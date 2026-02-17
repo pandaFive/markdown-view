@@ -112,6 +112,64 @@ async fn test_存在しないファイル() {
     assert!(body.contains("ファイルが見つかりません"));
 }
 
+#[tokio::test]
+async fn test_ファイル変更でwebsocket更新() {
+    // 一時ファイルを作成
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("watch_test.md");
+    tokio::fs::write(&file_path, "# Before").await.unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(markdown_view::server::AppState {
+        file_path: file_path.clone(),
+        dark_mode: false,
+        theme: None,
+        tx,
+    });
+
+    // サーバー起動
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // ファイル監視開始
+    markdown_view::watcher::watch_file(state.clone())
+        .await
+        .unwrap();
+
+    // WebSocket接続
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 初期メッセージを消費
+    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap();
+
+    // ファイルを変更
+    tokio::fs::write(&file_path, "# After Change")
+        .await
+        .unwrap();
+
+    // WebSocketで更新を受信（debounce 300ms + αのタイムアウト）
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["content"].as_str().unwrap().contains("After Change"));
+
+    // tmp_dirをleakしてテスト中に削除されないようにする
+    std::mem::forget(tmp_dir);
+}
+
 /// テスト用サーバーをセットアップするヘルパー
 async fn setup_server(
     markdown_content: &str,
