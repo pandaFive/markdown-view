@@ -32,37 +32,71 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
     // tokio::sync::mpscでnotifyからtokioにブリッジ
     let (tx, mut rx) = mpsc::channel(32);
 
+    // 初期化エラーを親タスクに伝播するための oneshot チャネル
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+
     // debouncerをstd::threadで起動（notifyはsyncスレッドで動作）
     std::thread::spawn(move || {
         let rt_tx = tx;
-        let mut debouncer = new_debouncer(
+        let debouncer = new_debouncer(
             Duration::from_millis(DEBOUNCE_MS),
-            move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-                if let Ok(events) = res {
-                    for event in events {
-                        if event.kind == DebouncedEventKind::Any {
-                            // 対象ファイルの変更のみ通知
-                            if is_target_file(&event.path, &target_path) {
-                                let _ = rt_tx.blocking_send(());
-                                break;
+            move |res: std::result::Result<
+                Vec<notify_debouncer_mini::DebouncedEvent>,
+                notify::Error,
+            >| {
+                match res {
+                    Ok(events) => {
+                        for event in events {
+                            if event.kind == DebouncedEventKind::Any {
+                                // 対象ファイルの変更のみ通知
+                                if is_target_file(&event.path, &target_path) {
+                                    if rt_tx.blocking_send(()).is_err() {
+                                        // 受信側が閉じた場合はログ出力のみ
+                                        eprintln!("[markdown-view] 通知チャネルが閉じています");
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        eprintln!("[markdown-view] ファイル監視エラー: {}", e);
+                    }
                 }
             },
-        )
-        .expect("debouncerの初期化に失敗");
+        );
 
-        debouncer
+        let mut debouncer = match debouncer {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = init_tx.send(Err(format!("debouncerの初期化に失敗: {}", e)));
+                return;
+            }
+        };
+
+        if let Err(e) = debouncer
             .watcher()
             .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
-            .expect("ファイル監視の開始に失敗");
+        {
+            let _ = init_tx.send(Err(format!("ファイル監視の開始に失敗: {}", e)));
+            return;
+        }
+
+        // 初期化成功を通知
+        let _ = init_tx.send(Ok(()));
 
         // スレッドを維持（debouncerのlifetimeのため）
         loop {
             std::thread::sleep(Duration::from_secs(3600));
         }
     });
+
+    // 初期化結果を待機
+    match init_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => anyhow::bail!(e),
+        Err(_) => anyhow::bail!("ファイル監視スレッドが予期せず終了しました"),
+    }
 
     // tokioタスクでファイル変更通知を処理
     tokio::spawn(async move {

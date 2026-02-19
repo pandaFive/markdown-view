@@ -5,11 +5,8 @@ use clap::Parser;
 use tokio::sync::broadcast;
 
 use markdown_view::cli::Args;
-use markdown_view::server::{create_router, AppState};
+use markdown_view::server::{create_router, AppState, MAX_FILE_SIZE};
 use markdown_view::watcher::watch_file;
-
-/// ファイルサイズ上限（10MB）
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {

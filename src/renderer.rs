@@ -1,12 +1,12 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
-use syntect::html::ClassedHTMLGenerator;
+use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
 
 /// Markdownテキストを HTML に変換する
 ///
 /// - GFM拡張（テーブル、タスクリスト、取消線）対応
-/// - コードブロックはsyntectでclass-basedハイライト
+/// - コードブロックはsyntectでテーマ付きハイライト
 /// - 見出しにはスラッグIDを付与
 /// - raw HTMLは無効化（XSS防止）
 pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
@@ -15,8 +15,8 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     }
 
     let ss = SyntaxSet::load_defaults_newlines();
-    let _ts = ThemeSet::load_defaults();
-    let _theme_name = theme_name.unwrap_or("base16-ocean.dark");
+    let ts = ThemeSet::load_defaults();
+    let theme = resolve_theme(&ts, theme_name);
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -26,16 +26,23 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     let parser = Parser::new_ext(input, options);
 
     let mut html_output = String::new();
+    let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
     let mut heading_level: Option<u8> = None;
-    let mut heading_text = String::new();
+    let mut heading_plain_text = String::new();
+    let mut heading_html = String::new();
+    let mut image_src: Option<String> = None;
+    let mut image_title: Option<String> = None;
+    let mut image_alt = String::new();
+    let mut in_table_head = false;
     let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for event in parser {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
                 // コードブロック開始: 言語名を取得
+                in_code_block = true;
                 code_block_lang = match kind {
                     pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                         let lang_str = lang.to_string();
@@ -56,20 +63,17 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                         .find_syntax_by_token(lang)
                         .or_else(|| ss.find_syntax_by_extension(lang))
                     {
-                        let mut generator = ClassedHTMLGenerator::new_with_class_style(
-                            syntax,
-                            &ss,
-                            syntect::html::ClassStyle::Spaced,
-                        );
-                        for line in syntect::util::LinesWithEndings::from(&code_block_content) {
-                            let _ = generator.parse_html_for_line_which_includes_newline(line);
+                        if let Ok(highlighted) =
+                            highlighted_html_for_string(&code_block_content, &ss, syntax, theme)
+                        {
+                            html_output.push_str(&add_code_block_class(highlighted));
+                        } else {
+                            html_output.push_str(&format!(
+                                "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
+                                html_escape(lang),
+                                html_escape(&code_block_content)
+                            ));
                         }
-                        let highlighted = generator.finalize();
-                        html_output.push_str(&format!(
-                            "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
-                            html_escape(lang),
-                            highlighted
-                        ));
                     } else {
                         // 言語が見つからない場合はプレーンテキスト
                         html_output.push_str(&format!(
@@ -85,49 +89,83 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                         html_escape(&code_block_content)
                     ));
                 }
+                in_code_block = false;
                 code_block_lang = None;
+                code_block_content.clear();
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 heading_level = Some(level as u8);
-                heading_text.clear();
+                heading_plain_text.clear();
+                heading_html.clear();
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(level) = heading_level {
-                    let slug = slugify(&heading_text);
-                    let count = id_counts.entry(slug.clone()).or_insert(0);
-                    let id = if *count == 0 {
-                        slug.clone()
-                    } else {
-                        format!("{}-{}", slug, count)
-                    };
-                    *count += 1;
+                    let slug = slugify(&heading_plain_text);
+                    let id = generate_unique_id(&slug, &mut id_counts);
 
                     html_output.push_str(&format!(
                         "<h{} id=\"{}\">{}</h{}>\n",
-                        level, id, heading_text, level
+                        level, id, heading_html, level
                     ));
                 }
                 heading_level = None;
             }
-            Event::Text(text) => {
-                if code_block_lang.is_some()
-                    || !code_block_content.is_empty() && heading_level.is_none()
-                {
-                    // コードブロック内
-                    if heading_level.is_none() {
-                        code_block_content.push_str(&text);
-                        continue;
+            Event::Start(Tag::Image {
+                dest_url, title, ..
+            }) => {
+                image_src = Some(dest_url.to_string());
+                image_title = if title.is_empty() {
+                    None
+                } else {
+                    Some(title.to_string())
+                };
+                image_alt.clear();
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(src) = image_src.take() {
+                    let mut image_html =
+                        format!("<img src=\"{}\" alt=\"{}\"", html_escape(&src), image_alt);
+                    if let Some(title) = image_title.take() {
+                        image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
+                    }
+                    image_html.push_str(" />");
+
+                    if heading_level.is_some() {
+                        heading_html.push_str(&image_html);
+                    } else {
+                        html_output.push_str(&image_html);
                     }
                 }
+                image_title = None;
+                image_alt.clear();
+            }
+            Event::Text(text) => {
+                if in_code_block {
+                    code_block_content.push_str(&text);
+                    continue;
+                }
+
+                if image_src.is_some() {
+                    image_alt.push_str(&html_escape(&text));
+                    continue;
+                }
+
                 if heading_level.is_some() {
-                    heading_text.push_str(&text);
+                    heading_plain_text.push_str(&text);
+                    heading_html.push_str(&html_escape(&text));
                 } else {
-                    html_output.push_str(&text);
+                    html_output.push_str(&html_escape(&text));
                 }
             }
             Event::Code(text) => {
+                if image_src.is_some() {
+                    image_alt.push_str(&html_escape(&text));
+                    continue;
+                }
+
                 if heading_level.is_some() {
-                    heading_text.push_str(&format!("<code>{}</code>", html_escape(&text)));
+                    heading_plain_text.push_str(&text);
+                    heading_html.push_str(&format!("<code>{}</code>", html_escape(&text)));
                 } else {
                     html_output.push_str(&format!("<code>{}</code>", html_escape(&text)));
                 }
@@ -136,10 +174,28 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 // raw HTMLは無効化（XSS防止）
             }
             Event::SoftBreak => {
-                html_output.push('\n');
+                if in_code_block {
+                    code_block_content.push('\n');
+                } else if image_src.is_some() {
+                    image_alt.push(' ');
+                } else if heading_level.is_some() {
+                    heading_plain_text.push(' ');
+                    heading_html.push(' ');
+                } else {
+                    html_output.push('\n');
+                }
             }
             Event::HardBreak => {
-                html_output.push_str("<br />\n");
+                if in_code_block {
+                    code_block_content.push('\n');
+                } else if image_src.is_some() {
+                    image_alt.push(' ');
+                } else if heading_level.is_some() {
+                    heading_plain_text.push(' ');
+                    heading_html.push_str("<br />");
+                } else {
+                    html_output.push_str("<br />\n");
+                }
             }
             Event::Rule => {
                 html_output.push_str("<hr />\n");
@@ -151,44 +207,95 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 html_output.push_str("</p>\n");
             }
             Event::Start(Tag::Emphasis) => {
-                html_output.push_str("<em>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("<em>");
+                } else {
+                    html_output.push_str("<em>");
+                }
             }
             Event::End(TagEnd::Emphasis) => {
-                html_output.push_str("</em>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("</em>");
+                } else {
+                    html_output.push_str("</em>");
+                }
             }
             Event::Start(Tag::Strong) => {
-                html_output.push_str("<strong>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("<strong>");
+                } else {
+                    html_output.push_str("<strong>");
+                }
             }
             Event::End(TagEnd::Strong) => {
-                html_output.push_str("</strong>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("</strong>");
+                } else {
+                    html_output.push_str("</strong>");
+                }
             }
             Event::Start(Tag::Strikethrough) => {
-                html_output.push_str("<del>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("<del>");
+                } else {
+                    html_output.push_str("<del>");
+                }
             }
             Event::End(TagEnd::Strikethrough) => {
-                html_output.push_str("</del>");
+                if image_src.is_some() {
+                    continue;
+                }
+                if heading_level.is_some() {
+                    heading_html.push_str("</del>");
+                } else {
+                    html_output.push_str("</del>");
+                }
             }
             Event::Start(Tag::Link {
                 dest_url, title, ..
             }) => {
-                html_output.push_str(&format!("<a href=\"{}\"", html_escape(&dest_url)));
-                if !title.is_empty() {
-                    html_output.push_str(&format!(" title=\"{}\"", html_escape(&title)));
+                if image_src.is_some() {
+                    continue;
                 }
-                html_output.push('>');
+
+                let safe_dest = sanitize_href(&dest_url);
+                let mut link_html = format!("<a href=\"{}\"", html_escape(&safe_dest));
+                if !title.is_empty() {
+                    link_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
+                }
+                link_html.push('>');
+
+                if heading_level.is_some() {
+                    heading_html.push_str(&link_html);
+                } else {
+                    html_output.push_str(&link_html);
+                }
             }
             Event::End(TagEnd::Link) => {
-                html_output.push_str("</a>");
-            }
-            Event::Start(Tag::Image {
-                dest_url, title: _, ..
-            }) => {
-                html_output.push_str(&format!("<img src=\"{}\" alt=\"", html_escape(&dest_url)));
-                // altテキストは子テキストイベントで収集される
-                // ここでは開始タグだけ出力し、テキストイベントでaltに追加
-            }
-            Event::End(TagEnd::Image) => {
-                html_output.push_str("\" />");
+                if image_src.is_some() {
+                    continue;
+                }
+
+                if heading_level.is_some() {
+                    heading_html.push_str("</a>");
+                } else {
+                    html_output.push_str("</a>");
+                }
             }
             Event::Start(Tag::BlockQuote(_)) => {
                 html_output.push_str("<blockquote>\n");
@@ -223,17 +330,21 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             }
             Event::Start(Tag::Table(alignments)) => {
                 html_output.push_str("<table>\n");
-                // alignmentsは後で使用
+                in_table_head = false;
+                // alignmentsは現在未使用（将来のセル揃え対応で使用予定）
                 let _ = alignments;
             }
             Event::End(TagEnd::Table) => {
                 html_output.push_str("</table>\n");
+                in_table_head = false;
             }
             Event::Start(Tag::TableHead) => {
-                html_output.push_str("<thead><tr>\n");
+                in_table_head = true;
+                html_output.push_str("<thead>\n");
             }
             Event::End(TagEnd::TableHead) => {
-                html_output.push_str("</tr></thead>\n");
+                html_output.push_str("</thead>\n");
+                in_table_head = false;
             }
             Event::Start(Tag::TableRow) => {
                 html_output.push_str("<tr>\n");
@@ -242,19 +353,14 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 html_output.push_str("</tr>\n");
             }
             Event::Start(Tag::TableCell) => {
-                // thead内ならth、tbody内ならtd
-                // 簡易判定: 直近のタグで判断
-                if html_output.ends_with("<thead><tr>\n")
-                    || html_output.contains("<thead><tr>\n") && !html_output.contains("</thead>")
-                {
+                if in_table_head {
                     html_output.push_str("<th>");
                 } else {
                     html_output.push_str("<td>");
                 }
             }
             Event::End(TagEnd::TableCell) => {
-                // 対応する閉じタグ
-                if !html_output.contains("</thead>") {
+                if in_table_head {
                     html_output.push_str("</th>\n");
                 } else {
                     html_output.push_str("</td>\n");
@@ -269,18 +375,95 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
 
 /// 見出しテキストをスラッグ（URL-safe ID）に変換する
 pub fn slugify(text: &str) -> String {
-    text.to_lowercase()
+    let slug = text
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+
+    if slug.is_empty() {
+        "section".to_string()
+    } else {
+        slug
+    }
+}
+
+/// スラッグから一意なIDを生成する（重複時は連番を付与）
+pub fn generate_unique_id(
+    slug: &str,
+    id_counts: &mut std::collections::HashMap<String, usize>,
+) -> String {
+    let count = id_counts.entry(slug.to_string()).or_insert(0);
+    let id = if *count == 0 {
+        slug.to_string()
+    } else {
+        format!("{}-{}", slug, count)
+    };
+    *count += 1;
+    id
+}
+
+fn resolve_theme<'a>(
+    theme_set: &'a ThemeSet,
+    theme_name: Option<&str>,
+) -> &'a syntect::highlighting::Theme {
+    const DEFAULT_THEME: &str = "base16-ocean.dark";
+
+    theme_name
+        .and_then(|name| theme_set.themes.get(name))
+        .or_else(|| theme_set.themes.get(DEFAULT_THEME))
+        .or_else(|| theme_set.themes.values().next())
+        .expect("syntect default themes should be available")
+}
+
+fn add_code_block_class(highlighted_html: String) -> String {
+    if highlighted_html.starts_with("<pre ") {
+        highlighted_html.replacen("<pre ", "<pre class=\"code-block\" ", 1)
+    } else if highlighted_html.starts_with("<pre>") {
+        highlighted_html.replacen("<pre>", "<pre class=\"code-block\">", 1)
+    } else {
+        highlighted_html
+    }
+}
+
+fn sanitize_href(dest_url: &str) -> String {
+    let trimmed = dest_url.trim();
+    if is_safe_href(trimmed) {
+        trimmed.to_string()
+    } else {
+        "#".to_string()
+    }
+}
+
+fn is_safe_href(dest_url: &str) -> bool {
+    if dest_url.is_empty() {
+        return false;
+    }
+
+    if dest_url.starts_with('#')
+        || dest_url.starts_with('/')
+        || dest_url.starts_with("./")
+        || dest_url.starts_with("../")
+        || dest_url.starts_with('?')
+        || dest_url.starts_with("//")
+    {
+        return true;
+    }
+
+    let Some(colon_pos) = dest_url.find(':') else {
+        return true;
+    };
+
+    let scheme = dest_url[..colon_pos].to_ascii_lowercase();
+    matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel")
 }
 
 /// HTML特殊文字のエスケープ
-fn html_escape(text: &str) -> String {
+pub fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

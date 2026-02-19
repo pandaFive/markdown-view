@@ -61,3 +61,27 @@ fn test_深いネスト() {
     assert!(toc.contains("H3"));
     assert!(toc.contains("H4"));
 }
+
+#[test]
+fn test_見出し画像のaltはid計算に含めない() {
+    let md = "# ![logo](x.png) Title";
+    let toc = generate_toc(md);
+    assert!(toc.contains(r##"href="#title""##));
+    assert!(!toc.contains(r##"href="#logo-title""##));
+}
+
+#[test]
+fn test_tocのネストulは親liの内側に生成される() {
+    let md = "# A\n## B";
+    let toc = generate_toc(md);
+    assert!(toc.contains(r##"<li><a href="#a">A</a><ul>"##));
+    assert!(!toc.contains(r##"</li><ul>"##));
+}
+
+#[test]
+fn test_見出しレベルが飛んでもulの直下にulを作らない() {
+    let md = "# A\n### C";
+    let toc = generate_toc(md);
+    assert!(toc.contains(r##"<li><a href="#a">A</a><ul>"##));
+    assert!(!toc.contains("<ul>\n<ul>"));
+}

@@ -1,7 +1,10 @@
+use crate::renderer::html_escape;
+
 /// HTMLテンプレートを生成する
 ///
 /// CSS/JSをすべて埋め込み、外部ファイル不要で動作する
 pub fn render_page(title: &str, content: &str, toc: &str, dark_mode: bool) -> String {
+    let escaped_title = html_escape(title);
     format!(
         r##"<!DOCTYPE html>
 <html lang="ja" data-theme="{theme}">
@@ -31,7 +34,7 @@ pub fn render_page(title: &str, content: &str, toc: &str, dark_mode: bool) -> St
 </body>
 </html>"##,
         theme = if dark_mode { "dark" } else { "light" },
-        title = title,
+        title = escaped_title,
         css = CSS,
         toc = toc,
         content = content,
@@ -289,8 +292,8 @@ body {
 
 // セキュリティ注記:
 // コンテンツ更新はサーバーサイドでpulldown-cmarkによりパースされたHTMLのみを反映する。
-// pulldown-cmarkはデフォルトでraw HTMLを無効化しており、renderer.rsでも明示的に
-// Event::Html / Event::InlineHtml を無視しているため、XSSリスクは軽減されている。
+// renderer.rsで明示的にEvent::Html / Event::InlineHtmlを無視しているため、
+// raw HTMLの注入によるXSSリスクは軽減されている。
 // WebSocket接続は127.0.0.1のみにバインドされたローカルサーバーからのみ受信する。
 const JS: &str = r##"
 (function() {
@@ -356,13 +359,21 @@ const JS: &str = r##"
   }
 
   // TOCアクティブ追跡（IntersectionObserver）
+  var currentObserver = null;
+
   function setupTocTracking() {
+    // 既存のObserverをクリーンアップ（メモリリーク防止）
+    if (currentObserver) {
+      currentObserver.disconnect();
+      currentObserver = null;
+    }
+
     var headings = document.querySelectorAll('#content h1, #content h2, #content h3, #content h4, #content h5, #content h6');
     var tocLinks = document.querySelectorAll('#toc a');
 
     if (headings.length === 0 || tocLinks.length === 0) return;
 
-    var observer = new IntersectionObserver(function(entries) {
+    currentObserver = new IntersectionObserver(function(entries) {
       entries.forEach(function(entry) {
         if (entry.isIntersecting) {
           var id = entry.target.getAttribute('id');
@@ -374,7 +385,7 @@ const JS: &str = r##"
     }, { rootMargin: '-10% 0% -80% 0%' });
 
     headings.forEach(function(heading) {
-      if (heading.id) observer.observe(heading);
+      if (heading.id) currentObserver.observe(heading);
     });
   }
 

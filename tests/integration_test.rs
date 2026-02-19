@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[tokio::test]
 async fn test_indexページ取得() {
@@ -40,7 +41,7 @@ async fn test_websocket接続() {
     let _ = state;
 
     let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (mut _write, mut read) = ws_stream.split();
 
     // 接続直後に初期コンテンツが送信される
@@ -61,7 +62,7 @@ async fn test_websocketブロードキャスト受信() {
     let (state, addr) = setup_server("initial").await;
 
     let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
@@ -109,7 +110,7 @@ async fn test_存在しないファイル() {
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     let body = resp.text().await.unwrap();
-    assert!(body.contains("ファイルが見つかりません"));
+    assert!(body.contains("ファイルアクセスエラー"));
 }
 
 #[tokio::test]
@@ -142,7 +143,7 @@ async fn test_ファイル変更でwebsocket更新() {
 
     // WebSocket接続
     let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
@@ -168,6 +169,16 @@ async fn test_ファイル変更でwebsocket更新() {
 
     // tmp_dirをleakしてテスト中に削除されないようにする
     std::mem::forget(tmp_dir);
+}
+
+#[tokio::test]
+async fn test_websocketは異なるoriginを拒否する() {
+    let (state, addr) = setup_server("# WS Test").await;
+    let _ = state;
+
+    let url = format!("ws://{}/ws", addr);
+    let result = connect_ws(&url, "https://evil.example").await;
+    assert!(result.is_err());
 }
 
 /// テスト用サーバーをセットアップするヘルパー
@@ -201,4 +212,23 @@ async fn setup_server(
     std::mem::forget(tmp_dir);
 
     (state, addr)
+}
+
+async fn connect_ws(
+    url: &str,
+    origin: &str,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    let mut request = url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().expect("Originヘッダは妥当な値"));
+    tokio_tungstenite::connect_async(request).await
 }
