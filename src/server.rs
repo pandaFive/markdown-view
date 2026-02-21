@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -62,7 +63,10 @@ async fn index_handler(
     if !is_allowed_request_host(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let (content, toc) = read_and_render(&state).await;
+    let (content, toc) = read_and_render(&state).await.map_err(|e| {
+        eprintln!("[markdown-view] index読み込みエラー: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let title = state
         .file_path
         .file_name()
@@ -79,7 +83,10 @@ async fn api_content_handler(
     if !is_allowed_request_host(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let (content, toc) = read_and_render(&state).await;
+    let (content, toc) = read_and_render(&state).await.map_err(|e| {
+        eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(UpdateMessage { content, toc }))
 }
 
@@ -166,7 +173,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx.subscribe();
 
     // 接続直後に現在のコンテンツを送信
-    let (content, toc) = read_and_render(&state).await;
+    let (content, toc) = match read_and_render(&state).await {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
+            return;
+        }
+    };
     let msg = match serde_json::to_string(&UpdateMessage { content, toc }) {
         Ok(json) => json,
         Err(e) => {
@@ -220,7 +233,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             "[markdown-view] WebSocketクライアントが{}メッセージ遅延、最新コンテンツを再送信",
                             n
                         );
-                        let (content, toc) = read_and_render(&state).await;
+                        let (content, toc) = match read_and_render(&state).await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
+                                continue;
+                            }
+                        };
                         let resend = match serde_json::to_string(&UpdateMessage { content, toc }) {
                             Ok(json) => json,
                             Err(e) => {
@@ -242,34 +261,64 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// ファイルを読み込んでレンダリングする
-async fn read_and_render(state: &AppState) -> (String, String) {
-    // ファイルサイズチェック（OOM防止）
-    let metadata = match tokio::fs::metadata(&state.file_path).await {
-        Ok(m) => m,
-        Err(e) => return (format!("ファイルアクセスエラー: {}", e), String::new()),
-    };
+enum ReadMarkdownError {
+    Io(std::io::Error),
+    TooLarge,
+}
 
+async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdownError> {
+    // 事前チェック（早期失敗）。読み込み側でも同じ上限を強制して競合更新を保護する。
+    let metadata = tokio::fs::metadata(file_path)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
     if metadata.len() > MAX_FILE_SIZE {
-        return (
-            "ファイルサイズが上限（10MB）を超えています".to_string(),
-            String::new(),
-        );
+        return Err(ReadMarkdownError::TooLarge);
     }
 
-    let markdown = match tokio::fs::read_to_string(&state.file_path).await {
+    let file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
+    let mut limited_reader = file.take(MAX_FILE_SIZE + 1);
+    let mut buffer = Vec::new();
+    limited_reader
+        .read_to_end(&mut buffer)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
+    if buffer.len() as u64 > MAX_FILE_SIZE {
+        return Err(ReadMarkdownError::TooLarge);
+    }
+
+    String::from_utf8(buffer)
+        .map_err(|e| ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
+/// ファイルを読み込んでレンダリングする
+async fn read_and_render(state: &AppState) -> Result<(String, String), std::io::Error> {
+    let markdown = match read_markdown_with_limit(&state.file_path).await {
         Ok(content) => content,
-        Err(e) => return (format!("ファイル読み込みエラー: {}", e), String::new()),
+        Err(ReadMarkdownError::TooLarge) => {
+            return Ok((
+                "ファイルサイズが上限（10MB）を超えています".to_string(),
+                String::new(),
+            ))
+        }
+        Err(ReadMarkdownError::Io(e)) => return Err(e),
     };
 
     let content = render_markdown(&markdown, state.theme.as_deref());
     let toc = generate_toc(&markdown);
-    (content, toc)
+    Ok((content, toc))
 }
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 pub async fn notify_update(state: &AppState) {
-    let (content, toc) = read_and_render(state).await;
+    let (content, toc) = match read_and_render(state).await {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
+            return;
+        }
+    };
     let msg = match serde_json::to_string(&UpdateMessage { content, toc }) {
         Ok(json) => json,
         Err(e) => {

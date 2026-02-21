@@ -107,7 +107,7 @@ async fn test_websocketブロードキャスト受信() {
 }
 
 #[tokio::test]
-async fn test_存在しないファイル() {
+async fn test_存在しないファイル時は500を返す() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let non_existent = tmp_dir.path().join("non_existent.md");
 
@@ -126,9 +126,12 @@ async fn test_存在しないファイル() {
         axum::serve(listener, router).await.unwrap();
     });
 
-    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("ファイルアクセスエラー"));
+    for path in ["/", "/api/content"] {
+        let resp = reqwest::get(format!("http://{}{}", addr, path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
 
 #[tokio::test]
