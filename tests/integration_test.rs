@@ -181,6 +181,62 @@ async fn test_websocketは異なるoriginを拒否する() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn test_websocket切断時に購読が速やかに解放される() {
+    let (state, addr) = setup_server("# WS Test").await;
+    let url = format!("ws://{}/ws", addr);
+    let (mut ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+
+    // 初期メッセージを受信して購読開始を確定
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap();
+
+    drop(ws_stream);
+
+    // クライアント切断後、receiver_count が0へ戻ること
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.tx.receiver_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_セキュリティヘッダが設定されている() {
+    let (state, addr) = setup_server("# Test").await;
+    let _ = state;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+
+    // X-Content-Type-Options
+    assert_eq!(
+        resp.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+
+    // X-Frame-Options
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+
+    // Content-Security-Policy
+    let csp = resp
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("object-src 'none'"));
+    // data:スキームがimg-srcに含まれていないこと（sanitize_hrefと整合）
+    assert!(!csp.contains("data:"));
+}
+
 /// テスト用サーバーをセットアップするヘルパー
 async fn setup_server(
     markdown_content: &str,

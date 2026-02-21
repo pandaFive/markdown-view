@@ -40,6 +40,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::http::header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
+        // CSP: script-src/style-srcはインラインテンプレート埋め込みのため'unsafe-inline'を許可。
+        // img-srcは外部画像参照のため*を許可（data:スキームはsanitize_hrefで除外済み）。
+        // frame-ancestors 'none'でクリックジャッキングを防止。
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+            ),
+        ))
         .with_state(state)
 }
 
@@ -113,24 +122,69 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
-    if socket.send(Message::Text(msg.into())).await.is_err() {
+    if let Err(e) = socket.send(Message::Text(msg.into())).await {
+        eprintln!("[markdown-view] WebSocket初期送信エラー: {}", e);
         return;
     }
 
     // broadcastチャネルからの更新を転送
     loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                if socket.send(Message::Text(msg.into())).await.is_err() {
-                    break;
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) => {
+                        break;
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if let Err(e) = socket.send(Message::Pong(payload)).await {
+                            eprintln!("[markdown-view] WebSocket pong送信エラー: {}", e);
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {
+                        // クライアントからのメッセージは現状未使用（読み捨て）。
+                        // サーバーは配信専用のため、クライアント入力を処理しない設計。
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("[markdown-view] WebSocket受信エラー: {}", e);
+                        break;
+                    }
+                    None => {
+                        break;
+                    }
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // メッセージをスキップ（遅延クライアント）
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                break;
+            recv = rx.recv() => {
+                match recv {
+                    Ok(msg) => {
+                        if let Err(e) = socket.send(Message::Text(msg.into())).await {
+                            eprintln!("[markdown-view] WebSocket送信エラー: {}", e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // 遅延クライアントに最新コンテンツを再送信
+                        eprintln!(
+                            "[markdown-view] WebSocketクライアントが{}メッセージ遅延、最新コンテンツを再送信",
+                            n
+                        );
+                        let (content, toc) = read_and_render(&state).await;
+                        let resend = match serde_json::to_string(&UpdateMessage { content, toc }) {
+                            Ok(json) => json,
+                            Err(e) => {
+                                eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = socket.send(Message::Text(resend.into())).await {
+                            eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
             }
         }
     }

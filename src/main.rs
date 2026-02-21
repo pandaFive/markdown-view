@@ -56,7 +56,9 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("ポート {} へのバインドに失敗", args.port))?;
 
-    let local_addr = listener.local_addr()?;
+    let local_addr = listener
+        .local_addr()
+        .context("ローカルアドレスの取得に失敗")?;
     let url = format!("http://{}", local_addr);
 
     eprintln!("markdown-view: {} をプレビュー中", file_path.display());

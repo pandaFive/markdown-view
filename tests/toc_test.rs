@@ -85,3 +85,10 @@ fn test_見出しレベルが飛んでもulの直下にulを作らない() {
     assert!(toc.contains(r##"<li><a href="#a">A</a><ul>"##));
     assert!(!toc.contains("<ul>\n<ul>"));
 }
+
+#[test]
+fn test_複数行見出しのスラッグが改行をスペースとして扱う() {
+    let md = "hello\nworld\n===";
+    let toc = generate_toc(md);
+    assert!(toc.contains(r##"href="#hello-world""##));
+}

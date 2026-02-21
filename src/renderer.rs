@@ -17,6 +17,9 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
     let theme = resolve_theme(&ts, theme_name);
+    if theme.is_none() {
+        eprintln!("[markdown-view] テーマが見つかりません。ハイライトなしで出力します");
+    }
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -57,25 +60,33 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
-                // コードブロック終了: syntectでハイライト
+                // コードブロック終了: syntectでハイライト（テーマが利用可能な場合のみ）
                 if let Some(ref lang) = code_block_lang {
-                    if let Some(syntax) = ss
-                        .find_syntax_by_token(lang)
-                        .or_else(|| ss.find_syntax_by_extension(lang))
-                    {
-                        if let Ok(highlighted) =
-                            highlighted_html_for_string(&code_block_content, &ss, syntax, theme)
-                        {
-                            html_output.push_str(&add_code_block_class(highlighted));
-                        } else {
-                            html_output.push_str(&format!(
-                                "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
-                                html_escape(lang),
-                                html_escape(&code_block_content)
-                            ));
-                        }
+                    let highlighted = theme.and_then(|t| {
+                        ss.find_syntax_by_token(lang)
+                            .or_else(|| ss.find_syntax_by_extension(lang))
+                            .and_then(|syntax| {
+                                match highlighted_html_for_string(
+                                    &code_block_content,
+                                    &ss,
+                                    syntax,
+                                    t,
+                                ) {
+                                    Ok(html) => Some(html),
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[markdown-view] コードハイライトエラー (lang={}): {}",
+                                            lang, e
+                                        );
+                                        None
+                                    }
+                                }
+                            })
+                    });
+
+                    if let Some(highlighted) = highlighted {
+                        html_output.push_str(&add_code_block_class(highlighted));
                     } else {
-                        // 言語が見つからない場合はプレーンテキスト
                         html_output.push_str(&format!(
                             "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
                             html_escape(lang),
@@ -123,8 +134,12 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             }
             Event::End(TagEnd::Image) => {
                 if let Some(src) = image_src.take() {
-                    let mut image_html =
-                        format!("<img src=\"{}\" alt=\"{}\"", html_escape(&src), image_alt);
+                    let safe_src = sanitize_href(&src);
+                    let mut image_html = format!(
+                        "<img src=\"{}\" alt=\"{}\"",
+                        html_escape(&safe_src),
+                        image_alt
+                    );
                     if let Some(title) = image_title.take() {
                         image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
                     }
@@ -410,14 +425,13 @@ pub fn generate_unique_id(
 fn resolve_theme<'a>(
     theme_set: &'a ThemeSet,
     theme_name: Option<&str>,
-) -> &'a syntect::highlighting::Theme {
+) -> Option<&'a syntect::highlighting::Theme> {
     const DEFAULT_THEME: &str = "base16-ocean.dark";
 
     theme_name
         .and_then(|name| theme_set.themes.get(name))
         .or_else(|| theme_set.themes.get(DEFAULT_THEME))
         .or_else(|| theme_set.themes.values().next())
-        .expect("syntect default themes should be available")
 }
 
 fn add_code_block_class(highlighted_html: String) -> String {
@@ -444,12 +458,16 @@ fn is_safe_href(dest_url: &str) -> bool {
         return false;
     }
 
+    // プロトコル相対URL（//example.com/...）はリダイレクト先を制御可能なため拒否
+    if dest_url.starts_with("//") {
+        return false;
+    }
+
     if dest_url.starts_with('#')
         || dest_url.starts_with('/')
         || dest_url.starts_with("./")
         || dest_url.starts_with("../")
         || dest_url.starts_with('?')
-        || dest_url.starts_with("//")
     {
         return true;
     }
@@ -462,10 +480,11 @@ fn is_safe_href(dest_url: &str) -> bool {
     matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel")
 }
 
-/// HTML特殊文字のエスケープ
+/// HTML特殊文字のエスケープ（属性値にも安全）
 pub fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }

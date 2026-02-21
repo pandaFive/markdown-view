@@ -59,6 +59,16 @@ fn extract_headings(input: &str) -> Vec<Heading> {
                     current_text.push_str(&text);
                 }
             }
+            Event::SoftBreak if current_level.is_some() => {
+                if !in_heading_image {
+                    current_text.push(' ');
+                }
+            }
+            Event::HardBreak if current_level.is_some() => {
+                if !in_heading_image {
+                    current_text.push(' ');
+                }
+            }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(level) = current_level {
                     let slug = slugify(&current_text);

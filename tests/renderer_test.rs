@@ -206,3 +206,99 @@ fn test_空スラッグ見出しにフォールバックidを付与する() {
     assert!(toc.contains(r##"href="#section""##));
     assert!(toc.contains(r##"href="#section-1""##));
 }
+
+#[test]
+fn test_複数行見出しでもtocリンクが一致する() {
+    let md = "hello\nworld\n===";
+    let html = render_markdown(md, None);
+    let toc = generate_toc(md);
+    assert!(html.contains(r##"id="hello-world""##));
+    assert!(toc.contains(r##"href="#hello-world""##));
+}
+
+#[test]
+fn test_危険なスキームのリンクがすべて無効化される() {
+    // data: スキーム
+    let html = render_markdown("[click](data:text/html,<script>alert(1)</script>)", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("data:text/html"));
+
+    // vbscript: スキーム
+    let html = render_markdown("[click](vbscript:msgbox)", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("vbscript:"));
+
+    // file: スキーム
+    let html = render_markdown("[click](file:///etc/passwd)", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("file:///"));
+}
+
+#[test]
+fn test_大文字混在スキームも無効化される() {
+    let html = render_markdown("[click](JAVASCRIPT:alert(1))", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("JAVASCRIPT:"));
+
+    let html = render_markdown("[click](JaVaScRiPt:alert(1))", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("JaVaScRiPt:"));
+}
+
+#[test]
+fn test_画像srcもunsafeスキームが無効化される() {
+    let html = render_markdown("![img](javascript:alert(1))", None);
+    assert!(html.contains(r##"src="#""##));
+    assert!(!html.contains("javascript:alert"));
+}
+
+#[test]
+fn test_html_escapeでシングルクォートがエスケープされる() {
+    use markdown_view::renderer::html_escape;
+    assert_eq!(html_escape("It's"), "It&#39;s");
+    assert_eq!(html_escape("a'b\"c"), "a&#39;b&quot;c");
+}
+
+#[test]
+fn test_安全なリンクスキームは許可される() {
+    let html = render_markdown("[mail](mailto:user@example.com)", None);
+    assert!(html.contains("mailto:user@example.com"));
+
+    let html = render_markdown("[tel](tel:+1234567890)", None);
+    assert!(html.contains("tel:+1234567890"));
+
+    let html = render_markdown("[link](https://example.com)", None);
+    assert!(html.contains("https://example.com"));
+
+    // 相対パス
+    let html = render_markdown("[link](./page.html)", None);
+    assert!(html.contains("./page.html"));
+
+    // アンカー
+    let html = render_markdown("[link](#section)", None);
+    assert!(html.contains("#section"));
+}
+
+#[test]
+fn test_画像srcのdata_スキームが無効化される() {
+    let html = render_markdown("![img](data:image/png;base64,abc)", None);
+    assert!(html.contains(r##"src="#""##));
+    assert!(!html.contains("data:image/png"));
+}
+
+#[test]
+fn test_プロトコル相対urlが無効化される() {
+    let html = render_markdown("[click](//evil.example/path)", None);
+    assert!(html.contains(r##"href="#""##));
+    assert!(!html.contains("//evil.example"));
+
+    let html = render_markdown("![img](//evil.example/img.png)", None);
+    assert!(html.contains(r##"src="#""##));
+    assert!(!html.contains("//evil.example"));
+}
+
+#[test]
+fn test_ローカルルートパスのリンクは許可される() {
+    let html = render_markdown("[link](/page.html)", None);
+    assert!(html.contains(r##"href="/page.html""##));
+}
