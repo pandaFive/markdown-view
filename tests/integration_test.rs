@@ -208,6 +208,37 @@ async fn test_websocket切断時に購読が速やかに解放される() {
 }
 
 #[tokio::test]
+async fn test_ファイルサイズ上限超過でエラーメッセージが返る() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let large_file = tmp_dir.path().join("large.md");
+
+    // MAX_FILE_SIZE(10MB) + 1バイトのファイルを作成
+    let content = "x".repeat(10 * 1024 * 1024 + 1);
+    tokio::fs::write(&large_file, &content).await.unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(markdown_view::server::AppState {
+        file_path: large_file,
+        dark_mode: false,
+        theme: None,
+        tx,
+    });
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("ファイルサイズが上限"));
+
+    std::mem::forget(tmp_dir);
+}
+
+#[tokio::test]
 async fn test_セキュリティヘッダが設定されている() {
     let (state, addr) = setup_server("# Test").await;
     let _ = state;

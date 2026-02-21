@@ -97,6 +97,8 @@ fn build_toc_html(headings: &[Heading]) -> String {
     let mut open_li_at_level: Vec<bool> = Vec::new();
 
     for heading in headings {
+        // 見出しレベルの急な深化を防止（h1→h4のような場合、h1→h2として扱う）
+        // これにより<ul>の直接ネスト（<ul><ul>）を回避する
         let level = heading.level.min(current_level.saturating_add(1)).max(1);
 
         // 深い階層から戻る場合は、開いているli/ulを閉じる

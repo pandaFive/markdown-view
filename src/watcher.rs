@@ -47,7 +47,7 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
                 match res {
                     Ok(events) => {
                         for event in events {
-                            if event.kind == DebouncedEventKind::Any {
+                            if is_content_change_event(&event.kind) {
                                 // 対象ファイルの変更のみ通知
                                 if is_target_file(&event.path, &target_path) {
                                     if rt_tx.blocking_send(()).is_err() {
@@ -108,11 +108,30 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// レンダリング更新が必要なイベント種別か判定する
+fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
+    matches!(
+        kind,
+        DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous
+    )
+}
+
 /// パスが監視対象ファイルと一致するか判定する
 fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     // canonicalizeで比較（シンボリックリンク対応）
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,
         Err(_) => event_path == target_path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_連続更新イベントも更新対象に含まれる() {
+        assert!(is_content_change_event(&DebouncedEventKind::Any));
+        assert!(is_content_change_event(&DebouncedEventKind::AnyContinuous));
     }
 }

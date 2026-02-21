@@ -302,3 +302,32 @@ fn test_ローカルルートパスのリンクは許可される() {
     let html = render_markdown("[link](/page.html)", None);
     assert!(html.contains(r##"href="/page.html""##));
 }
+
+// --- テンプレート テスト ---
+
+#[test]
+fn test_render_pageのタイトルがエスケープされる() {
+    use markdown_view::template::render_page;
+    let html = render_page("<script>xss</script>", "", "", false);
+    assert!(html.contains("&lt;script&gt;xss&lt;/script&gt;"));
+    assert!(!html.contains("<script>xss</script> - markdown-view"));
+}
+
+#[test]
+fn test_render_pageのダークモード() {
+    use markdown_view::template::render_page;
+    let light = render_page("t", "", "", false);
+    let dark = render_page("t", "", "", true);
+    assert!(light.contains(r#"data-theme="light""#));
+    assert!(dark.contains(r#"data-theme="dark""#));
+}
+
+#[test]
+fn test_render_pageの基本構造() {
+    use markdown_view::template::render_page;
+    let html = render_page("Test", "<p>Hello</p>", "<ul><li>H1</li></ul>", false);
+    assert!(html.contains("<!DOCTYPE html>"));
+    assert!(html.contains("<p>Hello</p>"));
+    assert!(html.contains("<ul><li>H1</li></ul>"));
+    assert!(html.contains("Test - markdown-view"));
+}

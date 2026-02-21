@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
@@ -8,15 +10,15 @@ use syntect::parsing::SyntaxSet;
 /// - GFM拡張（テーブル、タスクリスト、取消線）対応
 /// - コードブロックはsyntectでテーマ付きハイライト
 /// - 見出しにはスラッグIDを付与
-/// - raw HTMLは無効化（XSS防止）
+/// - raw HTMLは完全に除去される（XSS防止のため出力に含めない）
 pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     if input.is_empty() {
         return String::new();
     }
 
-    let ss = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-    let theme = resolve_theme(&ts, theme_name);
+    let ss = syntax_set();
+    let ts = theme_set();
+    let theme = resolve_theme(ts, theme_name);
     if theme.is_none() {
         eprintln!("[markdown-view] テーマが見つかりません。ハイライトなしで出力します");
     }
@@ -68,7 +70,7 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                             .and_then(|syntax| {
                                 match highlighted_html_for_string(
                                     &code_block_content,
-                                    &ss,
+                                    ss,
                                     syntax,
                                     t,
                                 ) {
@@ -186,7 +188,7 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 }
             }
             Event::Html(_) | Event::InlineHtml(_) => {
-                // raw HTMLは無効化（XSS防止）
+                // raw HTMLイベントは出力せず破棄する（XSS防止）
             }
             Event::SoftBreak => {
                 if in_code_block {
@@ -388,6 +390,16 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     html_output
 }
 
+fn syntax_set() -> &'static SyntaxSet {
+    static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn theme_set() -> &'static ThemeSet {
+    static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
 /// 見出しテキストをスラッグ（URL-safe ID）に変換する
 pub fn slugify(text: &str) -> String {
     let slug = text
@@ -428,9 +440,20 @@ fn resolve_theme<'a>(
 ) -> Option<&'a syntect::highlighting::Theme> {
     const DEFAULT_THEME: &str = "base16-ocean.dark";
 
-    theme_name
-        .and_then(|name| theme_set.themes.get(name))
-        .or_else(|| theme_set.themes.get(DEFAULT_THEME))
+    if let Some(name) = theme_name {
+        if let Some(theme) = theme_set.themes.get(name) {
+            return Some(theme);
+        }
+        let available: Vec<&str> = theme_set.themes.keys().map(|s| s.as_str()).collect();
+        eprintln!(
+            "[markdown-view] 警告: テーマ '{}' が見つかりません。デフォルトテーマを使用します。利用可能: {:?}",
+            name, available
+        );
+    }
+
+    theme_set
+        .themes
+        .get(DEFAULT_THEME)
         .or_else(|| theme_set.themes.values().next())
 }
 
