@@ -1,9 +1,11 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::header::{HOST, ORIGIN};
+use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
@@ -53,20 +55,32 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 /// GET / : 初期HTMLページを返す
-async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn index_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, StatusCode> {
+    if !is_allowed_request_host(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let (content, toc) = read_and_render(&state).await;
     let title = state
         .file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("markdown-view");
-    Html(render_page(title, &content, &toc, state.dark_mode))
+    Ok(Html(render_page(title, &content, &toc, state.dark_mode)))
 }
 
 /// GET /api/content : 現在のコンテンツをJSON形式で返す
-async fn api_content_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn api_content_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<UpdateMessage>, StatusCode> {
+    if !is_allowed_request_host(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let (content, toc) = read_and_render(&state).await;
-    Json(UpdateMessage { content, toc })
+    Ok(Json(UpdateMessage { content, toc }))
 }
 
 /// GET /ws : WebSocketアップグレード
@@ -75,10 +89,17 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !is_allowed_ws_origin(&headers) {
+    if !is_allowed_request_host(&headers) || !is_allowed_ws_origin(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+fn is_allowed_request_host(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    is_trusted_authority(host)
 }
 
 fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
@@ -88,6 +109,9 @@ fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
         return false;
     };
+    if !is_trusted_authority(host) {
+        return false;
+    }
     let Ok(origin_uri) = origin.parse::<Uri>() else {
         return false;
     };
@@ -100,8 +124,36 @@ fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     let Some(origin_authority) = origin_uri.authority() else {
         return false;
     };
+    if !is_trusted_authority(origin_authority.as_str()) {
+        return false;
+    }
 
     normalize_authority(origin_authority.as_str()) == normalize_authority(host)
+}
+
+fn is_trusted_authority(authority: &str) -> bool {
+    let Ok(authority) = authority.parse::<Authority>() else {
+        return false;
+    };
+    is_trusted_host(authority.host())
+}
+
+fn is_trusted_host(host: &str) -> bool {
+    let normalized = host
+        .trim()
+        .trim_end_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+
+    if normalized == "localhost" {
+        return true;
+    }
+
+    match normalized.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
 }
 
 fn normalize_authority(authority: &str) -> String {

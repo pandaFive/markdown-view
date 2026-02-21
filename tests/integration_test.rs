@@ -36,6 +36,24 @@ async fn test_apiコンテンツ取得() {
 }
 
 #[tokio::test]
+async fn test_httpは許可されないhostを拒否する() {
+    let (state, addr) = setup_server("# Host Check").await;
+    let _ = state;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    for path in ["/", "/api/content"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, path))
+            .header("Host", &attack_host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
 async fn test_websocket接続() {
     let (state, addr) = setup_server("# WS Test").await;
     let _ = state;
@@ -182,6 +200,18 @@ async fn test_websocketは異なるoriginを拒否する() {
 }
 
 #[tokio::test]
+async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
+    let (state, addr) = setup_server("# WS Test").await;
+    let _ = state;
+
+    let url = format!("ws://{}/ws", addr);
+    let rebinding_authority = format!("evil.example:{}", addr.port());
+    let rebinding_origin = format!("http://{}", rebinding_authority);
+    let result = connect_ws_with_host(&url, &rebinding_origin, Some(&rebinding_authority)).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_websocket切断時に購読が速やかに解放される() {
     let (state, addr) = setup_server("# WS Test").await;
     let url = format!("ws://{}/ws", addr);
@@ -313,9 +343,30 @@ async fn connect_ws(
     ),
     tokio_tungstenite::tungstenite::Error,
 > {
+    connect_ws_with_host(url, origin, None).await
+}
+
+async fn connect_ws_with_host(
+    url: &str,
+    origin: &str,
+    host: Option<&str>,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
     let mut request = url.into_client_request()?;
     request
         .headers_mut()
         .insert("Origin", origin.parse().expect("Originヘッダは妥当な値"));
+    if let Some(host) = host {
+        request
+            .headers_mut()
+            .insert("Host", host.parse().expect("Hostヘッダは妥当な値"));
+    }
     tokio_tungstenite::connect_async(request).await
 }
