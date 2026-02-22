@@ -65,7 +65,10 @@ async fn index_handler(
     }
     let (content, toc) = read_and_render(&state).await.map_err(|e| {
         eprintln!("[markdown-view] index読み込みエラー: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        match e {
+            ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
     })?;
     let title = state
         .file_path
@@ -85,7 +88,10 @@ async fn api_content_handler(
     }
     let (content, toc) = read_and_render(&state).await.map_err(|e| {
         eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        match e {
+            ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
     })?;
     Ok(Json(UpdateMessage { content, toc }))
 }
@@ -177,6 +183,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "ファイル読み込みエラー".into(),
+                })))
+                .await;
             return;
         }
     };
@@ -261,13 +273,26 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
+#[derive(Debug)]
 enum ReadMarkdownError {
     Io(std::io::Error),
     TooLarge,
 }
 
+impl std::fmt::Display for ReadMarkdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadMarkdownError::Io(e) => write!(f, "I/Oエラー: {}", e),
+            ReadMarkdownError::TooLarge => {
+                write!(f, "ファイルサイズが上限（10MB）を超えています")
+            }
+        }
+    }
+}
+
 async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdownError> {
-    // 事前チェック（早期失敗）。読み込み側でも同じ上限を強制して競合更新を保護する。
+    // パフォーマンス最適化: 明らかにサイズ超過のファイルを早期拒否する。
+    // 実際のサイズ制限はtake()による読み込み制限で保証する。
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
@@ -293,18 +318,8 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
 }
 
 /// ファイルを読み込んでレンダリングする
-async fn read_and_render(state: &AppState) -> Result<(String, String), std::io::Error> {
-    let markdown = match read_markdown_with_limit(&state.file_path).await {
-        Ok(content) => content,
-        Err(ReadMarkdownError::TooLarge) => {
-            return Ok((
-                "ファイルサイズが上限（10MB）を超えています".to_string(),
-                String::new(),
-            ))
-        }
-        Err(ReadMarkdownError::Io(e)) => return Err(e),
-    };
-
+async fn read_and_render(state: &AppState) -> Result<(String, String), ReadMarkdownError> {
+    let markdown = read_markdown_with_limit(&state.file_path).await?;
     let content = render_markdown(&markdown, state.theme.as_deref());
     let toc = generate_toc(&markdown);
     Ok((content, toc))
@@ -326,6 +341,101 @@ pub async fn notify_update(state: &AppState) {
             return;
         }
     };
-    // 送信失敗は無視（受信者がいない場合）
-    let _ = state.tx.send(msg);
+    // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）
+    if state.tx.send(msg).is_err() {
+        eprintln!(
+            "[markdown-view] ブロードキャスト送信先なし (receiver_count={})",
+            state.tx.receiver_count()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trusted_host_localhost() {
+        assert!(is_trusted_host("localhost"));
+        assert!(is_trusted_host("LOCALHOST"));
+        assert!(is_trusted_host("localhost."));
+    }
+
+    #[test]
+    fn test_trusted_host_loopback_ipv4() {
+        assert!(is_trusted_host("127.0.0.1"));
+        // 127.0.0.0/8は全てループバック
+        assert!(is_trusted_host("127.0.0.2"));
+        assert!(!is_trusted_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_trusted_host_loopback_ipv6() {
+        assert!(is_trusted_host("[::1]"));
+    }
+
+    #[test]
+    fn test_trusted_host_rejects_external() {
+        assert!(!is_trusted_host("evil.example"));
+        assert!(!is_trusted_host("example.com"));
+        assert!(!is_trusted_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_allowed_request_host_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_request_host_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert!(is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_request_host_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_ftp_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "ftp://localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_different_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://evil.example:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_missing_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_missing_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
 }

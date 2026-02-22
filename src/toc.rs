@@ -125,7 +125,7 @@ fn build_toc_html(headings: &[Heading]) -> String {
 
         html.push_str(&format!(
             "<li><a href=\"#{}\">{}</a>",
-            heading.id,
+            html_escape(&heading.id),
             html_escape(&heading.text)
         ));
         open_li_at_level[(current_level - 1) as usize] = true;

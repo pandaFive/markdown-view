@@ -7,8 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[tokio::test]
 async fn test_indexページ取得() {
-    let (state, addr) = setup_server("# Test\n\nHello world").await;
-    let _ = state; // stateを保持してサーバーを維持
+    let (_state, addr, _tmp_dir) = setup_server("# Test\n\nHello world").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -22,8 +21,7 @@ async fn test_indexページ取得() {
 
 #[tokio::test]
 async fn test_apiコンテンツ取得() {
-    let (state, addr) = setup_server("**bold** text").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("**bold** text").await;
 
     let resp = reqwest::get(format!("http://{}/api/content", addr))
         .await
@@ -37,8 +35,7 @@ async fn test_apiコンテンツ取得() {
 
 #[tokio::test]
 async fn test_httpは許可されないhostを拒否する() {
-    let (state, addr) = setup_server("# Host Check").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("# Host Check").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
@@ -55,8 +52,7 @@ async fn test_httpは許可されないhostを拒否する() {
 
 #[tokio::test]
 async fn test_websocket接続() {
-    let (state, addr) = setup_server("# WS Test").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -77,7 +73,7 @@ async fn test_websocket接続() {
 
 #[tokio::test]
 async fn test_websocketブロードキャスト受信() {
-    let (state, addr) = setup_server("initial").await;
+    let (state, addr, _tmp_dir) = setup_server("initial").await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -187,15 +183,12 @@ async fn test_ファイル変更でwebsocket更新() {
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(json["content"].as_str().unwrap().contains("After Change"));
-
-    // tmp_dirをleakしてテスト中に削除されないようにする
-    std::mem::forget(tmp_dir);
+    drop(tmp_dir);
 }
 
 #[tokio::test]
 async fn test_websocketは異なるoriginを拒否する() {
-    let (state, addr) = setup_server("# WS Test").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let result = connect_ws(&url, "https://evil.example").await;
@@ -204,8 +197,7 @@ async fn test_websocketは異なるoriginを拒否する() {
 
 #[tokio::test]
 async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
-    let (state, addr) = setup_server("# WS Test").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let rebinding_authority = format!("evil.example:{}", addr.port());
@@ -216,7 +208,7 @@ async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
 
 #[tokio::test]
 async fn test_websocket切断時に購読が速やかに解放される() {
-    let (state, addr) = setup_server("# WS Test").await;
+    let (state, addr, _tmp_dir) = setup_server("# WS Test").await;
     let url = format!("ws://{}/ws", addr);
     let (mut ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
 
@@ -241,7 +233,7 @@ async fn test_websocket切断時に購読が速やかに解放される() {
 }
 
 #[tokio::test]
-async fn test_ファイルサイズ上限超過でエラーメッセージが返る() {
+async fn test_ファイルサイズ上限超過で413を返す() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let large_file = tmp_dir.path().join("large.md");
 
@@ -264,17 +256,17 @@ async fn test_ファイルサイズ上限超過でエラーメッセージが返
         axum::serve(listener, router).await.unwrap();
     });
 
-    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("ファイルサイズが上限"));
-
-    std::mem::forget(tmp_dir);
+    for path in ["/", "/api/content"] {
+        let resp = reqwest::get(format!("http://{}{}", addr, path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }
 
 #[tokio::test]
 async fn test_セキュリティヘッダが設定されている() {
-    let (state, addr) = setup_server("# Test").await;
-    let _ = state;
+    let (_state, addr, _tmp_dir) = setup_server("# Test").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
 
@@ -302,9 +294,14 @@ async fn test_セキュリティヘッダが設定されている() {
 }
 
 /// テスト用サーバーをセットアップするヘルパー
+/// TempDirを返却して呼び出し元でライフタイムを管理する
 async fn setup_server(
     markdown_content: &str,
-) -> (Arc<markdown_view::server::AppState>, std::net::SocketAddr) {
+) -> (
+    Arc<markdown_view::server::AppState>,
+    std::net::SocketAddr,
+    tempfile::TempDir,
+) {
     // 一時ファイルにMarkdownを書き込む
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("test.md");
@@ -327,11 +324,7 @@ async fn setup_server(
         axum::serve(listener, router).await.unwrap();
     });
 
-    // tempfileのownershipはstateの寿命と一緒
-    // tmp_dirをleakしてテスト中に削除されないようにする
-    std::mem::forget(tmp_dir);
-
-    (state, addr)
+    (state, addr, tmp_dir)
 }
 
 async fn connect_ws(

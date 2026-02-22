@@ -118,7 +118,10 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
 
                     html_output.push_str(&format!(
                         "<h{} id=\"{}\">{}</h{}>\n",
-                        level, id, heading_html, level
+                        level,
+                        html_escape(&id),
+                        heading_html,
+                        level
                     ));
                 }
                 heading_level = None;

@@ -86,9 +86,8 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
         let _ = init_tx.send(Ok(()));
 
         // スレッドを維持（debouncerのlifetimeのため）
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        // park()はスレッドをブロックし、CPUを消費しない
+        std::thread::park();
     });
 
     // 初期化結果を待機
@@ -121,7 +120,14 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     // canonicalizeで比較（シンボリックリンク対応）
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,
-        Err(_) => event_path == target_path,
+        Err(e) => {
+            eprintln!(
+                "[markdown-view] パス正規化に失敗（フォールバック比較）: {} ({})",
+                event_path.display(),
+                e
+            );
+            event_path == target_path
+        }
     }
 }
 

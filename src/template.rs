@@ -42,7 +42,7 @@ pub fn render_page(title: &str, content: &str, toc: &str, dark_mode: bool) -> St
     )
 }
 
-/// WebSocket経由のコンテンツ更新用JSONメッセージ構造体
+/// コンテンツ更新用JSONメッセージ構造体（HTTP API・WebSocket共用）
 #[derive(serde::Serialize)]
 pub struct UpdateMessage {
     pub content: String,
@@ -316,6 +316,10 @@ const JS: &str = r##"
     ws.onmessage = function(event) {
       try {
         var data = JSON.parse(event.data);
+        if (data.error) {
+          console.error('[markdown-view] サーバーエラー:', data.error);
+          return;
+        }
         updateContent(data);
       } catch (e) {
         console.error('[markdown-view] parse error:', e);
