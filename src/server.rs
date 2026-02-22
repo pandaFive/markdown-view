@@ -44,7 +44,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         // CSP: script-src/style-srcはインラインテンプレート埋め込みのため'unsafe-inline'を許可。
-        // img-srcは外部画像参照のため*を許可（data:スキームはsanitize_hrefで除外済み）。
+        // img-srcは外部画像参照のため*を許可。
+        // sanitize_hrefはリンクのhref属性を対象とし、img srcのdata:スキームはCSP img-src側で制御する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -183,12 +184,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
-            let _ = socket
+            if let Err(e) = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1011,
                     reason: "ファイル読み込みエラー".into(),
                 })))
-                .await;
+                .await
+            {
+                eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+            }
             return;
         }
     };
@@ -196,6 +200,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         Ok(json) => json,
         Err(e) => {
             eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "内部エラー".into(),
+                })))
+                .await;
             return;
         }
     };
@@ -342,12 +352,7 @@ pub async fn notify_update(state: &AppState) {
         }
     };
     // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）
-    if state.tx.send(msg).is_err() {
-        eprintln!(
-            "[markdown-view] ブロードキャスト送信先なし (receiver_count={})",
-            state.tx.receiver_count()
-        );
-    }
+    let _ = state.tx.send(msg);
 }
 
 #[cfg(test)]

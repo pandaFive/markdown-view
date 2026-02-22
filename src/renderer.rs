@@ -143,7 +143,7 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                     let mut image_html = format!(
                         "<img src=\"{}\" alt=\"{}\"",
                         html_escape(&safe_src),
-                        image_alt
+                        html_escape(&image_alt)
                     );
                     if let Some(title) = image_title.take() {
                         image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
@@ -166,7 +166,8 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 }
 
                 if image_src.is_some() {
-                    image_alt.push_str(&html_escape(&text));
+                    // altテキストは生テキストで蓄積し、出力時にエスケープする
+                    image_alt.push_str(&text);
                     continue;
                 }
 
@@ -179,7 +180,8 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             }
             Event::Code(text) => {
                 if image_src.is_some() {
-                    image_alt.push_str(&html_escape(&text));
+                    // altテキストは生テキストで蓄積し、出力時にエスケープする
+                    image_alt.push_str(&text);
                     continue;
                 }
 
@@ -386,6 +388,8 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                     html_output.push_str("</td>\n");
                 }
             }
+            // 未対応のpulldown-cmarkイベントは無視する
+            // （FootnoteReference, MetadataBlock等、本ツールでは不要なイベント）
             _ => {}
         }
     }
@@ -454,10 +458,19 @@ fn resolve_theme<'a>(
         );
     }
 
-    theme_set
-        .themes
-        .get(DEFAULT_THEME)
-        .or_else(|| theme_set.themes.values().next())
+    if let Some(theme) = theme_set.themes.get(DEFAULT_THEME) {
+        return Some(theme);
+    }
+
+    // デフォルトテーマが見つからない場合、利用可能な最初のテーマにフォールバック
+    let fallback = theme_set.themes.iter().next();
+    if let Some((name, _)) = &fallback {
+        eprintln!(
+            "[markdown-view] 警告: デフォルトテーマ '{}' が見つかりません。'{}' を使用します",
+            DEFAULT_THEME, name
+        );
+    }
+    fallback.map(|(_, theme)| theme)
 }
 
 fn add_code_block_class(highlighted_html: String) -> String {

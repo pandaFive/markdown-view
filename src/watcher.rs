@@ -69,7 +69,12 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
         let mut debouncer = match debouncer {
             Ok(d) => d,
             Err(e) => {
-                let _ = init_tx.send(Err(format!("debouncerの初期化に失敗: {}", e)));
+                if init_tx
+                    .send(Err(format!("debouncerの初期化に失敗: {}", e)))
+                    .is_err()
+                {
+                    eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                }
                 return;
             }
         };
@@ -78,16 +83,25 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
             .watcher()
             .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
         {
-            let _ = init_tx.send(Err(format!("ファイル監視の開始に失敗: {}", e)));
+            if init_tx
+                .send(Err(format!("ファイル監視の開始に失敗: {}", e)))
+                .is_err()
+            {
+                eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+            }
             return;
         }
 
         // 初期化成功を通知
-        let _ = init_tx.send(Ok(()));
+        if init_tx.send(Ok(())).is_err() {
+            eprintln!("[markdown-view] 初期化成功の通知先が既に閉じています");
+        }
 
         // スレッドを維持（debouncerのlifetimeのため）
-        // park()はスレッドをブロックし、CPUを消費しない
-        std::thread::park();
+        // park()はspurious wakeupの可能性があるためループで保護する
+        loop {
+            std::thread::park();
+        }
     });
 
     // 初期化結果を待機
@@ -116,17 +130,20 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
 }
 
 /// パスが監視対象ファイルと一致するか判定する
+///
+/// target_pathは起動時にcanonicalize済みの絶対パス。
+/// event_pathもcanonicalizeして比較し、失敗時はファイル名で比較する。
 fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
-    // canonicalizeで比較（シンボリックリンク対応）
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,
         Err(e) => {
             eprintln!(
-                "[markdown-view] パス正規化に失敗（フォールバック比較）: {} ({})",
+                "[markdown-view] パス正規化に失敗（ファイル名比較にフォールバック）: {} ({})",
                 event_path.display(),
                 e
             );
-            event_path == target_path
+            // フォールバック: ファイル名が一致するかで判定
+            event_path.file_name() == target_path.file_name()
         }
     }
 }

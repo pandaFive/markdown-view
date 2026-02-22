@@ -294,14 +294,16 @@ body {
 // コンテンツ更新はサーバーサイドでpulldown-cmarkによりパースされたHTMLのみを反映する。
 // renderer.rsで明示的にEvent::Html / Event::InlineHtmlを無視しているため、
 // raw HTMLの注入によるXSSリスクは軽減されている。
-// WebSocket接続は127.0.0.1のみにバインドされたローカルサーバーからのみ受信する。
+// サーバーは127.0.0.1にバインドし、Host/Originヘッダー検証（server.rs）で
+// DNS Rebinding攻撃を防止している。
 const JS: &str = r##"
 (function() {
   'use strict';
 
   // WebSocket接続管理
   var WS_RECONNECT_BASE = 1000;
-  var WS_RECONNECT_MAX = 30000;
+  var WS_RECONNECT_MAX_DELAY = 30000;
+  var WS_RECONNECT_MAX_ATTEMPTS = 20;
   var ws = null;
   var reconnectAttempts = 0;
 
@@ -330,13 +332,18 @@ const JS: &str = r##"
       scheduleReconnect();
     };
 
-    ws.onerror = function() {
+    ws.onerror = function(event) {
+      console.error('[markdown-view] WebSocketエラー:', event);
       ws.close();
     };
   }
 
   function scheduleReconnect() {
-    var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, reconnectAttempts), WS_RECONNECT_MAX);
+    if (reconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
+      console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
+      return;
+    }
+    var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, reconnectAttempts), WS_RECONNECT_MAX_DELAY);
     reconnectAttempts++;
     setTimeout(connectWS, delay);
   }
@@ -347,7 +354,7 @@ const JS: &str = r##"
     var tocEl = document.getElementById('toc');
 
     // サーバーサイドでサニタイズ済みのHTMLを反映
-    // （pulldown-cmarkでraw HTML無効化 + ローカル127.0.0.1のみ）
+    // （pulldown-cmarkでraw HTML無効化 + Host/Origin検証）
     if (data.content !== undefined) {
       contentEl.innerHTML = data.content;
     }
