@@ -5,6 +5,7 @@ use clap::Parser;
 use tokio::sync::broadcast;
 
 use markdown_view::cli::Args;
+use markdown_view::renderer::validate_theme;
 use markdown_view::server::{create_router, AppState, MAX_FILE_SIZE};
 use markdown_view::watcher::watch_file;
 
@@ -33,6 +34,17 @@ async fn main() -> Result<()> {
             MAX_FILE_SIZE / 1024 / 1024,
             file_path.display()
         );
+    }
+
+    // テーマ名の起動時検証（存在しない場合は即座にエラー）
+    if let Some(ref theme_name) = args.theme {
+        if let Err(available) = validate_theme(theme_name) {
+            bail!(
+                "テーマ '{}' が見つかりません。利用可能なテーマ: {:?}",
+                theme_name,
+                available
+            );
+        }
     }
 
     // broadcast チャネル

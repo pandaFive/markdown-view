@@ -1,4 +1,4 @@
-use markdown_view::renderer::render_markdown;
+use markdown_view::renderer::{render_markdown, validate_theme};
 use markdown_view::toc::generate_toc;
 
 #[test]
@@ -194,6 +194,21 @@ fn test_テーマ指定でハイライト出力が変わる() {
     let dark = render_markdown(md, Some("base16-ocean.dark"));
     let light = render_markdown(md, Some("InspiredGitHub"));
     assert_ne!(dark, light);
+}
+
+#[test]
+fn test_有効なテーマ名の検証が成功する() {
+    assert!(validate_theme("base16-ocean.dark").is_ok());
+    assert!(validate_theme("InspiredGitHub").is_ok());
+}
+
+#[test]
+fn test_無効なテーマ名の検証が利用可能テーマ一覧を返す() {
+    let result = validate_theme("nonexistent-theme");
+    assert!(result.is_err());
+    let available = result.unwrap_err();
+    assert!(!available.is_empty());
+    assert!(available.iter().any(|t| t == "base16-ocean.dark"));
 }
 
 #[test]

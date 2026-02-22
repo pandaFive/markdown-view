@@ -112,9 +112,19 @@ pub async fn watch_file(state: Arc<AppState>) -> Result<()> {
     }
 
     // tokioタスクでファイル変更通知を処理
-    tokio::spawn(async move {
+    // タスク終了を監視し、ライブリロード停止をユーザーに通知する
+    let notify_handle = tokio::spawn(async move {
         while rx.recv().await.is_some() {
             notify_update(&state).await;
+        }
+        eprintln!("[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です");
+    });
+    tokio::spawn(async move {
+        if let Err(e) = notify_handle.await {
+            eprintln!(
+                "[markdown-view] ファイル変更通知タスクがパニックしました: {}",
+                e
+            );
         }
     });
 
@@ -142,8 +152,10 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
                 event_path.display(),
                 e
             );
-            // フォールバック: ファイル名が一致するかで判定
+            // フォールバック: ファイル名と親ディレクトリが一致するかで判定
+            // （ファイル名のみだと別ディレクトリの同名ファイルでfalse positiveになる）
             event_path.file_name() == target_path.file_name()
+                && event_path.parent() == target_path.parent()
         }
     }
 }

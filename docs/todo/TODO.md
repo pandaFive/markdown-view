@@ -108,24 +108,54 @@
   - 修正方針: RenderState構造体の導入、コードブロック/画像レンダリングの関数抽出、push_htmlヘルパーの追加
   - 理由: 可読性・保守性向上。新しいMarkdown要素追加時の状態管理バグリスクを低減
 
-- [ ] [Medium] `is_target_file` のアトミックセーブ対応
+- [x] [Medium] `is_target_file` のアトミックセーブ対応
   - ファイル: `src/watcher.rs`
-  - 影響範囲: ファイル変更検知
-  - 修正方針: `canonicalize` 失敗時にファイル名＋親ディレクトリで比較するフォールバック
-  - 理由: Vim/Emacs等のアトミックセーブ時に一時的にファイルが存在せず、変更イベントがドロップされる
+  - 対応: canonicalize失敗時にファイル名＋親ディレクトリ比較のフォールバックを実装済み
 
 - [ ] [Medium] CSP の `'unsafe-inline'` をnonce/hashに置換
   - ファイル: `src/server.rs`, `src/template.rs`
   - 修正方針: リクエストごとにnonce生成し、CSPヘッダーとscript/styleタグに埋め込む
   - 理由: unsafe-inlineはXSS防御を弱める。ローカルツールとしてはリスク低だが防御深化として有効
 
-- [ ] [Low] watcher JoinHandle の監視
+- [x] [Low] watcher JoinHandle の監視
   - ファイル: `src/watcher.rs`
-  - 影響範囲: watch_file関数
-  - 修正方針: `tokio::spawn` の返り値を保持し、パニック時にログ出力する仕組みを追加
-  - 理由: 現状JoinHandleがdropされ、tokioタスクのパニックが検知されない
+  - 対応: JoinHandleを保持し、パニック検知・ログ出力する監視タスクを追加済み
 
 - [ ] [Low] read_and_render → UpdateMessage 直接返却
   - ファイル: `src/server.rs`
   - 修正方針: `Result<(String, String), _>` → `Result<UpdateMessage, _>` に変更
   - 理由: タプルの位置引数による取り違えリスクを排除
+
+- [ ] [High] 監視スレッドのグレースフルシャットダウン機構
+  - ファイル: `src/watcher.rs`
+  - 影響範囲: std::thread::park()ループ、debouncer lifetime
+  - 修正方針: AtomicBool + unpark、またはmpsc channelでシャットダウンシグナルを送信
+  - 理由: 現在スレッドは永久にparkし、プロセス終了まで解放されない
+
+- [ ] [Medium] notify callbackエラーのチャネル伝播
+  - ファイル: `src/watcher.rs`
+  - 影響範囲: mpsc channel型、tokio受信タスク
+  - 修正方針: `mpsc::channel(32)` の型を `Result<(), String>` に変更し、エラー時にクライアントへWebSocket通知
+  - 理由: 初期化後の監視エラーがeprintlnのみで報告され、クライアントに伝播しない
+
+- [ ] [Medium] `is_target_file` のユニットテスト追加
+  - ファイル: `src/watcher.rs`
+  - 理由: 正規化成功ケース、失敗フォールバック（ファイル名+親ディレクトリ比較）、異なるディレクトリの同名ファイル等のテストが未整備
+
+- [ ] [Medium] WebSocket Origin ポート不一致時のテスト追加
+  - ファイル: `src/server.rs` テスト
+  - 理由: `is_allowed_ws_origin` でOriginのポートがHostと一致しない場合のテストが不足
+
+- [ ] [Medium] `read_markdown_with_limit` の境界値テスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: ちょうど10MB、10MB+1バイト等の境界値テストが未整備
+
+- [ ] [Medium] UpdateMessage にファクトリメソッド追加
+  - ファイル: `src/template.rs`
+  - 修正方針: `UpdateMessage::new(content, toc)` + `UpdateMessage::error(msg)` を追加
+  - 理由: エラーJSONの生成が `serde_json::json!` のアドホック構築で一貫性がない
+
+- [ ] [Medium] ReadMarkdownError に IntoResponse 実装
+  - ファイル: `src/server.rs`
+  - 修正方針: `impl IntoResponse for ReadMarkdownError` で TooLarge→413, Io→500 をカプセル化
+  - 理由: ハンドラーでのmatch分岐を減らし、ステータスコードマッピングを一箇所に集約

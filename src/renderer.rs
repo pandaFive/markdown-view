@@ -407,6 +407,18 @@ fn theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
+/// テーマ名が有効か検証する（起動時のfail-fast用）
+///
+/// 無効な場合は利用可能なテーマ名の一覧を返す。
+pub fn validate_theme(name: &str) -> Result<(), Vec<String>> {
+    let ts = theme_set();
+    if ts.themes.contains_key(name) {
+        Ok(())
+    } else {
+        Err(ts.themes.keys().cloned().collect())
+    }
+}
+
 /// 見出しテキストをスラッグ（URL-safe ID）に変換する
 pub fn slugify(text: &str) -> String {
     let slug = text

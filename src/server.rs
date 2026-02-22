@@ -200,12 +200,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         Ok(json) => json,
         Err(e) => {
             eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
-            let _ = socket
+            if let Err(e) = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1011,
                     reason: "内部エラー".into(),
                 })))
-                .await;
+                .await
+            {
+                eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+            }
             return;
         }
     };
@@ -259,6 +262,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             Ok(result) => result,
                             Err(e) => {
                                 eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
+                                // クライアントにエラーを通知
+                                if let Ok(error_json) = serde_json::to_string(&serde_json::json!({
+                                    "error": format!("ファイル読み込みエラー: {}", e)
+                                })) {
+                                    let _ = socket.send(Message::Text(error_json.into())).await;
+                                }
                                 continue;
                             }
                         };
@@ -300,9 +309,12 @@ impl std::fmt::Display for ReadMarkdownError {
     }
 }
 
+/// ファイルサイズ上限付きでMarkdownファイルを読み込む
+///
+/// TOCTOU対策として二段階のサイズチェックを行う:
+/// 1. metadata().len() による事前チェック（明らかな超過を早期拒否）
+/// 2. take() + read_to_end による読み込み時の実サイズ制限
 async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdownError> {
-    // パフォーマンス最適化: 明らかにサイズ超過のファイルを早期拒否する。
-    // 実際のサイズ制限はtake()による読み込み制限で保証する。
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
@@ -336,19 +348,27 @@ async fn read_and_render(state: &AppState) -> Result<(String, String), ReadMarkd
 }
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
+///
+/// 読み込みエラー時はエラーJSONをクライアントに送信する。
+/// JS側の `data.error` チェックでエラー表示される。
 pub async fn notify_update(state: &AppState) {
-    let (content, toc) = match read_and_render(state).await {
-        Ok(result) => result,
+    let msg = match read_and_render(state).await {
+        Ok((content, toc)) => match serde_json::to_string(&UpdateMessage { content, toc }) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
+                return;
+            }
+        },
         Err(e) => {
             eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
-            return;
-        }
-    };
-    let msg = match serde_json::to_string(&UpdateMessage { content, toc }) {
-        Ok(json) => json,
-        Err(e) => {
-            eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
-            return;
+            // クライアントにエラーを通知（JS側のdata.errorチェックで処理される）
+            match serde_json::to_string(&serde_json::json!({
+                "error": format!("ファイル読み込みエラー: {}", e)
+            })) {
+                Ok(json) => json,
+                Err(_) => return,
+            }
         }
     };
     // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）

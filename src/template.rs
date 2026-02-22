@@ -291,11 +291,9 @@ body {
 "##;
 
 // セキュリティ注記:
-// コンテンツ更新はサーバーサイドでpulldown-cmarkによりパースされたHTMLのみを反映する。
-// renderer.rsで明示的にEvent::Html / Event::InlineHtmlを無視しているため、
-// raw HTMLの注入によるXSSリスクは軽減されている。
-// サーバーは127.0.0.1にバインドし、Host/Originヘッダー検証（server.rs）で
-// DNS Rebinding攻撃を防止している。
+// XSS防止: pulldown-cmarkのEvent::Html / Event::InlineHtmlを除去し、
+// raw HTMLが出力に含まれないようにしている（renderer.rs）。
+// DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
 const JS: &str = r##"
 (function() {
   'use strict';
@@ -341,11 +339,21 @@ const JS: &str = r##"
   function scheduleReconnect() {
     if (reconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
       console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
+      showDisconnectBanner();
       return;
     }
     var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, reconnectAttempts), WS_RECONNECT_MAX_DELAY);
     reconnectAttempts++;
     setTimeout(connectWS, delay);
+  }
+
+  function showDisconnectBanner() {
+    if (document.getElementById('ws-disconnect-banner')) return;
+    var banner = document.createElement('div');
+    banner.id = 'ws-disconnect-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9999;font-size:14px;';
+    banner.textContent = 'ライブリロード接続が切断されました。ページをリロードしてください。';
+    document.body.appendChild(banner);
   }
 
   function updateContent(data) {
