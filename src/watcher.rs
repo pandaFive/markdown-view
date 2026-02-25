@@ -63,10 +63,17 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
                             if is_content_change_event(&event.kind) {
                                 // 対象ファイルの変更のみ通知
                                 if is_target_file(&event.path, &target_path) {
-                                    let path = event
-                                        .path
-                                        .canonicalize()
-                                        .unwrap_or_else(|_| event.path.clone());
+                                    let path = match event.path.canonicalize() {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
+                                                event.path.display(),
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    };
                                     if rt_tx.blocking_send(path).is_err() {
                                         eprintln!("[markdown-view] 通知チャネルが閉じています");
                                     }
@@ -183,14 +190,19 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                             if is_hidden {
                                 continue;
                             }
-                            let path = event
-                                .path
-                                .canonicalize()
-                                .unwrap_or_else(|_| event.path.clone());
+                            let path = match event.path.canonicalize() {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    eprintln!(
+                                        "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
+                                        event.path.display(),
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                            // 注意: canonicalize失敗時はevent.pathをそのまま使うため、
-                            // starts_withチェックが通る保証はない（その場合もスキップされる）
                             if !path.starts_with(&base_for_filter) {
                                 eprintln!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",

@@ -294,3 +294,20 @@
 - [ ] `notify_update` のdocコメントにディレクトリモード相対パス失敗時のスキップ動作を追記
   - ファイル: `src/server.rs`
   - 理由: 新たに追加されたスキップ動作がdocコメントに反映されていない（※コード内コメントには記載済み）
+
+## PR #4 レビュー Round 4 (レビュー日: 2026-02-25)
+
+### 修正済み
+
+- [x] [Critical] watcher `canonicalize` フォールバックがセキュリティ境界をバイパス
+  - ファイル: `src/watcher.rs` (`watch_directory`, `watch_single_file`)
+  - 対応: `unwrap_or_else(|_| event.path.clone())` → 失敗時はログ出力してイベントをスキップ
+- [x] [Important] `list_markdown_files_recursive` に再帰深度制限がない
+  - ファイル: `src/server.rs`
+  - 対応: `MAX_DIR_DEPTH = 32` の定数を追加し、超過時はログ出力してスキップ
+
+### Low Priority
+
+- [ ] `is_target_file` canonicalize失敗フォールバックのセキュリティ検証
+  - ファイル: `src/watcher.rs`
+  - 理由: ファイル名+親ディレクトリ比較のフォールバックは異なるディレクトリの同名ファイルで誤検知リスクあり

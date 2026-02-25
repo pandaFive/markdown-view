@@ -498,6 +498,9 @@ impl std::fmt::Display for ReadMarkdownError {
 /// ファイル一覧の最大件数
 const MAX_FILE_LIST: usize = 1000;
 
+/// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
+const MAX_DIR_DEPTH: usize = 32;
+
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 ///
 /// - 隠しファイル/ディレクトリ（`.`開始）を除外
@@ -511,7 +514,7 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     if let Ok(canonical_base) = base_dir.canonicalize() {
         visited_dirs.insert(canonical_base);
     }
-    list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs)?;
+    list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs, 0)?;
     files.sort();
     files.truncate(MAX_FILE_LIST);
     Ok(files)
@@ -522,7 +525,15 @@ fn list_markdown_files_recursive(
     current_dir: &Path,
     files: &mut Vec<String>,
     visited_dirs: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
 ) -> std::io::Result<()> {
+    if depth >= MAX_DIR_DEPTH {
+        eprintln!(
+            "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
+            current_dir.display()
+        );
+        return Ok(());
+    }
     let entries = std::fs::read_dir(current_dir)?;
     for entry in entries {
         let entry = entry?;
@@ -587,7 +598,7 @@ fn list_markdown_files_recursive(
                     }
                 }
             }
-            list_markdown_files_recursive(base_dir, &path, files, visited_dirs)?;
+            list_markdown_files_recursive(base_dir, &path, files, visited_dirs, depth + 1)?;
         } else if file_type.is_file() {
             if let Some(ext) = path.extension() {
                 if ext.eq_ignore_ascii_case("md") {
