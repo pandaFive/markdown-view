@@ -686,10 +686,7 @@ async fn test_ディレクトリモード_タブuiが表示される() {
 
     let body = resp.text().await.unwrap();
     // タブボタン
-    assert!(
-        body.contains("sidebar-tab"),
-        "タブボタンが存在するべき"
-    );
+    assert!(body.contains("sidebar-tab"), "タブボタンが存在するべき");
     // パネル
     assert!(
         body.contains("id=\"panel-files\""),
@@ -709,12 +706,13 @@ async fn test_単一ファイルモード_タブが表示されない() {
     assert_eq!(resp.status(), 200);
 
     let body = resp.text().await.unwrap();
+    // HTML構造にタブ要素が含まれない（CSSクラス定義ではなくHTML構造を検証）
     assert!(
-        !body.contains("sidebar-tab"),
+        !body.contains("data-tab=\"files\""),
         "単一ファイルモードではタブは不要"
     );
     assert!(
-        !body.contains("panel-files"),
+        !body.contains("id=\"panel-files\""),
         "単一ファイルモードではファイルパネルは不要"
     );
 }

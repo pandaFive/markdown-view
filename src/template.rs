@@ -16,27 +16,6 @@ pub fn render_page(
 ) -> String {
     let escaped_title = html_escape(title);
 
-    // ファイル一覧HTML（ディレクトリモードのみ）
-    let file_list_html = match file_list {
-        Some(files) => {
-            let mut html = String::from(
-                "<div class=\"file-list\">\n<div class=\"file-list-header\"><h2>ファイル</h2></div>\n<ul>\n",
-            );
-            for file in files {
-                let active = current_file.is_some_and(|c| c == file);
-                let class = if active { " class=\"active\"" } else { "" };
-                html.push_str(&format!(
-                    "<li{class}><a href=\"#\" data-file=\"{file}\">{file}</a></li>\n",
-                    class = class,
-                    file = html_escape(file),
-                ));
-            }
-            html.push_str("</ul>\n</div>\n");
-            html
-        }
-        None => String::new(),
-    };
-
     // ディレクトリモードフラグをdata属性で渡す
     let dir_mode_attr = if file_list.is_some() {
         format!(
@@ -45,6 +24,40 @@ pub fn render_page(
         )
     } else {
         String::new()
+    };
+
+    // サイドバー内部HTML: ディレクトリモード時はタブ切り替え式、単一ファイルモードは従来通り
+    let sidebar_inner = match file_list {
+        Some(files) => {
+            let tree = build_file_tree(files);
+            let tree_html = render_file_tree_html(&tree, current_file);
+            format!(
+                r##"  <div class="sidebar-tabs">
+    <button class="sidebar-tab active" data-tab="files">ファイル</button>
+    <button class="sidebar-tab" data-tab="toc">目次</button>
+    <button id="sidebar-toggle" class="sidebar-toggle" aria-label="閉じる">×</button>
+  </div>
+  <div class="sidebar-panel active" id="panel-files">
+    <div class="file-list">
+{tree_html}    </div>
+  </div>
+  <div class="sidebar-panel" id="panel-toc">
+    <nav id="toc">{toc}</nav>
+  </div>"##,
+                tree_html = tree_html,
+                toc = toc,
+            )
+        }
+        None => {
+            format!(
+                r##"  <div class="sidebar-header">
+    <h2>目次</h2>
+    <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
+  </div>
+  <nav id="toc">{toc}</nav>"##,
+                toc = toc,
+            )
+        }
     };
 
     format!(
@@ -60,12 +73,7 @@ pub fn render_page(
 </head>
 <body>
 <aside id="sidebar" class="sidebar">
-  {file_list_html}
-  <div class="sidebar-header">
-    <h2>目次</h2>
-    <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
-  </div>
-  <nav id="toc">{toc}</nav>
+{sidebar_inner}
 </aside>
 <button id="sidebar-open" class="sidebar-open" aria-label="目次を開く">☰</button>
 <main id="content" class="content">
@@ -80,8 +88,7 @@ pub fn render_page(
         dir_mode_attr = dir_mode_attr,
         title = escaped_title,
         css = CSS,
-        file_list_html = file_list_html,
-        toc = toc,
+        sidebar_inner = sidebar_inner,
         content = content,
         js = JS,
     )
@@ -160,7 +167,7 @@ body {
   min-height: 100vh;
 }
 
-/* サイドバー（TOC） */
+/* サイドバー */
 .sidebar {
   width: 280px;
   min-width: 280px;
@@ -172,6 +179,8 @@ body {
   top: 0;
   height: 100vh;
   transition: transform 0.3s ease;
+  display: flex;
+  flex-direction: column;
 }
 
 .sidebar-header {
@@ -320,29 +329,54 @@ body {
 .content li { margin: 0.25em 0; }
 .content li input[type="checkbox"] { margin-right: 0.5em; }
 
-/* ファイル一覧 */
-.file-list {
-  margin-bottom: 1rem;
-  padding-bottom: 0.5rem;
+/* タブバー */
+.sidebar-tabs {
+  display: flex;
+  align-items: center;
   border-bottom: 1px solid var(--sidebar-border);
+  margin-bottom: 0.5rem;
+  flex-shrink: 0;
 }
 
-.file-list-header h2 {
-  font-size: 0.875rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.sidebar-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
   color: var(--blockquote-fg);
-  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sidebar-tab:hover { color: var(--fg); }
+.sidebar-tab.active {
+  color: var(--toc-active);
+  border-bottom-color: var(--toc-active);
+  font-weight: 600;
+}
+
+.sidebar-tabs .sidebar-toggle { margin-left: auto; }
+
+/* タブパネル */
+.sidebar-panel { display: none; }
+.sidebar-panel.active {
+  display: block;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ファイル一覧 */
+.file-list {
+  padding: 0;
 }
 
 .file-list ul {
   list-style: none;
   padding-left: 0;
-  max-height: 200px;
-  overflow-y: auto;
 }
-
-.file-list li { margin: 0.125rem 0; }
 
 .file-list a {
   display: block;
@@ -356,7 +390,38 @@ body {
 }
 
 .file-list a:hover { background: var(--toc-hover-bg); }
-.file-list li.active a { color: var(--toc-active); font-weight: 600; }
+.file-tree-file.active a { color: var(--toc-active); font-weight: 600; }
+
+/* ファイルツリー */
+.file-tree-dir > summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  list-style: none;
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.file-tree-dir > summary::-webkit-details-marker { display: none; }
+
+.file-tree-dir > summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 0.3rem;
+  font-size: 0.625rem;
+  transition: transform 0.15s;
+}
+
+.file-tree-dir[open] > summary::before { transform: rotate(90deg); }
+.file-tree-dir > summary:hover { background: var(--toc-hover-bg); }
+
+.file-tree-children {
+  list-style: none;
+  padding-left: 1rem;
+}
+
+.file-tree-file { margin: 0.125rem 0; }
 
 /* モバイル対応 */
 @media (max-width: 768px) {
@@ -371,6 +436,7 @@ body {
   }
   .sidebar.open { transform: translateX(0); }
   .sidebar-toggle { display: block; }
+  .sidebar-tabs .sidebar-toggle { display: block; }
   .sidebar-open { display: block; }
   .content { padding: 1.5rem 1rem; padding-top: 3rem; }
 }
@@ -396,16 +462,146 @@ pub struct FileTreeNode {
 ///
 /// 各階層内でディレクトリが先、ファイルが後（それぞれアルファベット順）
 pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
-    let _ = files;
-    todo!("未実装")
+    // 中間表現: 各ディレクトリを子マップで表現
+    struct DirNode {
+        children_dirs: std::collections::BTreeMap<String, DirNode>,
+        files: Vec<(String, String)>, // (ファイル名, フルパス)
+    }
+
+    impl DirNode {
+        fn new() -> Self {
+            Self {
+                children_dirs: std::collections::BTreeMap::new(),
+                files: Vec::new(),
+            }
+        }
+
+        /// パスコンポーネントを辿ってファイルを挿入
+        fn insert(&mut self, parts: &[&str], full_path: &str) {
+            match parts.len() {
+                0 => {}
+                1 => {
+                    // リーフ（ファイル）
+                    self.files
+                        .push((parts[0].to_string(), full_path.to_string()));
+                }
+                _ => {
+                    // ディレクトリを辿る
+                    let dir = self
+                        .children_dirs
+                        .entry(parts[0].to_string())
+                        .or_insert_with(DirNode::new);
+                    dir.insert(&parts[1..], full_path);
+                }
+            }
+        }
+
+        /// FileTreeNodeのリストに変換（ディレクトリ先、ファイル後、各アルファベット順）
+        fn into_tree_nodes(self) -> Vec<FileTreeNode> {
+            let mut result = Vec::new();
+
+            // ディレクトリ（BTreeMapなのでアルファベット順）
+            for (name, child) in self.children_dirs {
+                result.push(FileTreeNode {
+                    name,
+                    full_path: None,
+                    children: child.into_tree_nodes(),
+                });
+            }
+
+            // ファイル（アルファベット順にソート）
+            let mut files = self.files;
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, full_path) in files {
+                result.push(FileTreeNode {
+                    name,
+                    full_path: Some(full_path),
+                    children: Vec::new(),
+                });
+            }
+
+            result
+        }
+    }
+
+    let mut root = DirNode::new();
+    for file in files {
+        let parts: Vec<&str> = file.split('/').collect();
+        root.insert(&parts, file);
+    }
+    root.into_tree_nodes()
 }
 
 /// ファイルツリーのHTML表現を生成する
 ///
 /// - `current_file`: 現在表示中のファイルパス（祖先ディレクトリをopen状態にする）
 pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>) -> String {
-    let _ = (nodes, current_file);
-    todo!("未実装")
+    // current_fileの祖先ディレクトリ名セットを構築
+    let active_dirs: std::collections::HashSet<String> = current_file
+        .map(|path| {
+            let mut dirs = std::collections::HashSet::new();
+            let mut accumulated = String::new();
+            let parts: Vec<&str> = path.split('/').collect();
+            // 最後の要素（ファイル名）を除くディレクトリパスを蓄積
+            for part in &parts[..parts.len().saturating_sub(1)] {
+                if !accumulated.is_empty() {
+                    accumulated.push('/');
+                }
+                accumulated.push_str(part);
+                dirs.insert(accumulated.clone());
+            }
+            dirs
+        })
+        .unwrap_or_default();
+
+    fn render_nodes(
+        nodes: &[FileTreeNode],
+        html: &mut String,
+        current_file: Option<&str>,
+        active_dirs: &std::collections::HashSet<String>,
+        current_path: &str,
+    ) {
+        for node in nodes {
+            if node.full_path.is_some() {
+                // ファイルノード
+                let is_active = current_file == node.full_path.as_deref();
+                let class = if is_active {
+                    "file-tree-file active"
+                } else {
+                    "file-tree-file"
+                };
+                let escaped_name = html_escape(&node.name);
+                let escaped_path = html_escape(node.full_path.as_deref().unwrap_or(""));
+                html.push_str(&format!(
+                    "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\">{name}</a></li>\n",
+                    class = class,
+                    path = escaped_path,
+                    name = escaped_name,
+                ));
+            } else {
+                // ディレクトリノード
+                let dir_path = if current_path.is_empty() {
+                    node.name.clone()
+                } else {
+                    format!("{}/{}", current_path, node.name)
+                };
+                let is_open = active_dirs.contains(&dir_path);
+                let open_attr = if is_open { " open" } else { "" };
+                let escaped_name = html_escape(&node.name);
+                html.push_str(&format!(
+                    "<details class=\"file-tree-dir\"{open}>\n<summary>{name}</summary>\n<ul class=\"file-tree-children\">\n",
+                    open = open_attr,
+                    name = escaped_name,
+                ));
+                render_nodes(&node.children, html, current_file, active_dirs, &dir_path);
+                html.push_str("</ul>\n</details>\n");
+            }
+        }
+    }
+
+    let mut html = String::new();
+    render_nodes(nodes, &mut html, current_file, &active_dirs, "");
+    html
 }
 
 const JS: &str = r##"
@@ -590,11 +786,20 @@ const JS: &str = r##"
 
   // ファイル一覧のアクティブ状態を更新
   function updateFileListActive(file) {
-    var items = document.querySelectorAll('.file-list li');
+    // ファイルツリーノードのアクティブ状態を切り替え
+    var items = document.querySelectorAll('.file-tree-file');
     items.forEach(function(li) {
       var link = li.querySelector('a');
       if (link && link.getAttribute('data-file') === file) {
         li.classList.add('active');
+        // 祖先のdetails要素をすべて開く
+        var parent = li.parentElement;
+        while (parent) {
+          if (parent.tagName === 'DETAILS') {
+            parent.open = true;
+          }
+          parent = parent.parentElement;
+        }
       } else {
         li.classList.remove('active');
       }
@@ -603,11 +808,33 @@ const JS: &str = r##"
 
   // ファイル一覧のクリックハンドラ設定
   function setupFileList() {
-    var fileLinks = document.querySelectorAll('.file-list a[data-file]');
+    var fileLinks = document.querySelectorAll('.file-tree-file a[data-file]');
     fileLinks.forEach(function(link) {
       link.addEventListener('click', function(e) {
         e.preventDefault();
         selectFile(link.getAttribute('data-file'));
+      });
+    });
+  }
+
+  // タブ切り替え設定
+  function setupTabs() {
+    var tabs = document.querySelectorAll('.sidebar-tab');
+    tabs.forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        var target = tab.getAttribute('data-tab');
+        // タブのアクティブ状態を切り替え
+        tabs.forEach(function(t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        // パネルの表示を切り替え
+        var panels = document.querySelectorAll('.sidebar-panel');
+        panels.forEach(function(panel) {
+          if (panel.id === 'panel-' + target) {
+            panel.classList.add('active');
+          } else {
+            panel.classList.remove('active');
+          }
+        });
       });
     });
   }
@@ -674,6 +901,7 @@ const JS: &str = r##"
   setupTocTracking();
   if (isDirMode) {
     setupFileList();
+    setupTabs();
   }
 })();
 "##;
@@ -733,10 +961,7 @@ mod tests {
 
     #[test]
     fn test_ルート直下のファイルのみ() {
-        let files = vec![
-            "README.md".to_string(),
-            "CHANGELOG.md".to_string(),
-        ];
+        let files = vec!["README.md".to_string(), "CHANGELOG.md".to_string()];
         let tree = build_file_tree(&files);
 
         // すべてファイルノード、ディレクトリノードなし
@@ -776,10 +1001,7 @@ mod tests {
 
     #[test]
     fn test_ツリーhtmlにアクティブファイルのパスが展開される() {
-        let files = vec![
-            "README.md".to_string(),
-            "docs/guide/intro.md".to_string(),
-        ];
+        let files = vec!["README.md".to_string(), "docs/guide/intro.md".to_string()];
         let tree = build_file_tree(&files);
         let html = render_file_tree_html(&tree, Some("docs/guide/intro.md"));
 
@@ -835,8 +1057,8 @@ mod tests {
             None,
         );
 
-        // タブボタンが存在しない
-        assert!(!html.contains("sidebar-tab"));
-        assert!(!html.contains("panel-files"));
+        // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
+        assert!(!html.contains("data-tab=\"files\""));
+        assert!(!html.contains("id=\"panel-files\""));
     }
 }
