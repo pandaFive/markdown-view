@@ -396,32 +396,56 @@ body {
 .file-tree-dir > summary {
   cursor: pointer;
   font-size: 0.8125rem;
-  padding: 0.2rem 0.5rem;
+  padding: 0.2rem 0.4rem;
   border-radius: 4px;
   list-style: none;
   color: var(--fg);
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 
 .file-tree-dir > summary::-webkit-details-marker { display: none; }
 
-.file-tree-dir > summary::before {
-  content: "▶";
-  display: inline-block;
-  margin-right: 0.3rem;
+.file-tree-dir > summary .tree-icon-chevron {
+  display: inline-flex;
+  width: 0.75rem;
+  flex-shrink: 0;
   font-size: 0.625rem;
   transition: transform 0.15s;
 }
 
-.file-tree-dir[open] > summary::before { transform: rotate(90deg); }
+.file-tree-dir[open] > summary .tree-icon-chevron { transform: rotate(90deg); }
 .file-tree-dir > summary:hover { background: var(--toc-hover-bg); }
 
 .file-tree-children {
   list-style: none;
-  padding-left: 1rem;
+  padding-left: 0.5rem;
+  margin-left: 0.45rem;
+  border-left: 1px solid var(--sidebar-border);
 }
 
-.file-tree-file { margin: 0.125rem 0; }
+.file-tree-file {
+  margin: 0;
+  display: flex;
+  align-items: center;
+}
+
+.file-tree-file a {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-left: 0.4rem;
+}
+
+.tree-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 1rem;
+  font-size: 0.8125rem;
+  justify-content: center;
+}
 
 /* モバイル対応 */
 @media (max-width: 768px) {
@@ -573,7 +597,7 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
                 let escaped_name = html_escape(&node.name);
                 let escaped_path = html_escape(node.full_path.as_deref().unwrap_or(""));
                 html.push_str(&format!(
-                    "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\">{name}</a></li>\n",
+                    "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\"><span class=\"tree-icon\">📄</span>{name}</a></li>\n",
                     class = class,
                     path = escaped_path,
                     name = escaped_name,
@@ -589,7 +613,7 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
                 let open_attr = if is_open { " open" } else { "" };
                 let escaped_name = html_escape(&node.name);
                 html.push_str(&format!(
-                    "<details class=\"file-tree-dir\"{open}>\n<summary>{name}</summary>\n<ul class=\"file-tree-children\">\n",
+                    "<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
                     open = open_attr,
                     name = escaped_name,
                 ));
