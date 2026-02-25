@@ -378,6 +378,12 @@ body {
   padding-left: 0;
 }
 
+.file-tree-root {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
 .file-list a {
   display: block;
   padding: 0.25rem 0.5rem;
@@ -472,6 +478,9 @@ body {
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
 // DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
 /// ファイルツリーのノード（ディレクトリまたはファイル）
+///
+/// - `full_path.is_some()`: ファイルノード
+/// - `full_path.is_none()`: ディレクトリノード（`children`を持つ）
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileTreeNode {
     /// 表示名（ディレクトリ名 or ファイル名）
@@ -549,9 +558,17 @@ pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
     }
 
     let mut root = DirNode::new();
+    let mut seen_paths = std::collections::HashSet::new();
     for file in files {
-        let parts: Vec<&str> = file.split('/').collect();
-        root.insert(&parts, file);
+        let parts: Vec<&str> = file.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let normalized_path = parts.join("/");
+        if !seen_paths.insert(normalized_path.clone()) {
+            continue;
+        }
+        root.insert(&parts, &normalized_path);
     }
     root.into_tree_nodes()
 }
@@ -560,8 +577,19 @@ pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
 ///
 /// - `current_file`: 現在表示中のファイルパス（祖先ディレクトリをopen状態にする）
 pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>) -> String {
+    // current_fileは防御的に正規化して扱う（連続スラッシュ等を吸収）
+    let normalized_current_file = current_file.and_then(|path| {
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("/"))
+        }
+    });
+
     // current_fileの祖先ディレクトリ名セットを構築
-    let active_dirs: std::collections::HashSet<String> = current_file
+    let active_dirs: std::collections::HashSet<String> = normalized_current_file
+        .as_deref()
         .map(|path| {
             let mut dirs = std::collections::HashSet::new();
             let mut accumulated = String::new();
@@ -613,18 +641,26 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
                 let open_attr = if is_open { " open" } else { "" };
                 let escaped_name = html_escape(&node.name);
                 html.push_str(&format!(
-                    "<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
+                    "<li>\n<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
                     open = open_attr,
                     name = escaped_name,
                 ));
                 render_nodes(&node.children, html, current_file, active_dirs, &dir_path);
-                html.push_str("</ul>\n</details>\n");
+                html.push_str("</ul>\n</details>\n</li>\n");
             }
         }
     }
 
     let mut html = String::new();
-    render_nodes(nodes, &mut html, current_file, &active_dirs, "");
+    html.push_str("<ul class=\"file-tree-root\">\n");
+    render_nodes(
+        nodes,
+        &mut html,
+        normalized_current_file.as_deref(),
+        &active_dirs,
+        "",
+    );
+    html.push_str("</ul>\n");
     html
 }
 
@@ -818,7 +854,7 @@ const JS: &str = r##"
         li.classList.add('active');
         // 祖先のdetails要素をすべて開く
         var parent = li.parentElement;
-        while (parent) {
+        while (parent && parent.id !== 'sidebar') {
           if (parent.tagName === 'DETAILS') {
             parent.open = true;
           }
@@ -1029,6 +1065,8 @@ mod tests {
         let tree = build_file_tree(&files);
         let html = render_file_tree_html(&tree, Some("docs/guide/intro.md"));
 
+        // ルートはulでラップされる
+        assert!(html.starts_with("<ul class=\"file-tree-root\">"));
         // アクティブファイルの祖先ディレクトリがopen状態
         assert!(html.contains("<details class=\"file-tree-dir\" open>"));
         // アクティブファイルにactiveクラスが付与される
@@ -1038,15 +1076,48 @@ mod tests {
     }
 
     #[test]
+    fn test_アクティブファイル判定でcurrent_fileの空セグメントを正規化する() {
+        let files = vec!["README.md".to_string(), "docs/guide/intro.md".to_string()];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, Some("docs//guide//intro.md"));
+
+        // 正規化により同一ファイルとしてactive判定される
+        assert!(html.contains("class=\"file-tree-file active\""));
+        // 祖先ディレクトリもopen状態になる
+        assert!(html.contains("<details class=\"file-tree-dir\" open>"));
+    }
+
+    #[test]
     fn test_ファイル名のエスケープがツリーhtmlで維持される() {
-        let files = vec!["A&B <notes>.md".to_string()];
+        let files = vec!["A&B \"<notes>\".md".to_string()];
         let tree = build_file_tree(&files);
         let html = render_file_tree_html(&tree, None);
 
-        // &, <, > がエスケープされている
-        assert!(html.contains("A&amp;B &lt;notes&gt;.md"));
+        // &, <, >, " がエスケープされている
+        assert!(html.contains("A&amp;B &quot;&lt;notes&gt;&quot;.md"));
         // 生の特殊文字がdata-file属性に含まれない
-        assert!(!html.contains("data-file=\"A&B <notes>.md\""));
+        assert!(!html.contains("data-file=\"A&B \"<notes>\".md\""));
+        // data-file属性値のダブルクォートがエスケープされる
+        assert!(html.contains("data-file=\"A&amp;B &quot;&lt;notes&gt;&quot;.md\""));
+    }
+
+    #[test]
+    fn test_空セグメントと重複パスを除去してツリー構築() {
+        let files = vec![
+            "docs//guide.md".to_string(),
+            "docs/guide.md".to_string(),
+            "///".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name, "docs");
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].name, "guide.md");
+        assert_eq!(
+            tree[0].children[0].full_path.as_deref(),
+            Some("docs/guide.md")
+        );
     }
 
     #[test]
