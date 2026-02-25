@@ -185,11 +185,6 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                             if !is_md {
                                 continue;
                             }
-                            // 隠しファイル除外（ベースディレクトリからの相対パスで判定）
-                            let is_hidden = is_hidden_relative(&event.path, &base_for_filter);
-                            if is_hidden {
-                                continue;
-                            }
                             let path = match event.path.canonicalize() {
                                 Ok(p) => p,
                                 Err(e) => {
@@ -208,6 +203,11 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                                     path.display()
                                 );
+                                continue;
+                            }
+                            // 隠しファイル除外（canonicalize後のパスで判定）
+                            // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
+                            if is_hidden_relative(&path, &base_for_filter) {
                                 continue;
                             }
                             if notified.insert(path.clone()) && rt_tx.blocking_send(path).is_err() {
@@ -309,8 +309,26 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
         Err(_) => {
             // strip_prefix失敗時はcanonicalizeして再試行
-            let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+            let canonical_path = match path.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "[markdown-view] 隠しファイル判定: パス正規化失敗（元パスで再試行）: {} ({})",
+                        path.display(), e
+                    );
+                    path.to_path_buf()
+                }
+            };
+            let canonical_base = match base.canonicalize() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!(
+                        "[markdown-view] 隠しファイル判定: ベース正規化失敗（元パスで再試行）: {} ({})",
+                        base.display(), e
+                    );
+                    base.to_path_buf()
+                }
+            };
             match canonical_path.strip_prefix(&canonical_base) {
                 Ok(relative) => relative
                     .components()
@@ -331,7 +349,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
 /// パスが監視対象ファイルと一致するか判定する
 ///
 /// target_pathは起動時にcanonicalize済みの絶対パス。
-/// event_pathもcanonicalizeして比較し、失敗時はファイル名で比較する。
+/// event_pathもcanonicalizeして比較し、失敗時はファイル名と親ディレクトリの両方で比較する。
 fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,

@@ -436,7 +436,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     if let Ok(error_json) = serde_json::to_string(&serde_json::json!({
                                         "error": format!("ファイル読み込みエラー: {}", e)
                                     })) {
-                                        let _ = socket.send(Message::Text(error_json.into())).await;
+                                        if let Err(e) = socket.send(Message::Text(error_json.into())).await {
+                                            eprintln!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
+                                            break;
+                                        }
                                     }
                                     continue;
                                 }
@@ -511,8 +514,17 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
     let mut visited_dirs = std::collections::HashSet::new();
     // ベースディレクトリ自体を訪問済みに登録（サイクル検出の起点）
-    if let Ok(canonical_base) = base_dir.canonicalize() {
-        visited_dirs.insert(canonical_base);
+    match base_dir.canonicalize() {
+        Ok(canonical_base) => {
+            visited_dirs.insert(canonical_base);
+        }
+        Err(e) => {
+            eprintln!(
+                "[markdown-view] ベースディレクトリの正規化に失敗（サイクル検出が不完全になる可能性あり）: {} ({})",
+                base_dir.display(),
+                e
+            );
+        }
     }
     list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs, 0)?;
     files.sort();
@@ -536,7 +548,17 @@ fn list_markdown_files_recursive(
     }
     let entries = std::fs::read_dir(current_dir)?;
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
+                    current_dir.display(),
+                    e
+                );
+                continue;
+            }
+        };
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
@@ -546,7 +568,17 @@ fn list_markdown_files_recursive(
         }
 
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                eprintln!(
+                    "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
 
         if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
             // 上限チェック（再帰前に打ち切り）
@@ -592,9 +624,18 @@ fn list_markdown_files_recursive(
                 }
             } else {
                 // 通常ディレクトリもサイクル検出対象に登録
-                if let Ok(canonical) = path.canonicalize() {
-                    if !visited_dirs.insert(canonical) {
-                        continue;
+                match path.canonicalize() {
+                    Ok(canonical) => {
+                        if !visited_dirs.insert(canonical) {
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[markdown-view] ディレクトリ正規化に失敗（サイクル検出なしで続行）: {} ({})",
+                            path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -772,7 +813,7 @@ async fn read_and_render_file(
 /// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
 /// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
-/// JS側の `data.error` チェックでエラー表示される。
+/// JS側の `data.error` チェックでコンソールにエラーログが出力される（UI表示はなし）。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     let relative_path = state.mode.relative_path_of(changed_file);
 
@@ -807,7 +848,13 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
                 "error": format!("ファイル読み込みエラー: {}", e)
             })) {
                 Ok(json) => json,
-                Err(_) => return,
+                Err(ser_err) => {
+                    eprintln!(
+                        "[markdown-view] エラーJSON生成にも失敗: {} (元エラー: {})",
+                        ser_err, e
+                    );
+                    return;
+                }
             }
         }
     };

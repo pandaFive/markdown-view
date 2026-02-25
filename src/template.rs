@@ -440,25 +440,27 @@ const JS: &str = r##"
     };
 
     ws.onmessage = function(event) {
+      var data;
       try {
-        var data = JSON.parse(event.data);
-        if (data.error) {
-          console.error('[markdown-view] サーバーエラー:', data.error);
-          return;
-        }
-        // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
-        if (data.refresh && isDirMode && currentFile) {
-          selectFile(currentFile, false);
-          return;
-        }
-        // ディレクトリモード: 自分の表示ファイルと一致する更新のみ適用
-        if (isDirMode && data.file) {
-          if (data.file !== currentFile) return;
-        }
-        updateContent(data);
+        data = JSON.parse(event.data);
       } catch (e) {
-        console.error('[markdown-view] parse error:', e);
+        console.error('[markdown-view] JSONパースエラー:', e);
+        return;
       }
+      if (data.error) {
+        console.error('[markdown-view] サーバーエラー:', data.error);
+        return;
+      }
+      // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
+      if (data.refresh && isDirMode && currentFile) {
+        selectFile(currentFile, false);
+        return;
+      }
+      // ディレクトリモード: 自分の表示ファイルと一致する更新のみ適用
+      if (isDirMode && data.file) {
+        if (data.file !== currentFile) return;
+      }
+      updateContent(data);
     };
 
     ws.onclose = function() {

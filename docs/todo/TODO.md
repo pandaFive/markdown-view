@@ -311,3 +311,87 @@
 - [ ] `is_target_file` canonicalize失敗フォールバックのセキュリティ検証
   - ファイル: `src/watcher.rs`
   - 理由: ファイル名+親ディレクトリ比較のフォールバックは異なるディレクトリの同名ファイルで誤検知リスクあり
+
+## PR #4 レビュー Round 5 (レビュー日: 2026-02-25)
+
+### 修正済み
+
+- [x] [Critical] watcher `is_hidden_relative` がcanonicalize前に実行され隠しディレクトリのsymlink bypass可能
+  - ファイル: `src/watcher.rs` (`watch_directory`)
+  - 対応: `is_hidden_relative` をcanonicalize + starts_with チェックの後に移動
+- [x] [Critical] lagged client のエラーJSON送信結果を `let _` で破棄、デッドコネクションで無限ループ
+  - ファイル: `src/server.rs:439`
+  - 対応: 送信失敗時はログ出力 + `break`
+- [x] [Important] `notify_update` エラーJSON生成失敗が無言でreturn
+  - ファイル: `src/server.rs:811`
+  - 対応: ログ出力追加
+- [x] [Important] `is_hidden_relative` のcanonicalize失敗が無言で吸収
+  - ファイル: `src/watcher.rs:312-313`
+  - 対応: matchに変更してログ出力追加
+- [x] [Important] `list_markdown_files` ベースdir canonicalize失敗が無言
+  - ファイル: `src/server.rs:514-516`
+  - 対応: matchに変更してログ出力追加
+- [x] [Important] 通常ディレクトリcanonicalize失敗が無言でサイクル検出スキップ
+  - ファイル: `src/server.rs:595-599`
+  - 対応: matchに変更してログ出力追加
+- [x] [Important] `is_target_file` docコメントが不正確
+  - ファイル: `src/watcher.rs:334`
+  - 対応: 「ファイル名と親ディレクトリの両方で比較する」に修正
+- [x] [Important] `notify_update` docコメントが「エラー表示される」と誤記
+  - ファイル: `src/server.rs:775`
+  - 対応: 「コンソールにエラーログが出力される（UI表示はなし）」に修正
+- [x] [Important] JS try-catchが広すぎて非パースエラーも "parse error" とラベル
+  - ファイル: `src/template.rs` (JS内 ws.onmessage)
+  - 対応: try-catchをJSON.parseのみに限定、後続ロジックはcatch外に移動
+- [x] [Important] ディレクトリ一覧で単一エントリのエラーが全体を中断
+  - ファイル: `src/server.rs:538-539, 549`
+  - 対応: `entry?` と `file_type()?` をmatchに変更、エラー時はスキップ+ログ
+
+### Low Priority / Suggestions
+
+- [ ] `notify_update` broadcastスキップのテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: ディレクトリモードで相対パス算出失敗時のスキップ動作が未テスト
+
+- [ ] `MAX_DIR_DEPTH` 深度制限のテスト追加
+  - ファイル: `src/server.rs` テスト
+  - 理由: 33+階層のディレクトリ構造でのスキップ動作が未テスト
+
+- [ ] `render_page` ディレクトリモード引数のユニットテスト追加
+  - ファイル: `tests/renderer_test.rs`
+  - 理由: `file_list`, `current_file` 引数のテストがNone,Noneのみ
+
+- [ ] `list_markdown_files` docコメントに `MAX_DIR_DEPTH` 記載追加
+  - ファイル: `src/server.rs`
+  - 理由: docコメントに深度制限の記載がない
+
+- [ ] CSP `img-src *` と `data:` スキームのコメント明確化
+  - ファイル: `src/server.rs:109`
+  - 理由: CSP Level 2+では `*` は `data:` にマッチしない。現状は安全（ブロック）だがコメントが曖昧
+
+- [ ] `ResolveFileError` に `status_code()` メソッド追加
+  - ファイル: `src/server.rs`
+  - 理由: HTTPステータスマッピングが2箇所に散在し微妙に異なる
+
+- [ ] `resolve_file` の403 vs 404の区別でパス列挙が可能（SEC-1）
+  - ファイル: `src/server.rs:230-237`
+  - 理由: Traversal/Hidden/NotMarkdown=403, NotFound=404 で隠しファイル存在が推測可能
+  - 対応方針: 全エラーを404に統一することを検討（ローカルツールなのでリスクは低い）
+
+- [ ] `base_for_filter` 変数名の明確化
+  - ファイル: `src/watcher.rs:162`
+  - 理由: canonicalize済みである不変条件が変数名に表現されていない
+
+### 巨大な修正（要別途対応）
+
+- [ ] [Medium] `AppMode` に `CanonicalPath` newtypeで不変条件を型で表現
+  - ファイル: `src/server.rs`, `src/main.rs`, `src/watcher.rs`
+  - 影響範囲: AppMode構築・パターンマッチ箇所すべて
+  - 修正方針: `CanonicalPath(PathBuf)` newtypeを導入、`relative_path_of` の毎回canonicalizeを排除
+  - 理由: type-design-analyzer 評価 4.0/10。繰り返しcanonicalize呼び出しの排除と型安全性向上
+
+- [ ] [Medium] broadcast チャネルを `String` から型付きメッセージに変更
+  - ファイル: `src/server.rs`, `src/template.rs`, `src/watcher.rs`
+  - 影響範囲: AppState, handle_socket, notify_update
+  - 修正方針: `BroadcastMessage` enumを導入（Update/Refresh/Error）、JSON化はWS送信直前に移動
+  - 理由: type-design-analyzer指摘。String型では任意のJSON形状を送信可能で型安全性が不足
