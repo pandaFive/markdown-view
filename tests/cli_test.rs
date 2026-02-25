@@ -10,7 +10,7 @@ fn parse_args(args: &[&str]) -> Result<markdown_view::cli::Args, clap::Error> {
 #[test]
 fn test_基本引数_ファイルパスのみ() {
     let args = parse_args(&["markdown-view", "README.md"]).unwrap();
-    assert_eq!(args.file, PathBuf::from("README.md"));
+    assert_eq!(args.path, PathBuf::from("README.md"));
     // デフォルト値の確認
     assert_eq!(args.port, 3000);
     assert!(!args.no_open);
@@ -61,11 +61,17 @@ fn test_全オプション組み合わせ() {
         "Monokai",
     ])
     .unwrap();
-    assert_eq!(args.file, PathBuf::from("docs/spec.md"));
+    assert_eq!(args.path, PathBuf::from("docs/spec.md"));
     assert_eq!(args.port, 4000);
     assert!(args.no_open);
     assert!(args.dark);
     assert_eq!(args.theme.as_deref(), Some("Monokai"));
+}
+
+#[test]
+fn test_ディレクトリパスを指定できる() {
+    let args = parse_args(&["markdown-view", "docs/"]).unwrap();
+    assert_eq!(args.path, PathBuf::from("docs/"));
 }
 
 #[test]
