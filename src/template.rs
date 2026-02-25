@@ -776,6 +776,24 @@ const JS: &str = r##"
     document.body.appendChild(banner);
   }
 
+  function showFileFetchErrorBanner(message) {
+    var banner = document.getElementById('file-fetch-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'file-fetch-error-banner';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9999;font-size:14px;';
+      document.body.appendChild(banner);
+    }
+    banner.textContent = message;
+  }
+
+  function hideFileFetchErrorBanner() {
+    var banner = document.getElementById('file-fetch-error-banner');
+    if (banner) {
+      banner.remove();
+    }
+  }
+
   // サーバーサイドでサニタイズ済みのHTMLを反映する
   // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
   function updateContent(data) {
@@ -820,6 +838,7 @@ const JS: &str = r##"
       // 別のファイル選択が行われた場合はこのレスポンスを破棄
       if (gen !== fetchGeneration) return;
       updateContent(data);
+      hideFileFetchErrorBanner();
       // サーバーの正規化済みパスでcurrentFileを同期
       // シンボリックリンク等で要求パスと返却パスが異なる場合に、
       // WebSocket更新のdata.fileフィルタリングが正しく動作するようにする
@@ -841,6 +860,7 @@ const JS: &str = r##"
       updateFileListActive(previousFile);
       // URLを元に戻す（pushHistory時はpushState、popstate時はreplaceState）
       setFileParam(previousFile, !pushHistory);
+      showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');
     });
   }
 
@@ -1155,5 +1175,26 @@ mod tests {
         // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
         assert!(!html.contains("data-tab=\"files\""));
         assert!(!html.contains("id=\"panel-files\""));
+    }
+
+    #[test]
+    fn test_selectfile_fetch失敗時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let html = render_page(
+            "Test",
+            "<p>content</p>",
+            "<ul><li>toc</li></ul>",
+            false,
+            Some(&files),
+            Some("README.md"),
+        );
+
+        assert!(html.contains("function showFileFetchErrorBanner(message)"));
+        assert!(html.contains("function hideFileFetchErrorBanner()"));
+        assert!(html.contains("file-fetch-error-banner"));
+        assert!(html.contains("hideFileFetchErrorBanner();"));
+        assert!(html.contains(
+            "showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');"
+        ));
     }
 }

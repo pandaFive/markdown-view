@@ -205,9 +205,10 @@
   - ファイル: `src/watcher.rs:188-189`
   - 理由: `canonicalize().unwrap_or_else` がサイレント。ログを追加して監視対象外イベントの追跡性を向上
 
-- [ ] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
+- [x] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
   - ファイル: `src/template.rs` (JS部分)
   - 理由: `console.error` のみでユーザーには通知されない。バナー表示等を検討
+  - 対応: `file-fetch-error-banner` を追加し、fetch失敗時に表示・成功時に自動非表示化
 
 - [ ] シンボリックリンクディレクトリのファイル一覧テスト追加
   - ファイル: `tests/integration_test.rs` or `src/server.rs`テスト
@@ -263,10 +264,11 @@
 
 ### Important（巨大な修正のためTODO）
 
-- [ ] [Important] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
+- [x] [Important] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
   - ファイル: `src/template.rs` (JS部分)
   - 修正方針: エラーバナー表示（disconnect bannerと同様のパターン）
   - 理由: `console.error` のみでユーザーには通知されない
+  - 対応: エラーバナー表示/非表示処理を実装し、`selectFile` の成功・失敗フローに統合
 
 - [ ] [Important] JS WebSocket `data.error` 受信時にユーザーへの視覚的フィードバック追加
   - ファイル: `src/template.rs` (JS部分)
