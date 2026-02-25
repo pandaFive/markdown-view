@@ -397,3 +397,33 @@
   - 影響範囲: AppState, handle_socket, notify_update
   - 修正方針: `BroadcastMessage` enumを導入（Update/Refresh/Error）、JSON化はWS送信直前に移動
   - 理由: type-design-analyzer指摘。String型では任意のJSON形状を送信可能で型安全性が不足
+
+## fetchエラーバナー レビュー (レビュー日: 2026-02-25)
+
+### 修正済み
+
+- [x] [Important] バナーに閉じるボタンがなく無期限に表示される
+  - ファイル: `src/template.rs` (JS部分)
+  - 対応: 閉じるボタン（×）追加。クリックで`hideFileFetchErrorBanner`を呼び出し
+- [x] [Important] stale-generation成功レスポンスがバナーをクリアしない
+  - ファイル: `src/template.rs` (JS部分 selectFile .then)
+  - 対応: `hideFileFetchErrorBanner()`をfetchGenerationチェックの前に移動
+- [x] [Medium] WebSocket経由のコンテンツ更新がバナーをクリアしない
+  - ファイル: `src/template.rs` (JS部分 ws.onmessage)
+  - 対応: `updateContent(data)`後に`hideFileFetchErrorBanner()`を追加
+- [x] [Medium] 両バナーがposition:fixed;top:0で重なる
+  - ファイル: `src/template.rs` (JS部分 showFileFetchErrorBanner)
+  - 対応: ws-disconnect-banner存在時はfetchエラーバナーの表示をスキップ。z-indexを9998に変更
+
+### Medium（巨大な修正のためTODO）
+
+- [ ] [Medium] エラーメッセージがHTTPステータスコードを無視している
+  - ファイル: `src/template.rs` (JS部分 selectFile .catch)
+  - 修正方針: catchブロックでerrオブジェクトにstatusを持たせ、403/404/413/500別のメッセージを出し分け
+  - 理由: 403(権限なし)、404(未存在)でも「再度お試しください」は不適切
+
+### Low Priority
+
+- [ ] `resp.json()`パース失敗がネットワークエラーと区別不能
+  - ファイル: `src/template.rs` (JS部分 selectFile .then)
+  - 理由: SyntaxErrorがcatchに流れHTTPエラーと同じ扱い。レスポンスボディ破損の特定が困難

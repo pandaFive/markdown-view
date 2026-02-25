@@ -744,6 +744,8 @@ const JS: &str = r##"
         if (data.file !== currentFile) return;
       }
       updateContent(data);
+      // WebSocket経由の成功更新でもfetchエラーバナーをクリア
+      hideFileFetchErrorBanner();
     };
 
     ws.onclose = function() {
@@ -776,17 +778,29 @@ const JS: &str = r##"
     document.body.appendChild(banner);
   }
 
+  // ファイルfetch失敗時のエラーバナーを表示する（既存バナーがあればメッセージを上書き）
+  // WebSocket切断バナー表示中は表示しない（根本原因は接続断のため）
   function showFileFetchErrorBanner(message) {
+    if (document.getElementById('ws-disconnect-banner')) return;
     var banner = document.getElementById('file-fetch-error-banner');
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'file-fetch-error-banner';
-      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9999;font-size:14px;';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9998;font-size:14px;';
+      var closeBtn = document.createElement('span');
+      closeBtn.textContent = '\u00d7';
+      closeBtn.style.cssText = 'cursor:pointer;float:right;font-size:18px;line-height:1;';
+      closeBtn.onclick = hideFileFetchErrorBanner;
+      banner.appendChild(closeBtn);
+      var msg = document.createElement('span');
+      msg.className = 'error-msg';
+      banner.appendChild(msg);
       document.body.appendChild(banner);
     }
-    banner.textContent = message;
+    banner.querySelector('.error-msg').textContent = message;
   }
 
+  // ファイルfetch成功時にエラーバナーを非表示にする
   function hideFileFetchErrorBanner() {
     var banner = document.getElementById('file-fetch-error-banner');
     if (banner) {
@@ -835,10 +849,11 @@ const JS: &str = r##"
       return resp.json();
     })
     .then(function(data) {
+      // エラーバナーは成功レスポンスが来た時点で常にクリア（世代に関わらず安全）
+      hideFileFetchErrorBanner();
       // 別のファイル選択が行われた場合はこのレスポンスを破棄
       if (gen !== fetchGeneration) return;
       updateContent(data);
-      hideFileFetchErrorBanner();
       // サーバーの正規化済みパスでcurrentFileを同期
       // シンボリックリンク等で要求パスと返却パスが異なる場合に、
       // WebSocket更新のdata.fileフィルタリングが正しく動作するようにする
@@ -1189,12 +1204,35 @@ mod tests {
             Some("README.md"),
         );
 
+        // バナー表示/非表示関数が存在する
         assert!(html.contains("function showFileFetchErrorBanner(message)"));
         assert!(html.contains("function hideFileFetchErrorBanner()"));
         assert!(html.contains("file-fetch-error-banner"));
+        // 閉じるボタンが存在する
+        assert!(html.contains("closeBtn.onclick = hideFileFetchErrorBanner"));
+        // WebSocket切断バナー表示中はfetchエラーバナーを抑制する
+        assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        // fetch成功時にバナーをクリア（generation チェック前）
         assert!(html.contains("hideFileFetchErrorBanner();"));
+        // fetch失敗時にバナーを表示
         assert!(html.contains(
             "showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');"
         ));
+    }
+
+    #[test]
+    fn test_websocket更新時にfetchエラーバナーがクリアされる() {
+        let files = vec!["README.md".to_string()];
+        let html = render_page(
+            "Test",
+            "<p>content</p>",
+            "<ul><li>toc</li></ul>",
+            false,
+            Some(&files),
+            Some("README.md"),
+        );
+
+        // WebSocket経由の成功更新後にバナーをクリアするコメントとコードが存在する
+        assert!(html.contains("WebSocket経由の成功更新でもfetchエラーバナーをクリア"));
     }
 }
