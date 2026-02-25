@@ -8,6 +8,14 @@ use tokio::sync::mpsc;
 
 use crate::server::{notify_update, AppMode, AppState};
 
+/// ファイル監視からtokioタスクへのメッセージ型
+enum WatcherMessage {
+    /// ファイル変更検知（canonicalize済みパス）
+    FileChanged(PathBuf),
+    /// 監視ランタイムエラー（notify debouncerコールバック由来）
+    WatchError(String),
+}
+
 /// デバウンス間隔（ミリ秒）
 const DEBOUNCE_MS: u64 = 300;
 
@@ -43,7 +51,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
     let target_path = file_path.clone();
 
     // tokio::sync::mpscでnotifyからtokioにブリッジ
-    let (tx, mut rx) = mpsc::channel::<PathBuf>(32);
+    let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
 
     // 初期化エラーを親タスクに伝播するための oneshot チャネル
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
@@ -74,7 +82,10 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
                                             continue;
                                         }
                                     };
-                                    if rt_tx.blocking_send(path).is_err() {
+                                    if rt_tx
+                                        .blocking_send(WatcherMessage::FileChanged(path))
+                                        .is_err()
+                                    {
                                         eprintln!("[markdown-view] 通知チャネルが閉じています");
                                     }
                                     break;
@@ -84,6 +95,12 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
                     }
                     Err(e) => {
                         eprintln!("[markdown-view] ファイル監視エラー: {}", e);
+                        if rt_tx
+                            .blocking_send(WatcherMessage::WatchError(e.to_string()))
+                            .is_err()
+                        {
+                            eprintln!("[markdown-view] エラー通知チャネルが閉じています");
+                        }
                     }
                 }
             },
@@ -134,8 +151,15 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
 
     // tokioタスクでファイル変更通知を処理
     let notify_handle = tokio::spawn(async move {
-        while let Some(changed_path) = rx.recv().await {
-            notify_update(&state, &changed_path).await;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                WatcherMessage::FileChanged(changed_path) => {
+                    notify_update(&state, &changed_path).await;
+                }
+                WatcherMessage::WatchError(error_msg) => {
+                    broadcast_error(&state, &error_msg);
+                }
+            }
         }
         eprintln!("[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です");
     });
@@ -153,7 +177,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
 
 /// ディレクトリの再帰監視
 async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<PathBuf>(32);
+    let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
 
@@ -210,7 +234,11 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                             if is_hidden_relative(&path, &base_for_filter) {
                                 continue;
                             }
-                            if notified.insert(path.clone()) && rt_tx.blocking_send(path).is_err() {
+                            if notified.insert(path.clone())
+                                && rt_tx
+                                    .blocking_send(WatcherMessage::FileChanged(path))
+                                    .is_err()
+                            {
                                 eprintln!("[markdown-view] 通知チャネルが閉じています");
                                 break;
                             }
@@ -218,6 +246,12 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                     }
                     Err(e) => {
                         eprintln!("[markdown-view] ディレクトリ監視エラー: {}", e);
+                        if rt_tx
+                            .blocking_send(WatcherMessage::WatchError(e.to_string()))
+                            .is_err()
+                        {
+                            eprintln!("[markdown-view] エラー通知チャネルが閉じています");
+                        }
                     }
                 }
             },
@@ -267,8 +301,15 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
     }
 
     let notify_handle = tokio::spawn(async move {
-        while let Some(changed_path) = rx.recv().await {
-            notify_update(&state, &changed_path).await;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                WatcherMessage::FileChanged(changed_path) => {
+                    notify_update(&state, &changed_path).await;
+                }
+                WatcherMessage::WatchError(error_msg) => {
+                    broadcast_error(&state, &error_msg);
+                }
+            }
         }
         eprintln!(
             "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です"
@@ -366,14 +407,96 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     }
 }
 
+/// 監視エラーをbroadcastチャネル経由でWebSocketクライアントに通知する
+///
+/// `server.rs:notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
+/// 受信者がいない場合は正常（クライアント未接続時）。
+fn broadcast_error(state: &AppState, error_msg: &str) {
+    let json = match serde_json::to_string(&serde_json::json!({
+        "error": format!("ファイル監視エラー: {}", error_msg)
+    })) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!(
+                "[markdown-view] エラーJSON生成に失敗: {} (元エラー: {})",
+                e, error_msg
+            );
+            return;
+        }
+    };
+    let _ = state.tx.send(json);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
 
     #[test]
     fn test_連続更新イベントも更新対象に含まれる() {
         assert!(is_content_change_event(&DebouncedEventKind::Any));
         assert!(is_content_change_event(&DebouncedEventKind::AnyContinuous));
+    }
+
+    #[test]
+    fn test_broadcast_errorがエラーjsonを送信する() {
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            mode: AppMode::SingleFile(PathBuf::from("/tmp/test.md")),
+            dark_mode: false,
+            theme: None,
+            tx,
+        });
+        let mut rx = state.tx.subscribe();
+
+        broadcast_error(&state, "テストエラーメッセージ");
+
+        let received = rx.try_recv().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイル監視エラー: テストエラーメッセージ"
+        );
+    }
+
+    #[test]
+    fn test_broadcast_errorは受信者なしでもパニックしない() {
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            mode: AppMode::SingleFile(PathBuf::from("/tmp/test.md")),
+            dark_mode: false,
+            theme: None,
+            tx,
+        });
+        // _rxをドロップして受信者をゼロにする
+        drop(_rx);
+
+        // パニックしないことを確認
+        broadcast_error(&state, "受信者なしエラー");
+    }
+
+    #[tokio::test]
+    async fn test_mpscチャネルでwatchermessageを送受信できる() {
+        let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
+
+        // FileChanged variant
+        let path = PathBuf::from("/tmp/test.md");
+        tx.send(WatcherMessage::FileChanged(path.clone()))
+            .await
+            .unwrap();
+        match rx.recv().await.unwrap() {
+            WatcherMessage::FileChanged(p) => assert_eq!(p, path),
+            WatcherMessage::WatchError(_) => panic!("FileChangedを期待したがWatchErrorを受信"),
+        }
+
+        // WatchError variant
+        tx.send(WatcherMessage::WatchError("テストエラー".to_string()))
+            .await
+            .unwrap();
+        match rx.recv().await.unwrap() {
+            WatcherMessage::WatchError(msg) => assert_eq!(msg, "テストエラー"),
+            WatcherMessage::FileChanged(_) => panic!("WatchErrorを期待したがFileChangedを受信"),
+        }
     }
 
     #[test]

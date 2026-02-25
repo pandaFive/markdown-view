@@ -625,6 +625,37 @@ async fn test_ディレクトリモード_readmeがデフォルト表示され�
     assert!(content.contains("README"));
 }
 
+#[tokio::test]
+async fn test_監視エラーがwebsocketクライアントにエラーjsonとして届く() {
+    let (state, addr, _tmp_dir) = setup_single_file_server("# Error Test").await;
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 単一ファイルモード: 初期メッセージを消費
+    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap();
+
+    // broadcastでエラーJSONを送信（watcher.rsのbroadcast_errorと同じ形式）
+    let error_json = serde_json::json!({"error": "ファイル監視エラー: テスト用エラー"});
+    state.tx.send(error_json.to_string()).unwrap();
+
+    // WebSocketでエラーJSONを受信
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("テスト用エラー"));
+    // contentフィールドは存在しない
+    assert!(json.get("content").is_none());
+}
+
 // ==============================
 // ヘルパー関数
 // ==============================
