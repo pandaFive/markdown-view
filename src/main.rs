@@ -30,9 +30,9 @@ async fn main() -> Result<()> {
                 path.display()
             );
         }
-        AppMode::SingleFile(path.clone())
+        AppMode::new_single_file(&path).context("単一ファイルモードの初期化に失敗")?
     } else if path.is_dir() {
-        AppMode::Directory(path.clone())
+        AppMode::new_directory(&path).context("ディレクトリモードの初期化に失敗")?
     } else {
         bail!(
             "指定されたパスはファイルでもディレクトリでもありません: {}",
@@ -77,16 +77,13 @@ async fn main() -> Result<()> {
         .context("ローカルアドレスの取得に失敗")?;
     let url = format!("http://{}", local_addr);
 
-    match &mode {
-        AppMode::SingleFile(p) => {
-            eprintln!("markdown-view: {} をプレビュー中", p.display());
-        }
-        AppMode::Directory(p) => {
-            eprintln!(
-                "markdown-view: {} 内のMarkdownファイルをプレビュー中",
-                p.display()
-            );
-        }
+    if let Some(p) = mode.single_file() {
+        eprintln!("markdown-view: {} をプレビュー中", p.display());
+    } else if let Some(p) = mode.directory() {
+        eprintln!(
+            "markdown-view: {} 内のMarkdownファイルをプレビュー中",
+            p.display()
+        );
     }
     eprintln!("URL: {}", url);
     eprintln!("Ctrl+C で終了");

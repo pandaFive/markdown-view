@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
-use crate::server::{notify_update, AppMode, AppState};
+use crate::server::{notify_update, AppState};
 
 /// ファイル監視からtokioタスクへのメッセージ型
 enum WatcherMessage {
@@ -24,19 +24,12 @@ const DEBOUNCE_MS: u64 = 300;
 /// notify + debouncer でファイル変更を検知し、
 /// tokioランタイムにブリッジしてbroadcastで通知する
 pub async fn watch_path(state: Arc<AppState>) -> Result<()> {
-    match &state.mode {
-        AppMode::SingleFile(file_path) => {
-            let file_path = file_path
-                .canonicalize()
-                .context("ファイルパスの正規化に失敗")?;
-            watch_single_file(state, file_path).await
-        }
-        AppMode::Directory(dir_path) => {
-            let dir_path = dir_path
-                .canonicalize()
-                .context("ディレクトリパスの正規化に失敗")?;
-            watch_directory(state, dir_path).await
-        }
+    if let Some(file_path) = state.mode.single_file().map(Path::to_path_buf) {
+        watch_single_file(state, file_path).await
+    } else if let Some(dir_path) = state.mode.directory().map(Path::to_path_buf) {
+        watch_directory(state, dir_path).await
+    } else {
+        unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
     }
 }
 
@@ -430,6 +423,7 @@ fn broadcast_error(state: &AppState, error_msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::AppMode;
     use tokio::sync::broadcast;
 
     #[test]
@@ -440,9 +434,13 @@ mod tests {
 
     #[test]
     fn test_broadcast_errorがエラーjsonを送信する() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
         let (tx, _rx) = broadcast::channel(16);
         let state = Arc::new(AppState {
-            mode: AppMode::SingleFile(PathBuf::from("/tmp/test.md")),
+            mode: AppMode::new_single_file(&file_path).unwrap(),
             dark_mode: false,
             theme: None,
             tx,
@@ -461,9 +459,13 @@ mod tests {
 
     #[test]
     fn test_broadcast_errorは受信者なしでもパニックしない() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
         let (tx, _rx) = broadcast::channel(16);
         let state = Arc::new(AppState {
-            mode: AppMode::SingleFile(PathBuf::from("/tmp/test.md")),
+            mode: AppMode::new_single_file(&file_path).unwrap(),
             dark_mode: false,
             theme: None,
             tx,

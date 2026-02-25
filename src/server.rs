@@ -18,61 +18,176 @@ use crate::renderer::render_markdown;
 use crate::template::{render_page, UpdateMessage};
 use crate::toc::generate_toc;
 
-/// アプリケーション動作モード
-#[derive(Debug, Clone)]
-pub enum AppMode {
-    /// 単一ファイルモード
-    SingleFile(PathBuf),
-    /// ディレクトリモード
-    Directory(PathBuf),
+/// canonicalize済みの絶対パス
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalPath(PathBuf);
+
+impl CanonicalPath {
+    /// パスをcanonicalizeして`CanonicalPath`を生成する
+    pub fn try_from_path(path: impl AsRef<Path>) -> Result<Self, CanonicalPathError> {
+        let canonical = path
+            .as_ref()
+            .canonicalize()
+            .map_err(CanonicalPathError::Canonicalize)?;
+        Ok(Self(canonical))
+    }
+
+    /// `Path`として参照する
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
+/// `CanonicalPath` 生成エラー
+#[derive(Debug)]
+pub enum CanonicalPathError {
+    /// canonicalize失敗
+    Canonicalize(std::io::Error),
+}
+
+impl std::fmt::Display for CanonicalPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalPathError::Canonicalize(e) => {
+                write!(f, "パスの正規化に失敗しました: {}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanonicalPathError {}
+
+/// `AppMode` 構築エラー
+#[derive(Debug)]
+pub enum AppModeBuildError {
+    /// canonicalize済みパスの生成に失敗
+    CanonicalPath(CanonicalPathError),
+    /// 単一ファイルモードでファイル以外が指定された
+    NotFile(PathBuf),
+    /// ディレクトリモードでディレクトリ以外が指定された
+    NotDirectory(PathBuf),
+    /// 単一ファイルモードで.md以外が指定された
+    NotMarkdown(PathBuf),
+}
+
+impl std::fmt::Display for AppModeBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppModeBuildError::CanonicalPath(e) => write!(f, "{}", e),
+            AppModeBuildError::NotFile(path) => {
+                write!(
+                    f,
+                    "単一ファイルモードにはファイルを指定してください: {}",
+                    path.display()
+                )
+            }
+            AppModeBuildError::NotDirectory(path) => {
+                write!(
+                    f,
+                    "ディレクトリモードにはディレクトリを指定してください: {}",
+                    path.display()
+                )
+            }
+            AppModeBuildError::NotMarkdown(path) => {
+                write!(f, ".mdファイルのみ指定可能です: {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AppModeBuildError {}
+
+#[derive(Debug, Clone)]
+enum AppModeKind {
+    SingleFile(CanonicalPath),
+    Directory(CanonicalPath),
+}
+
+/// アプリケーション動作モード
+#[derive(Debug, Clone)]
+pub struct AppMode(AppModeKind);
+
 impl AppMode {
+    /// 単一ファイルモードを生成する（canonicalize済み・.mdファイルのみ許可）
+    pub fn new_single_file(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
+        let canonical =
+            CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
+        if !canonical.as_path().is_file() {
+            return Err(AppModeBuildError::NotFile(
+                canonical.as_path().to_path_buf(),
+            ));
+        }
+        match canonical.as_path().extension() {
+            Some(ext) if ext.eq_ignore_ascii_case("md") => {}
+            _ => {
+                return Err(AppModeBuildError::NotMarkdown(
+                    canonical.as_path().to_path_buf(),
+                ))
+            }
+        }
+        Ok(Self(AppModeKind::SingleFile(canonical)))
+    }
+
+    /// ディレクトリモードを生成する（canonicalize済みディレクトリのみ許可）
+    pub fn new_directory(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
+        let canonical =
+            CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
+        if !canonical.as_path().is_dir() {
+            return Err(AppModeBuildError::NotDirectory(
+                canonical.as_path().to_path_buf(),
+            ));
+        }
+        Ok(Self(AppModeKind::Directory(canonical)))
+    }
+
     /// ベースディレクトリを返す（ファイルモードは親、ディレクトリモードはそのまま）
     pub fn base_dir(&self) -> &Path {
-        match self {
-            AppMode::SingleFile(p) => p.parent().unwrap_or(p),
-            AppMode::Directory(p) => p,
+        match &self.0 {
+            AppModeKind::SingleFile(p) => p.as_path().parent().unwrap_or(p.as_path()),
+            AppModeKind::Directory(p) => p.as_path(),
         }
     }
 
     /// 単一ファイルモードのパスを返す（ディレクトリモードはNone）
     pub fn single_file(&self) -> Option<&Path> {
-        match self {
-            AppMode::SingleFile(p) => Some(p),
-            AppMode::Directory(_) => None,
+        match &self.0 {
+            AppModeKind::SingleFile(p) => Some(p.as_path()),
+            AppModeKind::Directory(_) => None,
         }
+    }
+
+    /// ディレクトリモードのパスを返す（単一ファイルモードはNone）
+    pub fn directory(&self) -> Option<&Path> {
+        match &self.0 {
+            AppModeKind::SingleFile(_) => None,
+            AppModeKind::Directory(p) => Some(p.as_path()),
+        }
+    }
+
+    /// ディレクトリモードかどうか
+    pub fn is_directory(&self) -> bool {
+        matches!(self.0, AppModeKind::Directory(_))
     }
 
     /// ディレクトリモード時にファイルの相対パスを計算する
     ///
     /// `file_path` はcanonicalize済みの絶対パスであること。
-    /// canonicalize失敗やstrip_prefix失敗時はエラーログを出力してNoneを返す。
+    /// strip_prefix失敗時はエラーログを出力してNoneを返す。
     /// 単一ファイルモードでは常にNoneを返す。
     pub fn relative_path_of(&self, file_path: &Path) -> Option<String> {
-        match self {
-            AppMode::Directory(base) => match base.canonicalize() {
-                Ok(canonical_base) => match file_path.strip_prefix(&canonical_base) {
-                    Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
-                    Err(_) => {
-                        eprintln!(
-                            "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
-                            file_path.display(),
-                            canonical_base.display()
-                        );
-                        None
-                    }
-                },
-                Err(e) => {
+        match &self.0 {
+            AppModeKind::Directory(base) => match file_path.strip_prefix(base.as_path()) {
+                Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
+                Err(_) => {
                     eprintln!(
-                        "[markdown-view] ベースディレクトリの正規化に失敗: {} ({})",
-                        base.display(),
-                        e
+                        "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
+                        file_path.display(),
+                        base.as_path().display()
                     );
                     None
                 }
             },
-            AppMode::SingleFile(_) => None,
+            AppModeKind::SingleFile(_) => None,
         }
     }
 }
@@ -198,15 +313,14 @@ async fn api_files_handler(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    match &state.mode {
-        AppMode::Directory(base) => {
-            let files = list_markdown_files(base).map_err(|e| {
-                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-            Ok(Json(files))
-        }
-        AppMode::SingleFile(_) => Ok(Json(vec![])),
+    if let Some(base) = state.mode.directory() {
+        let files = list_markdown_files(base).map_err(|e| {
+            eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Ok(Json(files))
+    } else {
+        Ok(Json(vec![]))
     }
 }
 
@@ -218,44 +332,45 @@ fn resolve_target_file(
     state: &AppState,
     query_file: Option<&str>,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
-    match &state.mode {
-        AppMode::SingleFile(path) => Ok((path.clone(), None)),
-        AppMode::Directory(base) => {
-            let files = list_markdown_files(base).map_err(|e| {
-                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+    if let Some(path) = state.mode.single_file() {
+        Ok((path.to_path_buf(), None))
+    } else if let Some(base) = state.mode.directory() {
+        let files = list_markdown_files(base).map_err(|e| {
+            eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-            let file_path = if let Some(rel) = query_file {
-                resolve_file(base, rel).map_err(|e| {
-                    eprintln!("[markdown-view] ファイル解決エラー: {}", e);
-                    match e {
-                        ResolveFileError::Traversal
-                        | ResolveFileError::NotMarkdown
-                        | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
-                        _ => StatusCode::NOT_FOUND,
-                    }
-                })?
-            } else {
-                // デフォルト: README.mdがあればそれ、なければアルファベット順最初
-                let default_file = files
-                    .iter()
-                    .find(|f| f.eq_ignore_ascii_case("readme.md"))
-                    .or_else(|| files.first());
-
-                match default_file {
-                    Some(rel) => resolve_file(base, rel).map_err(|e| {
-                        eprintln!("[markdown-view] デフォルトファイル解決エラー: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                    None => {
-                        return Err(StatusCode::NOT_FOUND);
-                    }
+        let file_path = if let Some(rel) = query_file {
+            resolve_file(base, rel).map_err(|e| {
+                eprintln!("[markdown-view] ファイル解決エラー: {}", e);
+                match e {
+                    ResolveFileError::Traversal
+                    | ResolveFileError::NotMarkdown
+                    | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
+                    _ => StatusCode::NOT_FOUND,
                 }
-            };
+            })?
+        } else {
+            // デフォルト: README.mdがあればそれ、なければアルファベット順最初
+            let default_file = files
+                .iter()
+                .find(|f| f.eq_ignore_ascii_case("readme.md"))
+                .or_else(|| files.first());
 
-            Ok((file_path, Some(files)))
-        }
+            match default_file {
+                Some(rel) => resolve_file(base, rel).map_err(|e| {
+                    eprintln!("[markdown-view] デフォルトファイル解決エラー: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
+                None => {
+                    return Err(StatusCode::NOT_FOUND);
+                }
+            }
+        };
+
+        Ok((file_path, Some(files)))
+    } else {
+        unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
     }
 }
 
@@ -838,7 +953,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
 
     // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
     // fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため
-    if matches!(&state.mode, AppMode::Directory(_)) && relative_path.is_none() {
+    if state.mode.is_directory() && relative_path.is_none() {
         eprintln!(
             "[markdown-view] 相対パス算出失敗のためブロードキャストをスキップ: {}",
             changed_file.display()
@@ -1174,24 +1289,36 @@ mod tests {
     // --- AppMode テスト ---
 
     #[test]
-    fn test_app_mode_single_file() {
-        let mode = AppMode::SingleFile(PathBuf::from("/tmp/test.md"));
-        assert_eq!(mode.base_dir(), Path::new("/tmp"));
-        assert_eq!(mode.single_file(), Some(Path::new("/tmp/test.md")));
+    fn test_app_mode_new_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let canonical = file_path.canonicalize().unwrap();
+
+        assert_eq!(mode.base_dir(), canonical.parent().unwrap());
+        assert_eq!(mode.single_file(), Some(canonical.as_path()));
+        assert!(mode.directory().is_none());
     }
 
     #[test]
-    fn test_app_mode_directory() {
-        let mode = AppMode::Directory(PathBuf::from("/tmp/docs"));
-        assert_eq!(mode.base_dir(), Path::new("/tmp/docs"));
+    fn test_app_mode_new_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mode = AppMode::new_directory(dir.path()).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+
+        assert_eq!(mode.base_dir(), canonical.as_path());
         assert!(mode.single_file().is_none());
+        assert_eq!(mode.directory(), Some(canonical.as_path()));
     }
 
     #[test]
     fn test_app_mode_relative_path_of_ディレクトリモード() {
         let dir = create_test_dir();
         let canonical = dir.path().canonicalize().unwrap();
-        let mode = AppMode::Directory(dir.path().to_path_buf());
+        let mode = AppMode::new_directory(dir.path()).unwrap();
         let file_path = canonical.join("docs/api.md");
         assert_eq!(
             mode.relative_path_of(&file_path),
@@ -1201,14 +1328,28 @@ mod tests {
 
     #[test]
     fn test_app_mode_relative_path_of_単一ファイルモードはnone() {
-        let mode = AppMode::SingleFile(PathBuf::from("/tmp/test.md"));
-        assert_eq!(mode.relative_path_of(Path::new("/tmp/test.md")), None);
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let canonical = file_path.canonicalize().unwrap();
+        assert_eq!(mode.relative_path_of(&canonical), None);
     }
 
     #[test]
-    fn test_app_mode_relative_path_of_存在しないベースでエラーログ() {
-        let mode = AppMode::Directory(PathBuf::from("/nonexistent/path/that/does/not/exist"));
-        // canonicalize失敗時はNoneが返る（エラーログが出力される）
-        assert_eq!(mode.relative_path_of(Path::new("/some/file.md")), None);
+    fn test_app_mode_new_directory_存在しないパスは拒否() {
+        let result = AppMode::new_directory("/nonexistent/path/that/does/not/exist");
+        assert!(matches!(result, Err(AppModeBuildError::CanonicalPath(_))));
+    }
+
+    #[test]
+    fn test_app_mode_new_single_file_非mdは拒否() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "test").unwrap();
+
+        let result = AppMode::new_single_file(&file_path);
+        assert!(matches!(result, Err(AppModeBuildError::NotMarkdown(_))));
     }
 }
