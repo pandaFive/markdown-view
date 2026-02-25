@@ -6,35 +6,39 @@ use tokio::sync::broadcast;
 
 use markdown_view::cli::Args;
 use markdown_view::renderer::validate_theme;
-use markdown_view::server::{create_router, AppState, MAX_FILE_SIZE};
-use markdown_view::watcher::watch_file;
+use markdown_view::server::{create_router, AppMode, AppState, MAX_FILE_SIZE};
+use markdown_view::watcher::watch_path;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // ファイル存在チェック
-    let file_path = args
-        .file
+    // パス存在チェック
+    let path = args
+        .path
         .canonicalize()
-        .with_context(|| format!("ファイルが見つかりません: {}", args.file.display()))?;
+        .with_context(|| format!("パスが見つかりません: {}", args.path.display()))?;
 
-    if !file_path.is_file() {
+    // ファイルかディレクトリかを判定してモードを決定
+    let mode = if path.is_file() {
+        // 単一ファイルモード: 起動時にサイズチェック
+        let metadata = std::fs::metadata(&path).context("ファイルのメタデータ取得に失敗")?;
+        if metadata.len() > MAX_FILE_SIZE {
+            bail!(
+                "ファイルサイズが上限（{}MB）を超えています: {}",
+                MAX_FILE_SIZE / 1024 / 1024,
+                path.display()
+            );
+        }
+        AppMode::SingleFile(path.clone())
+    } else if path.is_dir() {
+        AppMode::Directory(path.clone())
+    } else {
         bail!(
-            "指定されたパスはファイルではありません: {}",
-            file_path.display()
+            "指定されたパスはファイルでもディレクトリでもありません: {}",
+            path.display()
         );
-    }
-
-    // ファイルサイズチェック
-    let metadata = std::fs::metadata(&file_path).context("ファイルのメタデータ取得に失敗")?;
-    if metadata.len() > MAX_FILE_SIZE {
-        bail!(
-            "ファイルサイズが上限（{}MB）を超えています: {}",
-            MAX_FILE_SIZE / 1024 / 1024,
-            file_path.display()
-        );
-    }
+    };
 
     // テーマ名の起動時検証（存在しない場合は即座にエラー）
     if let Some(ref theme_name) = args.theme {
@@ -51,16 +55,16 @@ async fn main() -> Result<()> {
     let (tx, _rx) = broadcast::channel(16);
 
     let state = Arc::new(AppState {
-        file_path: file_path.clone(),
+        mode: mode.clone(),
         dark_mode: args.dark,
         theme: args.theme,
         tx,
     });
 
-    // ファイル監視開始
-    watch_file(state.clone())
+    // ファイル/ディレクトリ監視開始
+    watch_path(state.clone())
         .await
-        .context("ファイル監視の開始に失敗")?;
+        .context("監視の開始に失敗")?;
 
     // HTTPサーバー起動（127.0.0.1のみにバインド）
     let bind_addr = format!("127.0.0.1:{}", args.port);
@@ -73,7 +77,17 @@ async fn main() -> Result<()> {
         .context("ローカルアドレスの取得に失敗")?;
     let url = format!("http://{}", local_addr);
 
-    eprintln!("markdown-view: {} をプレビュー中", file_path.display());
+    match &mode {
+        AppMode::SingleFile(p) => {
+            eprintln!("markdown-view: {} をプレビュー中", p.display());
+        }
+        AppMode::Directory(p) => {
+            eprintln!(
+                "markdown-view: {} 内のMarkdownファイルをプレビュー中",
+                p.display()
+            );
+        }
+    }
     eprintln!("URL: {}", url);
     eprintln!("Ctrl+C で終了");
 

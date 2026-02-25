@@ -18,9 +18,68 @@ use crate::renderer::render_markdown;
 use crate::template::{render_page, UpdateMessage};
 use crate::toc::generate_toc;
 
+/// アプリケーション動作モード
+#[derive(Debug, Clone)]
+pub enum AppMode {
+    /// 単一ファイルモード
+    SingleFile(PathBuf),
+    /// ディレクトリモード
+    Directory(PathBuf),
+}
+
+impl AppMode {
+    /// ベースディレクトリを返す（ファイルモードは親、ディレクトリモードはそのまま）
+    pub fn base_dir(&self) -> &Path {
+        match self {
+            AppMode::SingleFile(p) => p.parent().unwrap_or(p),
+            AppMode::Directory(p) => p,
+        }
+    }
+
+    /// 単一ファイルモードのパスを返す（ディレクトリモードはNone）
+    pub fn single_file(&self) -> Option<&Path> {
+        match self {
+            AppMode::SingleFile(p) => Some(p),
+            AppMode::Directory(_) => None,
+        }
+    }
+
+    /// ディレクトリモード時にファイルの相対パスを計算する
+    ///
+    /// `file_path` はcanonicalize済みの絶対パスであること。
+    /// canonicalize失敗やstrip_prefix失敗時はエラーログを出力してNoneを返す。
+    /// 単一ファイルモードでは常にNoneを返す。
+    pub fn relative_path_of(&self, file_path: &Path) -> Option<String> {
+        match self {
+            AppMode::Directory(base) => match base.canonicalize() {
+                Ok(canonical_base) => match file_path.strip_prefix(&canonical_base) {
+                    Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
+                    Err(_) => {
+                        eprintln!(
+                            "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
+                            file_path.display(),
+                            canonical_base.display()
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[markdown-view] ベースディレクトリの正規化に失敗: {} ({})",
+                        base.display(),
+                        e
+                    );
+                    None
+                }
+            },
+            AppMode::SingleFile(_) => None,
+        }
+    }
+}
+
 /// サーバー共有状態
 pub struct AppState {
-    pub file_path: PathBuf,
+    pub mode: AppMode,
     pub dark_mode: bool,
     pub theme: Option<String>,
     pub tx: broadcast::Sender<String>,
@@ -35,6 +94,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
         .route("/api/content", get(api_content_handler))
+        .route("/api/files", get(api_files_handler))
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -45,7 +105,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         ))
         // CSP: script-src/style-srcはインラインテンプレート埋め込みのため'unsafe-inline'を許可。
         // img-srcは外部画像参照のため*を許可。
-        // sanitize_hrefはリンクのhref属性を対象とし、img srcのdata:スキームはCSP img-src側で制御する。
+        // sanitize_hrefはリンクのhref属性とimg要素のsrc属性の両方に適用される（renderer.rs参照）。
+        // img srcのdata:スキームはCSP img-src側で制御する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -56,45 +117,146 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// クエリパラメータ
+#[derive(serde::Deserialize, Default)]
+struct FileQuery {
+    file: Option<String>,
+}
+
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, StatusCode> {
     if !is_allowed_request_host(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let (content, toc) = read_and_render(&state).await.map_err(|e| {
-        eprintln!("[markdown-view] index読み込みエラー: {}", e);
-        match e {
-            ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    })?;
-    let title = state
-        .file_path
+
+    let (file_path, file_list) = resolve_target_file(&state, query.file.as_deref())?;
+
+    let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
+        .await
+        .map_err(|e| {
+            eprintln!("[markdown-view] index読み込みエラー: {}", e);
+            match e {
+                ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        })?;
+
+    let title = file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("markdown-view");
-    Ok(Html(render_page(title, &content, &toc, state.dark_mode)))
+
+    let current_file = state.mode.relative_path_of(&file_path);
+
+    Ok(Html(render_page(
+        title,
+        &content,
+        &toc,
+        state.dark_mode,
+        file_list.as_deref(),
+        current_file.as_deref(),
+    )))
 }
 
 /// GET /api/content : 現在のコンテンツをJSON形式で返す
 async fn api_content_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, StatusCode> {
     if !is_allowed_request_host(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let (content, toc) = read_and_render(&state).await.map_err(|e| {
-        eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
-        match e {
-            ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+
+    let (file_path, _) = resolve_target_file(&state, query.file.as_deref())?;
+
+    let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
+        .await
+        .map_err(|e| {
+            eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
+            match e {
+                ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        })?;
+
+    let file = state.mode.relative_path_of(&file_path);
+
+    Ok(Json(UpdateMessage { content, toc, file }))
+}
+
+/// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
+async fn api_files_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    if !is_allowed_request_host(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    match &state.mode {
+        AppMode::Directory(base) => {
+            let files = list_markdown_files(base).map_err(|e| {
+                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            Ok(Json(files))
         }
-    })?;
-    Ok(Json(UpdateMessage { content, toc }))
+        AppMode::SingleFile(_) => Ok(Json(vec![])),
+    }
+}
+
+/// モードとクエリパラメータからターゲットファイルを解決する
+///
+/// ディレクトリモード: クエリ指定があればresolve_file、なければデフォルトファイル
+/// 単一ファイルモード: クエリ無視でファイルを返す
+fn resolve_target_file(
+    state: &AppState,
+    query_file: Option<&str>,
+) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
+    match &state.mode {
+        AppMode::SingleFile(path) => Ok((path.clone(), None)),
+        AppMode::Directory(base) => {
+            let files = list_markdown_files(base).map_err(|e| {
+                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            let file_path = if let Some(rel) = query_file {
+                resolve_file(base, rel).map_err(|e| {
+                    eprintln!("[markdown-view] ファイル解決エラー: {}", e);
+                    match e {
+                        ResolveFileError::Traversal
+                        | ResolveFileError::NotMarkdown
+                        | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
+                        _ => StatusCode::NOT_FOUND,
+                    }
+                })?
+            } else {
+                // デフォルト: README.mdがあればそれ、なければアルファベット順最初
+                let default_file = files
+                    .iter()
+                    .find(|f| f.eq_ignore_ascii_case("readme.md"))
+                    .or_else(|| files.first());
+
+                match default_file {
+                    Some(rel) => resolve_file(base, rel).map_err(|e| {
+                        eprintln!("[markdown-view] デフォルトファイル解決エラー: {}", e);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+                    None => {
+                        return Err(StatusCode::NOT_FOUND);
+                    }
+                }
+            };
+
+            Ok((file_path, Some(files)))
+        }
+    }
 }
 
 /// GET /ws : WebSocketアップグレード
@@ -179,42 +341,49 @@ fn normalize_authority(authority: &str) -> String {
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx.subscribe();
 
-    // 接続直後に現在のコンテンツを送信
-    let (content, toc) = match read_and_render(&state).await {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
-            if let Err(e) = socket
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1011,
-                    reason: "ファイル読み込みエラー".into(),
-                })))
-                .await
-            {
-                eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+    // 単一ファイルモードのみ接続直後に初期コンテンツを送信
+    // ディレクトリモードではクライアントが?fileパラメータで/api/contentをフェッチする
+    if let Some(file_path) = state.mode.single_file() {
+        let (content, toc) = match read_and_render_file(file_path, state.theme.as_deref()).await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
+                if let Err(e) = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1011,
+                        reason: "ファイル読み込みエラー".into(),
+                    })))
+                    .await
+                {
+                    eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+                }
+                return;
             }
+        };
+        let msg = match serde_json::to_string(&UpdateMessage {
+            content,
+            toc,
+            file: None,
+        }) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
+                if let Err(e) = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1011,
+                        reason: "内部エラー".into(),
+                    })))
+                    .await
+                {
+                    eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+                }
+                return;
+            }
+        };
+        if let Err(e) = socket.send(Message::Text(msg.into())).await {
+            eprintln!("[markdown-view] WebSocket初期送信エラー: {}", e);
             return;
         }
-    };
-    let msg = match serde_json::to_string(&UpdateMessage { content, toc }) {
-        Ok(json) => json,
-        Err(e) => {
-            eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
-            if let Err(e) = socket
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1011,
-                    reason: "内部エラー".into(),
-                })))
-                .await
-            {
-                eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
-            }
-            return;
-        }
-    };
-    if let Err(e) = socket.send(Message::Text(msg.into())).await {
-        eprintln!("[markdown-view] WebSocket初期送信エラー: {}", e);
-        return;
     }
 
     // broadcastチャネルからの更新を転送
@@ -253,34 +422,59 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // 遅延クライアントに最新コンテンツを再送信
+                        // 遅延クライアントに最新コンテンツを再送信（単一ファイルモードのみ）
                         eprintln!(
-                            "[markdown-view] WebSocketクライアントが{}メッセージ遅延、最新コンテンツを再送信",
+                            "[markdown-view] WebSocketクライアントが{}メッセージ遅延",
                             n
                         );
-                        let (content, toc) = match read_and_render(&state).await {
-                            Ok(result) => result,
-                            Err(e) => {
-                                eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
-                                // クライアントにエラーを通知
-                                if let Ok(error_json) = serde_json::to_string(&serde_json::json!({
-                                    "error": format!("ファイル読み込みエラー: {}", e)
-                                })) {
-                                    let _ = socket.send(Message::Text(error_json.into())).await;
+                        if let Some(file_path) = state.mode.single_file() {
+                            // 単一ファイルモード: 最新コンテンツを再送信
+                            let (content, toc) = match read_and_render_file(file_path, state.theme.as_deref()).await {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
+                                    if let Ok(error_json) = serde_json::to_string(&serde_json::json!({
+                                        "error": format!("ファイル読み込みエラー: {}", e)
+                                    })) {
+                                        if let Err(e) = socket.send(Message::Text(error_json.into())).await {
+                                            eprintln!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
+                                            break;
+                                        }
+                                    } else {
+                                        eprintln!(
+                                            "[markdown-view] WebSocketエラーJSON生成にも失敗 (元エラー: {})",
+                                            e
+                                        );
+                                    }
+                                    continue;
                                 }
-                                continue;
+                            };
+                            let resend = match serde_json::to_string(&UpdateMessage { content, toc, file: None }) {
+                                Ok(json) => json,
+                                Err(e) => {
+                                    eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = socket.send(Message::Text(resend.into())).await {
+                                eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                break;
                             }
-                        };
-                        let resend = match serde_json::to_string(&UpdateMessage { content, toc }) {
-                            Ok(json) => json,
-                            Err(e) => {
-                                eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
-                                continue;
+                        } else {
+                            // ディレクトリモード: クライアントにリフレッシュを促す
+                            match serde_json::to_string(&serde_json::json!({
+                                "refresh": true
+                            })) {
+                                Ok(json) => {
+                                    if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                        eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[markdown-view] リフレッシュJSONシリアライズエラー: {}", e);
+                                }
                             }
-                        };
-                        if let Err(e) = socket.send(Message::Text(resend.into())).await {
-                            eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
-                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -304,6 +498,288 @@ impl std::fmt::Display for ReadMarkdownError {
             ReadMarkdownError::Io(e) => write!(f, "I/Oエラー: {}", e),
             ReadMarkdownError::TooLarge => {
                 write!(f, "ファイルサイズが上限（10MB）を超えています")
+            }
+        }
+    }
+}
+
+/// ファイル一覧の最大件数
+const MAX_FILE_LIST: usize = 1000;
+
+/// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
+const MAX_DIR_DEPTH: usize = 32;
+
+/// ディレクトリ内の.mdファイルを再帰的に列挙する
+///
+/// - 隠しファイル/ディレクトリ（`.`開始）を除外
+/// - シンボリックリンクのサイクルを検出してスキップ
+/// - 最大`MAX_FILE_LIST`件まで
+/// - ベースディレクトリからの相対パスで返す（アルファベット順ソート）
+pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut visited_dirs = std::collections::HashSet::new();
+    // ベースディレクトリ自体を訪問済みに登録（サイクル検出の起点）
+    match base_dir.canonicalize() {
+        Ok(canonical_base) => {
+            visited_dirs.insert(canonical_base);
+        }
+        Err(e) => {
+            eprintln!(
+                "[markdown-view] ベースディレクトリの正規化に失敗（サイクル検出が不完全になる可能性あり）: {} ({})",
+                base_dir.display(),
+                e
+            );
+        }
+    }
+    list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs, 0)?;
+    files.sort();
+    files.truncate(MAX_FILE_LIST);
+    Ok(files)
+}
+
+fn list_markdown_files_recursive(
+    base_dir: &Path,
+    current_dir: &Path,
+    files: &mut Vec<String>,
+    visited_dirs: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> std::io::Result<()> {
+    if depth >= MAX_DIR_DEPTH {
+        eprintln!(
+            "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
+            current_dir.display()
+        );
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(current_dir)?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
+                    current_dir.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // 隠しファイル/ディレクトリを除外
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                eprintln!(
+                    "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
+            // 上限チェック（再帰前に打ち切り）
+            if files.len() >= MAX_FILE_LIST {
+                return Ok(());
+            }
+            // シンボリックリンクディレクトリの場合、解決先がベースディレクトリ内か確認
+            if file_type.is_symlink() {
+                match path.canonicalize() {
+                    Ok(resolved) => {
+                        let canonical_base = match base_dir.canonicalize() {
+                            Ok(cb) => cb,
+                            Err(e) => {
+                                eprintln!(
+                                    "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
+                                    base_dir.display(),
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+                        if !resolved.starts_with(&canonical_base) {
+                            eprintln!(
+                                "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+                                path.display(),
+                                resolved.display()
+                            );
+                            continue;
+                        }
+                        // サイクル検出: 既に訪問済みのディレクトリはスキップ
+                        if !visited_dirs.insert(resolved) {
+                            eprintln!(
+                                "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                                path.display()
+                            );
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[markdown-view] シンボリックリンクの正規化に失敗（スキップ）: {} ({})",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // 通常ディレクトリもサイクル検出対象に登録
+                match path.canonicalize() {
+                    Ok(canonical) => {
+                        if !visited_dirs.insert(canonical) {
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[markdown-view] ディレクトリ正規化に失敗（サイクル検出なしで続行）: {} ({})",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+            list_markdown_files_recursive(base_dir, &path, files, visited_dirs, depth + 1)?;
+        } else if file_type.is_file() {
+            if let Some(ext) = path.extension() {
+                if ext.eq_ignore_ascii_case("md") {
+                    match path.strip_prefix(base_dir) {
+                        Ok(relative) => {
+                            // パス区切り文字を/に統一
+                            let relative_str = relative
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            files.push(relative_str);
+                            if files.len() >= MAX_FILE_LIST {
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
+                                path.display(),
+                                base_dir.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
+///
+/// - 空パス、絶対パス、NULバイト含有を拒否
+/// - 隠しファイル/ディレクトリ（`.`開始のパスコンポーネント）を拒否
+/// - canonicalize + starts_with でベースディレクトリ外アクセスを防止
+/// - .md拡張子のファイルのみ許可
+/// - 戻り値はcanonicalize済みの絶対パス
+pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
+    if relative.is_empty() {
+        return Err(ResolveFileError::EmptyPath);
+    }
+
+    // NULバイトチェック
+    if relative.contains('\0') {
+        return Err(ResolveFileError::InvalidPath);
+    }
+
+    // 絶対パス拒否
+    let rel_path = Path::new(relative);
+    if rel_path.is_absolute() {
+        return Err(ResolveFileError::InvalidPath);
+    }
+
+    let candidate = base_dir.join(rel_path);
+    let canonical = candidate.canonicalize().map_err(|e| {
+        eprintln!(
+            "[markdown-view] ファイルパス正規化失敗: {} ({})",
+            candidate.display(),
+            e
+        );
+        ResolveFileError::NotFound
+    })?;
+
+    // ベースディレクトリ外へのアクセス防止
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        eprintln!(
+            "[markdown-view] ベースディレクトリ正規化失敗: {} ({})",
+            base_dir.display(),
+            e
+        );
+        ResolveFileError::NotFound
+    })?;
+    if !canonical.starts_with(&canonical_base) {
+        return Err(ResolveFileError::Traversal);
+    }
+
+    // 隠しファイル/ディレクトリの拒否（canonicalize後の相対パスで判定）
+    // /api/files や watcher から除外されるファイルへの直接アクセスを防止
+    if let Ok(resolved_relative) = canonical.strip_prefix(&canonical_base) {
+        if resolved_relative
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            return Err(ResolveFileError::Hidden);
+        }
+    }
+
+    // ファイル存在チェック
+    if !canonical.is_file() {
+        return Err(ResolveFileError::NotFound);
+    }
+
+    // .md拡張子チェック
+    match canonical.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => {}
+        _ => return Err(ResolveFileError::NotMarkdown),
+    }
+
+    Ok(canonical)
+}
+
+/// resolve_file のエラー型
+#[derive(Debug, PartialEq)]
+pub enum ResolveFileError {
+    /// 空パス
+    EmptyPath,
+    /// 無効なパス（絶対パス、NULバイト等）
+    InvalidPath,
+    /// ファイルが存在しない
+    NotFound,
+    /// ディレクトリトラバーサル検出
+    Traversal,
+    /// .md以外の拡張子
+    NotMarkdown,
+    /// 隠しファイル/ディレクトリ（`.`開始のパスコンポーネント）
+    Hidden,
+}
+
+impl std::fmt::Display for ResolveFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveFileError::EmptyPath => write!(f, "ファイルパスが空です"),
+            ResolveFileError::InvalidPath => write!(f, "無効なパスです"),
+            ResolveFileError::NotFound => write!(f, "ファイルが見つかりません"),
+            ResolveFileError::Traversal => {
+                write!(f, "ディレクトリ外へのアクセスは禁止されています")
+            }
+            ResolveFileError::NotMarkdown => write!(f, ".mdファイルのみアクセス可能です"),
+            ResolveFileError::Hidden => {
+                write!(f, "隠しファイルへのアクセスは禁止されています")
             }
         }
     }
@@ -340,26 +816,50 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
 }
 
 /// ファイルを読み込んでレンダリングする
-async fn read_and_render(state: &AppState) -> Result<(String, String), ReadMarkdownError> {
-    let markdown = read_markdown_with_limit(&state.file_path).await?;
-    let content = render_markdown(&markdown, state.theme.as_deref());
+async fn read_and_render_file(
+    file_path: &Path,
+    theme: Option<&str>,
+) -> Result<(String, String), ReadMarkdownError> {
+    let markdown = read_markdown_with_limit(file_path).await?;
+    let content = render_markdown(&markdown, theme);
     let toc = generate_toc(&markdown);
     Ok((content, toc))
 }
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
+/// `changed_file`: 変更されたファイルの絶対パス（canonicalize済み）
+/// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
+/// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
-/// JS側の `data.error` チェックでエラー表示される。
-pub async fn notify_update(state: &AppState) {
-    let msg = match read_and_render(state).await {
-        Ok((content, toc)) => match serde_json::to_string(&UpdateMessage { content, toc }) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
-                return;
+/// JS側の `data.error` チェックでコンソールにエラーログが出力される（UI表示はなし）。
+pub async fn notify_update(state: &AppState, changed_file: &Path) {
+    let relative_path = state.mode.relative_path_of(changed_file);
+
+    // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
+    // fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため
+    if matches!(&state.mode, AppMode::Directory(_)) && relative_path.is_none() {
+        eprintln!(
+            "[markdown-view] 相対パス算出失敗のためブロードキャストをスキップ: {}",
+            changed_file.display()
+        );
+        return;
+    }
+
+    let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
+        Ok((content, toc)) => {
+            match serde_json::to_string(&UpdateMessage {
+                content,
+                toc,
+                file: relative_path,
+            }) {
+                Ok(json) => json,
+                Err(e) => {
+                    eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
+                    return;
+                }
             }
-        },
+        }
         Err(e) => {
             eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
             // クライアントにエラーを通知（JS側のdata.errorチェックで処理される）
@@ -367,7 +867,13 @@ pub async fn notify_update(state: &AppState) {
                 "error": format!("ファイル読み込みエラー: {}", e)
             })) {
                 Ok(json) => json,
-                Err(_) => return,
+                Err(ser_err) => {
+                    eprintln!(
+                        "[markdown-view] エラーJSON生成にも失敗: {} (元エラー: {})",
+                        ser_err, e
+                    );
+                    return;
+                }
             }
         }
     };
@@ -462,5 +968,247 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    // --- resolve_file テスト ---
+
+    fn create_test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+        std::fs::write(dir.path().join("guide.md"), "# Guide").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "text file").unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/api.md"), "# API").unwrap();
+        std::fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+        std::fs::write(dir.path().join(".hidden/secret.md"), "# Secret").unwrap();
+        std::fs::write(dir.path().join(".dotfile.md"), "# Dot").unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_resolve_file_正常なパス() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "README.md");
+        assert!(result.is_ok());
+        assert!(result.unwrap().ends_with("README.md"));
+    }
+
+    #[test]
+    fn test_resolve_file_サブディレクトリのパス() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "docs/api.md");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_file_トラバーサル拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "../../../etc/passwd");
+        assert!(matches!(
+            result,
+            Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_file_絶対パス拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "/etc/passwd");
+        assert_eq!(result, Err(ResolveFileError::InvalidPath));
+    }
+
+    #[test]
+    fn test_resolve_file_存在しないファイル() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "nonexistent.md");
+        assert_eq!(result, Err(ResolveFileError::NotFound));
+    }
+
+    #[test]
+    fn test_resolve_file_非md拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "notes.txt");
+        assert_eq!(result, Err(ResolveFileError::NotMarkdown));
+    }
+
+    #[test]
+    fn test_resolve_file_隠しファイル拒否() {
+        let dir = create_test_dir();
+        // 隠しディレクトリ内のファイル
+        let result = resolve_file(dir.path(), ".hidden/secret.md");
+        assert_eq!(result, Err(ResolveFileError::Hidden));
+    }
+
+    #[test]
+    fn test_resolve_file_隠しドットファイル拒否() {
+        let dir = create_test_dir();
+        // ドットで始まるファイル
+        let result = resolve_file(dir.path(), ".dotfile.md");
+        assert_eq!(result, Err(ResolveFileError::Hidden));
+    }
+
+    #[test]
+    fn test_resolve_file_nulバイト拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "README\0.md");
+        assert_eq!(result, Err(ResolveFileError::InvalidPath));
+    }
+
+    #[test]
+    fn test_resolve_file_ディレクトリパス拒否() {
+        let dir = create_test_dir();
+        // docsディレクトリは存在するが、ファイルではないのでNotFound
+        let result = resolve_file(dir.path(), "docs");
+        assert_eq!(result, Err(ResolveFileError::NotFound));
+    }
+
+    #[test]
+    fn test_resolve_file_空パス拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "");
+        assert_eq!(result, Err(ResolveFileError::EmptyPath));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_file_シンボリックリンクによるトラバーサル拒否() {
+        let dir = create_test_dir();
+        // ベースディレクトリ外を指すシンボリックリンクを作成
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(outside_dir.path().join("secret.md"), "# Secret").unwrap();
+
+        std::os::unix::fs::symlink(
+            outside_dir.path().join("secret.md"),
+            dir.path().join("link.md"),
+        )
+        .unwrap();
+
+        let result = resolve_file(dir.path(), "link.md");
+        // canonicalizeでシンボリックリンクが解決され、ベースディレクトリ外を指すためTraversal
+        assert_eq!(result, Err(ResolveFileError::Traversal));
+    }
+
+    // --- list_markdown_files テスト ---
+
+    #[test]
+    fn test_list_markdown_files_基本動作() {
+        let dir = create_test_dir();
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(files.contains(&"guide.md".to_string()));
+        assert!(files.contains(&"docs/api.md".to_string()));
+    }
+
+    #[test]
+    fn test_list_markdown_files_非md除外() {
+        let dir = create_test_dir();
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(!files.iter().any(|f| f.ends_with(".txt")));
+    }
+
+    #[test]
+    fn test_list_markdown_files_隠しファイル除外() {
+        let dir = create_test_dir();
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(!files.iter().any(|f| f.contains(".hidden")));
+        assert!(!files.iter().any(|f| f.starts_with('.')));
+    }
+
+    #[test]
+    fn test_list_markdown_files_空ディレクトリ() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_list_markdown_files_ソート済み() {
+        let dir = create_test_dir();
+        let files = list_markdown_files(dir.path()).unwrap();
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_list_markdown_files_シンボリックリンクサイクルでハングしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/doc.md"), "# Doc").unwrap();
+
+        // サイクルを作成: sub/loop -> ベースディレクトリ自体
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop")).unwrap();
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        // 無限再帰せず正常に返ること
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(files.contains(&"sub/doc.md".to_string()));
+        // サイクル経由の重複エントリがないこと
+        assert!(
+            !files.iter().any(|f| f.contains("loop/")),
+            "サイクル経由のエントリが含まれてはいけない: {:?}",
+            files
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_list_markdown_files_自己参照シンボリックリンクでハングしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+
+        // 自己参照サイクル: loop -> .
+        std::os::unix::fs::symlink(".", dir.path().join("loop")).unwrap();
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(
+            !files.iter().any(|f| f.contains("loop/")),
+            "サイクル経由のエントリが含まれてはいけない: {:?}",
+            files
+        );
+    }
+
+    // --- AppMode テスト ---
+
+    #[test]
+    fn test_app_mode_single_file() {
+        let mode = AppMode::SingleFile(PathBuf::from("/tmp/test.md"));
+        assert_eq!(mode.base_dir(), Path::new("/tmp"));
+        assert_eq!(mode.single_file(), Some(Path::new("/tmp/test.md")));
+    }
+
+    #[test]
+    fn test_app_mode_directory() {
+        let mode = AppMode::Directory(PathBuf::from("/tmp/docs"));
+        assert_eq!(mode.base_dir(), Path::new("/tmp/docs"));
+        assert!(mode.single_file().is_none());
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_ディレクトリモード() {
+        let dir = create_test_dir();
+        let canonical = dir.path().canonicalize().unwrap();
+        let mode = AppMode::Directory(dir.path().to_path_buf());
+        let file_path = canonical.join("docs/api.md");
+        assert_eq!(
+            mode.relative_path_of(&file_path),
+            Some("docs/api.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_単一ファイルモードはnone() {
+        let mode = AppMode::SingleFile(PathBuf::from("/tmp/test.md"));
+        assert_eq!(mode.relative_path_of(Path::new("/tmp/test.md")), None);
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_存在しないベースでエラーログ() {
+        let mode = AppMode::Directory(PathBuf::from("/nonexistent/path/that/does/not/exist"));
+        // canonicalize失敗時はNoneが返る（エラーログが出力される）
+        assert_eq!(mode.relative_path_of(Path::new("/some/file.md")), None);
     }
 }

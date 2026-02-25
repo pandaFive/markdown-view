@@ -6,8 +6,8 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "markdown-view", version, about)]
 pub struct Args {
-    /// プレビューするMarkdownファイルのパス
-    pub file: PathBuf,
+    /// プレビューするMarkdownファイルまたはディレクトリのパス
+    pub path: PathBuf,
 
     /// HTTPサーバーのポート番号
     #[arg(short, long, default_value_t = 3000)]
