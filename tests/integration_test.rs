@@ -656,6 +656,67 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
     assert!(json.get("content").is_none());
 }
 
+#[tokio::test]
+async fn test_ディレクトリモード_ファイルツリーにディレクトリ構造が含まれる() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    // ディレクトリがdetails/summaryで表現される
+    assert!(
+        body.contains("<details"),
+        "ディレクトリノードにdetails要素が必要"
+    );
+    assert!(
+        body.contains("<summary>"),
+        "ディレクトリノードにsummary要素が必要"
+    );
+    // docsフォルダが存在する
+    assert!(body.contains("docs"), "docsフォルダが表示されるべき");
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_タブuiが表示される() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    // タブボタン
+    assert!(body.contains("sidebar-tab"), "タブボタンが存在するべき");
+    // パネル
+    assert!(
+        body.contains("id=\"panel-files\""),
+        "ファイルパネルが存在するべき"
+    );
+    assert!(
+        body.contains("id=\"panel-toc\""),
+        "目次パネルが存在するべき"
+    );
+}
+
+#[tokio::test]
+async fn test_単一ファイルモード_タブが表示されない() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test\n\nHello").await;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    // HTML構造にタブ要素が含まれない（CSSクラス定義ではなくHTML構造を検証）
+    assert!(
+        !body.contains("data-tab=\"files\""),
+        "単一ファイルモードではタブは不要"
+    );
+    assert!(
+        !body.contains("id=\"panel-files\""),
+        "単一ファイルモードではファイルパネルは不要"
+    );
+}
+
 // ==============================
 // ヘルパー関数
 // ==============================
