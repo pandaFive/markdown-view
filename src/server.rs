@@ -105,7 +105,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         ))
         // CSP: script-src/style-srcはインラインテンプレート埋め込みのため'unsafe-inline'を許可。
         // img-srcは外部画像参照のため*を許可。
-        // sanitize_hrefはリンクのhref属性を対象とし、img srcのdata:スキームはCSP img-src側で制御する。
+        // sanitize_hrefはリンクのhref属性とimg要素のsrc属性の両方に適用される（renderer.rs参照）。
+        // img srcのdata:スキームはCSP img-src側で制御する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -500,11 +501,17 @@ const MAX_FILE_LIST: usize = 1000;
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 ///
 /// - 隠しファイル/ディレクトリ（`.`開始）を除外
+/// - シンボリックリンクのサイクルを検出してスキップ
 /// - 最大`MAX_FILE_LIST`件まで
-/// - ベースディレクトリからの相対パスで返す
+/// - ベースディレクトリからの相対パスで返す（アルファベット順ソート）
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
-    list_markdown_files_recursive(base_dir, base_dir, &mut files)?;
+    let mut visited_dirs = std::collections::HashSet::new();
+    // ベースディレクトリ自体を訪問済みに登録（サイクル検出の起点）
+    if let Ok(canonical_base) = base_dir.canonicalize() {
+        visited_dirs.insert(canonical_base);
+    }
+    list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs)?;
     files.sort();
     files.truncate(MAX_FILE_LIST);
     Ok(files)
@@ -514,6 +521,7 @@ fn list_markdown_files_recursive(
     base_dir: &Path,
     current_dir: &Path,
     files: &mut Vec<String>,
+    visited_dirs: &mut std::collections::HashSet<PathBuf>,
 ) -> std::io::Result<()> {
     let entries = std::fs::read_dir(current_dir)?;
     for entry in entries {
@@ -529,7 +537,7 @@ fn list_markdown_files_recursive(
         let path = entry.path();
         let file_type = entry.file_type()?;
 
-        if file_type.is_dir() || file_type.is_symlink() && path.is_dir() {
+        if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
             // 上限チェック（再帰前に打ち切り）
             if files.len() >= MAX_FILE_LIST {
                 return Ok(());
@@ -538,31 +546,70 @@ fn list_markdown_files_recursive(
             if file_type.is_symlink() {
                 match path.canonicalize() {
                     Ok(resolved) => {
-                        let canonical_base = base_dir
-                            .canonicalize()
-                            .unwrap_or_else(|_| base_dir.to_path_buf());
+                        let canonical_base = match base_dir.canonicalize() {
+                            Ok(cb) => cb,
+                            Err(e) => {
+                                eprintln!(
+                                    "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
+                                    base_dir.display(),
+                                    e
+                                );
+                                continue;
+                            }
+                        };
                         if !resolved.starts_with(&canonical_base) {
                             // ベースディレクトリ外を指すシンボリックリンクはスキップ
                             continue;
                         }
+                        // サイクル検出: 既に訪問済みのディレクトリはスキップ
+                        if !visited_dirs.insert(resolved) {
+                            eprintln!(
+                                "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                                path.display()
+                            );
+                            continue;
+                        }
                     }
-                    Err(_) => continue,
+                    Err(e) => {
+                        eprintln!(
+                            "[markdown-view] シンボリックリンクの正規化に失敗（スキップ）: {} ({})",
+                            path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // 通常ディレクトリもサイクル検出対象に登録
+                if let Ok(canonical) = path.canonicalize() {
+                    if !visited_dirs.insert(canonical) {
+                        continue;
+                    }
                 }
             }
-            list_markdown_files_recursive(base_dir, &path, files)?;
+            list_markdown_files_recursive(base_dir, &path, files, visited_dirs)?;
         } else if file_type.is_file() {
             if let Some(ext) = path.extension() {
                 if ext.eq_ignore_ascii_case("md") {
-                    if let Ok(relative) = path.strip_prefix(base_dir) {
-                        // パス区切り文字を/に統一
-                        let relative_str = relative
-                            .components()
-                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                            .collect::<Vec<_>>()
-                            .join("/");
-                        files.push(relative_str);
-                        if files.len() >= MAX_FILE_LIST {
-                            return Ok(());
+                    match path.strip_prefix(base_dir) {
+                        Ok(relative) => {
+                            // パス区切り文字を/に統一
+                            let relative_str = relative
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/");
+                            files.push(relative_str);
+                            if files.len() >= MAX_FILE_LIST {
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
+                                path.display(),
+                                base_dir.display()
+                            );
                         }
                     }
                 }
@@ -710,11 +757,23 @@ async fn read_and_render_file(
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
-/// `changed_file`: 変更されたファイルの絶対パス
+/// `changed_file`: 変更されたファイルの絶対パス（canonicalize済み）
+/// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
+/// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
 /// JS側の `data.error` チェックでエラー表示される。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     let relative_path = state.mode.relative_path_of(changed_file);
+
+    // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
+    // fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため
+    if matches!(&state.mode, AppMode::Directory(_)) && relative_path.is_none() {
+        eprintln!(
+            "[markdown-view] 相対パス算出失敗のためブロードキャストをスキップ: {}",
+            changed_file.display()
+        );
+        return;
+    }
 
     let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
         Ok((content, toc)) => {
@@ -992,6 +1051,47 @@ mod tests {
         let mut sorted = files.clone();
         sorted.sort();
         assert_eq!(files, sorted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_list_markdown_files_シンボリックリンクサイクルでハングしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/doc.md"), "# Doc").unwrap();
+
+        // サイクルを作成: sub/loop -> ベースディレクトリ自体
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop")).unwrap();
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        // 無限再帰せず正常に返ること
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(files.contains(&"sub/doc.md".to_string()));
+        // サイクル経由の重複エントリがないこと
+        assert!(
+            !files.iter().any(|f| f.contains("loop/")),
+            "サイクル経由のエントリが含まれてはいけない: {:?}",
+            files
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_list_markdown_files_自己参照シンボリックリンクでハングしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+
+        // 自己参照サイクル: loop -> .
+        std::os::unix::fs::symlink(".", dir.path().join("loop")).unwrap();
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(
+            !files.iter().any(|f| f.contains("loop/")),
+            "サイクル経由のエントリが含まれてはいけない: {:?}",
+            files
+        );
     }
 
     // --- AppMode テスト ---

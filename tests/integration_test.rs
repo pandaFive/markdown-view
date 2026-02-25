@@ -561,6 +561,57 @@ async fn test_ディレクトリモード_websocket初期メッセージが送�
 }
 
 #[tokio::test]
+async fn test_ディレクトリモード_readmeなし時はアルファベット順最初のファイルがデフォルト() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    // README.mdを作成せず、複数の.mdファイルを配置
+    tokio::fs::write(tmp_dir.path().join("zebra.md"), "# Zebra")
+        .await
+        .unwrap();
+    tokio::fs::write(tmp_dir.path().join("alpha.md"), "# Alpha")
+        .await
+        .unwrap();
+    tokio::fs::write(tmp_dir.path().join("beta.md"), "# Beta")
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState {
+        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        dark_mode: false,
+        theme: None,
+        tx,
+    });
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // indexでalphaがデフォルト表示される
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("Alpha"),
+        "README.mdなし時はアルファベット順最初のファイルが表示されるべき"
+    );
+    // data-current-fileがalpha.mdであること
+    assert!(body.contains("data-current-file=\"alpha.md\""));
+
+    // api/contentでもalphaが返る
+    let resp = reqwest::get(format!("http://{}/api/content", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["content"].as_str().unwrap().contains("Alpha"));
+    assert_eq!(json["file"].as_str().unwrap(), "alpha.md");
+}
+
+#[tokio::test]
 async fn test_ディレクトリモード_readmeがデフォルト表示される() {
     let (_state, addr, _tmp_dir) = setup_dir_server().await;
 

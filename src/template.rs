@@ -535,8 +535,16 @@ const JS: &str = r##"
       // 別のファイル選択が行われた場合はこのレスポンスを破棄
       if (gen !== fetchGeneration) return;
       updateContent(data);
+      // サーバーの正規化済みパスでcurrentFileを同期
+      // シンボリックリンク等で要求パスと返却パスが異なる場合に、
+      // WebSocket更新のdata.fileフィルタリングが正しく動作するようにする
+      if (data.file && data.file !== currentFile) {
+        currentFile = data.file;
+        setFileParam(currentFile, true);
+        updateFileListActive(currentFile);
+      }
       // タイトル更新
-      var fileName = file.split('/').pop() || file;
+      var fileName = currentFile.split('/').pop() || currentFile;
       document.title = fileName + ' - markdown-view';
     })
     .catch(function(err) {

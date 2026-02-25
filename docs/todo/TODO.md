@@ -225,9 +225,10 @@
   - ファイル: `tests/integration_test.rs`
   - 理由: ファイル一覧で現在選択中のファイルに `class="active"` が付与されることの検証
 
-- [ ] デフォルトファイルフォールバックテスト追加
+- [x] デフォルトファイルフォールバックテスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: README.mdがない場合にアルファベット順最初のファイルが選ばれることの検証
+  - 対応: `test_ディレクトリモード_readmeなし時はアルファベット順最初のファイルがデフォルト` を追加
 
 - [ ] `relative_path_of` にfile_pathの事前条件docコメント追加
   - ファイル: `src/server.rs`
@@ -257,3 +258,39 @@
   - ファイル: `src/server.rs`
   - 修正方針: `impl std::error::Error for ResolveFileError {}` + `impl std::error::Error for ReadMarkdownError {}`
   - 理由: 標準エラーインターフェース準拠。anyhowとの互換性向上
+
+## PR #4 レビュー Round 3 (レビュー日: 2026-02-25)
+
+### Important（巨大な修正のためTODO）
+
+- [ ] [Important] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
+  - ファイル: `src/template.rs` (JS部分)
+  - 修正方針: エラーバナー表示（disconnect bannerと同様のパターン）
+  - 理由: `console.error` のみでユーザーには通知されない
+
+- [ ] [Important] JS WebSocket `data.error` 受信時にユーザーへの視覚的フィードバック追加
+  - ファイル: `src/template.rs` (JS部分)
+  - 修正方針: エラーバナー/トースト表示
+  - 理由: `console.error` のみでユーザーには通知されない
+
+### Low Priority
+
+- [ ] `list_markdown_files` のシンボリックリンクサイクル検出テスト追加
+  - ファイル: `src/server.rs` テスト
+  - 理由: サイクル検出ロジックの動作検証（テスト環境でのsymlink loop作成が必要）
+
+- [ ] `notify_update` のディレクトリモード相対パス失敗時スキップテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: ベースディレクトリ外のファイル変更時にブロードキャストがスキップされることの検証
+
+- [ ] `list_markdown_files_recursive` の通常ディレクトリcanonicalize失敗時テスト追加
+  - ファイル: `src/server.rs` テスト
+  - 理由: ハードリンクやマウントポイントでcanonicalizeが失敗するケースの検証
+
+- [ ] `resolve_file` のdocコメントに「canonicalize済みの絶対パスを返す」を追記
+  - ファイル: `src/server.rs`
+  - 理由: 戻り値の保証がドキュメントに明記されていない
+
+- [ ] `notify_update` のdocコメントにディレクトリモード相対パス失敗時のスキップ動作を追記
+  - ファイル: `src/server.rs`
+  - 理由: 新たに追加されたスキップ動作がdocコメントに反映されていない（※コード内コメントには記載済み）
