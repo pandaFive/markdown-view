@@ -43,6 +43,30 @@ impl AppMode {
             AppMode::Directory(_) => None,
         }
     }
+
+    /// ディレクトリモード時にファイルの相対パスを計算する
+    ///
+    /// canonicalize失敗時はエラーログを出力してNoneを返す。
+    /// 単一ファイルモードでは常にNoneを返す。
+    pub fn relative_path_of(&self, file_path: &Path) -> Option<String> {
+        match self {
+            AppMode::Directory(base) => match base.canonicalize() {
+                Ok(canonical_base) => file_path
+                    .strip_prefix(&canonical_base)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/")),
+                Err(e) => {
+                    eprintln!(
+                        "[markdown-view] ベースディレクトリの正規化に失敗: {} ({})",
+                        base.display(),
+                        e
+                    );
+                    None
+                }
+            },
+            AppMode::SingleFile(_) => None,
+        }
+    }
 }
 
 /// サーバー共有状態
@@ -117,16 +141,7 @@ async fn index_handler(
         .and_then(|n| n.to_str())
         .unwrap_or("markdown-view");
 
-    // 現在のファイルの相対パスを計算（ディレクトリモード用）
-    let current_file = match &state.mode {
-        AppMode::Directory(base) => base.canonicalize().ok().and_then(|canonical_base| {
-            file_path
-                .strip_prefix(&canonical_base)
-                .ok()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-        }),
-        AppMode::SingleFile(_) => None,
-    };
+    let current_file = state.mode.relative_path_of(&file_path);
 
     Ok(Html(render_page(
         title,
@@ -160,16 +175,7 @@ async fn api_content_handler(
             }
         })?;
 
-    // 現在のファイルの相対パスを計算
-    let file = match &state.mode {
-        AppMode::Directory(base) => base.canonicalize().ok().and_then(|canonical_base| {
-            file_path
-                .strip_prefix(&canonical_base)
-                .ok()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-        }),
-        AppMode::SingleFile(_) => None,
-    };
+    let file = state.mode.relative_path_of(&file_path);
 
     Ok(Json(UpdateMessage { content, toc, file }))
 }
@@ -412,6 +418,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             n
                         );
                         if let Some(file_path) = state.mode.single_file() {
+                            // 単一ファイルモード: 最新コンテンツを再送信
                             let (content, toc) = match read_and_render_file(file_path, state.theme.as_deref()).await {
                                 Ok(result) => result,
                                 Err(e) => {
@@ -435,8 +442,17 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
                                 break;
                             }
+                        } else {
+                            // ディレクトリモード: クライアントにリフレッシュを促す
+                            if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                                "refresh": true
+                            })) {
+                                if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                    eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                    break;
+                                }
+                            }
                         }
-                        // ディレクトリモードではクライアント側でリフェッチする
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         break;
@@ -651,16 +667,7 @@ async fn read_and_render_file(
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
 /// JS側の `data.error` チェックでエラー表示される。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
-    // 変更ファイルの相対パスを計算（ディレクトリモード用）
-    let relative_path = match &state.mode {
-        AppMode::Directory(base) => base.canonicalize().ok().and_then(|canonical_base| {
-            changed_file
-                .strip_prefix(&canonical_base)
-                .ok()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-        }),
-        AppMode::SingleFile(_) => None,
-    };
+    let relative_path = state.mode.relative_path_of(changed_file);
 
     let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
         Ok((content, toc)) => {
@@ -855,6 +862,25 @@ mod tests {
         assert_eq!(result, Err(ResolveFileError::EmptyPath));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_file_シンボリックリンクによるトラバーサル拒否() {
+        let dir = create_test_dir();
+        // ベースディレクトリ外を指すシンボリックリンクを作成
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(outside_dir.path().join("secret.md"), "# Secret").unwrap();
+
+        std::os::unix::fs::symlink(
+            outside_dir.path().join("secret.md"),
+            dir.path().join("link.md"),
+        )
+        .unwrap();
+
+        let result = resolve_file(dir.path(), "link.md");
+        // canonicalizeでシンボリックリンクが解決され、ベースディレクトリ外を指すためTraversal
+        assert_eq!(result, Err(ResolveFileError::Traversal));
+    }
+
     // --- list_markdown_files テスト ---
 
     #[test]
@@ -911,5 +937,30 @@ mod tests {
         let mode = AppMode::Directory(PathBuf::from("/tmp/docs"));
         assert_eq!(mode.base_dir(), Path::new("/tmp/docs"));
         assert!(mode.single_file().is_none());
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_ディレクトリモード() {
+        let dir = create_test_dir();
+        let canonical = dir.path().canonicalize().unwrap();
+        let mode = AppMode::Directory(dir.path().to_path_buf());
+        let file_path = canonical.join("docs/api.md");
+        assert_eq!(
+            mode.relative_path_of(&file_path),
+            Some("docs/api.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_単一ファイルモードはnone() {
+        let mode = AppMode::SingleFile(PathBuf::from("/tmp/test.md"));
+        assert_eq!(mode.relative_path_of(Path::new("/tmp/test.md")), None);
+    }
+
+    #[test]
+    fn test_app_mode_relative_path_of_存在しないベースでエラーログ() {
+        let mode = AppMode::Directory(PathBuf::from("/nonexistent/path/that/does/not/exist"));
+        // canonicalize失敗時はNoneが返る（エラーログが出力される）
+        assert_eq!(mode.relative_path_of(Path::new("/some/file.md")), None);
     }
 }

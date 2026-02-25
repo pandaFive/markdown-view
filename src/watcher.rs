@@ -112,7 +112,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
             eprintln!("[markdown-view] 初期化成功の通知先が既に閉じています");
         }
 
-        // スレッドを維持（debouncerのlifetimeのため）
+        // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
         loop {
             std::thread::park();
         }
@@ -151,6 +151,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
 
     let watch_dir = dir_path.clone();
+    // イベントコールバック内で相対パスの隠しファイル判定に使用
+    let base_for_filter = dir_path.clone();
 
     std::thread::spawn(move || {
         let rt_tx = tx;
@@ -176,11 +178,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                             if !is_md {
                                 continue;
                             }
-                            // 隠しファイル除外
-                            let is_hidden = event
-                                .path
-                                .components()
-                                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+                            // 隠しファイル除外（ベースディレクトリからの相対パスで判定）
+                            let is_hidden = is_hidden_relative(&event.path, &base_for_filter);
                             if is_hidden {
                                 continue;
                             }
@@ -188,6 +187,15 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                                 .path
                                 .canonicalize()
                                 .unwrap_or_else(|_| event.path.clone());
+                            // canonicalize後のパスがベースディレクトリ内であることを確認
+                            // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
+                            if !path.starts_with(&base_for_filter) {
+                                eprintln!(
+                                    "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
+                                    path.display()
+                                );
+                                continue;
+                            }
                             if notified.insert(path.clone()) && rt_tx.blocking_send(path).is_err() {
                                 eprintln!("[markdown-view] 通知チャネルが閉じています");
                                 break;
@@ -232,6 +240,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
             eprintln!("[markdown-view] 初期化成功の通知先が既に閉じています");
         }
 
+        // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
         loop {
             std::thread::park();
         }
@@ -271,6 +280,29 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
     )
 }
 
+/// ベースディレクトリからの相対パスに隠しコンポーネントが含まれるか判定する
+///
+/// ベースディレクトリ自体が`.`で始まるパスに含まれる場合でも
+/// 正しく動作するよう、相対パス部分のみをチェックする。
+fn is_hidden_relative(path: &Path, base: &Path) -> bool {
+    match path.strip_prefix(base) {
+        Ok(relative) => relative
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
+        Err(_) => {
+            // strip_prefix失敗時はcanonicalizeして再試行
+            let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+            match canonical_path.strip_prefix(&canonical_base) {
+                Ok(relative) => relative
+                    .components()
+                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
+                Err(_) => false,
+            }
+        }
+    }
+}
+
 /// パスが監視対象ファイルと一致するか判定する
 ///
 /// target_pathは起動時にcanonicalize済みの絶対パス。
@@ -299,5 +331,31 @@ mod tests {
     fn test_連続更新イベントも更新対象に含まれる() {
         assert!(is_content_change_event(&DebouncedEventKind::Any));
         assert!(is_content_change_event(&DebouncedEventKind::AnyContinuous));
+    }
+
+    #[test]
+    fn test_隠しファイル判定_相対パスのみチェック() {
+        // ベースディレクトリ自体がドットで始まるパスに含まれるケース
+        let base = Path::new("/home/user/.config/docs");
+        let visible_file = Path::new("/home/user/.config/docs/README.md");
+        let hidden_file = Path::new("/home/user/.config/docs/.secret/notes.md");
+        let hidden_dotfile = Path::new("/home/user/.config/docs/.hidden.md");
+
+        // ベースディレクトリの.configはチェック対象外
+        assert!(!is_hidden_relative(visible_file, base));
+        // 相対パス部分の.secretは隠しディレクトリ
+        assert!(is_hidden_relative(hidden_file, base));
+        // 相対パス部分の.hidden.mdは隠しファイル
+        assert!(is_hidden_relative(hidden_dotfile, base));
+    }
+
+    #[test]
+    fn test_隠しファイル判定_通常のベースディレクトリ() {
+        let base = Path::new("/home/user/docs");
+        let visible = Path::new("/home/user/docs/guide.md");
+        let hidden = Path::new("/home/user/docs/.draft/wip.md");
+
+        assert!(!is_hidden_relative(visible, base));
+        assert!(is_hidden_relative(hidden, base));
     }
 }

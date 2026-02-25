@@ -159,3 +159,39 @@
   - ファイル: `src/server.rs`
   - 修正方針: `impl IntoResponse for ReadMarkdownError` で TooLarge→413, Io→500 をカプセル化
   - 理由: ハンドラーでのmatch分岐を減らし、ステータスコードマッピングを一箇所に集約
+
+## PR #4 レビュー Suggestion (レビュー日: 2026-02-25)
+
+### Low Priority
+
+- [ ] `AppMode` にバリデーション付きコンストラクタを追加
+  - ファイル: `src/server.rs`
+  - 理由: `AppMode::SingleFile` に存在しないパスや非.mdを設定可能な現状を改善
+
+- [ ] `ResolveFileError` に `std::error::Error` を実装
+  - ファイル: `src/server.rs`
+  - 理由: 標準のエラーインターフェースに準拠し、`anyhow` との互換性を向上
+
+- [ ] `render_page` の6引数を構造体パラメータに変更
+  - ファイル: `src/template.rs`, 呼び出し箇所全て
+  - 理由: 引数の順序ミスリスク軽減。`RenderPageParams` 構造体を導入
+
+- [ ] `list_markdown_files` のクエリ指定時スキップ
+  - ファイル: `src/server.rs` (`resolve_target_file`)
+  - 理由: `query_file` が Some の場合、ファイル一覧の走査は不要（パフォーマンス改善）
+
+- [ ] 空ディレクトリ時の404テスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: .mdファイルが1つもないディレクトリで404が返ることのテストが未整備
+
+- [ ] 単一ファイルモードの `/api/content` で `file` フィールド不在テスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: 単一ファイルモードのAPIレスポンスに `file` フィールドが含まれないことの検証
+
+- [ ] `resolve_file` docコメントに「正規化済みパスを返す」を追記
+  - ファイル: `src/server.rs`
+  - 理由: 戻り値がcanonicalize済みであることがドキュメントに明記されていない
+
+- [ ] `notify_update` docコメントにディレクトリモード動作を追記
+  - ファイル: `src/server.rs`
+  - 理由: ディレクトリモード時の `file` フィールド付与動作がドキュメントに未記載

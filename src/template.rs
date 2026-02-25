@@ -377,10 +377,6 @@ body {
 "##;
 
 // セキュリティ注記:
-// XSS防止: pulldown-cmarkのEvent::Html / Event::InlineHtmlを除去し、
-// raw HTMLが出力に含まれないようにしている（renderer.rs）。
-// DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
-// セキュリティ注記:
 // innerHTML使用箇所: updateContent()内でサーバーサイドでサニタイズ済みHTMLを反映。
 // XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
@@ -401,14 +397,19 @@ const JS: &str = r##"
   }
 
   // URLの?fileパラメータを更新（ページ遷移なし）
-  function setFileParam(file) {
+  // replace=trueの場合はreplaceState（戻る/進む操作時やエラーロールバック時）
+  function setFileParam(file, replace) {
     var url = new URL(location.href);
     if (file) {
       url.searchParams.set('file', file);
     } else {
       url.searchParams.delete('file');
     }
-    history.pushState(null, '', url.toString());
+    if (replace) {
+      history.replaceState(null, '', url.toString());
+    } else {
+      history.pushState(null, '', url.toString());
+    }
   }
 
   // ディレクトリモード: 初期化時にURLパラメータからファイルを復元
@@ -417,8 +418,8 @@ const JS: &str = r##"
     if (paramFile) {
       currentFile = paramFile;
     } else if (currentFile) {
-      // サーバーが選んだデフォルトファイルをURLに反映
-      setFileParam(currentFile);
+      // サーバーが選んだデフォルトファイルをURLに反映（初期化なのでreplaceState）
+      setFileParam(currentFile, true);
     }
   }
 
@@ -442,6 +443,11 @@ const JS: &str = r##"
         var data = JSON.parse(event.data);
         if (data.error) {
           console.error('[markdown-view] サーバーエラー:', data.error);
+          return;
+        }
+        // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
+        if (data.refresh && isDirMode && currentFile) {
+          selectFile(currentFile, false);
           return;
         }
         // ディレクトリモード: 自分の表示ファイルと一致する更新のみ適用
@@ -506,9 +512,14 @@ const JS: &str = r##"
   }
 
   // ディレクトリモード: ファイル選択
-  function selectFile(file) {
+  // pushHistory=false の場合はhistoryに追加しない（popstate/refresh経由）
+  var fetchGeneration = 0;
+  function selectFile(file, pushHistory) {
+    if (pushHistory === undefined) pushHistory = true;
+    var previousFile = currentFile;
+    var gen = ++fetchGeneration;
     currentFile = file;
-    setFileParam(file);
+    if (pushHistory) setFileParam(file);
     updateFileListActive(file);
 
     // API経由でコンテンツを取得
@@ -520,6 +531,8 @@ const JS: &str = r##"
       return resp.json();
     })
     .then(function(data) {
+      // 別のファイル選択が行われた場合はこのレスポンスを破棄
+      if (gen !== fetchGeneration) return;
       updateContent(data);
       // タイトル更新
       var fileName = file.split('/').pop() || file;
@@ -527,6 +540,13 @@ const JS: &str = r##"
     })
     .catch(function(err) {
       console.error('[markdown-view] ファイル取得エラー:', err);
+      // 別のファイル選択が行われた場合はロールバック不要
+      if (gen !== fetchGeneration) return;
+      // 失敗時は前の状態にロールバック
+      currentFile = previousFile;
+      updateFileListActive(previousFile);
+      // URLを元に戻す（pushHistory時はpushState、popstate時はreplaceState）
+      setFileParam(previousFile, !pushHistory);
     });
   }
 
@@ -554,12 +574,12 @@ const JS: &str = r##"
     });
   }
 
-  // ブラウザの戻る/進むボタン対応
+  // ブラウザの戻る/進むボタン対応（historyに追加せずコンテンツのみ更新）
   if (isDirMode) {
     window.addEventListener('popstate', function() {
       var file = getFileParam();
       if (file && file !== currentFile) {
-        selectFile(file);
+        selectFile(file, false);
       }
     });
   }

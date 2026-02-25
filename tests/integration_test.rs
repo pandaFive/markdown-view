@@ -439,6 +439,60 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
 }
 
 #[tokio::test]
+async fn test_ディレクトリモード_api_filesは不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    let resp = client
+        .get(format!("http://{}/api/files", addr))
+        .header("Host", &attack_host)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_ファイル名のhtmlエスケープ() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+
+    // HTMLエスケープが必要な文字（&）を含むファイル名を作成
+    let special_filename = "A&B notes.md";
+    tokio::fs::write(tmp_dir.path().join(special_filename), "# A&B")
+        .await
+        .unwrap();
+    tokio::fs::write(tmp_dir.path().join("README.md"), "# README")
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState {
+        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        dark_mode: false,
+        theme: None,
+        tx,
+    });
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    // &がそのまま出力されず、エスケープされていること
+    // data-file属性とリンクテキストの両方でエスケープされる
+    assert!(body.contains("A&amp;B notes.md"));
+    // 生の&がファイル名として出力されていないこと（data-file="A&B"のような形式がないこと）
+    assert!(!body.contains("data-file=\"A&B notes.md\""));
+}
+
+#[tokio::test]
 async fn test_ディレクトリモード_readmeがデフォルト表示される() {
     let (_state, addr, _tmp_dir) = setup_dir_server().await;
 
