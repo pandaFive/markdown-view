@@ -440,6 +440,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                             eprintln!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
                                             break;
                                         }
+                                    } else {
+                                        eprintln!(
+                                            "[markdown-view] WebSocketエラーJSON生成にも失敗 (元エラー: {})",
+                                            e
+                                        );
                                     }
                                     continue;
                                 }
@@ -601,7 +606,11 @@ fn list_markdown_files_recursive(
                             }
                         };
                         if !resolved.starts_with(&canonical_base) {
-                            // ベースディレクトリ外を指すシンボリックリンクはスキップ
+                            eprintln!(
+                                "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+                                path.display(),
+                                resolved.display()
+                            );
                             continue;
                         }
                         // サイクル検出: 既に訪問済みのディレクトリはスキップ
@@ -695,14 +704,24 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     }
 
     let candidate = base_dir.join(rel_path);
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|_| ResolveFileError::NotFound)?;
+    let canonical = candidate.canonicalize().map_err(|e| {
+        eprintln!(
+            "[markdown-view] ファイルパス正規化失敗: {} ({})",
+            candidate.display(),
+            e
+        );
+        ResolveFileError::NotFound
+    })?;
 
     // ベースディレクトリ外へのアクセス防止
-    let canonical_base = base_dir
-        .canonicalize()
-        .map_err(|_| ResolveFileError::NotFound)?;
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        eprintln!(
+            "[markdown-view] ベースディレクトリ正規化失敗: {} ({})",
+            base_dir.display(),
+            e
+        );
+        ResolveFileError::NotFound
+    })?;
     if !canonical.starts_with(&canonical_base) {
         return Err(ResolveFileError::Traversal);
     }
