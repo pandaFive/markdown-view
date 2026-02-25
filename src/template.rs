@@ -381,6 +381,33 @@ body {
 // XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
 // DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
+/// ファイルツリーのノード（ディレクトリまたはファイル）
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileTreeNode {
+    /// 表示名（ディレクトリ名 or ファイル名）
+    pub name: String,
+    /// ファイルの場合のみ: 完全相対パス
+    pub full_path: Option<String>,
+    /// 子ノード
+    pub children: Vec<FileTreeNode>,
+}
+
+/// フラットなファイルパスのリストからツリー構造を構築する
+///
+/// 各階層内でディレクトリが先、ファイルが後（それぞれアルファベット順）
+pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
+    let _ = files;
+    todo!("未実装")
+}
+
+/// ファイルツリーのHTML表現を生成する
+///
+/// - `current_file`: 現在表示中のファイルパス（祖先ディレクトリをopen状態にする）
+pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>) -> String {
+    let _ = (nodes, current_file);
+    todo!("未実装")
+}
+
 const JS: &str = r##"
 (function() {
   'use strict';
@@ -650,3 +677,166 @@ const JS: &str = r##"
   }
 })();
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_フラットファイルリストからツリーを構築() {
+        let files = vec![
+            "README.md".to_string(),
+            "docs/api.md".to_string(),
+            "docs/guide/intro.md".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+
+        // ルート直下: ディレクトリ(docs)が先、ファイル(README.md)が後
+        assert_eq!(tree.len(), 2);
+
+        // docs ディレクトリ
+        assert_eq!(tree[0].name, "docs");
+        assert!(tree[0].full_path.is_none());
+        assert_eq!(tree[0].children.len(), 2);
+
+        // docs/guide ディレクトリ（ディレクトリ先）
+        assert_eq!(tree[0].children[0].name, "guide");
+        assert!(tree[0].children[0].full_path.is_none());
+        assert_eq!(tree[0].children[0].children.len(), 1);
+
+        // docs/guide/intro.md
+        assert_eq!(tree[0].children[0].children[0].name, "intro.md");
+        assert_eq!(
+            tree[0].children[0].children[0].full_path.as_deref(),
+            Some("docs/guide/intro.md")
+        );
+
+        // docs/api.md（ファイル後）
+        assert_eq!(tree[0].children[1].name, "api.md");
+        assert_eq!(
+            tree[0].children[1].full_path.as_deref(),
+            Some("docs/api.md")
+        );
+
+        // README.md（ルート直下ファイル）
+        assert_eq!(tree[1].name, "README.md");
+        assert_eq!(tree[1].full_path.as_deref(), Some("README.md"));
+        assert!(tree[1].children.is_empty());
+    }
+
+    #[test]
+    fn test_空のファイルリストからツリーを構築() {
+        let files: Vec<String> = vec![];
+        let tree = build_file_tree(&files);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_ルート直下のファイルのみ() {
+        let files = vec![
+            "README.md".to_string(),
+            "CHANGELOG.md".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+
+        // すべてファイルノード、ディレクトリノードなし
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].name, "CHANGELOG.md");
+        assert!(tree[0].full_path.is_some());
+        assert_eq!(tree[1].name, "README.md");
+        assert!(tree[1].full_path.is_some());
+    }
+
+    #[test]
+    fn test_深いネストのファイルツリー() {
+        let files = vec!["a/b/c/d.md".to_string()];
+        let tree = build_file_tree(&files);
+
+        // a/
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].name, "a");
+        assert!(tree[0].full_path.is_none());
+
+        // a/b/
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].name, "b");
+        assert!(tree[0].children[0].full_path.is_none());
+
+        // a/b/c/
+        assert_eq!(tree[0].children[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].children[0].name, "c");
+        assert!(tree[0].children[0].children[0].full_path.is_none());
+
+        // a/b/c/d.md
+        assert_eq!(tree[0].children[0].children[0].children.len(), 1);
+        let leaf = &tree[0].children[0].children[0].children[0];
+        assert_eq!(leaf.name, "d.md");
+        assert_eq!(leaf.full_path.as_deref(), Some("a/b/c/d.md"));
+    }
+
+    #[test]
+    fn test_ツリーhtmlにアクティブファイルのパスが展開される() {
+        let files = vec![
+            "README.md".to_string(),
+            "docs/guide/intro.md".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, Some("docs/guide/intro.md"));
+
+        // アクティブファイルの祖先ディレクトリがopen状態
+        assert!(html.contains("<details class=\"file-tree-dir\" open>"));
+        // アクティブファイルにactiveクラスが付与される
+        assert!(html.contains("class=\"file-tree-file active\""));
+        // data-file属性が正しい
+        assert!(html.contains("data-file=\"docs/guide/intro.md\""));
+    }
+
+    #[test]
+    fn test_ファイル名のエスケープがツリーhtmlで維持される() {
+        let files = vec!["A&B <notes>.md".to_string()];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, None);
+
+        // &, <, > がエスケープされている
+        assert!(html.contains("A&amp;B &lt;notes&gt;.md"));
+        // 生の特殊文字がdata-file属性に含まれない
+        assert!(!html.contains("data-file=\"A&B <notes>.md\""));
+    }
+
+    #[test]
+    fn test_ディレクトリモードでタブ構造が生成される() {
+        let files = vec!["README.md".to_string()];
+        let html = render_page(
+            "Test",
+            "<p>content</p>",
+            "<ul><li>toc</li></ul>",
+            false,
+            Some(&files),
+            Some("README.md"),
+        );
+
+        // タブボタンが存在する
+        assert!(html.contains("sidebar-tab"));
+        assert!(html.contains("data-tab=\"files\""));
+        assert!(html.contains("data-tab=\"toc\""));
+        // パネルが存在する
+        assert!(html.contains("id=\"panel-files\""));
+        assert!(html.contains("id=\"panel-toc\""));
+    }
+
+    #[test]
+    fn test_単一ファイルモードでタブが生成されない() {
+        let html = render_page(
+            "Test",
+            "<p>content</p>",
+            "<ul><li>toc</li></ul>",
+            false,
+            None,
+            None,
+        );
+
+        // タブボタンが存在しない
+        assert!(!html.contains("sidebar-tab"));
+        assert!(!html.contains("panel-files"));
+    }
+}
