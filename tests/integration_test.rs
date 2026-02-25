@@ -111,11 +111,14 @@ async fn test_websocketブロードキャスト受信() {
 #[tokio::test]
 async fn test_存在しないファイル時は500を返す() {
     let tmp_dir = tempfile::tempdir().unwrap();
-    let non_existent = tmp_dir.path().join("non_existent.md");
+    let file_path = tmp_dir.path().join("deleted.md");
+    tokio::fs::write(&file_path, "# before delete")
+        .await
+        .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::SingleFile(non_existent),
+        mode: AppMode::new_single_file(&file_path).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -127,6 +130,9 @@ async fn test_存在しないファイル時は500を返す() {
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
+
+    // AppMode生成後にファイルが消えたケースを再現
+    tokio::fs::remove_file(&file_path).await.unwrap();
 
     for path in ["/", "/api/content"] {
         let resp = reqwest::get(format!("http://{}{}", addr, path))
@@ -145,7 +151,7 @@ async fn test_ファイル変更でwebsocket更新() {
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::SingleFile(file_path.clone()),
+        mode: AppMode::new_single_file(&file_path).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -249,7 +255,7 @@ async fn test_ファイルサイズ上限超過で413を返す() {
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::SingleFile(large_file),
+        mode: AppMode::new_single_file(&large_file).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -488,7 +494,7 @@ async fn test_ディレクトリモード_ファイル名のhtmlエスケープ(
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -519,7 +525,7 @@ async fn test_ディレクトリモード_空ディレクトリで404を返す()
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -577,7 +583,7 @@ async fn test_ディレクトリモード_readmeなし時はアルファベッ�
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -733,7 +739,7 @@ async fn setup_single_file_server(
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::SingleFile(file_path),
+        mode: AppMode::new_single_file(&file_path).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
@@ -781,7 +787,7 @@ async fn setup_dir_server() -> (Arc<AppState>, std::net::SocketAddr, tempfile::T
 
     let (tx, _rx) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
         dark_mode: false,
         theme: None,
         tx,
