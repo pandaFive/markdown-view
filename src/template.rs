@@ -412,13 +412,14 @@ const JS: &str = r##"
     }
   }
 
-  // ディレクトリモード: 初期化時にURLパラメータからファイルを復元
+  // ディレクトリモード: 初期化時にURLパラメータをサーバーの正規化済み値に同期
+  // data-current-fileはサーバーがcanonicalize済みの相対パスを設定するため、
+  // URLクエリの生値（例: docs/../README.md）よりも信頼できる。
+  // currentFileを常にサーバーの正規化値に保つことで、
+  // WebSocket更新のdata.fileとの比較が正しく行われる。
   if (isDirMode) {
-    var paramFile = getFileParam();
-    if (paramFile) {
-      currentFile = paramFile;
-    } else if (currentFile) {
-      // サーバーが選んだデフォルトファイルをURLに反映（初期化なのでreplaceState）
+    if (currentFile) {
+      // サーバーの正規化済みパスでURLを同期（初期化なのでreplaceState）
       setFileParam(currentFile, true);
     }
   }

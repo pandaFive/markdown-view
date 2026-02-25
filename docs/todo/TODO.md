@@ -180,9 +180,10 @@
   - ファイル: `src/server.rs` (`resolve_target_file`)
   - 理由: `query_file` が Some の場合、ファイル一覧の走査は不要（パフォーマンス改善）
 
-- [ ] 空ディレクトリ時の404テスト追加
+- [x] 空ディレクトリ時の404テスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: .mdファイルが1つもないディレクトリで404が返ることのテストが未整備
+  - 対応: `test_ディレクトリモード_空ディレクトリで404を返す` を追加
 
 - [ ] 単一ファイルモードの `/api/content` で `file` フィールド不在テスト追加
   - ファイル: `tests/integration_test.rs`
@@ -195,3 +196,64 @@
 - [ ] `notify_update` docコメントにディレクトリモード動作を追記
   - ファイル: `src/server.rs`
   - 理由: ディレクトリモード時の `file` フィールド付与動作がドキュメントに未記載
+
+## PR #4 レビュー Round 2 Suggestion (レビュー日: 2026-02-25)
+
+### Low Priority
+
+- [ ] Watcher canonicalize サイレントフォールバックにログ追加
+  - ファイル: `src/watcher.rs:188-189`
+  - 理由: `canonicalize().unwrap_or_else` がサイレント。ログを追加して監視対象外イベントの追跡性を向上
+
+- [ ] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
+  - ファイル: `src/template.rs` (JS部分)
+  - 理由: `console.error` のみでユーザーには通知されない。バナー表示等を検討
+
+- [ ] シンボリックリンクディレクトリのファイル一覧テスト追加
+  - ファイル: `tests/integration_test.rs` or `src/server.rs`テスト
+  - 理由: `list_markdown_files` のsymlink containmentチェック動作が未テスト
+
+- [ ] `UpdateMessage.file` フィールドのシリアライズテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: `skip_serializing_if` による条件付きシリアライズの動作検証
+
+- [ ] 単一ファイルモードで `?file=` クエリパラメータ指定時の動作テスト
+  - ファイル: `tests/integration_test.rs`
+  - 理由: クエリが無視されることの明示的テストが未整備
+
+- [ ] アクティブファイルマーカーのHTMLテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: ファイル一覧で現在選択中のファイルに `class="active"` が付与されることの検証
+
+- [ ] デフォルトファイルフォールバックテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 理由: README.mdがない場合にアルファベット順最初のファイルが選ばれることの検証
+
+- [ ] `relative_path_of` にfile_pathの事前条件docコメント追加
+  - ファイル: `src/server.rs`
+  - 理由: file_pathがcanonicalize済みであることの前提が明記されていない
+
+- [ ] `is_hidden_relative` にfail-safe動作のdocコメント追加
+  - ファイル: `src/watcher.rs`
+  - 理由: 判定失敗時に安全側で `true` を返す動作の明示
+
+- [ ] `list_markdown_files` にソート順のdocコメント追加
+  - ファイル: `src/server.rs`
+  - 理由: アルファベット順ソートであることがdocコメントに未記載
+
+- [ ] innerHTML セキュリティコメントにエスケープ経路を追記
+  - ファイル: `src/template.rs`
+  - 理由: `updateContent()` のコメントに具体的なエスケープパス（renderer.rs→server.rs→template.rs）を記載
+
+### 巨大な修正（要別途対応）
+
+- [ ] [Medium] `AppMode` にバリデーション付きコンストラクタ追加
+  - ファイル: `src/server.rs`, `src/main.rs`, `tests/integration_test.rs`
+  - 影響範囲: 全AppState生成箇所
+  - 修正方針: `AppMode::new_single_file(path)` / `AppMode::new_directory(path)` で存在確認・.md検証
+  - 理由: 型設計アナライザで5.5/10の評価。不変条件の強制が不十分
+
+- [ ] [Low] `ResolveFileError`/`ReadMarkdownError` に `std::error::Error` 実装
+  - ファイル: `src/server.rs`
+  - 修正方針: `impl std::error::Error for ResolveFileError {}` + `impl std::error::Error for ReadMarkdownError {}`
+  - 理由: 標準エラーインターフェース準拠。anyhowとの互換性向上

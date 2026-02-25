@@ -46,15 +46,23 @@ impl AppMode {
 
     /// ディレクトリモード時にファイルの相対パスを計算する
     ///
-    /// canonicalize失敗時はエラーログを出力してNoneを返す。
+    /// `file_path` はcanonicalize済みの絶対パスであること。
+    /// canonicalize失敗やstrip_prefix失敗時はエラーログを出力してNoneを返す。
     /// 単一ファイルモードでは常にNoneを返す。
     pub fn relative_path_of(&self, file_path: &Path) -> Option<String> {
         match self {
             AppMode::Directory(base) => match base.canonicalize() {
-                Ok(canonical_base) => file_path
-                    .strip_prefix(&canonical_base)
-                    .ok()
-                    .map(|p| p.to_string_lossy().replace('\\', "/")),
+                Ok(canonical_base) => match file_path.strip_prefix(&canonical_base) {
+                    Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
+                    Err(_) => {
+                        eprintln!(
+                            "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
+                            file_path.display(),
+                            canonical_base.display()
+                        );
+                        None
+                    }
+                },
                 Err(e) => {
                     eprintln!(
                         "[markdown-view] ベースディレクトリの正規化に失敗: {} ({})",
@@ -221,8 +229,9 @@ fn resolve_target_file(
                 resolve_file(base, rel).map_err(|e| {
                     eprintln!("[markdown-view] ファイル解決エラー: {}", e);
                     match e {
-                        ResolveFileError::Traversal => StatusCode::FORBIDDEN,
-                        ResolveFileError::NotMarkdown => StatusCode::FORBIDDEN,
+                        ResolveFileError::Traversal
+                        | ResolveFileError::NotMarkdown
+                        | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
                         _ => StatusCode::NOT_FOUND,
                     }
                 })?
@@ -444,12 +453,17 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                         } else {
                             // ディレクトリモード: クライアントにリフレッシュを促す
-                            if let Ok(json) = serde_json::to_string(&serde_json::json!({
+                            match serde_json::to_string(&serde_json::json!({
                                 "refresh": true
                             })) {
-                                if let Err(e) = socket.send(Message::Text(json.into())).await {
-                                    eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
-                                    break;
+                                Ok(json) => {
+                                    if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                        eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[markdown-view] リフレッシュJSONシリアライズエラー: {}", e);
                                 }
                             }
                         }
@@ -515,10 +529,25 @@ fn list_markdown_files_recursive(
         let path = entry.path();
         let file_type = entry.file_type()?;
 
-        if file_type.is_dir() {
+        if file_type.is_dir() || file_type.is_symlink() && path.is_dir() {
             // 上限チェック（再帰前に打ち切り）
             if files.len() >= MAX_FILE_LIST {
                 return Ok(());
+            }
+            // シンボリックリンクディレクトリの場合、解決先がベースディレクトリ内か確認
+            if file_type.is_symlink() {
+                match path.canonicalize() {
+                    Ok(resolved) => {
+                        let canonical_base = base_dir
+                            .canonicalize()
+                            .unwrap_or_else(|_| base_dir.to_path_buf());
+                        if !resolved.starts_with(&canonical_base) {
+                            // ベースディレクトリ外を指すシンボリックリンクはスキップ
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
             }
             list_markdown_files_recursive(base_dir, &path, files)?;
         } else if file_type.is_file() {
@@ -546,8 +575,10 @@ fn list_markdown_files_recursive(
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 ///
 /// - 空パス、絶対パス、NULバイト含有を拒否
+/// - 隠しファイル/ディレクトリ（`.`開始のパスコンポーネント）を拒否
 /// - canonicalize + starts_with でベースディレクトリ外アクセスを防止
 /// - .md拡張子のファイルのみ許可
+/// - 戻り値はcanonicalize済みの絶対パス
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
     if relative.is_empty() {
         return Err(ResolveFileError::EmptyPath);
@@ -577,6 +608,17 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
         return Err(ResolveFileError::Traversal);
     }
 
+    // 隠しファイル/ディレクトリの拒否（canonicalize後の相対パスで判定）
+    // /api/files や watcher から除外されるファイルへの直接アクセスを防止
+    if let Ok(resolved_relative) = canonical.strip_prefix(&canonical_base) {
+        if resolved_relative
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            return Err(ResolveFileError::Hidden);
+        }
+    }
+
     // ファイル存在チェック
     if !canonical.is_file() {
         return Err(ResolveFileError::NotFound);
@@ -604,6 +646,8 @@ pub enum ResolveFileError {
     Traversal,
     /// .md以外の拡張子
     NotMarkdown,
+    /// 隠しファイル/ディレクトリ（`.`開始のパスコンポーネント）
+    Hidden,
 }
 
 impl std::fmt::Display for ResolveFileError {
@@ -616,6 +660,9 @@ impl std::fmt::Display for ResolveFileError {
                 write!(f, "ディレクトリ外へのアクセスは禁止されています")
             }
             ResolveFileError::NotMarkdown => write!(f, ".mdファイルのみアクセス可能です"),
+            ResolveFileError::Hidden => {
+                write!(f, "隠しファイルへのアクセスは禁止されています")
+            }
         }
     }
 }
@@ -849,10 +896,34 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_file_隠しファイル拒否() {
+        let dir = create_test_dir();
+        // 隠しディレクトリ内のファイル
+        let result = resolve_file(dir.path(), ".hidden/secret.md");
+        assert_eq!(result, Err(ResolveFileError::Hidden));
+    }
+
+    #[test]
+    fn test_resolve_file_隠しドットファイル拒否() {
+        let dir = create_test_dir();
+        // ドットで始まるファイル
+        let result = resolve_file(dir.path(), ".dotfile.md");
+        assert_eq!(result, Err(ResolveFileError::Hidden));
+    }
+
+    #[test]
     fn test_resolve_file_nulバイト拒否() {
         let dir = create_test_dir();
         let result = resolve_file(dir.path(), "README\0.md");
         assert_eq!(result, Err(ResolveFileError::InvalidPath));
+    }
+
+    #[test]
+    fn test_resolve_file_ディレクトリパス拒否() {
+        let dir = create_test_dir();
+        // docsディレクトリは存在するが、ファイルではないのでNotFound
+        let result = resolve_file(dir.path(), "docs");
+        assert_eq!(result, Err(ResolveFileError::NotFound));
     }
 
     #[test]

@@ -189,6 +189,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                                 .unwrap_or_else(|_| event.path.clone());
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
+                            // 注意: canonicalize失敗時はevent.pathをそのまま使うため、
+                            // starts_withチェックが通る保証はない（その場合もスキップされる）
                             if !path.starts_with(&base_for_filter) {
                                 eprintln!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
@@ -284,6 +286,10 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
 ///
 /// ベースディレクトリ自体が`.`で始まるパスに含まれる場合でも
 /// 正しく動作するよう、相対パス部分のみをチェックする。
+///
+/// ## Fail-safe動作
+/// `strip_prefix`とcanonicalizeの両方に失敗した場合は`true`を返し、
+/// 安全側に倒す（隠しファイルとして扱い処理をスキップする）。
 fn is_hidden_relative(path: &Path, base: &Path) -> bool {
     match path.strip_prefix(base) {
         Ok(relative) => relative
@@ -297,7 +303,14 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
                 Ok(relative) => relative
                     .components()
                     .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
-                Err(_) => false,
+                Err(_) => {
+                    // 相対パスが算出できない場合は安全側に倒す（隠しファイルとして除外）
+                    eprintln!(
+                        "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
+                        path.display()
+                    );
+                    true
+                }
             }
         }
     }
@@ -357,5 +370,15 @@ mod tests {
 
         assert!(!is_hidden_relative(visible, base));
         assert!(is_hidden_relative(hidden, base));
+    }
+
+    #[test]
+    fn test_隠しファイル判定_相対パス算出不可時は安全側で除外() {
+        // ベースと完全に無関係なパス（strip_prefixもcanonicalizeも失敗するケース）
+        let base = Path::new("/nonexistent/base/dir");
+        let unrelated = Path::new("/completely/different/path/file.md");
+
+        // fail-safe: trueを返す（隠しファイルとして除外）
+        assert!(is_hidden_relative(unrelated, base));
     }
 }

@@ -400,6 +400,26 @@ async fn test_ディレクトリモード_非mdファイル拒否() {
 }
 
 #[tokio::test]
+async fn test_ディレクトリモード_隠しファイルの直接アクセスが拒否される() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    // 隠しディレクトリ内のファイル
+    let resp = reqwest::get(format!(
+        "http://{}/api/content?file=.hidden/secret.md",
+        addr
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // index経由でも同様
+    let resp = reqwest::get(format!("http://{}/?file=.hidden/secret.md", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn test_ディレクトリモード_ファイル指定でindex取得() {
     let (_state, addr, _tmp_dir) = setup_dir_server().await;
 
@@ -490,6 +510,54 @@ async fn test_ディレクトリモード_ファイル名のhtmlエスケープ(
     assert!(body.contains("A&amp;B notes.md"));
     // 生の&がファイル名として出力されていないこと（data-file="A&B"のような形式がないこと）
     assert!(!body.contains("data-file=\"A&B notes.md\""));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_空ディレクトリで404を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    // .mdファイルを1つも置かない
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState {
+        mode: AppMode::Directory(tmp_dir.path().to_path_buf()),
+        dark_mode: false,
+        theme: None,
+        tx,
+    });
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // indexが404を返す
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // api/contentも404を返す（デフォルトファイルがない）
+    let resp = reqwest::get(format!("http://{}/api/content", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_websocket初期メッセージが送信されない() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // ディレクトリモードでは接続直後にメッセージが送信されないことを確認
+    let result = tokio::time::timeout(Duration::from_millis(500), read.next()).await;
+    // タイムアウトする（メッセージなし）
+    assert!(
+        result.is_err(),
+        "ディレクトリモードではWS初期メッセージは送信されないはず"
+    );
 }
 
 #[tokio::test]
