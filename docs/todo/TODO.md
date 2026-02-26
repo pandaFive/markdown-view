@@ -12,18 +12,20 @@
   - 理由: `MAX_FILE_SIZE` 超過時の動作テストが未整備
   - 対応: `test_ファイルサイズ上限超過で413を返す` に更新
 
-- [ ] 未知言語コードブロックのテスト追加
+- [x] 未知言語コードブロックのテスト追加
   - ファイル: `tests/renderer_test.rs`
   - 理由: syntectが認識しない言語指定時のフォールバック動作のテストが未整備
+  - 対応: `test_未知言語コードブロックはフォールバック描画される` を追加
 
 - [x] テーブルalignment対応
   - ファイル: `src/renderer.rs`（`Event::Start(Tag::Table(alignments))`付近）
   - 理由: テーブルのセル揃え（left/center/right）が未実装
   - 対応: `alignments` を `th/td` の `style="text-align:*"` に反映
 
-- [ ] 順序付きリストのテスト追加
+- [x] 順序付きリストのテスト追加
   - ファイル: `tests/renderer_test.rs`
   - 理由: `<ol>` のレンダリング動作テストが未整備
+  - 対応: `test_順序付きリスト` を追加
 
 - [x] WebSocket Origin検証のエッジケーステスト追加
   - ファイル: `src/server.rs`
@@ -40,9 +42,10 @@
   - 理由: `std::thread::spawn` で無名スレッド。`thread::Builder::new().name(...)` を使用すべき
   - 対応: `markdown-view-watcher-file` / `markdown-view-watcher-dir` を付与
 
-- [ ] `sanitize_href` のホワイトスペースパディングテスト追加
+- [x] `sanitize_href` のホワイトスペースパディングテスト追加
   - ファイル: `tests/renderer_test.rs`
   - 理由: `"  javascript:alert(1)  "` のようなパディング付きURLのテストが未整備
+  - 対応: `test_sanitize_hrefのホワイトスペースパディング付き危険urlは無効化される` を追加
 
 - [x] `notify_update` でクライアント不在時のレンダリングスキップ
   - ファイル: `src/server.rs`
@@ -66,17 +69,20 @@
   - 理由: `[data-theme="dark"]`と`@media (prefers-color-scheme: dark)`で同じ変数が重複
   - 対応: `DARK_THEME_VARS` を共通化し、`CSS_TEMPLATE` を `OnceLock` で1回だけ展開
 
-- [ ] `slugify` の日本語・CJK文字テスト追加
+- [x] `slugify` の日本語・CJK文字テスト追加
   - ファイル: `tests/renderer_test.rs` or `tests/toc_test.rs`
   - 理由: 日本語見出しのスラッグ生成が未テスト（ターゲットユーザーは日本語利用）
+  - 対応: `toc_test` に日本語見出しの `section` / `section-1` 検証を追加
 
-- [ ] non-UTF8ファイル読み込み時の500レスポンステスト追加
+- [x] non-UTF8ファイル読み込み時の500レスポンステスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: バイナリファイルを`.md`として開いた場合の動作が未テスト
+  - 対応: `test_non_utf8ファイル読み込み時は500を返す` を追加
 
-- [ ] フルパイプラインXSSテスト（render_markdown→render_page）
+- [x] フルパイプラインXSSテスト（render_markdown→render_page）
   - ファイル: `tests/renderer_test.rs`
   - 理由: 個別関数のXSSテストはあるがパイプライン全体のEnd-to-Endテストがない
+  - 対応: `test_フルパイプラインxss対策_render_markdownからrender_pageまで` を追加
 
 ## 巨大な修正（要別途対応）
 
@@ -153,9 +159,10 @@
   - 理由: 初期化後の監視エラーがeprintlnのみで報告され、クライアントに伝播しない
   - 対応: callbackエラーを `WatcherMessage::WatchError` で受け、WSへエラー通知
 
-- [ ] [Medium] `is_target_file` のユニットテスト追加
+- [x] [Medium] `is_target_file` のユニットテスト追加
   - ファイル: `src/watcher.rs`
   - 理由: 正規化成功ケース、失敗フォールバック（ファイル名+親ディレクトリ比較）、異なるディレクトリの同名ファイル等のテストが未整備
+  - 対応: `watcher::tests` に `is_target_file` の成功/失敗フォールバック検証3件を追加
 
 - [x] [Medium] WebSocket Origin ポート不一致時のテスト追加
   - ファイル: `src/server.rs` テスト
@@ -340,9 +347,10 @@
 
 ### Low Priority
 
-- [ ] `is_target_file` canonicalize失敗フォールバックのセキュリティ検証
+- [x] `is_target_file` canonicalize失敗フォールバックのセキュリティ検証
   - ファイル: `src/watcher.rs`
   - 理由: ファイル名+親ディレクトリ比較のフォールバックは異なるディレクトリの同名ファイルで誤検知リスクあり
+  - 対応: 親ディレクトリ不一致時に `false` となるユニットテストを追加
 
 ## PR #4 レビュー Round 5 (レビュー日: 2026-02-25)
 

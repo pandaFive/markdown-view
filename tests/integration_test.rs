@@ -164,6 +164,37 @@ async fn test_存在しないファイル時は500を返す() {
 }
 
 #[tokio::test]
+async fn test_non_utf8ファイル読み込み時は500を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("binary.md");
+    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    for path in ["/", "/api/content"] {
+        let resp = reqwest::get(format!("http://{}{}", addr, path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+#[tokio::test]
 async fn test_ファイル変更でwebsocket更新() {
     // 一時ファイルを作成
     let tmp_dir = tempfile::tempdir().unwrap();

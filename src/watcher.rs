@@ -572,6 +572,45 @@ mod tests {
     }
 
     #[test]
+    fn test_is_target_file_正規化成功時は完全一致のみtrue() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        let other = dir.path().join("other.md");
+        std::fs::write(&target, "# target").unwrap();
+        std::fs::write(&other, "# other").unwrap();
+
+        let canonical_target = target.canonicalize().unwrap();
+        assert!(is_target_file(&target, &canonical_target));
+        assert!(!is_target_file(&other, &canonical_target));
+    }
+
+    #[test]
+    fn test_is_target_file_正規化失敗時は同名かつ同一親ディレクトリでフォールバック一致() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        std::fs::write(&target, "# target").unwrap();
+        let canonical_target = target.canonicalize().unwrap();
+
+        // event_pathのcanonicalizeを失敗させるために削除
+        std::fs::remove_file(&target).unwrap();
+
+        assert!(is_target_file(&target, &canonical_target));
+    }
+
+    #[test]
+    fn test_is_target_file_正規化失敗フォールバックでも親ディレクトリ不一致はfalse() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        std::fs::write(&target, "# target").unwrap();
+        let canonical_target = target.canonicalize().unwrap();
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_path_same_name = other_dir.path().join("target.md");
+        // ファイルを作らずcanonicalize失敗にする
+        assert!(!is_target_file(&other_path_same_name, &canonical_target));
+    }
+
+    #[test]
     fn test_隠しファイル判定_相対パスのみチェック() {
         // ベースディレクトリ自体がドットで始まるパスに含まれるケース
         let base = Path::new("/home/user/.config/docs");

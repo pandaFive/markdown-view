@@ -61,6 +61,14 @@ fn test_コードブロック_ハイライト() {
 }
 
 #[test]
+fn test_未知言語コードブロックはフォールバック描画される() {
+    let md = "```unknown-lang\nlet x = 1;\n```";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<pre class=\"code-block\"><code class=\"language-unknown-lang\">"));
+    assert!(html.contains("let x = 1;"));
+}
+
+#[test]
 fn test_インラインコード() {
     let md = "Use `println!` macro";
     let html = render_markdown(md, None);
@@ -88,6 +96,15 @@ fn test_リンク() {
     assert!(html.contains("href="));
     assert!(html.contains("https://www.rust-lang.org"));
     assert!(html.contains("Rust"));
+}
+
+#[test]
+fn test_順序付きリスト() {
+    let md = "1. first\n2. second";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<ol start=\"1\">"));
+    assert!(html.contains("<li>first</li>"));
+    assert!(html.contains("<li>second</li>"));
 }
 
 #[test]
@@ -186,6 +203,13 @@ fn test_複数テーブルでもヘッダセル閉じタグが壊れない() {
 fn test_unsafeスキームのリンクは無効化される() {
     let md = "[click](javascript:alert(1))";
     let html = render_markdown(md, None);
+    assert!(html.contains(r##"<a href="#">click</a>"##));
+    assert!(!html.contains("javascript:alert(1)"));
+}
+
+#[test]
+fn test_sanitize_hrefのホワイトスペースパディング付き危険urlは無効化される() {
+    let html = render_markdown("[click](  javascript:alert(1)  )", None);
     assert!(html.contains(r##"<a href="#">click</a>"##));
     assert!(!html.contains("javascript:alert(1)"));
 }
@@ -337,6 +361,27 @@ fn test_プロトコル相対urlが無効化される() {
 fn test_ローカルルートパスのリンクは許可される() {
     let html = render_markdown("[link](/page.html)", None);
     assert!(html.contains(r##"href="/page.html""##));
+}
+
+#[test]
+fn test_フルパイプラインxss対策_render_markdownからrender_pageまで() {
+    use markdown_view::template::{render_page, RenderPageParams};
+
+    let content = render_markdown(
+        "# Title\n<script>alert('xss')</script>\n[bad](javascript:alert(1))",
+        None,
+    );
+    let html = render_page(RenderPageParams {
+        title: "Test",
+        content: &content,
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
+
+    assert!(!html.contains("<script>alert('xss')</script>"));
+    assert!(html.contains(r##"<a href="#">bad</a>"##));
 }
 
 // --- テンプレート テスト ---
