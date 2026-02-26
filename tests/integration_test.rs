@@ -362,8 +362,11 @@ async fn test_セキュリティヘッダが設定されている() {
         .to_str()
         .unwrap();
     assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("script-src 'sha256-"));
+    assert!(csp.contains("style-src 'sha256-"));
     assert!(csp.contains("frame-ancestors 'none'"));
     assert!(csp.contains("object-src 'none'"));
+    assert!(!csp.contains("unsafe-inline"));
     assert!(!csp.contains("data:"));
 }
 

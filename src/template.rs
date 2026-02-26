@@ -71,9 +71,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} - markdown-view</title>
-<style>
-{css}
-</style>
+<style>{css}</style>
 </head>
 <body>
 <aside id="sidebar" class="sidebar">
@@ -83,9 +81,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 <main id="content" class="content">
 {content}
 </main>
-<script>
-{js}
-</script>
+<script>{js}</script>
 </body>
 </html>"##,
         theme = if params.dark_mode { "dark" } else { "light" },
@@ -483,6 +479,28 @@ body {
 fn css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
     CSS.get_or_init(|| CSS_TEMPLATE.replace("__DARK_THEME_VARS__", DARK_THEME_VARS))
+}
+
+/// インラインCSS/JS用のCSPハッシュソースを返す
+pub fn csp_hash_sources() -> (&'static str, &'static str) {
+    static SOURCES: OnceLock<(String, String)> = OnceLock::new();
+    let sources = SOURCES.get_or_init(|| {
+        let style_hash = sha256_base64(css().as_bytes());
+        let script_hash = sha256_base64(JS.as_bytes());
+        (
+            format!("'sha256-{}'", script_hash),
+            format!("'sha256-{}'", style_hash),
+        )
+    });
+    (sources.0.as_str(), sources.1.as_str())
+}
+
+fn sha256_base64(input: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(input);
+    base64::engine::general_purpose::STANDARD.encode(digest)
 }
 
 // セキュリティ注記:

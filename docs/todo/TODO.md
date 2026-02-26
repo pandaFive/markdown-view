@@ -123,10 +123,11 @@
   - ファイル: `src/watcher.rs`
   - 対応: canonicalize失敗時にファイル名＋親ディレクトリ比較のフォールバックを実装済み
 
-- [ ] [Medium] CSP の `'unsafe-inline'` をnonce/hashに置換
+- [x] [Medium] CSP の `'unsafe-inline'` をnonce/hashに置換
   - ファイル: `src/server.rs`, `src/template.rs`
   - 修正方針: リクエストごとにnonce生成し、CSPヘッダーとscript/styleタグに埋め込む
   - 理由: unsafe-inlineはXSS防御を弱める。ローカルツールとしてはリスク低だが防御深化として有効
+  - 対応: インラインCSS/JSのSHA-256ハッシュを生成し、`script-src`/`style-src` をhashベース許可へ変更
 
 - [x] [Low] watcher JoinHandle の監視
   - ファイル: `src/watcher.rs`

@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::renderer::render_markdown;
-use crate::template::{render_page, RenderPageParams, UpdateMessage};
+use crate::template::{csp_hash_sources, render_page, RenderPageParams, UpdateMessage};
 use crate::toc::generate_toc;
 
 /// canonicalize済みの絶対パス
@@ -267,6 +267,7 @@ pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
+    let csp_header = build_csp_header();
     Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
@@ -280,18 +281,26 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::http::header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
-        // CSP: script-src/style-srcはインラインテンプレート埋め込みのため'unsafe-inline'を許可。
+        // CSP: script/styleはハッシュベース許可でunsafe-inlineを排除する。
         // img-srcは外部画像参照のため*を許可。
-        // sanitize_hrefはリンクのhref属性とimg要素のsrc属性の両方に適用される（renderer.rs参照）。
-        // img srcのdata:スキームはCSP img-src側で制御する。
+        // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(
-                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
-            ),
+            csp_header,
         ))
         .with_state(state)
+}
+
+fn build_csp_header() -> HeaderValue {
+    let (script_src, style_src) = csp_hash_sources();
+    let csp = format!(
+        "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+        script_src, style_src
+    );
+    HeaderValue::from_str(&csp).unwrap_or_else(|_| {
+        HeaderValue::from_static("default-src 'self'; object-src 'none'; frame-ancestors 'none'")
+    })
 }
 
 /// クエリパラメータ
