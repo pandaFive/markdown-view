@@ -77,6 +77,6 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 ## コード規約
 
 - コメント・コミットメッセージは日本語
-- `tracing::info!/warn!` マクロで構造化ログ出力（`tracing` + `tracing-subscriber` 導入済み）
+- `tracing::info!/warn!/error!` マクロで構造化ログ出力（初期化失敗時のみ `eprintln!` フォールバック）
 - syntect/pulldown-cmarkの静的リソースは`OnceLock`でlazy初期化
 - 公開関数に`///`ドキュメントコメントを付与

@@ -555,3 +555,8 @@
 - [ ] `img-src *` のプライバシーリスクをドキュメント化
   - ファイル: `src/server.rs` (L298)
   - 理由: 外部画像によるトラッキングピクセル/閲覧追跡のリスクが未ドキュメント
+
+- [ ] syntectの `ClassedHTMLGenerator` 移行で `style-src 'unsafe-inline'` を排除
+  - ファイル: `src/renderer.rs`, `src/template.rs`, `src/server.rs`
+  - 修正方針: `highlighted_html_for_string` → `ClassedHTMLGenerator` + CSSクラスベースのテーマスタイルシート生成
+  - 理由: 現在syntectがインラインstyleを出力するため `style-src 'unsafe-inline'` が必要。クラスベースに移行すればCSPを強化可能
