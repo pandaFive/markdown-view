@@ -24,6 +24,18 @@ fn test_gfmテーブル() {
 }
 
 #[test]
+fn test_テーブルalignmentが反映される() {
+    let md = "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<th style=\"text-align:left\">L</th>"));
+    assert!(html.contains("<th style=\"text-align:center\">C</th>"));
+    assert!(html.contains("<th style=\"text-align:right\">R</th>"));
+    assert!(html.contains("<td style=\"text-align:left\">1</td>"));
+    assert!(html.contains("<td style=\"text-align:center\">2</td>"));
+    assert!(html.contains("<td style=\"text-align:right\">3</td>"));
+}
+
+#[test]
 fn test_タスクリスト() {
     let md = "- [x] Done\n- [ ] Todo";
     let html = render_markdown(md, None);

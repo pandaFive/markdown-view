@@ -194,10 +194,72 @@ impl AppMode {
 
 /// サーバー共有状態
 pub struct AppState {
-    pub mode: AppMode,
-    pub dark_mode: bool,
-    pub theme: Option<String>,
-    pub tx: broadcast::Sender<String>,
+    mode: AppMode,
+    dark_mode: bool,
+    theme: Option<String>,
+    tx: broadcast::Sender<BroadcastMessage>,
+}
+
+impl AppState {
+    /// `AppState` を生成する
+    pub fn new(
+        mode: AppMode,
+        dark_mode: bool,
+        theme: Option<String>,
+        tx: broadcast::Sender<BroadcastMessage>,
+    ) -> Self {
+        Self {
+            mode,
+            dark_mode,
+            theme,
+            tx,
+        }
+    }
+
+    /// 動作モードを返す
+    pub fn mode(&self) -> &AppMode {
+        &self.mode
+    }
+
+    /// ダークモード設定を返す
+    pub fn dark_mode(&self) -> bool {
+        self.dark_mode
+    }
+
+    /// テーマ名を返す
+    pub fn theme(&self) -> Option<&str> {
+        self.theme.as_deref()
+    }
+
+    /// broadcast送信チャネルを返す
+    pub fn tx(&self) -> &broadcast::Sender<BroadcastMessage> {
+        &self.tx
+    }
+}
+
+/// WebSocket broadcastメッセージ
+#[derive(Debug, Clone)]
+pub enum BroadcastMessage {
+    /// コンテンツ更新
+    Update(UpdateMessage),
+    /// クライアントに再取得を促す
+    Refresh,
+    /// エラー通知
+    Error(String),
+}
+
+impl BroadcastMessage {
+    fn to_json(&self) -> Result<String, serde_json::Error> {
+        match self {
+            BroadcastMessage::Update(update) => serde_json::to_string(update),
+            BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
+                "refresh": true
+            })),
+            BroadcastMessage::Error(message) => {
+                serde_json::to_string(&UpdateMessage::error(message))
+            }
+        }
+    }
 }
 
 /// ファイルサイズ上限（10MB）: OOM防止
@@ -248,16 +310,13 @@ async fn index_handler(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let (file_path, file_list) = resolve_target_file(&state, query.file.as_deref())?;
+    let (file_path, file_list) = resolve_target_file(&state, query.file.as_deref(), true)?;
 
     let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             eprintln!("[markdown-view] index読み込みエラー: {}", e);
-            match e {
-                ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-                ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            }
+            e.status_code()
         })?;
 
     let title = file_path
@@ -287,21 +346,18 @@ async fn api_content_handler(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let (file_path, _) = resolve_target_file(&state, query.file.as_deref())?;
+    let (file_path, _) = resolve_target_file(&state, query.file.as_deref(), false)?;
 
     let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
-            match e {
-                ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-                ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            }
+            e.status_code()
         })?;
 
     let file = state.mode.relative_path_of(&file_path);
 
-    Ok(Json(UpdateMessage { content, toc, file }))
+    Ok(Json(UpdateMessage::new(content, toc, file)))
 }
 
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
@@ -331,26 +387,23 @@ async fn api_files_handler(
 fn resolve_target_file(
     state: &AppState,
     query_file: Option<&str>,
+    include_file_list: bool,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
     if let Some(path) = state.mode.single_file() {
         Ok((path.to_path_buf(), None))
     } else if let Some(base) = state.mode.directory() {
-        let files = list_markdown_files(base).map_err(|e| {
-            eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
+        let mut precomputed_files: Option<Vec<String>> = None;
         let file_path = if let Some(rel) = query_file {
             resolve_file(base, rel).map_err(|e| {
                 eprintln!("[markdown-view] ファイル解決エラー: {}", e);
-                match e {
-                    ResolveFileError::Traversal
-                    | ResolveFileError::NotMarkdown
-                    | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
-                    _ => StatusCode::NOT_FOUND,
-                }
+                e.status_code()
             })?
         } else {
+            let files = list_markdown_files(base).map_err(|e| {
+                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            precomputed_files = Some(files.clone());
             // デフォルト: README.mdがあればそれ、なければアルファベット順最初
             let default_file = files
                 .iter()
@@ -368,7 +421,19 @@ fn resolve_target_file(
             }
         };
 
-        Ok((file_path, Some(files)))
+        let file_list = if include_file_list {
+            match precomputed_files {
+                Some(files) => Some(files),
+                None => Some(list_markdown_files(base).map_err(|e| {
+                    eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?),
+            }
+        } else {
+            None
+        };
+
+        Ok((file_path, file_list))
     } else {
         unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
     }
@@ -475,11 +540,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 return;
             }
         };
-        let msg = match serde_json::to_string(&UpdateMessage {
-            content,
-            toc,
-            file: None,
-        }) {
+        let msg = match BroadcastMessage::Update(UpdateMessage::new(content, toc, None)).to_json() {
             Ok(json) => json,
             Err(e) => {
                 eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
@@ -531,7 +592,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             recv = rx.recv() => {
                 match recv {
                     Ok(msg) => {
-                        if let Err(e) = socket.send(Message::Text(msg.into())).await {
+                        let json = match msg.to_json() {
+                            Ok(json) => json,
+                            Err(e) => {
+                                eprintln!("[markdown-view] WebSocketメッセージJSON化エラー: {}", e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = socket.send(Message::Text(json.into())).await {
                             eprintln!("[markdown-view] WebSocket送信エラー: {}", e);
                             break;
                         }
@@ -548,9 +616,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 Ok(result) => result,
                                 Err(e) => {
                                     eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
-                                    if let Ok(error_json) = serde_json::to_string(&serde_json::json!({
-                                        "error": format!("ファイル読み込みエラー: {}", e)
-                                    })) {
+                                    if let Ok(error_json) = BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e)).to_json() {
                                         if let Err(e) = socket.send(Message::Text(error_json.into())).await {
                                             eprintln!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
                                             break;
@@ -564,7 +630,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     continue;
                                 }
                             };
-                            let resend = match serde_json::to_string(&UpdateMessage { content, toc, file: None }) {
+                            let resend = match BroadcastMessage::Update(UpdateMessage::new(content, toc, None)).to_json() {
                                 Ok(json) => json,
                                 Err(e) => {
                                     eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
@@ -577,9 +643,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                         } else {
                             // ディレクトリモード: クライアントにリフレッシュを促す
-                            match serde_json::to_string(&serde_json::json!({
-                                "refresh": true
-                            })) {
+                            match BroadcastMessage::Refresh.to_json() {
                                 Ok(json) => {
                                     if let Err(e) = socket.send(Message::Text(json.into())).await {
                                         eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
@@ -615,6 +679,22 @@ impl std::fmt::Display for ReadMarkdownError {
                 write!(f, "ファイルサイズが上限（10MB）を超えています")
             }
         }
+    }
+}
+
+impl ReadMarkdownError {
+    /// HTTPステータスコードへ変換する
+    fn status_code(&self) -> StatusCode {
+        match self {
+            ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        }
+    }
+}
+
+impl IntoResponse for ReadMarkdownError {
+    fn into_response(self) -> axum::response::Response {
+        self.status_code().into_response()
     }
 }
 
@@ -900,6 +980,20 @@ impl std::fmt::Display for ResolveFileError {
     }
 }
 
+impl ResolveFileError {
+    /// HTTPステータスコードへ変換する
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            ResolveFileError::Traversal
+            | ResolveFileError::NotMarkdown
+            | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
+            ResolveFileError::EmptyPath
+            | ResolveFileError::InvalidPath
+            | ResolveFileError::NotFound => StatusCode::NOT_FOUND,
+        }
+    }
+}
+
 /// ファイルサイズ上限付きでMarkdownファイルを読み込む
 ///
 /// TOCTOU対策として二段階のサイズチェックを行う:
@@ -949,6 +1043,10 @@ async fn read_and_render_file(
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
 /// JS側の `data.error` チェックでコンソールにエラーログが出力される（UI表示はなし）。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
+    if state.tx.receiver_count() == 0 {
+        return;
+    }
+
     let relative_path = state.mode.relative_path_of(changed_file);
 
     // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
@@ -963,33 +1061,11 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
 
     let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
         Ok((content, toc)) => {
-            match serde_json::to_string(&UpdateMessage {
-                content,
-                toc,
-                file: relative_path,
-            }) {
-                Ok(json) => json,
-                Err(e) => {
-                    eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
-                    return;
-                }
-            }
+            BroadcastMessage::Update(UpdateMessage::new(content, toc, relative_path))
         }
         Err(e) => {
             eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
-            // クライアントにエラーを通知（JS側のdata.errorチェックで処理される）
-            match serde_json::to_string(&serde_json::json!({
-                "error": format!("ファイル読み込みエラー: {}", e)
-            })) {
-                Ok(json) => json,
-                Err(ser_err) => {
-                    eprintln!(
-                        "[markdown-view] エラーJSON生成にも失敗: {} (元エラー: {})",
-                        ser_err, e
-                    );
-                    return;
-                }
-            }
+            BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e))
         }
     };
     // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）
@@ -1053,6 +1129,14 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_different_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:4000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
     }
 
     #[test]

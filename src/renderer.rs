@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
@@ -41,6 +41,8 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     let mut image_title: Option<String> = None;
     let mut image_alt = String::new();
     let mut in_table_head = false;
+    let mut table_alignments: Vec<Alignment> = Vec::new();
+    let mut table_cell_index = 0usize;
     let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for event in parser {
@@ -353,12 +355,14 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             Event::Start(Tag::Table(alignments)) => {
                 html_output.push_str("<table>\n");
                 in_table_head = false;
-                // alignmentsは現在未使用（将来のセル揃え対応で使用予定）
-                let _ = alignments;
+                table_alignments = alignments;
+                table_cell_index = 0;
             }
             Event::End(TagEnd::Table) => {
                 html_output.push_str("</table>\n");
                 in_table_head = false;
+                table_alignments.clear();
+                table_cell_index = 0;
             }
             Event::Start(Tag::TableHead) => {
                 in_table_head = true;
@@ -370,16 +374,22 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             }
             Event::Start(Tag::TableRow) => {
                 html_output.push_str("<tr>\n");
+                table_cell_index = 0;
             }
             Event::End(TagEnd::TableRow) => {
                 html_output.push_str("</tr>\n");
             }
             Event::Start(Tag::TableCell) => {
+                let align_attr = table_alignments
+                    .get(table_cell_index)
+                    .and_then(table_align_style_attr)
+                    .unwrap_or("");
                 if in_table_head {
-                    html_output.push_str("<th>");
+                    html_output.push_str(&format!("<th{}>", align_attr));
                 } else {
-                    html_output.push_str("<td>");
+                    html_output.push_str(&format!("<td{}>", align_attr));
                 }
+                table_cell_index = table_cell_index.saturating_add(1);
             }
             Event::End(TagEnd::TableCell) => {
                 if in_table_head {
@@ -395,6 +405,15 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     }
 
     html_output
+}
+
+fn table_align_style_attr(alignment: &Alignment) -> Option<&'static str> {
+    match alignment {
+        Alignment::Left => Some(" style=\"text-align:left\""),
+        Alignment::Center => Some(" style=\"text-align:center\""),
+        Alignment::Right => Some(" style=\"text-align:right\""),
+        Alignment::None => None,
+    }
 }
 
 fn syntax_set() -> &'static SyntaxSet {

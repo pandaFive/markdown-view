@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
-use crate::server::{notify_update, AppState};
+use crate::server::{notify_update, AppState, BroadcastMessage};
 
 /// ファイル監視からtokioタスクへのメッセージ型
 enum WatcherMessage {
@@ -16,17 +17,103 @@ enum WatcherMessage {
     WatchError(String),
 }
 
+fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, label: &str) {
+    match tx.try_send(msg) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            eprintln!(
+                "[markdown-view] 監視メッセージ送信キューが満杯のため破棄: {}",
+                label
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            eprintln!("[markdown-view] 通知チャネルが閉じています: {}", label);
+        }
+    }
+}
+
 /// デバウンス間隔（ミリ秒）
 const DEBOUNCE_MS: u64 = 300;
+/// 監視スレッドのpark待機間隔（ミリ秒）
+const WATCHER_THREAD_PARK_MS: u64 = 250;
+
+/// 監視実行中ハンドル
+///
+/// Drop時に監視スレッドと通知タスクを停止する。
+pub struct WatchHandle {
+    runtime: Option<WatchRuntime>,
+}
+
+struct WatchRuntime {
+    shutdown_flag: Arc<AtomicBool>,
+    watcher_thread: std::thread::JoinHandle<()>,
+    notify_task: tokio::task::JoinHandle<()>,
+}
+
+impl WatchHandle {
+    fn new(
+        shutdown_flag: Arc<AtomicBool>,
+        watcher_thread: std::thread::JoinHandle<()>,
+        notify_task: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            runtime: Some(WatchRuntime {
+                shutdown_flag,
+                watcher_thread,
+                notify_task,
+            }),
+        }
+    }
+
+    /// 監視スレッドと通知タスクを停止する
+    pub async fn shutdown(mut self) {
+        if let Some(mut runtime) = self.runtime.take() {
+            runtime.shutdown_flag.store(true, Ordering::Release);
+            runtime.watcher_thread.thread().unpark();
+
+            if let Err(e) = runtime.watcher_thread.join() {
+                eprintln!(
+                    "[markdown-view] 監視スレッドの停止中にパニックを検出: {:?}",
+                    e
+                );
+            }
+
+            if tokio::time::timeout(Duration::from_secs(2), &mut runtime.notify_task)
+                .await
+                .is_err()
+            {
+                eprintln!("[markdown-view] 通知タスク停止がタイムアウトしたためabortします");
+                runtime.notify_task.abort();
+                let _ = runtime.notify_task.await;
+            }
+        }
+    }
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_flag.store(true, Ordering::Release);
+            runtime.watcher_thread.thread().unpark();
+            if let Err(e) = runtime.watcher_thread.join() {
+                eprintln!(
+                    "[markdown-view] 監視スレッドのDrop停止中にパニックを検出: {:?}",
+                    e
+                );
+            }
+            runtime.notify_task.abort();
+        }
+    }
+}
 
 /// ファイルまたはディレクトリの監視を開始する
 ///
 /// notify + debouncer でファイル変更を検知し、
 /// tokioランタイムにブリッジしてbroadcastで通知する
-pub async fn watch_path(state: Arc<AppState>) -> Result<()> {
-    if let Some(file_path) = state.mode.single_file().map(Path::to_path_buf) {
+pub async fn watch_path(state: Arc<AppState>) -> Result<WatchHandle> {
+    if let Some(file_path) = state.mode().single_file().map(Path::to_path_buf) {
         watch_single_file(state, file_path).await
-    } else if let Some(dir_path) = state.mode.directory().map(Path::to_path_buf) {
+    } else if let Some(dir_path) = state.mode().directory().map(Path::to_path_buf) {
         watch_directory(state, dir_path).await
     } else {
         unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
@@ -34,7 +121,7 @@ pub async fn watch_path(state: Arc<AppState>) -> Result<()> {
 }
 
 /// 単一ファイルの監視
-async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<()> {
+async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<WatchHandle> {
     // 監視対象ディレクトリ（ファイルの親ディレクトリ）
     let watch_dir = file_path
         .parent()
@@ -48,9 +135,13 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
 
     // 初期化エラーを親タスクに伝播するための oneshot チャネル
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let thread_shutdown_flag = shutdown_flag.clone();
 
     // debouncerをstd::threadで起動（notifyはsyncスレッドで動作）
-    std::thread::spawn(move || {
+    let watcher_thread = std::thread::Builder::new()
+        .name("markdown-view-watcher-file".to_string())
+        .spawn(move || {
         let rt_tx = tx;
         let debouncer = new_debouncer(
             Duration::from_millis(DEBOUNCE_MS),
@@ -75,12 +166,11 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
                                             continue;
                                         }
                                     };
-                                    if rt_tx
-                                        .blocking_send(WatcherMessage::FileChanged(path))
-                                        .is_err()
-                                    {
-                                        eprintln!("[markdown-view] 通知チャネルが閉じています");
-                                    }
+                                    send_watcher_message(
+                                        &rt_tx,
+                                        WatcherMessage::FileChanged(path),
+                                        "単一ファイル更新",
+                                    );
                                     break;
                                 }
                             }
@@ -88,12 +178,11 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
                     }
                     Err(e) => {
                         eprintln!("[markdown-view] ファイル監視エラー: {}", e);
-                        if rt_tx
-                            .blocking_send(WatcherMessage::WatchError(e.to_string()))
-                            .is_err()
-                        {
-                            eprintln!("[markdown-view] エラー通知チャネルが閉じています");
-                        }
+                        send_watcher_message(
+                            &rt_tx,
+                            WatcherMessage::WatchError(e.to_string()),
+                            "単一ファイル監視エラー",
+                        );
                     }
                 }
             },
@@ -130,10 +219,11 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
         }
 
         // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-        loop {
-            std::thread::park();
+        while !thread_shutdown_flag.load(Ordering::Acquire) {
+            std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
         }
-    });
+    })
+        .context("監視スレッドの起動に失敗")?;
 
     // 初期化結果を待機
     match init_rx.await {
@@ -142,8 +232,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
         Err(_) => anyhow::bail!("ファイル監視スレッドが予期せず終了しました"),
     }
 
-    // tokioタスクでファイル変更通知を処理
-    let notify_handle = tokio::spawn(async move {
+    let notify_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
@@ -156,20 +245,12 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<(
         }
         eprintln!("[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です");
     });
-    tokio::spawn(async move {
-        if let Err(e) = notify_handle.await {
-            eprintln!(
-                "[markdown-view] ファイル変更通知タスクがパニックしました: {}",
-                e
-            );
-        }
-    });
 
-    Ok(())
+    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
 }
 
 /// ディレクトリの再帰監視
-async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> {
+async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<WatchHandle> {
     let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
 
     let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
@@ -177,8 +258,12 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
     let watch_dir = dir_path.clone();
     // イベントコールバック内で相対パスの隠しファイル判定に使用
     let base_for_filter = dir_path.clone();
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let thread_shutdown_flag = shutdown_flag.clone();
 
-    std::thread::spawn(move || {
+    let watcher_thread = std::thread::Builder::new()
+        .name("markdown-view-watcher-dir".to_string())
+        .spawn(move || {
         let rt_tx = tx;
         let debouncer = new_debouncer(
             Duration::from_millis(DEBOUNCE_MS),
@@ -227,24 +312,22 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
                             if is_hidden_relative(&path, &base_for_filter) {
                                 continue;
                             }
-                            if notified.insert(path.clone())
-                                && rt_tx
-                                    .blocking_send(WatcherMessage::FileChanged(path))
-                                    .is_err()
-                            {
-                                eprintln!("[markdown-view] 通知チャネルが閉じています");
-                                break;
+                            if notified.insert(path.clone()) {
+                                send_watcher_message(
+                                    &rt_tx,
+                                    WatcherMessage::FileChanged(path),
+                                    "ディレクトリ更新",
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("[markdown-view] ディレクトリ監視エラー: {}", e);
-                        if rt_tx
-                            .blocking_send(WatcherMessage::WatchError(e.to_string()))
-                            .is_err()
-                        {
-                            eprintln!("[markdown-view] エラー通知チャネルが閉じています");
-                        }
+                        send_watcher_message(
+                            &rt_tx,
+                            WatcherMessage::WatchError(e.to_string()),
+                            "ディレクトリ監視エラー",
+                        );
                     }
                 }
             },
@@ -282,10 +365,11 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
         }
 
         // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-        loop {
-            std::thread::park();
+        while !thread_shutdown_flag.load(Ordering::Acquire) {
+            std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
         }
-    });
+    })
+        .context("監視スレッドの起動に失敗")?;
 
     match init_rx.await {
         Ok(Ok(())) => {}
@@ -293,7 +377,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
         Err(_) => anyhow::bail!("ディレクトリ監視スレッドが予期せず終了しました"),
     }
 
-    let notify_handle = tokio::spawn(async move {
+    let notify_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
@@ -308,16 +392,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<()> 
             "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です"
         );
     });
-    tokio::spawn(async move {
-        if let Err(e) = notify_handle.await {
-            eprintln!(
-                "[markdown-view] ディレクトリ変更通知タスクがパニックしました: {}",
-                e
-            );
-        }
-    });
 
-    Ok(())
+    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
 }
 
 /// レンダリング更新が必要なイベント種別か判定する
@@ -405,19 +481,10 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
 /// `server.rs:notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
 /// 受信者がいない場合は正常（クライアント未接続時）。
 fn broadcast_error(state: &AppState, error_msg: &str) {
-    let json = match serde_json::to_string(&serde_json::json!({
-        "error": format!("ファイル監視エラー: {}", error_msg)
-    })) {
-        Ok(json) => json,
-        Err(e) => {
-            eprintln!(
-                "[markdown-view] エラーJSON生成に失敗: {} (元エラー: {})",
-                e, error_msg
-            );
-            return;
-        }
-    };
-    let _ = state.tx.send(json);
+    let _ = state.tx().send(BroadcastMessage::Error(format!(
+        "ファイル監視エラー: {}",
+        error_msg
+    )));
 }
 
 #[cfg(test)]
@@ -439,22 +506,23 @@ mod tests {
         std::fs::write(&file_path, "# test").unwrap();
 
         let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            mode: AppMode::new_single_file(&file_path).unwrap(),
-            dark_mode: false,
-            theme: None,
+        let state = Arc::new(AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
             tx,
-        });
-        let mut rx = state.tx.subscribe();
+        ));
+        let mut rx = state.tx().subscribe();
 
         broadcast_error(&state, "テストエラーメッセージ");
 
         let received = rx.try_recv().unwrap();
-        let json: serde_json::Value = serde_json::from_str(&received).unwrap();
-        assert_eq!(
-            json["error"].as_str().unwrap(),
-            "ファイル監視エラー: テストエラーメッセージ"
-        );
+        match received {
+            BroadcastMessage::Error(msg) => {
+                assert_eq!(msg, "ファイル監視エラー: テストエラーメッセージ");
+            }
+            other => panic!("Errorを期待したが {:?} を受信", other),
+        }
     }
 
     #[test]
@@ -464,12 +532,12 @@ mod tests {
         std::fs::write(&file_path, "# test").unwrap();
 
         let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            mode: AppMode::new_single_file(&file_path).unwrap(),
-            dark_mode: false,
-            theme: None,
+        let state = Arc::new(AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
             tx,
-        });
+        ));
         // _rxをドロップして受信者をゼロにする
         drop(_rx);
 

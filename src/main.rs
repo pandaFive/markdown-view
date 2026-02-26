@@ -54,15 +54,10 @@ async fn main() -> Result<()> {
     // broadcast チャネル
     let (tx, _rx) = broadcast::channel(16);
 
-    let state = Arc::new(AppState {
-        mode: mode.clone(),
-        dark_mode: args.dark,
-        theme: args.theme,
-        tx,
-    });
+    let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
 
     // ファイル/ディレクトリ監視開始
-    watch_path(state.clone())
+    let watcher_handle = watch_path(state.clone())
         .await
         .context("監視の開始に失敗")?;
 
@@ -96,7 +91,15 @@ async fn main() -> Result<()> {
     }
 
     let router = create_router(state);
-    axum::serve(listener, router).await?;
+    let server_result = axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            // Ctrl+C受信時にHTTPサーバーをグレースフル停止する
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+
+    watcher_handle.shutdown().await;
+    server_result?;
 
     Ok(())
 }

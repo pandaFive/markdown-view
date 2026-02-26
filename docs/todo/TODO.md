@@ -16,9 +16,10 @@
   - ファイル: `tests/renderer_test.rs`
   - 理由: syntectが認識しない言語指定時のフォールバック動作のテストが未整備
 
-- [ ] テーブルalignment対応
+- [x] テーブルalignment対応
   - ファイル: `src/renderer.rs`（`Event::Start(Tag::Table(alignments))`付近）
   - 理由: テーブルのセル揃え（left/center/right）が未実装
+  - 対応: `alignments` を `th/td` の `style="text-align:*"` に反映
 
 - [ ] 順序付きリストのテスト追加
   - ファイル: `tests/renderer_test.rs`
@@ -34,18 +35,20 @@
   - 対象: `sanitize_href`, `is_safe_href`, `is_allowed_ws_origin`, `normalize_authority`
   - 理由: セキュリティ上重要な関数にdocコメントがない
 
-- [ ] 監視スレッドの名前付け
+- [x] 監視スレッドの名前付け
   - ファイル: `src/watcher.rs`
   - 理由: `std::thread::spawn` で無名スレッド。`thread::Builder::new().name(...)` を使用すべき
+  - 対応: `markdown-view-watcher-file` / `markdown-view-watcher-dir` を付与
 
 - [ ] `sanitize_href` のホワイトスペースパディングテスト追加
   - ファイル: `tests/renderer_test.rs`
   - 理由: `"  javascript:alert(1)  "` のようなパディング付きURLのテストが未整備
 
-- [ ] `notify_update` でクライアント不在時のレンダリングスキップ
+- [x] `notify_update` でクライアント不在時のレンダリングスキップ
   - ファイル: `src/server.rs`
   - 修正方針: `state.tx.receiver_count() == 0` なら早期リターン
   - 理由: 接続クライアントがいない場合の無駄なレンダリングを回避
+  - 対応: `receiver_count()==0` で早期returnを実装
 
 - [ ] `eprintln!` を構造化ロギング（`log` or `tracing`）に置換
   - ファイル: 全ソースファイル
@@ -78,11 +81,12 @@
   - ファイル: `src/server.rs`
   - 対応: `ReadMarkdownError` を戻り値型に使用。TooLarge→413、Io→500 を返すように修正
 
-- [ ] [High] ファイル監視ランタイムエラーの伝播
+- [x] [High] ファイル監視ランタイムエラーの伝播
   - ファイル: `src/watcher.rs`
   - 影響範囲: debouncer callback, mpsc channel, tokio spawn task
   - 修正方針: mpscチャネルの型を `Result<(), String>` に変更し、エラー時にログ出力＋WebSocket通知を検討
   - 理由: 初期化後の監視エラーでライブリロードが静かに停止する
+  - 対応: `WatcherMessage::WatchError` を通知タスクで `BroadcastMessage::Error` に変換して配信
 
 - [ ] [Medium] renderer/tocの見出し抽出ロジック統合（DRY違反）
   - ファイル: `src/renderer.rs`, `src/toc.rs`
@@ -90,17 +94,19 @@
   - 修正方針: 共通の見出し抽出関数を作成し、rendererとtocで共有。パーサーオプションも統一
   - 理由: 同じMarkdownを2回パースし、見出しID生成ロジックが2箇所に重複している
 
-- [ ] [Medium] broadcast チャネルを `String` から `UpdateMessage` 型に変更
+- [x] [Medium] broadcast チャネルを `String` から `UpdateMessage` 型に変更
   - ファイル: `src/server.rs`, `src/template.rs`, `src/watcher.rs`
   - 影響範囲: AppState, handle_socket, notify_update, watcher bridge
   - 修正方針: `broadcast::Sender<String>` → `broadcast::Sender<Arc<UpdateMessage>>` に変更し、JSON化をWebSocket送信直前に移動
   - 理由: 型安全性向上。現状は任意文字列をbroadcastできてしまう
+  - 対応: `broadcast::Sender<BroadcastMessage>` へ変更し、JSON化をWS送信直前に集約
 
-- [ ] [Medium] AppState のフィールドをprivate化してコンストラクタを追加
+- [x] [Medium] AppState のフィールドをprivate化してコンストラクタを追加
   - ファイル: `src/server.rs`, `src/main.rs`, `tests/integration_test.rs`
   - 影響範囲: AppState生成箇所すべて（main.rs, 統合テスト内のAppState直接生成箇所）
   - 修正方針: pub フィールド → `pub(crate)` + `AppState::new()` コンストラクタ
   - 理由: 不変条件の強制。バリデーションなしに生成可能な現状を改善
+  - 対応: フィールドをprivate化し `AppState::new()` と getter 群へ移行
 
 - [ ] [Medium] `render_markdown` のGod Function分割
   - ファイル: `src/renderer.rs`
@@ -126,39 +132,45 @@
   - 修正方針: `Result<(String, String), _>` → `Result<UpdateMessage, _>` に変更
   - 理由: タプルの位置引数による取り違えリスクを排除
 
-- [ ] [High] 監視スレッドのグレースフルシャットダウン機構
+- [x] [High] 監視スレッドのグレースフルシャットダウン機構
   - ファイル: `src/watcher.rs`
   - 影響範囲: std::thread::park()ループ、debouncer lifetime
   - 修正方針: AtomicBool + unpark、またはmpsc channelでシャットダウンシグナルを送信
   - 理由: 現在スレッドは永久にparkし、プロセス終了まで解放されない
+  - 対応: `WatchHandle` を導入し、AtomicBool + unpark + join で停止可能化
 
-- [ ] [Medium] notify callbackエラーのチャネル伝播
+- [x] [Medium] notify callbackエラーのチャネル伝播
   - ファイル: `src/watcher.rs`
   - 影響範囲: mpsc channel型、tokio受信タスク
   - 修正方針: `mpsc::channel(32)` の型を `Result<(), String>` に変更し、エラー時にクライアントへWebSocket通知
   - 理由: 初期化後の監視エラーがeprintlnのみで報告され、クライアントに伝播しない
+  - 対応: callbackエラーを `WatcherMessage::WatchError` で受け、WSへエラー通知
 
 - [ ] [Medium] `is_target_file` のユニットテスト追加
   - ファイル: `src/watcher.rs`
   - 理由: 正規化成功ケース、失敗フォールバック（ファイル名+親ディレクトリ比較）、異なるディレクトリの同名ファイル等のテストが未整備
 
-- [ ] [Medium] WebSocket Origin ポート不一致時のテスト追加
+- [x] [Medium] WebSocket Origin ポート不一致時のテスト追加
   - ファイル: `src/server.rs` テスト
   - 理由: `is_allowed_ws_origin` でOriginのポートがHostと一致しない場合のテストが不足
+  - 対応: `server::tests` と `integration_test` にポート不一致拒否テストを追加
 
-- [ ] [Medium] `read_markdown_with_limit` の境界値テスト追加
+- [x] [Medium] `read_markdown_with_limit` の境界値テスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: ちょうど10MB、10MB+1バイト等の境界値テストが未整備
+  - 対応: 10MBちょうど=200、10MB+1=413 のテストを整備
 
-- [ ] [Medium] UpdateMessage にファクトリメソッド追加
+- [x] [Medium] UpdateMessage にファクトリメソッド追加
   - ファイル: `src/template.rs`
   - 修正方針: `UpdateMessage::new(content, toc)` + `UpdateMessage::error(msg)` を追加
   - 理由: エラーJSONの生成が `serde_json::json!` のアドホック構築で一貫性がない
+  - 対応: `UpdateMessage::new(content, toc, file)` と `UpdateMessage::error(msg)` を追加
 
-- [ ] [Medium] ReadMarkdownError に IntoResponse 実装
+- [x] [Medium] ReadMarkdownError に IntoResponse 実装
   - ファイル: `src/server.rs`
   - 修正方針: `impl IntoResponse for ReadMarkdownError` で TooLarge→413, Io→500 をカプセル化
   - 理由: ハンドラーでのmatch分岐を減らし、ステータスコードマッピングを一箇所に集約
+  - 対応: `status_code()` と `IntoResponse` 実装を追加
 
 ## PR #4 レビュー Suggestion (レビュー日: 2026-02-25)
 
@@ -176,18 +188,20 @@
   - ファイル: `src/template.rs`, 呼び出し箇所全て
   - 理由: 引数の順序ミスリスク軽減。`RenderPageParams` 構造体を導入
 
-- [ ] `list_markdown_files` のクエリ指定時スキップ
+- [x] `list_markdown_files` のクエリ指定時スキップ
   - ファイル: `src/server.rs` (`resolve_target_file`)
   - 理由: `query_file` が Some の場合、ファイル一覧の走査は不要（パフォーマンス改善）
+  - 対応: `resolve_target_file(..., include_file_list)` を導入し、`/api/content` では一覧走査をスキップ
 
 - [x] 空ディレクトリ時の404テスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: .mdファイルが1つもないディレクトリで404が返ることのテストが未整備
   - 対応: `test_ディレクトリモード_空ディレクトリで404を返す` を追加
 
-- [ ] 単一ファイルモードの `/api/content` で `file` フィールド不在テスト追加
+- [x] 単一ファイルモードの `/api/content` で `file` フィールド不在テスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: 単一ファイルモードのAPIレスポンスに `file` フィールドが含まれないことの検証
+  - 対応: `test_apiコンテンツ取得` で `json.get(\"file\").is_none()` を追加
 
 - [ ] `resolve_file` docコメントに「正規化済みパスを返す」を追記
   - ファイル: `src/server.rs`
@@ -218,13 +232,15 @@
   - ファイル: `tests/integration_test.rs`
   - 理由: `skip_serializing_if` による条件付きシリアライズの動作検証
 
-- [ ] 単一ファイルモードで `?file=` クエリパラメータ指定時の動作テスト
+- [x] 単一ファイルモードで `?file=` クエリパラメータ指定時の動作テスト
   - ファイル: `tests/integration_test.rs`
   - 理由: クエリが無視されることの明示的テストが未整備
+  - 対応: `test_単一ファイルモードでfileクエリは無視される` を追加
 
-- [ ] アクティブファイルマーカーのHTMLテスト追加
+- [x] アクティブファイルマーカーのHTMLテスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: ファイル一覧で現在選択中のファイルに `class="active"` が付与されることの検証
+  - 対応: `test_ディレクトリモード_アクティブファイルマーカーが表示される` を追加
 
 - [x] デフォルトファイルフォールバックテスト追加
   - ファイル: `tests/integration_test.rs`
@@ -372,9 +388,10 @@
   - ファイル: `src/server.rs:109`
   - 理由: CSP Level 2+では `*` は `data:` にマッチしない。現状は安全（ブロック）だがコメントが曖昧
 
-- [ ] `ResolveFileError` に `status_code()` メソッド追加
+- [x] `ResolveFileError` に `status_code()` メソッド追加
   - ファイル: `src/server.rs`
   - 理由: HTTPステータスマッピングが2箇所に散在し微妙に異なる
+  - 対応: `ResolveFileError::status_code()` を実装し `resolve_target_file` で利用
 
 - [ ] `resolve_file` の403 vs 404の区別でパス列挙が可能（SEC-1）
   - ファイル: `src/server.rs:230-237`
@@ -393,11 +410,12 @@
   - 修正方針: `CanonicalPath(PathBuf)` newtypeを導入、`relative_path_of` の毎回canonicalizeを排除
   - 理由: type-design-analyzer 評価 4.0/10。繰り返しcanonicalize呼び出しの排除と型安全性向上
 
-- [ ] [Medium] broadcast チャネルを `String` から型付きメッセージに変更
+- [x] [Medium] broadcast チャネルを `String` から型付きメッセージに変更
   - ファイル: `src/server.rs`, `src/template.rs`, `src/watcher.rs`
   - 影響範囲: AppState, handle_socket, notify_update
   - 修正方針: `BroadcastMessage` enumを導入（Update/Refresh/Error）、JSON化はWS送信直前に移動
   - 理由: type-design-analyzer指摘。String型では任意のJSON形状を送信可能で型安全性が不足
+  - 対応: `BroadcastMessage` enum導入、送信直前JSON化へ移行
 
 ## fetchエラーバナー レビュー (レビュー日: 2026-02-25)
 
@@ -418,13 +436,15 @@
 
 ### Medium（巨大な修正のためTODO）
 
-- [ ] [Medium] エラーメッセージがHTTPステータスコードを無視している
+- [x] [Medium] エラーメッセージがHTTPステータスコードを無視している
   - ファイル: `src/template.rs` (JS部分 selectFile .catch)
   - 修正方針: catchブロックでerrオブジェクトにstatusを持たせ、403/404/413/500別のメッセージを出し分け
   - 理由: 403(権限なし)、404(未存在)でも「再度お試しください」は不適切
+  - 対応: `createHttpError` と `getFileFetchErrorMessage` を導入し、HTTPステータス別文言に変更
 
 ### Low Priority
 
-- [ ] `resp.json()`パース失敗がネットワークエラーと区別不能
+- [x] `resp.json()`パース失敗がネットワークエラーと区別不能
   - ファイル: `src/template.rs` (JS部分 selectFile .then)
   - 理由: SyntaxErrorがcatchに流れHTTPエラーと同じ扱い。レスポンスボディ破損の特定が困難
+  - 対応: `resp.json().catch` で `err.type='parse'` を付与し、専用メッセージに分岐

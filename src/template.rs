@@ -95,13 +95,25 @@ pub fn render_page(
 }
 
 /// コンテンツ更新用JSONメッセージ構造体（HTTP API・WebSocket共用）
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct UpdateMessage {
     pub content: String,
     pub toc: String,
     /// ディレクトリモード時の変更ファイル相対パス（単一ファイルモードはNone）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+}
+
+impl UpdateMessage {
+    /// 更新メッセージを生成する
+    pub fn new(content: String, toc: String, file: Option<String>) -> Self {
+        Self { content, toc, file }
+    }
+
+    /// エラーJSONを生成する
+    pub fn error(message: impl AsRef<str>) -> serde_json::Value {
+        serde_json::json!({ "error": message.as_ref() })
+    }
 }
 
 const CSS: &str = r##"
@@ -840,6 +852,34 @@ const JS: &str = r##"
     }
   }
 
+  function createHttpError(status) {
+    var err = new Error('HTTP ' + status);
+    err.type = 'http';
+    err.status = status;
+    return err;
+  }
+
+  function getFileFetchErrorMessage(err) {
+    if (err && err.type === 'http') {
+      switch (err.status) {
+        case 403:
+          return 'このファイルにはアクセスできません。';
+        case 404:
+          return '指定したファイルが見つかりません。';
+        case 413:
+          return 'ファイルサイズが上限（10MB）を超えています。';
+        case 500:
+          return 'サーバー内部エラーが発生しました。';
+        default:
+          return 'ファイルの読み込みに失敗しました（HTTP ' + err.status + '）。';
+      }
+    }
+    if (err && err.type === 'parse') {
+      return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
+    }
+    return 'ネットワークエラーが発生しました。接続を確認して再度お試しください。';
+  }
+
   // サーバーサイドでサニタイズ済みのHTMLを反映する
   // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
   function updateContent(data) {
@@ -877,8 +917,11 @@ const JS: &str = r##"
       headers: { 'Accept': 'application/json' }
     })
     .then(function(resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
+      if (!resp.ok) throw createHttpError(resp.status);
+      return resp.json().catch(function(err) {
+        err.type = 'parse';
+        throw err;
+      });
     })
     .then(function(data) {
       // エラーバナーは成功レスポンスが来た時点で常にクリア（世代に関わらず安全）
@@ -907,7 +950,7 @@ const JS: &str = r##"
       updateFileListActive(previousFile);
       // URLを元に戻す（pushHistory時はpushState、popstate時はreplaceState）
       setFileParam(previousFile, !pushHistory);
-      showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');
+      showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     });
   }
 
@@ -1244,12 +1287,14 @@ mod tests {
         assert!(html.contains("closeBtn.onclick = hideFileFetchErrorBanner"));
         // WebSocket切断バナー表示中はfetchエラーバナーを抑制する
         assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        // HTTPエラーとJSONパースエラーを区別する
+        assert!(html.contains("function createHttpError(status)"));
+        assert!(html.contains("function getFileFetchErrorMessage(err)"));
+        assert!(html.contains("err.type = 'parse';"));
         // fetch成功時にバナーをクリア（generation チェック前）
         assert!(html.contains("hideFileFetchErrorBanner();"));
-        // fetch失敗時にバナーを表示
-        assert!(html.contains(
-            "showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');"
-        ));
+        // fetch失敗時にエラー種別に応じたメッセージを表示
+        assert!(html.contains("showFileFetchErrorBanner(getFileFetchErrorMessage(err));"));
     }
 
     #[test]
