@@ -504,7 +504,10 @@ fn sha256_base64(input: &[u8]) -> String {
 }
 
 // セキュリティ注記:
-// innerHTML使用箇所: updateContent()内でサーバーサイドでサニタイズ済みHTMLを反映。
+// innerHTML使用箇所: updateContent()内でサニタイズ済みHTMLのみを反映。
+// エスケープ経路: renderer.rs(render_markdown)でraw HTML除去
+//   -> server.rs(read_and_render_file)でテンプレートへ受け渡し
+//   -> template.rs(updateContent)で反映。
 // XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
 // DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。

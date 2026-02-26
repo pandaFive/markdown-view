@@ -282,7 +282,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         // CSP: script/styleはハッシュベース許可でunsafe-inlineを排除する。
-        // img-srcは外部画像参照のため*を許可。
+        // img-srcは外部画像参照のため*を許可（CSP Level 2+では `*` に `data:` は含まれない）。
         // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
@@ -466,6 +466,10 @@ fn is_allowed_request_host(headers: &HeaderMap) -> bool {
     is_trusted_authority(host)
 }
 
+/// WebSocket接続時のOriginヘッダーを検証する
+///
+/// DNS Rebinding対策として、Host検証に加えてOriginのauthority一致も要求する。
+/// Originスキームは`http`/`https`のみ許可する。
 fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
         return false;
@@ -520,6 +524,9 @@ fn is_trusted_host(host: &str) -> bool {
     }
 }
 
+/// authority文字列（`host[:port]`）を比較用に正規化する
+///
+/// 末尾ドットを除去し、大小文字差を吸収する。
 fn normalize_authority(authority: &str) -> String {
     authority.trim().trim_end_matches('.').to_ascii_lowercase()
 }
@@ -726,6 +733,7 @@ const MAX_DIR_DEPTH: usize = 32;
 /// - 隠しファイル/ディレクトリ（`.`開始）を除外
 /// - シンボリックリンクのサイクルを検出してスキップ
 /// - 最大`MAX_FILE_LIST`件まで
+/// - 最大`MAX_DIR_DEPTH`階層まで走査
 /// - ベースディレクトリからの相対パスで返す（アルファベット順ソート）
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
@@ -804,60 +812,45 @@ fn list_markdown_files_recursive(
             }
             // シンボリックリンクディレクトリの場合、解決先がベースディレクトリ内か確認
             if file_type.is_symlink() {
-                match path.canonicalize() {
-                    Ok(resolved) => {
-                        let canonical_base = match base_dir.canonicalize() {
-                            Ok(cb) => cb,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
-                                    base_dir.display(),
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-                        if !resolved.starts_with(&canonical_base) {
-                            tracing::warn!(
-                                "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
-                                path.display(),
-                                resolved.display()
-                            );
-                            continue;
-                        }
-                        // サイクル検出: 既に訪問済みのディレクトリはスキップ
-                        if !visited_dirs.insert(resolved) {
-                            tracing::warn!(
-                                "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
-                                path.display()
-                            );
-                            continue;
-                        }
-                    }
+                let Some(resolved) = canonicalize_dir_for_cycle(&path, "シンボリックリンク")
+                else {
+                    continue;
+                };
+                let canonical_base = match base_dir.canonicalize() {
+                    Ok(cb) => cb,
                     Err(e) => {
                         tracing::warn!(
-                            "[markdown-view] シンボリックリンクの正規化に失敗（スキップ）: {} ({})",
-                            path.display(),
+                            "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
+                            base_dir.display(),
                             e
                         );
                         continue;
                     }
+                };
+                if !resolved.starts_with(&canonical_base) {
+                    tracing::warn!(
+                        "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+                        path.display(),
+                        resolved.display()
+                    );
+                    continue;
+                }
+                // サイクル検出: 既に訪問済みのディレクトリはスキップ
+                if !visited_dirs.insert(resolved) {
+                    tracing::warn!(
+                        "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                        path.display()
+                    );
+                    continue;
                 }
             } else {
                 // 通常ディレクトリもサイクル検出対象に登録
-                match path.canonicalize() {
-                    Ok(canonical) => {
-                        if !visited_dirs.insert(canonical) {
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[markdown-view] ディレクトリ正規化に失敗（サイクル検出なしで続行）: {} ({})",
-                            path.display(),
-                            e
-                        );
-                    }
+                let Some(canonical) = canonicalize_dir_for_cycle(&path, "通常ディレクトリ")
+                else {
+                    continue;
+                };
+                if !visited_dirs.insert(canonical) {
+                    continue;
                 }
             }
             list_markdown_files_recursive(base_dir, &path, files, visited_dirs, depth + 1)?;
@@ -890,6 +883,21 @@ fn list_markdown_files_recursive(
         }
     }
     Ok(())
+}
+
+fn canonicalize_dir_for_cycle(path: &Path, label: &str) -> Option<PathBuf> {
+    match path.canonicalize() {
+        Ok(canonical) => Some(canonical),
+        Err(e) => {
+            tracing::warn!(
+                "[markdown-view] {}の正規化に失敗（スキップ）: {} ({})",
+                label,
+                path.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
@@ -1385,6 +1393,56 @@ mod tests {
             "サイクル経由のエントリが含まれてはいけない: {:?}",
             files
         );
+    }
+
+    #[test]
+    fn test_list_markdown_files_深度上限を超えるパスは除外される() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.md"), "# root").unwrap();
+
+        let mut current = dir.path().to_path_buf();
+        for i in 0..=MAX_DIR_DEPTH {
+            current = current.join(format!("d{}", i));
+            std::fs::create_dir_all(&current).unwrap();
+        }
+        std::fs::write(current.join("deep.md"), "# deep").unwrap();
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert!(files.contains(&"root.md".to_string()));
+        assert!(!files.iter().any(|f| f.ends_with("deep.md")));
+    }
+
+    #[test]
+    fn test_list_markdown_files_recursive_通常ディレクトリcanonicalize失敗時はスキップ扱い() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-dir");
+        assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ() {
+        let base_dir = tempfile::tempdir().unwrap();
+        std::fs::write(base_dir.path().join("README.md"), "# README").unwrap();
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("outside.md");
+        std::fs::write(&outside_file, "# outside").unwrap();
+        let outside_canonical = outside_file.canonicalize().unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_directory(base_dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        notify_update(&state, &outside_canonical).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     // --- AppMode テスト ---

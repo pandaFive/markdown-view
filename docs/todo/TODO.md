@@ -32,10 +32,11 @@
   - 理由: Origin未送信、不正スキーム、ポート不一致等の境界テストが未整備
   - 対応: `server::tests` にユニットテスト12件追加
 
-- [ ] セキュリティ関数のドキュメントコメント追加
+- [x] セキュリティ関数のドキュメントコメント追加
   - ファイル: `src/renderer.rs`, `src/server.rs`
   - 対象: `sanitize_href`, `is_safe_href`, `is_allowed_ws_origin`, `normalize_authority`
   - 理由: セキュリティ上重要な関数にdocコメントがない
+  - 対応: 各関数に許可条件/正規化方針/DNS Rebinding対策のdocコメントを追加
 
 - [x] 監視スレッドの名前付け
   - ファイル: `src/watcher.rs`
@@ -220,13 +221,15 @@
   - 理由: 単一ファイルモードのAPIレスポンスに `file` フィールドが含まれないことの検証
   - 対応: `test_apiコンテンツ取得` で `json.get(\"file\").is_none()` を追加
 
-- [ ] `resolve_file` docコメントに「正規化済みパスを返す」を追記
+- [x] `resolve_file` docコメントに「正規化済みパスを返す」を追記
   - ファイル: `src/server.rs`
   - 理由: 戻り値がcanonicalize済みであることがドキュメントに明記されていない
+  - 対応: `resolve_file` のdocコメントに明記済み
 
-- [ ] `notify_update` docコメントにディレクトリモード動作を追記
+- [x] `notify_update` docコメントにディレクトリモード動作を追記
   - ファイル: `src/server.rs`
   - 理由: ディレクトリモード時の `file` フィールド付与動作がドキュメントに未記載
+  - 対応: 相対パス付与と相対パス算出失敗時スキップ動作をdocコメントに追記
 
 ## PR #4 レビュー Round 2 Suggestion (レビュー日: 2026-02-25)
 
@@ -242,13 +245,15 @@
   - 理由: `console.error` のみでユーザーには通知されない。バナー表示等を検討
   - 対応: `file-fetch-error-banner` を追加し、fetch失敗時に表示・成功時に自動非表示化
 
-- [ ] シンボリックリンクディレクトリのファイル一覧テスト追加
+- [x] シンボリックリンクディレクトリのファイル一覧テスト追加
   - ファイル: `tests/integration_test.rs` or `src/server.rs`テスト
   - 理由: `list_markdown_files` のsymlink containmentチェック動作が未テスト
+  - 対応: `server::tests` にシンボリックリンクサイクル/自己参照リンク検証を追加済み
 
-- [ ] `UpdateMessage.file` フィールドのシリアライズテスト追加
+- [x] `UpdateMessage.file` フィールドのシリアライズテスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: `skip_serializing_if` による条件付きシリアライズの動作検証
+  - 対応: 単一ファイルで不在・ディレクトリモードで存在することを統合テストで検証済み
 
 - [x] 単一ファイルモードで `?file=` クエリパラメータ指定時の動作テスト
   - ファイル: `tests/integration_test.rs`
@@ -265,21 +270,25 @@
   - 理由: README.mdがない場合にアルファベット順最初のファイルが選ばれることの検証
   - 対応: `test_ディレクトリモード_readmeなし時はアルファベット順最初のファイルがデフォルト` を追加
 
-- [ ] `relative_path_of` にfile_pathの事前条件docコメント追加
+- [x] `relative_path_of` にfile_pathの事前条件docコメント追加
   - ファイル: `src/server.rs`
   - 理由: file_pathがcanonicalize済みであることの前提が明記されていない
+  - 対応: docコメントにcanonicalize済み前提を追記済み
 
-- [ ] `is_hidden_relative` にfail-safe動作のdocコメント追加
+- [x] `is_hidden_relative` にfail-safe動作のdocコメント追加
   - ファイル: `src/watcher.rs`
   - 理由: 判定失敗時に安全側で `true` を返す動作の明示
+  - 対応: fail-safe時の `true` 返却をdocコメントに明記済み
 
-- [ ] `list_markdown_files` にソート順のdocコメント追加
+- [x] `list_markdown_files` にソート順のdocコメント追加
   - ファイル: `src/server.rs`
   - 理由: アルファベット順ソートであることがdocコメントに未記載
+  - 対応: ソート順仕様をdocコメントへ追記済み
 
-- [ ] innerHTML セキュリティコメントにエスケープ経路を追記
+- [x] innerHTML セキュリティコメントにエスケープ経路を追記
   - ファイル: `src/template.rs`
   - 理由: `updateContent()` のコメントに具体的なエスケープパス（renderer.rs→server.rs→template.rs）を記載
+  - 対応: renderer→server→templateの経路をコメントで明記
 
 ### 巨大な修正（要別途対応）
 
@@ -314,25 +323,30 @@
 
 ### Low Priority
 
-- [ ] `list_markdown_files` のシンボリックリンクサイクル検出テスト追加
+- [x] `list_markdown_files` のシンボリックリンクサイクル検出テスト追加
   - ファイル: `src/server.rs` テスト
   - 理由: サイクル検出ロジックの動作検証（テスト環境でのsymlink loop作成が必要）
+  - 対応: `server::tests` のシンボリックリンクサイクル系テストで検証済み
 
-- [ ] `notify_update` のディレクトリモード相対パス失敗時スキップテスト追加
+- [x] `notify_update` のディレクトリモード相対パス失敗時スキップテスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: ベースディレクトリ外のファイル変更時にブロードキャストがスキップされることの検証
+  - 対応: `server::tests` に相対パス算出失敗時の非送信テストを追加
 
-- [ ] `list_markdown_files_recursive` の通常ディレクトリcanonicalize失敗時テスト追加
+- [x] `list_markdown_files_recursive` の通常ディレクトリcanonicalize失敗時テスト追加
   - ファイル: `src/server.rs` テスト
   - 理由: ハードリンクやマウントポイントでcanonicalizeが失敗するケースの検証
+  - 対応: `canonicalize_dir_for_cycle` を抽出し、通常ディレクトリ失敗時のスキップ分岐をユニットテスト化
 
-- [ ] `resolve_file` のdocコメントに「canonicalize済みの絶対パスを返す」を追記
+- [x] `resolve_file` のdocコメントに「canonicalize済みの絶対パスを返す」を追記
   - ファイル: `src/server.rs`
   - 理由: 戻り値の保証がドキュメントに明記されていない
+  - 対応: `resolve_file` docコメントに明記済み
 
-- [ ] `notify_update` のdocコメントにディレクトリモード相対パス失敗時のスキップ動作を追記
+- [x] `notify_update` のdocコメントにディレクトリモード相対パス失敗時のスキップ動作を追記
   - ファイル: `src/server.rs`
   - 理由: 新たに追加されたスキップ動作がdocコメントに反映されていない（※コード内コメントには記載済み）
+  - 対応: スキップ条件と理由をdocコメントへ反映済み
 
 ## PR #4 レビュー Round 4 (レビュー日: 2026-02-25)
 
@@ -389,25 +403,30 @@
 
 ### Low Priority / Suggestions
 
-- [ ] `notify_update` broadcastスキップのテスト追加
+- [x] `notify_update` broadcastスキップのテスト追加
   - ファイル: `tests/integration_test.rs`
   - 理由: ディレクトリモードで相対パス算出失敗時のスキップ動作が未テスト
+  - 対応: `test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ` を追加
 
-- [ ] `MAX_DIR_DEPTH` 深度制限のテスト追加
+- [x] `MAX_DIR_DEPTH` 深度制限のテスト追加
   - ファイル: `src/server.rs` テスト
   - 理由: 33+階層のディレクトリ構造でのスキップ動作が未テスト
+  - 対応: `test_list_markdown_files_深度上限を超えるパスは除外される` を追加
 
-- [ ] `render_page` ディレクトリモード引数のユニットテスト追加
+- [x] `render_page` ディレクトリモード引数のユニットテスト追加
   - ファイル: `tests/renderer_test.rs`
   - 理由: `file_list`, `current_file` 引数のテストがNone,Noneのみ
+  - 対応: `template::tests` で `file_list`/`current_file` 指定時のHTML構造を検証済み
 
-- [ ] `list_markdown_files` docコメントに `MAX_DIR_DEPTH` 記載追加
+- [x] `list_markdown_files` docコメントに `MAX_DIR_DEPTH` 記載追加
   - ファイル: `src/server.rs`
   - 理由: docコメントに深度制限の記載がない
+  - 対応: 深度上限をdocコメントへ追記済み
 
-- [ ] CSP `img-src *` と `data:` スキームのコメント明確化
+- [x] CSP `img-src *` と `data:` スキームのコメント明確化
   - ファイル: `src/server.rs:109`
   - 理由: CSP Level 2+では `*` は `data:` にマッチしない。現状は安全（ブロック）だがコメントが曖昧
+  - 対応: `img-src *` が `data:` を含まない点をコメントに明記
 
 - [x] `ResolveFileError` に `status_code()` メソッド追加
   - ファイル: `src/server.rs`

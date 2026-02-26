@@ -623,6 +623,9 @@ fn add_code_block_class(highlighted_html: String) -> String {
     }
 }
 
+/// リンク/画像URLを安全な形式に正規化する
+///
+/// 前後の空白を除去し、許可スキーム以外は `"#"` に置き換える。
 fn sanitize_href(dest_url: &str) -> String {
     let trimmed = dest_url.trim();
     if is_safe_href(trimmed) {
@@ -632,6 +635,9 @@ fn sanitize_href(dest_url: &str) -> String {
     }
 }
 
+/// URLが許可スキームかどうか判定する
+///
+/// `http/https/mailto/tel` とローカル参照（`/`, `./`, `../`, `#`, `?`）のみ許可する。
 fn is_safe_href(dest_url: &str) -> bool {
     if dest_url.is_empty() {
         return false;
