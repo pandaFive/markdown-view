@@ -1002,14 +1002,9 @@ impl std::error::Error for ResolveFileError {}
 impl ResolveFileError {
     /// HTTPステータスコードへ変換する
     pub fn status_code(&self) -> StatusCode {
-        match self {
-            ResolveFileError::Traversal
-            | ResolveFileError::NotMarkdown
-            | ResolveFileError::Hidden => StatusCode::FORBIDDEN,
-            ResolveFileError::EmptyPath
-            | ResolveFileError::InvalidPath
-            | ResolveFileError::NotFound => StatusCode::NOT_FOUND,
-        }
+        // エラー種別で応答を分けるとファイル存在有無の推測材料になるため、404に統一する
+        let _ = self;
+        StatusCode::NOT_FOUND
     }
 }
 

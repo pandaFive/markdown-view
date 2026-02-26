@@ -444,11 +444,7 @@ async fn test_ディレクトリモード_トラバーサル攻撃拒否() {
     let resp = reqwest::get(format!("http://{}/api/content?file=../../etc/passwd", addr))
         .await
         .unwrap();
-    // NotFoundまたはForbidden
-    assert!(
-        resp.status() == reqwest::StatusCode::NOT_FOUND
-            || resp.status() == reqwest::StatusCode::FORBIDDEN
-    );
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -468,7 +464,7 @@ async fn test_ディレクトリモード_非mdファイル拒否() {
     let resp = reqwest::get(format!("http://{}/api/content?file=notes.txt", addr))
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -482,13 +478,13 @@ async fn test_ディレクトリモード_隠しファイルの直接アクセ�
     ))
     .await
     .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // index経由でも同様
     let resp = reqwest::get(format!("http://{}/?file=.hidden/secret.md", addr))
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

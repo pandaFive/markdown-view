@@ -259,7 +259,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
 
     let watch_dir = dir_path.clone();
     // イベントコールバック内で相対パスの隠しファイル判定に使用
-    let base_for_filter = dir_path.clone();
+    let canonical_base_dir = dir_path.clone();
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let thread_shutdown_flag = shutdown_flag.clone();
 
@@ -302,7 +302,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             };
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                            if !path.starts_with(&base_for_filter) {
+                            if !path.starts_with(&canonical_base_dir) {
                                 tracing::warn!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                                     path.display()
@@ -311,7 +311,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             }
                             // 隠しファイル除外（canonicalize後のパスで判定）
                             // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                            if is_hidden_relative(&path, &base_for_filter) {
+                            if is_hidden_relative(&path, &canonical_base_dir) {
                                 continue;
                             }
                             if notified.insert(path.clone()) {

@@ -225,9 +225,10 @@
 
 ### Low Priority
 
-- [ ] Watcher canonicalize サイレントフォールバックにログ追加
+- [x] Watcher canonicalize サイレントフォールバックにログ追加
   - ファイル: `src/watcher.rs:188-189`
   - 理由: `canonicalize().unwrap_or_else` がサイレント。ログを追加して監視対象外イベントの追跡性を向上
+  - 対応: `canonicalize` 失敗時に警告ログを出力してイベントをスキップする実装へ変更
 
 - [x] JS `selectFile` のfetch失敗時にユーザーへの視覚的フィードバック追加
   - ファイル: `src/template.rs` (JS部分)
@@ -405,14 +406,16 @@
   - 理由: HTTPステータスマッピングが2箇所に散在し微妙に異なる
   - 対応: `ResolveFileError::status_code()` を実装し `resolve_target_file` で利用
 
-- [ ] `resolve_file` の403 vs 404の区別でパス列挙が可能（SEC-1）
+- [x] `resolve_file` の403 vs 404の区別でパス列挙が可能（SEC-1）
   - ファイル: `src/server.rs:230-237`
   - 理由: Traversal/Hidden/NotMarkdown=403, NotFound=404 で隠しファイル存在が推測可能
   - 対応方針: 全エラーを404に統一することを検討（ローカルツールなのでリスクは低い）
+  - 対応: `ResolveFileError::status_code()` を404固定に変更し、エラー種別の露出を抑制
 
-- [ ] `base_for_filter` 変数名の明確化
+- [x] `base_for_filter` 変数名の明確化
   - ファイル: `src/watcher.rs:162`
   - 理由: canonicalize済みである不変条件が変数名に表現されていない
+  - 対応: `canonical_base_dir` へリネームして意図を明確化
 
 ### 巨大な修正（要別途対応）
 
