@@ -316,6 +316,9 @@ body {
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
+.content th.align-left, .content td.align-left { text-align: left; }
+.content th.align-center, .content td.align-center { text-align: center; }
+.content th.align-right, .content td.align-right { text-align: right; }
 
 .content th { font-weight: 600; background: var(--table-alt-bg); }
 .content tr:nth-child(even) { background: var(--table-alt-bg); }

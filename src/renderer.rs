@@ -408,14 +408,14 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 state.push_html("</tr>\n");
             }
             Event::Start(Tag::TableCell) => {
-                let align_attr = table_alignments
+                let align_class = table_alignments
                     .get(table_cell_index)
-                    .and_then(table_align_style_attr)
+                    .and_then(table_align_class_attr)
                     .unwrap_or("");
                 if in_table_head {
-                    state.push_html(&format!("<th{}>", align_attr));
+                    state.push_html(&format!("<th{}>", align_class));
                 } else {
-                    state.push_html(&format!("<td{}>", align_attr));
+                    state.push_html(&format!("<td{}>", align_class));
                 }
                 table_cell_index = table_cell_index.saturating_add(1);
             }
@@ -435,11 +435,11 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     state.html_output
 }
 
-fn table_align_style_attr(alignment: &Alignment) -> Option<&'static str> {
+fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
     match alignment {
-        Alignment::Left => Some(" style=\"text-align:left\""),
-        Alignment::Center => Some(" style=\"text-align:center\""),
-        Alignment::Right => Some(" style=\"text-align:right\""),
+        Alignment::Left => Some(" class=\"align-left\""),
+        Alignment::Center => Some(" class=\"align-center\""),
+        Alignment::Right => Some(" class=\"align-right\""),
         Alignment::None => None,
     }
 }

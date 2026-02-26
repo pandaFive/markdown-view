@@ -27,12 +27,12 @@ fn test_gfmテーブル() {
 fn test_テーブルalignmentが反映される() {
     let md = "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |";
     let html = render_markdown(md, None);
-    assert!(html.contains("<th style=\"text-align:left\">L</th>"));
-    assert!(html.contains("<th style=\"text-align:center\">C</th>"));
-    assert!(html.contains("<th style=\"text-align:right\">R</th>"));
-    assert!(html.contains("<td style=\"text-align:left\">1</td>"));
-    assert!(html.contains("<td style=\"text-align:center\">2</td>"));
-    assert!(html.contains("<td style=\"text-align:right\">3</td>"));
+    assert!(html.contains("<th class=\"align-left\">L</th>"));
+    assert!(html.contains("<th class=\"align-center\">C</th>"));
+    assert!(html.contains("<th class=\"align-right\">R</th>"));
+    assert!(html.contains("<td class=\"align-left\">1</td>"));
+    assert!(html.contains("<td class=\"align-center\">2</td>"));
+    assert!(html.contains("<td class=\"align-right\">3</td>"));
 }
 
 #[test]
