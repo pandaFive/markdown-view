@@ -7,12 +7,12 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
-use crate::server::{notify_update, AppState, BroadcastMessage};
+use crate::server::{notify_update, AppState, BroadcastMessage, CanonicalPath};
 
 /// ファイル監視からtokioタスクへのメッセージ型
 enum WatcherMessage {
     /// ファイル変更検知（canonicalize済みパス）
-    FileChanged(PathBuf),
+    FileChanged(CanonicalPath),
     /// 監視ランタイムエラー（notify debouncerコールバック由来）
     WatchError(String),
 }
@@ -36,10 +36,13 @@ fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, 
 const DEBOUNCE_MS: u64 = 300;
 /// 監視スレッドのpark待機間隔（ミリ秒）
 const WATCHER_THREAD_PARK_MS: u64 = 250;
+/// shutdown() のグレースフル停止待機秒数
+const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 /// 監視実行中ハンドル
 ///
-/// Drop時に監視スレッドと通知タスクを停止する。
+/// `shutdown()` は通知タスクの終了を一定時間待つグレースフル停止を行う。
+/// `Drop` は待機せず即時abortするフォールバック停止を行う。
 pub struct WatchHandle {
     runtime: Option<WatchRuntime>,
 }
@@ -78,9 +81,12 @@ impl WatchHandle {
                 );
             }
 
-            if tokio::time::timeout(Duration::from_secs(2), &mut runtime.notify_task)
-                .await
-                .is_err()
+            if tokio::time::timeout(
+                Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
+                &mut runtime.notify_task,
+            )
+            .await
+            .is_err()
             {
                 tracing::warn!("[markdown-view] 通知タスク停止がタイムアウトしたためabortします");
                 runtime.notify_task.abort();
@@ -155,7 +161,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                             if is_content_change_event(&event.kind) {
                                 // 対象ファイルの変更のみ通知
                                 if is_target_file(&event.path, &target_path) {
-                                    let path = match event.path.canonicalize() {
+                                    let path = match CanonicalPath::try_from_path(&event.path) {
                                         Ok(p) => p,
                                         Err(e) => {
                                             tracing::warn!(
@@ -236,7 +242,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, &changed_path).await;
+                    notify_update(&state, changed_path.as_path()).await;
                 }
                 WatcherMessage::WatchError(error_msg) => {
                     broadcast_error(&state, &error_msg);
@@ -289,7 +295,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             if !is_md {
                                 continue;
                             }
-                            let path = match event.path.canonicalize() {
+                            let path = match CanonicalPath::try_from_path(&event.path) {
                                 Ok(p) => p,
                                 Err(e) => {
                                     tracing::warn!(
@@ -302,19 +308,19 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             };
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                            if !path.starts_with(&canonical_base_dir) {
+                            if !path.as_path().starts_with(&canonical_base_dir) {
                                 tracing::warn!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                                    path.display()
+                                    path.as_path().display()
                                 );
                                 continue;
                             }
                             // 隠しファイル除外（canonicalize後のパスで判定）
                             // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                            if is_hidden_relative(&path, &canonical_base_dir) {
+                            if is_hidden_relative(path.as_path(), &canonical_base_dir) {
                                 continue;
                             }
-                            if notified.insert(path.clone()) {
+                            if notified.insert(path.as_path().to_path_buf()) {
                                 send_watcher_message(
                                     &rt_tx,
                                     WatcherMessage::FileChanged(path),
@@ -383,7 +389,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, &changed_path).await;
+                    notify_update(&state, changed_path.as_path()).await;
                 }
                 WatcherMessage::WatchError(error_msg) => {
                     broadcast_error(&state, &error_msg);
@@ -552,12 +558,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
 
         // FileChanged variant
-        let path = PathBuf::from("/tmp/test.md");
-        tx.send(WatcherMessage::FileChanged(path.clone()))
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        std::fs::write(&path, "# test").unwrap();
+        let canonical = CanonicalPath::try_from_path(&path).unwrap();
+        tx.send(WatcherMessage::FileChanged(canonical.clone()))
             .await
             .unwrap();
         match rx.recv().await.unwrap() {
-            WatcherMessage::FileChanged(p) => assert_eq!(p, path),
+            WatcherMessage::FileChanged(p) => assert_eq!(p, canonical),
             WatcherMessage::WatchError(_) => panic!("FileChangedを期待したがWatchErrorを受信"),
         }
 
@@ -574,8 +583,12 @@ mod tests {
     #[test]
     fn test_send_watcher_message_チャネル満杯時はメッセージを破棄してブロックしない() {
         let (tx, mut rx) = mpsc::channel::<WatcherMessage>(1);
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.md");
+        std::fs::write(&first, "# first").unwrap();
+        let first_canonical = CanonicalPath::try_from_path(&first).unwrap();
         // チャネルを満杯にする
-        tx.blocking_send(WatcherMessage::FileChanged(PathBuf::from("/tmp/first.md")))
+        tx.blocking_send(WatcherMessage::FileChanged(first_canonical.clone()))
             .unwrap();
 
         // 満杯時にtry_sendで即座に破棄される（ブロックしない）
@@ -588,7 +601,7 @@ mod tests {
         // 最初のメッセージのみ受信できる
         match rx.blocking_recv().unwrap() {
             WatcherMessage::FileChanged(path) => {
-                assert_eq!(path, PathBuf::from("/tmp/first.md"));
+                assert_eq!(path, first_canonical);
             }
             WatcherMessage::WatchError(_) => {
                 panic!("最初のメッセージはFileChangedを期待")
@@ -675,5 +688,61 @@ mod tests {
 
         // fail-safe: trueを返す（隠しファイルとして除外）
         assert!(is_hidden_relative(unrelated, base));
+    }
+
+    #[tokio::test]
+    async fn test_watchhandle_shutdownはタイムアウト後にabortする() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let thread_flag = shutdown_flag.clone();
+        let watcher_thread = std::thread::spawn(move || {
+            while !thread_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        });
+        let notify_task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let handle = WatchHandle::new(shutdown_flag, watcher_thread, notify_task);
+        let start = std::time::Instant::now();
+        handle.shutdown().await;
+        assert!(start.elapsed() >= Duration::from_secs(SHUTDOWN_TIMEOUT_SECS));
+    }
+
+    #[tokio::test]
+    async fn test_watchhandle_dropはフォールバック停止でabortする() {
+        struct TaskDropFlag(Arc<AtomicBool>);
+        impl Drop for TaskDropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let thread_flag = shutdown_flag.clone();
+        let watcher_thread = std::thread::spawn(move || {
+            while !thread_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        });
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_for_task = dropped.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let notify_task = tokio::spawn(async move {
+            let _guard = TaskDropFlag(dropped_for_task);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        let handle = WatchHandle::new(shutdown_flag, watcher_thread, notify_task);
+        started_rx.await.unwrap();
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }
