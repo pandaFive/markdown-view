@@ -270,10 +270,11 @@
   - 理由: `console.error` のみでユーザーには通知されない
   - 対応: エラーバナー表示/非表示処理を実装し、`selectFile` の成功・失敗フローに統合
 
-- [ ] [Important] JS WebSocket `data.error` 受信時にユーザーへの視覚的フィードバック追加
+- [x] [Important] JS WebSocket `data.error` 受信時にユーザーへの視覚的フィードバック追加
   - ファイル: `src/template.rs` (JS部分)
   - 修正方針: エラーバナー/トースト表示
   - 理由: `console.error` のみでユーザーには通知されない
+  - 対応: `ws-server-error-banner` の表示/非表示処理を追加し、`data.error` 受信時表示・成功更新時クリアを実装
 
 ### Low Priority
 

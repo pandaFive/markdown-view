@@ -732,6 +732,7 @@ const JS: &str = r##"
       }
       if (data.error) {
         console.error('[markdown-view] サーバーエラー:', data.error);
+        showWsServerErrorBanner(data.error);
         return;
       }
       // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
@@ -744,7 +745,8 @@ const JS: &str = r##"
         if (data.file !== currentFile) return;
       }
       updateContent(data);
-      // WebSocket経由の成功更新でもfetchエラーバナーをクリア
+      // WebSocket経由の成功更新で各種エラーバナーをクリア
+      hideWsServerErrorBanner();
       hideFileFetchErrorBanner();
     };
 
@@ -776,6 +778,36 @@ const JS: &str = r##"
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9999;font-size:14px;';
     banner.textContent = 'ライブリロード接続が切断されました。ページをリロードしてください。';
     document.body.appendChild(banner);
+  }
+
+  // WebSocketからサーバーエラー通知を受信した時のバナーを表示する
+  // WebSocket切断バナー表示中は表示しない（根本原因は接続断のため）
+  function showWsServerErrorBanner(message) {
+    if (document.getElementById('ws-disconnect-banner')) return;
+    var banner = document.getElementById('ws-server-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'ws-server-error-banner';
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9998;font-size:14px;';
+      var closeBtn = document.createElement('span');
+      closeBtn.textContent = '\u00d7';
+      closeBtn.style.cssText = 'cursor:pointer;float:right;font-size:18px;line-height:1;';
+      closeBtn.onclick = hideWsServerErrorBanner;
+      banner.appendChild(closeBtn);
+      var msg = document.createElement('span');
+      msg.className = 'error-msg';
+      banner.appendChild(msg);
+      document.body.appendChild(banner);
+    }
+    banner.querySelector('.error-msg').textContent = message;
+  }
+
+  // 正常更新後または手動クローズ時にWebSocketサーバーエラーバナーを非表示にする
+  function hideWsServerErrorBanner() {
+    var banner = document.getElementById('ws-server-error-banner');
+    if (banner) {
+      banner.remove();
+    }
   }
 
   // ファイルfetch失敗時のエラーバナーを表示する（既存バナーがあればメッセージを上書き）
@@ -1233,6 +1265,32 @@ mod tests {
         );
 
         // WebSocket経由の成功更新後にバナーをクリアするコメントとコードが存在する
-        assert!(html.contains("WebSocket経由の成功更新でもfetchエラーバナーをクリア"));
+        assert!(html.contains("WebSocket経由の成功更新で各種エラーバナーをクリア"));
+        assert!(html.contains("hideWsServerErrorBanner();"));
+        assert!(html.contains("hideFileFetchErrorBanner();"));
+    }
+
+    #[test]
+    fn test_websocket_data_error時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let html = render_page(
+            "Test",
+            "<p>content</p>",
+            "<ul><li>toc</li></ul>",
+            false,
+            Some(&files),
+            Some("README.md"),
+        );
+
+        // サーバーエラーバナー表示/非表示関数が存在する
+        assert!(html.contains("function showWsServerErrorBanner(message)"));
+        assert!(html.contains("function hideWsServerErrorBanner()"));
+        assert!(html.contains("ws-server-error-banner"));
+        // 閉じるボタンが存在する
+        assert!(html.contains("closeBtn.onclick = hideWsServerErrorBanner"));
+        // WebSocket切断バナー表示中はサーバーエラーバナーを抑制する
+        assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        // data.error受信時にバナー表示を呼び出す
+        assert!(html.contains("showWsServerErrorBanner(data.error);"));
     }
 }
