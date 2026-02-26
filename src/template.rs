@@ -1,17 +1,28 @@
 use std::sync::OnceLock;
 
-use crate::renderer::html_escape;
+use crate::renderer::{html_escape, SanitizedHtml};
+
+/// サイドバー描画パラメータ
+pub enum SidebarParams<'a> {
+    /// 単一ファイルモード（目次のみ表示）
+    SingleFile,
+    /// ディレクトリモード（ファイル一覧 + 目次）
+    Directory {
+        file_list: &'a [String],
+        current_file: Option<&'a str>,
+    },
+}
 
 /// HTMLテンプレートのパラメータ
 pub struct RenderPageParams<'a> {
     pub title: &'a str,
-    pub content: &'a str,
-    pub toc: &'a str,
+    pub content: &'a SanitizedHtml,
+    pub toc: &'a SanitizedHtml,
     pub dark_mode: bool,
-    /// ディレクトリモード時のファイル一覧（`None`なら単一ファイルモード）
-    pub file_list: Option<&'a [String]>,
-    /// ディレクトリモード時の現在表示ファイル相対パス
-    pub current_file: Option<&'a str>,
+    /// syntectクラスベースハイライト用CSS
+    pub syntax_css: &'a str,
+    /// サイドバー表示モード
+    pub sidebar: SidebarParams<'a>,
 }
 
 /// HTMLテンプレートを生成する
@@ -20,22 +31,18 @@ pub struct RenderPageParams<'a> {
 pub fn render_page(params: RenderPageParams<'_>) -> String {
     let escaped_title = html_escape(params.title);
 
-    // ディレクトリモードフラグをdata属性で渡す
-    let dir_mode_attr = if params.file_list.is_some() {
-        format!(
-            " data-dir-mode=\"true\" data-current-file=\"{}\"",
-            html_escape(params.current_file.unwrap_or(""))
-        )
-    } else {
-        String::new()
-    };
-
-    // サイドバー内部HTML: ディレクトリモード時はタブ切り替え式、単一ファイルモードは従来通り
-    let sidebar_inner = match params.file_list {
-        Some(files) => {
-            let tree = build_file_tree(files);
-            let tree_html = render_file_tree_html(&tree, params.current_file);
-            format!(
+    let (dir_mode_attr, sidebar_inner) = match params.sidebar {
+        SidebarParams::Directory {
+            file_list,
+            current_file,
+        } => {
+            let tree = build_file_tree(file_list);
+            let tree_html = render_file_tree_html(&tree, current_file);
+            let attr = format!(
+                " data-dir-mode=\"true\" data-current-file=\"{}\"",
+                html_escape(current_file.unwrap_or(""))
+            );
+            let html = format!(
                 r##"  <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
     <button class="sidebar-tab" data-tab="toc">目次</button>
@@ -49,19 +56,21 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
     <nav id="toc">{toc}</nav>
   </div>"##,
                 tree_html = tree_html,
-                toc = params.toc,
-            )
+                toc = params.toc.as_str(),
+            );
+            (attr, html)
         }
-        None => {
+        SidebarParams::SingleFile => (
+            String::new(),
             format!(
                 r##"  <div class="sidebar-header">
     <h2>目次</h2>
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
   <nav id="toc">{toc}</nav>"##,
-                toc = params.toc,
-            )
-        }
+                toc = params.toc.as_str(),
+            ),
+        ),
     };
 
     format!(
@@ -87,9 +96,9 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         theme = if params.dark_mode { "dark" } else { "light" },
         dir_mode_attr = dir_mode_attr,
         title = escaped_title,
-        css = css(),
+        css = combined_css(params.syntax_css),
         sidebar_inner = sidebar_inner,
-        content = params.content,
+        content = params.content.as_str(),
         js = JS,
     )
 }
@@ -97,8 +106,8 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 /// コンテンツ更新用JSONメッセージ構造体（HTTP API・WebSocket共用）
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct UpdateMessage {
-    pub content: String,
-    pub toc: String,
+    pub content: SanitizedHtml,
+    pub toc: SanitizedHtml,
     /// ディレクトリモード時の変更ファイル相対パス（単一ファイルモードはNone）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -106,7 +115,7 @@ pub struct UpdateMessage {
 
 impl UpdateMessage {
     /// 更新メッセージを生成する
-    pub fn new(content: String, toc: String, file: Option<String>) -> Self {
+    pub fn new(content: SanitizedHtml, toc: SanitizedHtml, file: Option<String>) -> Self {
         Self { content, toc, file }
     }
 
@@ -484,18 +493,25 @@ fn css() -> &'static str {
     CSS.get_or_init(|| CSS_TEMPLATE.replace("__DARK_THEME_VARS__", DARK_THEME_VARS))
 }
 
+/// ベースCSSと構文ハイライトCSSを結合する
+pub fn combined_css(syntax_css: &str) -> String {
+    if syntax_css.is_empty() {
+        css().to_string()
+    } else {
+        format!("{}\n{}", css(), syntax_css)
+    }
+}
+
 /// インラインCSS/JS用のCSPハッシュソースを返す
-pub fn csp_hash_sources() -> (&'static str, &'static str) {
-    static SOURCES: OnceLock<(String, String)> = OnceLock::new();
-    let sources = SOURCES.get_or_init(|| {
-        let style_hash = sha256_base64(css().as_bytes());
-        let script_hash = sha256_base64(JS.as_bytes());
-        (
-            format!("'sha256-{}'", script_hash),
-            format!("'sha256-{}'", style_hash),
-        )
-    });
-    (sources.0.as_str(), sources.1.as_str())
+///
+/// 戻り値の順序: `(script-srcハッシュ, style-srcハッシュ)`
+pub fn csp_hash_sources(syntax_css: &str) -> (String, String) {
+    let style_hash = sha256_base64(combined_css(syntax_css).as_bytes());
+    let script_hash = sha256_base64(JS.as_bytes());
+    (
+        format!("'sha256-{}'", script_hash),
+        format!("'sha256-{}'", style_hash),
+    )
 }
 
 fn sha256_base64(input: &[u8]) -> String {
@@ -514,18 +530,16 @@ fn sha256_base64(input: &[u8]) -> String {
 // XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
 // DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
-/// ファイルツリーのノード（ディレクトリまたはファイル）
-///
-/// - `full_path.is_some()`: ファイルノード
-/// - `full_path.is_none()`: ディレクトリノード（`children`を持つ）
+/// ファイルツリーのノード（不正状態を表現しないenum）
 #[derive(Debug, Clone, PartialEq)]
-pub struct FileTreeNode {
-    /// 表示名（ディレクトリ名 or ファイル名）
-    pub name: String,
-    /// ファイルの場合のみ: 完全相対パス
-    pub full_path: Option<String>,
-    /// 子ノード
-    pub children: Vec<FileTreeNode>,
+pub enum FileTreeNode {
+    /// ファイルノード
+    File { name: String, full_path: String },
+    /// ディレクトリノード
+    Directory {
+        name: String,
+        children: Vec<FileTreeNode>,
+    },
 }
 
 /// フラットなファイルパスのリストからツリー構造を構築する
@@ -572,9 +586,8 @@ pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
 
             // ディレクトリ（BTreeMapなのでアルファベット順）
             for (name, child) in self.children_dirs {
-                result.push(FileTreeNode {
+                result.push(FileTreeNode::Directory {
                     name,
-                    full_path: None,
                     children: child.into_tree_nodes(),
                 });
             }
@@ -583,11 +596,7 @@ pub fn build_file_tree(files: &[String]) -> Vec<FileTreeNode> {
             let mut files = self.files;
             files.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, full_path) in files {
-                result.push(FileTreeNode {
-                    name,
-                    full_path: Some(full_path),
-                    children: Vec::new(),
-                });
+                result.push(FileTreeNode::File { name, full_path });
             }
 
             result
@@ -651,39 +660,40 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
         current_path: &str,
     ) {
         for node in nodes {
-            if node.full_path.is_some() {
-                // ファイルノード
-                let is_active = current_file == node.full_path.as_deref();
-                let class = if is_active {
-                    "file-tree-file active"
-                } else {
-                    "file-tree-file"
-                };
-                let escaped_name = html_escape(&node.name);
-                let escaped_path = html_escape(node.full_path.as_deref().unwrap_or(""));
-                html.push_str(&format!(
-                    "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\"><span class=\"tree-icon\">📄</span>{name}</a></li>\n",
-                    class = class,
-                    path = escaped_path,
-                    name = escaped_name,
-                ));
-            } else {
-                // ディレクトリノード
-                let dir_path = if current_path.is_empty() {
-                    node.name.clone()
-                } else {
-                    format!("{}/{}", current_path, node.name)
-                };
-                let is_open = active_dirs.contains(&dir_path);
-                let open_attr = if is_open { " open" } else { "" };
-                let escaped_name = html_escape(&node.name);
-                html.push_str(&format!(
-                    "<li>\n<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
-                    open = open_attr,
-                    name = escaped_name,
-                ));
-                render_nodes(&node.children, html, current_file, active_dirs, &dir_path);
-                html.push_str("</ul>\n</details>\n</li>\n");
+            match node {
+                FileTreeNode::File { name, full_path } => {
+                    let is_active = current_file == Some(full_path.as_str());
+                    let class = if is_active {
+                        "file-tree-file active"
+                    } else {
+                        "file-tree-file"
+                    };
+                    let escaped_name = html_escape(name);
+                    let escaped_path = html_escape(full_path);
+                    html.push_str(&format!(
+                        "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\"><span class=\"tree-icon\">📄</span>{name}</a></li>\n",
+                        class = class,
+                        path = escaped_path,
+                        name = escaped_name,
+                    ));
+                }
+                FileTreeNode::Directory { name, children } => {
+                    let dir_path = if current_path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", current_path, name)
+                    };
+                    let is_open = active_dirs.contains(&dir_path);
+                    let open_attr = if is_open { " open" } else { "" };
+                    let escaped_name = html_escape(name);
+                    html.push_str(&format!(
+                        "<li>\n<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
+                        open = open_attr,
+                        name = escaped_name,
+                    ));
+                    render_nodes(children, html, current_file, active_dirs, &dir_path);
+                    html.push_str("</ul>\n</details>\n</li>\n");
+                }
             }
         }
     }
@@ -1104,6 +1114,16 @@ const JS: &str = r##"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::{render_markdown, syntax_theme_css};
+    use crate::toc::generate_toc;
+
+    fn test_content() -> SanitizedHtml {
+        render_markdown("content", None)
+    }
+
+    fn test_toc() -> SanitizedHtml {
+        generate_toc("# toc")
+    }
 
     #[test]
     fn test_フラットファイルリストからツリーを構築() {
@@ -1118,33 +1138,45 @@ mod tests {
         assert_eq!(tree.len(), 2);
 
         // docs ディレクトリ
-        assert_eq!(tree[0].name, "docs");
-        assert!(tree[0].full_path.is_none());
-        assert_eq!(tree[0].children.len(), 2);
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "docs");
+                assert_eq!(children.len(), 2);
+                match &children[0] {
+                    FileTreeNode::Directory {
+                        name,
+                        children: nested,
+                    } => {
+                        assert_eq!(name, "guide");
+                        assert_eq!(nested.len(), 1);
+                        match &nested[0] {
+                            FileTreeNode::File { name, full_path } => {
+                                assert_eq!(name, "intro.md");
+                                assert_eq!(full_path, "docs/guide/intro.md");
+                            }
+                            _ => panic!("docs/guide/intro.md はファイルノードを期待"),
+                        }
+                    }
+                    _ => panic!("docs/guide はディレクトリノードを期待"),
+                }
+                match &children[1] {
+                    FileTreeNode::File { name, full_path } => {
+                        assert_eq!(name, "api.md");
+                        assert_eq!(full_path, "docs/api.md");
+                    }
+                    _ => panic!("docs/api.md はファイルノードを期待"),
+                }
+            }
+            _ => panic!("ルート先頭はdocsディレクトリを期待"),
+        }
 
-        // docs/guide ディレクトリ（ディレクトリ先）
-        assert_eq!(tree[0].children[0].name, "guide");
-        assert!(tree[0].children[0].full_path.is_none());
-        assert_eq!(tree[0].children[0].children.len(), 1);
-
-        // docs/guide/intro.md
-        assert_eq!(tree[0].children[0].children[0].name, "intro.md");
-        assert_eq!(
-            tree[0].children[0].children[0].full_path.as_deref(),
-            Some("docs/guide/intro.md")
-        );
-
-        // docs/api.md（ファイル後）
-        assert_eq!(tree[0].children[1].name, "api.md");
-        assert_eq!(
-            tree[0].children[1].full_path.as_deref(),
-            Some("docs/api.md")
-        );
-
-        // README.md（ルート直下ファイル）
-        assert_eq!(tree[1].name, "README.md");
-        assert_eq!(tree[1].full_path.as_deref(), Some("README.md"));
-        assert!(tree[1].children.is_empty());
+        match &tree[1] {
+            FileTreeNode::File { name, full_path } => {
+                assert_eq!(name, "README.md");
+                assert_eq!(full_path, "README.md");
+            }
+            _ => panic!("README.md はファイルノードを期待"),
+        }
     }
 
     #[test]
@@ -1161,10 +1193,14 @@ mod tests {
 
         // すべてファイルノード、ディレクトリノードなし
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree[0].name, "CHANGELOG.md");
-        assert!(tree[0].full_path.is_some());
-        assert_eq!(tree[1].name, "README.md");
-        assert!(tree[1].full_path.is_some());
+        assert!(matches!(
+            &tree[0],
+            FileTreeNode::File { name, full_path } if name == "CHANGELOG.md" && full_path == "CHANGELOG.md"
+        ));
+        assert!(matches!(
+            &tree[1],
+            FileTreeNode::File { name, full_path } if name == "README.md" && full_path == "README.md"
+        ));
     }
 
     #[test]
@@ -1174,24 +1210,38 @@ mod tests {
 
         // a/
         assert_eq!(tree.len(), 1);
-        assert_eq!(tree[0].name, "a");
-        assert!(tree[0].full_path.is_none());
-
-        // a/b/
-        assert_eq!(tree[0].children.len(), 1);
-        assert_eq!(tree[0].children[0].name, "b");
-        assert!(tree[0].children[0].full_path.is_none());
-
-        // a/b/c/
-        assert_eq!(tree[0].children[0].children.len(), 1);
-        assert_eq!(tree[0].children[0].children[0].name, "c");
-        assert!(tree[0].children[0].children[0].full_path.is_none());
-
-        // a/b/c/d.md
-        assert_eq!(tree[0].children[0].children[0].children.len(), 1);
-        let leaf = &tree[0].children[0].children[0].children[0];
-        assert_eq!(leaf.name, "d.md");
-        assert_eq!(leaf.full_path.as_deref(), Some("a/b/c/d.md"));
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "a");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    FileTreeNode::Directory {
+                        name,
+                        children: b_children,
+                    } => {
+                        assert_eq!(name, "b");
+                        assert_eq!(b_children.len(), 1);
+                        match &b_children[0] {
+                            FileTreeNode::Directory {
+                                name,
+                                children: c_children,
+                            } => {
+                                assert_eq!(name, "c");
+                                assert_eq!(c_children.len(), 1);
+                                assert!(matches!(
+                                    &c_children[0],
+                                    FileTreeNode::File { name, full_path }
+                                        if name == "d.md" && full_path == "a/b/c/d.md"
+                                ));
+                            }
+                            _ => panic!("cディレクトリを期待"),
+                        }
+                    }
+                    _ => panic!("bディレクトリを期待"),
+                }
+            }
+            _ => panic!("aディレクトリを期待"),
+        }
     }
 
     #[test]
@@ -1246,25 +1296,36 @@ mod tests {
         let tree = build_file_tree(&files);
 
         assert_eq!(tree.len(), 1);
-        assert_eq!(tree[0].name, "docs");
-        assert_eq!(tree[0].children.len(), 1);
-        assert_eq!(tree[0].children[0].name, "guide.md");
-        assert_eq!(
-            tree[0].children[0].full_path.as_deref(),
-            Some("docs/guide.md")
-        );
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "docs");
+                assert_eq!(children.len(), 1);
+                assert!(matches!(
+                    &children[0],
+                    FileTreeNode::File { name, full_path }
+                        if name == "guide.md" && full_path == "docs/guide.md"
+                ));
+            }
+            _ => panic!("docsディレクトリを期待"),
+        }
     }
 
     #[test]
     fn test_ディレクトリモードでタブ構造が生成される() {
         let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
-            content: "<p>content</p>",
-            toc: "<ul><li>toc</li></ul>",
+            content: &content,
+            toc: &toc,
             dark_mode: false,
-            file_list: Some(&files),
-            current_file: Some("README.md"),
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
         });
 
         // タブボタンが存在する
@@ -1278,13 +1339,16 @@ mod tests {
 
     #[test]
     fn test_単一ファイルモードでタブが生成されない() {
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
-            content: "<p>content</p>",
-            toc: "<ul><li>toc</li></ul>",
+            content: &content,
+            toc: &toc,
             dark_mode: false,
-            file_list: None,
-            current_file: None,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::SingleFile,
         });
 
         // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
@@ -1295,13 +1359,19 @@ mod tests {
     #[test]
     fn test_selectfile_fetch失敗時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
-            content: "<p>content</p>",
-            toc: "<ul><li>toc</li></ul>",
+            content: &content,
+            toc: &toc,
             dark_mode: false,
-            file_list: Some(&files),
-            current_file: Some("README.md"),
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
         });
 
         // バナー表示/非表示関数が存在する
@@ -1325,13 +1395,19 @@ mod tests {
     #[test]
     fn test_websocket更新時にfetchエラーバナーがクリアされる() {
         let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
-            content: "<p>content</p>",
-            toc: "<ul><li>toc</li></ul>",
+            content: &content,
+            toc: &toc,
             dark_mode: false,
-            file_list: Some(&files),
-            current_file: Some("README.md"),
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
         });
 
         // WebSocket経由の成功更新後にバナーをクリアするコメントとコードが存在する
@@ -1343,13 +1419,19 @@ mod tests {
     #[test]
     fn test_websocket_data_error時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
-            content: "<p>content</p>",
-            toc: "<ul><li>toc</li></ul>",
+            content: &content,
+            toc: &toc,
             dark_mode: false,
-            file_list: Some(&files),
-            current_file: Some("README.md"),
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
         });
 
         // サーバーエラーバナー表示/非表示関数が存在する

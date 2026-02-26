@@ -14,8 +14,10 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::renderer::render_markdown;
-use crate::template::{csp_hash_sources, render_page, RenderPageParams, UpdateMessage};
+use crate::renderer::{render_markdown, syntax_theme_css};
+use crate::template::{
+    csp_hash_sources, render_page, RenderPageParams, SidebarParams, UpdateMessage,
+};
 use crate::toc::generate_toc;
 
 /// canonicalize済みの絶対パス
@@ -197,6 +199,7 @@ pub struct AppState {
     mode: AppMode,
     dark_mode: bool,
     theme: Option<String>,
+    syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
 }
 
@@ -209,6 +212,7 @@ impl AppState {
         tx: broadcast::Sender<BroadcastMessage>,
     ) -> Self {
         Self {
+            syntax_css: syntax_theme_css(theme.as_deref()),
             mode,
             dark_mode,
             theme,
@@ -229,6 +233,11 @@ impl AppState {
     /// テーマ名を返す
     pub fn theme(&self) -> Option<&str> {
         self.theme.as_deref()
+    }
+
+    /// 構文ハイライト用CSSを返す
+    pub fn syntax_css(&self) -> &str {
+        &self.syntax_css
     }
 
     /// broadcast送信チャネルを返す
@@ -267,7 +276,7 @@ pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let csp_header = build_csp_header();
+    let csp_header = build_csp_header(state.syntax_css());
     Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
@@ -282,9 +291,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         // CSP: scriptはハッシュベース許可を維持し、unsafe-inlineを排除する。
-        // styleはsyntectのコードハイライトがインラインstyleを出力するため、
-        // style-srcでunsafe-inlineを許可する（script-srcには適用しない）。
+        // styleはsyntect class-basedハイライトを使用し、unsafe-inlineを許可しない。
         // img-srcは外部画像参照のため*を許可（CSP Level 2+では `*` に `data:` は含まれない）。
+        // プライバシー注意: 外部画像はトラッキングピクセルとして悪用可能なため、
+        // 秘密情報を含む文書では信頼済みドメインのみに制限する運用を推奨する。
         // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
@@ -294,10 +304,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-fn build_csp_header() -> HeaderValue {
-    let (script_src, style_src) = csp_hash_sources();
+fn build_csp_header(syntax_css: &str) -> HeaderValue {
+    let (script_src, style_src) = csp_hash_sources(syntax_css);
     let csp = format!(
-        "default-src 'self'; script-src {}; style-src {} 'unsafe-inline'; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+        "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
     HeaderValue::from_str(&csp).unwrap_or_else(|e| {
@@ -316,23 +326,40 @@ struct FileQuery {
     file: Option<String>,
 }
 
+type ApiError = (StatusCode, Json<serde_json::Value>);
+
+fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
+    (status, Json(UpdateMessage::error(message)))
+}
+
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
-) -> Result<Html<String>, StatusCode> {
+) -> Result<Html<String>, ApiError> {
     if !is_allowed_request_host(&headers) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "許可されていないHostヘッダーです",
+        ));
     }
 
-    let (file_path, file_list) = resolve_target_file(&state, query.file.as_deref(), true)?;
+    let (file_path, file_list) =
+        resolve_target_file(&state, query.file.as_deref(), true).map_err(|status| {
+            let msg = match status {
+                StatusCode::NOT_FOUND => "表示可能なMarkdownファイルが見つかりません",
+                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
+                _ => "ファイル解決に失敗しました",
+            };
+            json_error(status, msg)
+        })?;
 
     let update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
-            e.status_code()
+            json_error(e.status_code(), e.to_string())
         })?;
 
     let title = file_path
@@ -347,8 +374,14 @@ async fn index_handler(
         content: &update.content,
         toc: &update.toc,
         dark_mode: state.dark_mode,
-        file_list: file_list.as_deref(),
-        current_file: current_file.as_deref(),
+        syntax_css: state.syntax_css(),
+        sidebar: match file_list.as_deref() {
+            Some(files) => SidebarParams::Directory {
+                file_list: files,
+                current_file: current_file.as_deref(),
+            },
+            None => SidebarParams::SingleFile,
+        },
     })))
 }
 
@@ -357,18 +390,29 @@ async fn api_content_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
-) -> Result<Json<UpdateMessage>, StatusCode> {
+) -> Result<Json<UpdateMessage>, ApiError> {
     if !is_allowed_request_host(&headers) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "許可されていないHostヘッダーです",
+        ));
     }
 
-    let (file_path, _) = resolve_target_file(&state, query.file.as_deref(), false)?;
+    let (file_path, _) =
+        resolve_target_file(&state, query.file.as_deref(), false).map_err(|status| {
+            let msg = match status {
+                StatusCode::NOT_FOUND => "指定したファイルが見つかりません",
+                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
+                _ => "ファイル解決に失敗しました",
+            };
+            json_error(status, msg)
+        })?;
 
     let mut update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
-            e.status_code()
+            json_error(e.status_code(), e.to_string())
         })?;
 
     update.file = state.mode.relative_path_of(&file_path);
@@ -379,15 +423,21 @@ async fn api_content_handler(
 async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Vec<String>>, StatusCode> {
+) -> Result<Json<Vec<String>>, ApiError> {
     if !is_allowed_request_host(&headers) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "許可されていないHostヘッダーです",
+        ));
     }
 
     if let Some(base) = state.mode.directory() {
         let files = list_markdown_files(base).map_err(|e| {
             tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ファイル一覧の取得に失敗しました",
+            )
         })?;
         Ok(Json(files))
     } else {
@@ -462,7 +512,8 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if !is_allowed_request_host(&headers) || !is_allowed_ws_origin(&headers) {
-        return StatusCode::FORBIDDEN.into_response();
+        return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
+            .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
@@ -536,7 +587,16 @@ fn is_trusted_host(host: &str) -> bool {
 ///
 /// 末尾ドットを除去し、大小文字差を吸収する。
 fn normalize_authority(authority: &str) -> String {
-    authority.trim().trim_end_matches('.').to_ascii_lowercase()
+    if let Ok(parsed) = authority.parse::<Authority>() {
+        let host = parsed.host().trim_end_matches('.').to_ascii_lowercase();
+        if let Some(port) = parsed.port_u16() {
+            format!("{}:{}", host, port)
+        } else {
+            host
+        }
+    } else {
+        authority.trim().trim_end_matches('.').to_ascii_lowercase()
+    }
 }
 
 /// WebSocket接続を処理する
@@ -1040,6 +1100,13 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
     let file = tokio::fs::File::open(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
+    let buffer = read_bytes_with_limit(file).await?;
+
+    String::from_utf8(buffer)
+        .map_err(|e| ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
+async fn read_bytes_with_limit(file: tokio::fs::File) -> Result<Vec<u8>, ReadMarkdownError> {
     let mut limited_reader = file.take(MAX_FILE_SIZE + 1);
     let mut buffer = Vec::new();
     limited_reader
@@ -1049,9 +1116,7 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
     if buffer.len() as u64 > MAX_FILE_SIZE {
         return Err(ReadMarkdownError::TooLarge);
     }
-
-    String::from_utf8(buffer)
-        .map_err(|e| ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    Ok(buffer)
 }
 
 /// ファイルを読み込んでレンダリングする
@@ -1200,6 +1265,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_normalize_authority_末尾ドットと大文字小文字を正規化する() {
+        assert_eq!(
+            normalize_authority("LOCALHOST.:3000"),
+            normalize_authority("localhost:3000")
+        );
+        assert_eq!(
+            normalize_authority("Example.COM."),
+            normalize_authority("example.com")
+        );
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_trailing_dotとmixed_caseを許可する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "LOCALHOST.:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(is_allowed_ws_origin(&headers));
     }
 
     // --- resolve_file テスト ---
@@ -1425,6 +1510,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing-dir");
         assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_bytes_with_limit_takeによる第2段階チェックで超過を検出する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("large.md");
+        tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+            .await
+            .unwrap();
+
+        let file = tokio::fs::File::open(&file_path).await.unwrap();
+        let result = read_bytes_with_limit(file).await;
+        assert!(matches!(result, Err(ReadMarkdownError::TooLarge)));
     }
 
     #[tokio::test]

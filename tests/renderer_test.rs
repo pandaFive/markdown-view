@@ -1,4 +1,6 @@
-use markdown_view::renderer::{render_markdown, validate_theme};
+use markdown_view::renderer::{
+    generate_unique_id, render_markdown, slugify, syntax_theme_css, validate_theme,
+};
 use markdown_view::toc::generate_toc;
 
 #[test]
@@ -226,9 +228,8 @@ fn test_見出し画像入りでもtocリンクが一致する() {
 
 #[test]
 fn test_テーマ指定でハイライト出力が変わる() {
-    let md = "```rust\nfn main() {}\n```";
-    let dark = render_markdown(md, Some("base16-ocean.dark"));
-    let light = render_markdown(md, Some("InspiredGitHub"));
+    let dark = syntax_theme_css(Some("base16-ocean.dark"));
+    let light = syntax_theme_css(Some("InspiredGitHub"));
     assert_ne!(dark, light);
 }
 
@@ -364,20 +365,50 @@ fn test_ローカルルートパスのリンクは許可される() {
 }
 
 #[test]
+fn test_空hrefはフォールバックされる() {
+    let html = render_markdown("[empty]()", None);
+    assert!(html.contains(r##"<a href="#">empty</a>"##));
+}
+
+#[test]
+fn test_slugify_直接テスト_unicode_onlyと空入力() {
+    assert_eq!(slugify("日本語のみ"), "日本語のみ");
+    assert_eq!(slugify(""), "section");
+    assert_eq!(slugify("!!!"), "section");
+}
+
+#[test]
+fn test_slugify_直接テスト_連続記号は単一ハイフンに正規化される() {
+    assert_eq!(slugify("A---B___C"), "a-b-c");
+}
+
+#[test]
+fn test_generate_unique_id_直接テスト_重複時に連番を付与する() {
+    let mut counts = std::collections::HashMap::new();
+    assert_eq!(generate_unique_id("section", &mut counts), "section");
+    assert_eq!(generate_unique_id("section", &mut counts), "section-1");
+    assert_eq!(generate_unique_id("section", &mut counts), "section-2");
+}
+
+#[test]
 fn test_フルパイプラインxss対策_render_markdownからrender_pageまで() {
-    use markdown_view::template::{render_page, RenderPageParams};
+    use markdown_view::renderer::syntax_theme_css;
+    use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
+    use markdown_view::toc::generate_toc;
 
     let content = render_markdown(
         "# Title\n<script>alert('xss')</script>\n[bad](javascript:alert(1))",
         None,
     );
+    let toc = generate_toc("# Title");
+    let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
         title: "Test",
         content: &content,
-        toc: "",
+        toc: &toc,
         dark_mode: false,
-        file_list: None,
-        current_file: None,
+        syntax_css: &syntax_css,
+        sidebar: SidebarParams::SingleFile,
     });
 
     assert!(!html.contains("<script>alert('xss')</script>"));
@@ -388,14 +419,19 @@ fn test_フルパイプラインxss対策_render_markdownからrender_pageまで
 
 #[test]
 fn test_render_pageのタイトルがエスケープされる() {
-    use markdown_view::template::{render_page, RenderPageParams};
+    use markdown_view::renderer::{render_markdown, syntax_theme_css};
+    use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
+    use markdown_view::toc::generate_toc;
+    let content = render_markdown("xss", None);
+    let toc = generate_toc("# t");
+    let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
         title: "<script>xss</script>",
-        content: "",
-        toc: "",
+        content: &content,
+        toc: &toc,
         dark_mode: false,
-        file_list: None,
-        current_file: None,
+        syntax_css: &syntax_css,
+        sidebar: SidebarParams::SingleFile,
     });
     assert!(html.contains("&lt;script&gt;xss&lt;/script&gt;"));
     assert!(!html.contains("<script>xss</script> - markdown-view"));
@@ -403,22 +439,27 @@ fn test_render_pageのタイトルがエスケープされる() {
 
 #[test]
 fn test_render_pageのダークモード() {
-    use markdown_view::template::{render_page, RenderPageParams};
+    use markdown_view::renderer::{render_markdown, syntax_theme_css};
+    use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
+    use markdown_view::toc::generate_toc;
+    let content = render_markdown("x", None);
+    let toc = generate_toc("# t");
+    let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let light = render_page(RenderPageParams {
         title: "t",
-        content: "",
-        toc: "",
+        content: &content,
+        toc: &toc,
         dark_mode: false,
-        file_list: None,
-        current_file: None,
+        syntax_css: &syntax_css,
+        sidebar: SidebarParams::SingleFile,
     });
     let dark = render_page(RenderPageParams {
         title: "t",
-        content: "",
-        toc: "",
+        content: &content,
+        toc: &toc,
         dark_mode: true,
-        file_list: None,
-        current_file: None,
+        syntax_css: &syntax_css,
+        sidebar: SidebarParams::SingleFile,
     });
     assert!(light.contains(r#"data-theme="light""#));
     assert!(dark.contains(r#"data-theme="dark""#));
@@ -426,17 +467,22 @@ fn test_render_pageのダークモード() {
 
 #[test]
 fn test_render_pageの基本構造() {
-    use markdown_view::template::{render_page, RenderPageParams};
+    use markdown_view::renderer::{render_markdown, syntax_theme_css};
+    use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
+    use markdown_view::toc::generate_toc;
+    let content = render_markdown("Hello", None);
+    let toc = generate_toc("# H1");
+    let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
         title: "Test",
-        content: "<p>Hello</p>",
-        toc: "<ul><li>H1</li></ul>",
+        content: &content,
+        toc: &toc,
         dark_mode: false,
-        file_list: None,
-        current_file: None,
+        syntax_css: &syntax_css,
+        sidebar: SidebarParams::SingleFile,
     });
     assert!(html.contains("<!DOCTYPE html>"));
     assert!(html.contains("<p>Hello</p>"));
-    assert!(html.contains("<ul><li>H1</li></ul>"));
+    assert!(html.contains("<a href=\"#h1\">H1</a>"));
     assert!(html.contains("Test - markdown-view"));
 }
