@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::renderer::html_escape;
 
 /// HTMLテンプレートのパラメータ
@@ -89,7 +91,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         theme = if params.dark_mode { "dark" } else { "light" },
         dir_mode_attr = dir_mode_attr,
         title = escaped_title,
-        css = CSS,
+        css = css(),
         sidebar_inner = sidebar_inner,
         content = params.content,
         js = JS,
@@ -118,7 +120,23 @@ impl UpdateMessage {
     }
 }
 
-const CSS: &str = r##"
+const DARK_THEME_VARS: &str = r##"
+  --bg: #0d1117;
+  --fg: #e6edf3;
+  --sidebar-bg: #161b22;
+  --sidebar-border: #30363d;
+  --link: #58a6ff;
+  --code-bg: #161b22;
+  --blockquote-border: #30363d;
+  --blockquote-fg: #8b949e;
+  --table-border: #30363d;
+  --table-alt-bg: #161b22;
+  --hr-color: #21262d;
+  --toc-active: #58a6ff;
+  --toc-hover-bg: #1c2128;
+"##;
+
+const CSS_TEMPLATE: &str = r##"
 /* リセットと基本設定 */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -139,36 +157,12 @@ const CSS: &str = r##"
 }
 
 [data-theme="dark"] {
-  --bg: #0d1117;
-  --fg: #e6edf3;
-  --sidebar-bg: #161b22;
-  --sidebar-border: #30363d;
-  --link: #58a6ff;
-  --code-bg: #161b22;
-  --blockquote-border: #30363d;
-  --blockquote-fg: #8b949e;
-  --table-border: #30363d;
-  --table-alt-bg: #161b22;
-  --hr-color: #21262d;
-  --toc-active: #58a6ff;
-  --toc-hover-bg: #1c2128;
+__DARK_THEME_VARS__
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0d1117;
-    --fg: #e6edf3;
-    --sidebar-bg: #161b22;
-    --sidebar-border: #30363d;
-    --link: #58a6ff;
-    --code-bg: #161b22;
-    --blockquote-border: #30363d;
-    --blockquote-fg: #8b949e;
-    --table-border: #30363d;
-    --table-alt-bg: #161b22;
-    --hr-color: #21262d;
-    --toc-active: #58a6ff;
-    --toc-hover-bg: #1c2128;
+__DARK_THEME_VARS__
   }
 }
 
@@ -485,6 +479,11 @@ body {
   .content { padding: 1.5rem 1rem; padding-top: 3rem; }
 }
 "##;
+
+fn css() -> &'static str {
+    static CSS: OnceLock<String> = OnceLock::new();
+    CSS.get_or_init(|| CSS_TEMPLATE.replace("__DARK_THEME_VARS__", DARK_THEME_VARS))
+}
 
 // セキュリティ注記:
 // innerHTML使用箇所: updateContent()内でサーバーサイドでサニタイズ済みHTMLを反映。

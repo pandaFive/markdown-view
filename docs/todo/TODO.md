@@ -60,10 +60,11 @@
   - 理由: 現在5回の`.replace()`チェーンで中間Stringが5回割り当てられる
   - 対応: `for ch in text.chars()` の1パス変換へ置換し、中間割り当てを削減
 
-- [ ] ダークテーマCSS変数の重複排除
+- [x] ダークテーマCSS変数の重複排除
   - ファイル: `src/template.rs:72-104`
   - 修正方針: Rustの`const`でCSS変数を定義し2箇所に`format!`で埋め込む
   - 理由: `[data-theme="dark"]`と`@media (prefers-color-scheme: dark)`で同じ変数が重複
+  - 対応: `DARK_THEME_VARS` を共通化し、`CSS_TEMPLATE` を `OnceLock` で1回だけ展開
 
 - [ ] `slugify` の日本語・CJK文字テスト追加
   - ファイル: `tests/renderer_test.rs` or `tests/toc_test.rs`
