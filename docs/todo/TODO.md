@@ -127,10 +127,11 @@
   - ファイル: `src/watcher.rs`
   - 対応: JoinHandleを保持し、パニック検知・ログ出力する監視タスクを追加済み
 
-- [ ] [Low] read_and_render → UpdateMessage 直接返却
+- [x] [Low] read_and_render → UpdateMessage 直接返却
   - ファイル: `src/server.rs`
   - 修正方針: `Result<(String, String), _>` → `Result<UpdateMessage, _>` に変更
   - 理由: タプルの位置引数による取り違えリスクを排除
+  - 対応: `read_and_render_file` を `UpdateMessage` 返却へ変更し、呼び出し側を更新
 
 - [x] [High] 監視スレッドのグレースフルシャットダウン機構
   - ファイル: `src/watcher.rs`

@@ -312,7 +312,7 @@ async fn index_handler(
 
     let (file_path, file_list) = resolve_target_file(&state, query.file.as_deref(), true)?;
 
-    let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
+    let update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             eprintln!("[markdown-view] index読み込みエラー: {}", e);
@@ -328,8 +328,8 @@ async fn index_handler(
 
     Ok(Html(render_page(
         title,
-        &content,
-        &toc,
+        &update.content,
+        &update.toc,
         state.dark_mode,
         file_list.as_deref(),
         current_file.as_deref(),
@@ -348,16 +348,15 @@ async fn api_content_handler(
 
     let (file_path, _) = resolve_target_file(&state, query.file.as_deref(), false)?;
 
-    let (content, toc) = read_and_render_file(&file_path, state.theme.as_deref())
+    let mut update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
             eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
             e.status_code()
         })?;
 
-    let file = state.mode.relative_path_of(&file_path);
-
-    Ok(Json(UpdateMessage::new(content, toc, file)))
+    update.file = state.mode.relative_path_of(&file_path);
+    Ok(Json(update))
 }
 
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
@@ -524,7 +523,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     // 単一ファイルモードのみ接続直後に初期コンテンツを送信
     // ディレクトリモードではクライアントが?fileパラメータで/api/contentをフェッチする
     if let Some(file_path) = state.mode.single_file() {
-        let (content, toc) = match read_and_render_file(file_path, state.theme.as_deref()).await {
+        let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
@@ -540,7 +539,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 return;
             }
         };
-        let msg = match BroadcastMessage::Update(UpdateMessage::new(content, toc, None)).to_json() {
+        let msg = match BroadcastMessage::Update(update).to_json() {
             Ok(json) => json,
             Err(e) => {
                 eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
@@ -612,7 +611,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         );
                         if let Some(file_path) = state.mode.single_file() {
                             // 単一ファイルモード: 最新コンテンツを再送信
-                            let (content, toc) = match read_and_render_file(file_path, state.theme.as_deref()).await {
+                            let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
                                 Ok(result) => result,
                                 Err(e) => {
                                     eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
@@ -630,7 +629,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     continue;
                                 }
                             };
-                            let resend = match BroadcastMessage::Update(UpdateMessage::new(content, toc, None)).to_json() {
+                            let resend = match BroadcastMessage::Update(update).to_json() {
                                 Ok(json) => json,
                                 Err(e) => {
                                     eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
@@ -1028,11 +1027,13 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
 async fn read_and_render_file(
     file_path: &Path,
     theme: Option<&str>,
-) -> Result<(String, String), ReadMarkdownError> {
+) -> Result<UpdateMessage, ReadMarkdownError> {
     let markdown = read_markdown_with_limit(file_path).await?;
-    let content = render_markdown(&markdown, theme);
-    let toc = generate_toc(&markdown);
-    Ok((content, toc))
+    Ok(UpdateMessage::new(
+        render_markdown(&markdown, theme),
+        generate_toc(&markdown),
+        None,
+    ))
 }
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
@@ -1060,8 +1061,9 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     }
 
     let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
-        Ok((content, toc)) => {
-            BroadcastMessage::Update(UpdateMessage::new(content, toc, relative_path))
+        Ok(mut update) => {
+            update.file = relative_path;
+            BroadcastMessage::Update(update)
         }
         Err(e) => {
             eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
