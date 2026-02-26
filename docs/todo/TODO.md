@@ -185,9 +185,10 @@
   - ファイル: `src/server.rs`
   - 理由: 標準のエラーインターフェースに準拠し、`anyhow` との互換性を向上
 
-- [ ] `render_page` の6引数を構造体パラメータに変更
+- [x] `render_page` の6引数を構造体パラメータに変更
   - ファイル: `src/template.rs`, 呼び出し箇所全て
   - 理由: 引数の順序ミスリスク軽減。`RenderPageParams` 構造体を導入
+  - 対応: `RenderPageParams` を導入し、`render_page` 呼び出しを全箇所更新
 
 - [x] `list_markdown_files` のクエリ指定時スキップ
   - ファイル: `src/server.rs` (`resolve_target_file`)

@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::renderer::render_markdown;
-use crate::template::{render_page, UpdateMessage};
+use crate::template::{render_page, RenderPageParams, UpdateMessage};
 use crate::toc::generate_toc;
 
 /// canonicalize済みの絶対パス
@@ -326,14 +326,14 @@ async fn index_handler(
 
     let current_file = state.mode.relative_path_of(&file_path);
 
-    Ok(Html(render_page(
+    Ok(Html(render_page(RenderPageParams {
         title,
-        &update.content,
-        &update.toc,
-        state.dark_mode,
-        file_list.as_deref(),
-        current_file.as_deref(),
-    )))
+        content: &update.content,
+        toc: &update.toc,
+        dark_mode: state.dark_mode,
+        file_list: file_list.as_deref(),
+        current_file: current_file.as_deref(),
+    })))
 }
 
 /// GET /api/content : 現在のコンテンツをJSON形式で返す

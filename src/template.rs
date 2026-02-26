@@ -1,36 +1,38 @@
 use crate::renderer::html_escape;
 
+/// HTMLテンプレートのパラメータ
+pub struct RenderPageParams<'a> {
+    pub title: &'a str,
+    pub content: &'a str,
+    pub toc: &'a str,
+    pub dark_mode: bool,
+    /// ディレクトリモード時のファイル一覧（`None`なら単一ファイルモード）
+    pub file_list: Option<&'a [String]>,
+    /// ディレクトリモード時の現在表示ファイル相対パス
+    pub current_file: Option<&'a str>,
+}
+
 /// HTMLテンプレートを生成する
 ///
 /// CSS/JSをすべて埋め込み、外部ファイル不要で動作する
-///
-/// - `file_list`: ディレクトリモード時のファイル一覧（`None`なら単一ファイルモード）
-/// - `current_file`: ディレクトリモード時の現在表示ファイル相対パス
-pub fn render_page(
-    title: &str,
-    content: &str,
-    toc: &str,
-    dark_mode: bool,
-    file_list: Option<&[String]>,
-    current_file: Option<&str>,
-) -> String {
-    let escaped_title = html_escape(title);
+pub fn render_page(params: RenderPageParams<'_>) -> String {
+    let escaped_title = html_escape(params.title);
 
     // ディレクトリモードフラグをdata属性で渡す
-    let dir_mode_attr = if file_list.is_some() {
+    let dir_mode_attr = if params.file_list.is_some() {
         format!(
             " data-dir-mode=\"true\" data-current-file=\"{}\"",
-            html_escape(current_file.unwrap_or(""))
+            html_escape(params.current_file.unwrap_or(""))
         )
     } else {
         String::new()
     };
 
     // サイドバー内部HTML: ディレクトリモード時はタブ切り替え式、単一ファイルモードは従来通り
-    let sidebar_inner = match file_list {
+    let sidebar_inner = match params.file_list {
         Some(files) => {
             let tree = build_file_tree(files);
-            let tree_html = render_file_tree_html(&tree, current_file);
+            let tree_html = render_file_tree_html(&tree, params.current_file);
             format!(
                 r##"  <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
@@ -45,7 +47,7 @@ pub fn render_page(
     <nav id="toc">{toc}</nav>
   </div>"##,
                 tree_html = tree_html,
-                toc = toc,
+                toc = params.toc,
             )
         }
         None => {
@@ -55,7 +57,7 @@ pub fn render_page(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
   <nav id="toc">{toc}</nav>"##,
-                toc = toc,
+                toc = params.toc,
             )
         }
     };
@@ -84,12 +86,12 @@ pub fn render_page(
 </script>
 </body>
 </html>"##,
-        theme = if dark_mode { "dark" } else { "light" },
+        theme = if params.dark_mode { "dark" } else { "light" },
         dir_mode_attr = dir_mode_attr,
         title = escaped_title,
         css = CSS,
         sidebar_inner = sidebar_inner,
-        content = content,
+        content = params.content,
         js = JS,
     )
 }
@@ -1233,14 +1235,14 @@ mod tests {
     #[test]
     fn test_ディレクトリモードでタブ構造が生成される() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // タブボタンが存在する
         assert!(html.contains("sidebar-tab"));
@@ -1253,14 +1255,14 @@ mod tests {
 
     #[test]
     fn test_単一ファイルモードでタブが生成されない() {
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            None,
-            None,
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: None,
+            current_file: None,
+        });
 
         // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
         assert!(!html.contains("data-tab=\"files\""));
@@ -1270,14 +1272,14 @@ mod tests {
     #[test]
     fn test_selectfile_fetch失敗時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // バナー表示/非表示関数が存在する
         assert!(html.contains("function showFileFetchErrorBanner(message)"));
@@ -1300,14 +1302,14 @@ mod tests {
     #[test]
     fn test_websocket更新時にfetchエラーバナーがクリアされる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // WebSocket経由の成功更新後にバナーをクリアするコメントとコードが存在する
         assert!(html.contains("WebSocket経由の成功更新で各種エラーバナーをクリア"));
@@ -1318,14 +1320,14 @@ mod tests {
     #[test]
     fn test_websocket_data_error時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // サーバーエラーバナー表示/非表示関数が存在する
         assert!(html.contains("function showWsServerErrorBanner(message)"));

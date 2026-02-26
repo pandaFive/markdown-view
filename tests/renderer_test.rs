@@ -334,32 +334,53 @@ fn test_ローカルルートパスのリンクは許可される() {
 
 #[test]
 fn test_render_pageのタイトルがエスケープされる() {
-    use markdown_view::template::render_page;
-    let html = render_page("<script>xss</script>", "", "", false, None, None);
+    use markdown_view::template::{render_page, RenderPageParams};
+    let html = render_page(RenderPageParams {
+        title: "<script>xss</script>",
+        content: "",
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
     assert!(html.contains("&lt;script&gt;xss&lt;/script&gt;"));
     assert!(!html.contains("<script>xss</script> - markdown-view"));
 }
 
 #[test]
 fn test_render_pageのダークモード() {
-    use markdown_view::template::render_page;
-    let light = render_page("t", "", "", false, None, None);
-    let dark = render_page("t", "", "", true, None, None);
+    use markdown_view::template::{render_page, RenderPageParams};
+    let light = render_page(RenderPageParams {
+        title: "t",
+        content: "",
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
+    let dark = render_page(RenderPageParams {
+        title: "t",
+        content: "",
+        toc: "",
+        dark_mode: true,
+        file_list: None,
+        current_file: None,
+    });
     assert!(light.contains(r#"data-theme="light""#));
     assert!(dark.contains(r#"data-theme="dark""#));
 }
 
 #[test]
 fn test_render_pageの基本構造() {
-    use markdown_view::template::render_page;
-    let html = render_page(
-        "Test",
-        "<p>Hello</p>",
-        "<ul><li>H1</li></ul>",
-        false,
-        None,
-        None,
-    );
+    use markdown_view::template::{render_page, RenderPageParams};
+    let html = render_page(RenderPageParams {
+        title: "Test",
+        content: "<p>Hello</p>",
+        toc: "<ul><li>H1</li></ul>",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
     assert!(html.contains("<!DOCTYPE html>"));
     assert!(html.contains("<p>Hello</p>"));
     assert!(html.contains("<ul><li>H1</li></ul>"));
