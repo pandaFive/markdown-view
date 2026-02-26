@@ -92,3 +92,11 @@ fn test_複数行見出しのスラッグが改行をスペースとして扱う
     let toc = generate_toc(md);
     assert!(toc.contains(r##"href="#hello-world""##));
 }
+
+#[test]
+fn test_slugify_日本語見出しはsection連番で一意化される() {
+    let md = "# 日本語見出し\n## 日本語見出し";
+    let toc = generate_toc(md);
+    assert!(toc.contains(r##"href="#日本語見出し""##));
+    assert!(toc.contains(r##"href="#日本語見出し-1""##));
+}

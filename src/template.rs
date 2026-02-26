@@ -1,36 +1,40 @@
+use std::sync::OnceLock;
+
 use crate::renderer::html_escape;
+
+/// HTMLテンプレートのパラメータ
+pub struct RenderPageParams<'a> {
+    pub title: &'a str,
+    pub content: &'a str,
+    pub toc: &'a str,
+    pub dark_mode: bool,
+    /// ディレクトリモード時のファイル一覧（`None`なら単一ファイルモード）
+    pub file_list: Option<&'a [String]>,
+    /// ディレクトリモード時の現在表示ファイル相対パス
+    pub current_file: Option<&'a str>,
+}
 
 /// HTMLテンプレートを生成する
 ///
 /// CSS/JSをすべて埋め込み、外部ファイル不要で動作する
-///
-/// - `file_list`: ディレクトリモード時のファイル一覧（`None`なら単一ファイルモード）
-/// - `current_file`: ディレクトリモード時の現在表示ファイル相対パス
-pub fn render_page(
-    title: &str,
-    content: &str,
-    toc: &str,
-    dark_mode: bool,
-    file_list: Option<&[String]>,
-    current_file: Option<&str>,
-) -> String {
-    let escaped_title = html_escape(title);
+pub fn render_page(params: RenderPageParams<'_>) -> String {
+    let escaped_title = html_escape(params.title);
 
     // ディレクトリモードフラグをdata属性で渡す
-    let dir_mode_attr = if file_list.is_some() {
+    let dir_mode_attr = if params.file_list.is_some() {
         format!(
             " data-dir-mode=\"true\" data-current-file=\"{}\"",
-            html_escape(current_file.unwrap_or(""))
+            html_escape(params.current_file.unwrap_or(""))
         )
     } else {
         String::new()
     };
 
     // サイドバー内部HTML: ディレクトリモード時はタブ切り替え式、単一ファイルモードは従来通り
-    let sidebar_inner = match file_list {
+    let sidebar_inner = match params.file_list {
         Some(files) => {
             let tree = build_file_tree(files);
-            let tree_html = render_file_tree_html(&tree, current_file);
+            let tree_html = render_file_tree_html(&tree, params.current_file);
             format!(
                 r##"  <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
@@ -45,7 +49,7 @@ pub fn render_page(
     <nav id="toc">{toc}</nav>
   </div>"##,
                 tree_html = tree_html,
-                toc = toc,
+                toc = params.toc,
             )
         }
         None => {
@@ -55,7 +59,7 @@ pub fn render_page(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
   <nav id="toc">{toc}</nav>"##,
-                toc = toc,
+                toc = params.toc,
             )
         }
     };
@@ -67,9 +71,7 @@ pub fn render_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} - markdown-view</title>
-<style>
-{css}
-</style>
+<style>{css}</style>
 </head>
 <body>
 <aside id="sidebar" class="sidebar">
@@ -79,23 +81,21 @@ pub fn render_page(
 <main id="content" class="content">
 {content}
 </main>
-<script>
-{js}
-</script>
+<script>{js}</script>
 </body>
 </html>"##,
-        theme = if dark_mode { "dark" } else { "light" },
+        theme = if params.dark_mode { "dark" } else { "light" },
         dir_mode_attr = dir_mode_attr,
         title = escaped_title,
-        css = CSS,
+        css = css(),
         sidebar_inner = sidebar_inner,
-        content = content,
+        content = params.content,
         js = JS,
     )
 }
 
 /// コンテンツ更新用JSONメッセージ構造体（HTTP API・WebSocket共用）
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct UpdateMessage {
     pub content: String,
     pub toc: String,
@@ -104,7 +104,35 @@ pub struct UpdateMessage {
     pub file: Option<String>,
 }
 
-const CSS: &str = r##"
+impl UpdateMessage {
+    /// 更新メッセージを生成する
+    pub fn new(content: String, toc: String, file: Option<String>) -> Self {
+        Self { content, toc, file }
+    }
+
+    /// エラーJSONを生成する
+    pub fn error(message: impl AsRef<str>) -> serde_json::Value {
+        serde_json::json!({ "error": message.as_ref() })
+    }
+}
+
+const DARK_THEME_VARS: &str = r##"
+  --bg: #0d1117;
+  --fg: #e6edf3;
+  --sidebar-bg: #161b22;
+  --sidebar-border: #30363d;
+  --link: #58a6ff;
+  --code-bg: #161b22;
+  --blockquote-border: #30363d;
+  --blockquote-fg: #8b949e;
+  --table-border: #30363d;
+  --table-alt-bg: #161b22;
+  --hr-color: #21262d;
+  --toc-active: #58a6ff;
+  --toc-hover-bg: #1c2128;
+"##;
+
+const CSS_TEMPLATE: &str = r##"
 /* リセットと基本設定 */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -125,36 +153,12 @@ const CSS: &str = r##"
 }
 
 [data-theme="dark"] {
-  --bg: #0d1117;
-  --fg: #e6edf3;
-  --sidebar-bg: #161b22;
-  --sidebar-border: #30363d;
-  --link: #58a6ff;
-  --code-bg: #161b22;
-  --blockquote-border: #30363d;
-  --blockquote-fg: #8b949e;
-  --table-border: #30363d;
-  --table-alt-bg: #161b22;
-  --hr-color: #21262d;
-  --toc-active: #58a6ff;
-  --toc-hover-bg: #1c2128;
+__DARK_THEME_VARS__
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0d1117;
-    --fg: #e6edf3;
-    --sidebar-bg: #161b22;
-    --sidebar-border: #30363d;
-    --link: #58a6ff;
-    --code-bg: #161b22;
-    --blockquote-border: #30363d;
-    --blockquote-fg: #8b949e;
-    --table-border: #30363d;
-    --table-alt-bg: #161b22;
-    --hr-color: #21262d;
-    --toc-active: #58a6ff;
-    --toc-hover-bg: #1c2128;
+__DARK_THEME_VARS__
   }
 }
 
@@ -312,6 +316,9 @@ body {
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
+.content th.align-left, .content td.align-left { text-align: left; }
+.content th.align-center, .content td.align-center { text-align: center; }
+.content th.align-right, .content td.align-right { text-align: right; }
 
 .content th { font-weight: 600; background: var(--table-alt-bg); }
 .content tr:nth-child(even) { background: var(--table-alt-bg); }
@@ -472,8 +479,38 @@ body {
 }
 "##;
 
+fn css() -> &'static str {
+    static CSS: OnceLock<String> = OnceLock::new();
+    CSS.get_or_init(|| CSS_TEMPLATE.replace("__DARK_THEME_VARS__", DARK_THEME_VARS))
+}
+
+/// インラインCSS/JS用のCSPハッシュソースを返す
+pub fn csp_hash_sources() -> (&'static str, &'static str) {
+    static SOURCES: OnceLock<(String, String)> = OnceLock::new();
+    let sources = SOURCES.get_or_init(|| {
+        let style_hash = sha256_base64(css().as_bytes());
+        let script_hash = sha256_base64(JS.as_bytes());
+        (
+            format!("'sha256-{}'", script_hash),
+            format!("'sha256-{}'", style_hash),
+        )
+    });
+    (sources.0.as_str(), sources.1.as_str())
+}
+
+fn sha256_base64(input: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(input);
+    base64::engine::general_purpose::STANDARD.encode(digest)
+}
+
 // セキュリティ注記:
-// innerHTML使用箇所: updateContent()内でサーバーサイドでサニタイズ済みHTMLを反映。
+// innerHTML使用箇所: updateContent()内でサニタイズ済みHTMLのみを反映。
+// エスケープ経路: renderer.rs(render_markdown)でraw HTML除去
+//   -> server.rs(read_and_render_file)でテンプレートへ受け渡し
+//   -> template.rs(updateContent)で反映。
 // XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
 // raw HTMLが出力に含まれないようにしている（renderer.rs）。
 // DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
@@ -840,6 +877,34 @@ const JS: &str = r##"
     }
   }
 
+  function createHttpError(status) {
+    var err = new Error('HTTP ' + status);
+    err.type = 'http';
+    err.status = status;
+    return err;
+  }
+
+  function getFileFetchErrorMessage(err) {
+    if (err && err.type === 'http') {
+      switch (err.status) {
+        case 403:
+          return 'このファイルにはアクセスできません。';
+        case 404:
+          return '指定したファイルが見つかりません。';
+        case 413:
+          return 'ファイルサイズが上限（10MB）を超えています。';
+        case 500:
+          return 'サーバー内部エラーが発生しました。';
+        default:
+          return 'ファイルの読み込みに失敗しました（HTTP ' + err.status + '）。';
+      }
+    }
+    if (err && err.type === 'parse') {
+      return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
+    }
+    return 'ネットワークエラーが発生しました。接続を確認して再度お試しください。';
+  }
+
   // サーバーサイドでサニタイズ済みのHTMLを反映する
   // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
   function updateContent(data) {
@@ -877,8 +942,11 @@ const JS: &str = r##"
       headers: { 'Accept': 'application/json' }
     })
     .then(function(resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
+      if (!resp.ok) throw createHttpError(resp.status);
+      return resp.json().catch(function(err) {
+        err.type = 'parse';
+        throw err;
+      });
     })
     .then(function(data) {
       // エラーバナーは成功レスポンスが来た時点で常にクリア（世代に関わらず安全）
@@ -907,7 +975,7 @@ const JS: &str = r##"
       updateFileListActive(previousFile);
       // URLを元に戻す（pushHistory時はpushState、popstate時はreplaceState）
       setFileParam(previousFile, !pushHistory);
-      showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');
+      showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     });
   }
 
@@ -1190,14 +1258,14 @@ mod tests {
     #[test]
     fn test_ディレクトリモードでタブ構造が生成される() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // タブボタンが存在する
         assert!(html.contains("sidebar-tab"));
@@ -1210,14 +1278,14 @@ mod tests {
 
     #[test]
     fn test_単一ファイルモードでタブが生成されない() {
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            None,
-            None,
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: None,
+            current_file: None,
+        });
 
         // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
         assert!(!html.contains("data-tab=\"files\""));
@@ -1227,14 +1295,14 @@ mod tests {
     #[test]
     fn test_selectfile_fetch失敗時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // バナー表示/非表示関数が存在する
         assert!(html.contains("function showFileFetchErrorBanner(message)"));
@@ -1244,25 +1312,27 @@ mod tests {
         assert!(html.contains("closeBtn.onclick = hideFileFetchErrorBanner"));
         // WebSocket切断バナー表示中はfetchエラーバナーを抑制する
         assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        // HTTPエラーとJSONパースエラーを区別する
+        assert!(html.contains("function createHttpError(status)"));
+        assert!(html.contains("function getFileFetchErrorMessage(err)"));
+        assert!(html.contains("err.type = 'parse';"));
         // fetch成功時にバナーをクリア（generation チェック前）
         assert!(html.contains("hideFileFetchErrorBanner();"));
-        // fetch失敗時にバナーを表示
-        assert!(html.contains(
-            "showFileFetchErrorBanner('ファイルの読み込みに失敗しました。再度お試しください。');"
-        ));
+        // fetch失敗時にエラー種別に応じたメッセージを表示
+        assert!(html.contains("showFileFetchErrorBanner(getFileFetchErrorMessage(err));"));
     }
 
     #[test]
     fn test_websocket更新時にfetchエラーバナーがクリアされる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // WebSocket経由の成功更新後にバナーをクリアするコメントとコードが存在する
         assert!(html.contains("WebSocket経由の成功更新で各種エラーバナーをクリア"));
@@ -1273,14 +1343,14 @@ mod tests {
     #[test]
     fn test_websocket_data_error時の視覚フィードバックjsが埋め込まれる() {
         let files = vec!["README.md".to_string()];
-        let html = render_page(
-            "Test",
-            "<p>content</p>",
-            "<ul><li>toc</li></ul>",
-            false,
-            Some(&files),
-            Some("README.md"),
-        );
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: "<p>content</p>",
+            toc: "<ul><li>toc</li></ul>",
+            dark_mode: false,
+            file_list: Some(&files),
+            current_file: Some("README.md"),
+        });
 
         // サーバーエラーバナー表示/非表示関数が存在する
         assert!(html.contains("function showWsServerErrorBanner(message)"));

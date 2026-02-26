@@ -24,6 +24,18 @@ fn test_gfmテーブル() {
 }
 
 #[test]
+fn test_テーブルalignmentが反映される() {
+    let md = "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<th class=\"align-left\">L</th>"));
+    assert!(html.contains("<th class=\"align-center\">C</th>"));
+    assert!(html.contains("<th class=\"align-right\">R</th>"));
+    assert!(html.contains("<td class=\"align-left\">1</td>"));
+    assert!(html.contains("<td class=\"align-center\">2</td>"));
+    assert!(html.contains("<td class=\"align-right\">3</td>"));
+}
+
+#[test]
 fn test_タスクリスト() {
     let md = "- [x] Done\n- [ ] Todo";
     let html = render_markdown(md, None);
@@ -46,6 +58,14 @@ fn test_コードブロック_ハイライト() {
     // syntectによるclass-basedハイライトが適用される
     assert!(html.contains("<pre"));
     assert!(html.contains("fn"));
+}
+
+#[test]
+fn test_未知言語コードブロックはフォールバック描画される() {
+    let md = "```unknown-lang\nlet x = 1;\n```";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<pre class=\"code-block\"><code class=\"language-unknown-lang\">"));
+    assert!(html.contains("let x = 1;"));
 }
 
 #[test]
@@ -76,6 +96,15 @@ fn test_リンク() {
     assert!(html.contains("href="));
     assert!(html.contains("https://www.rust-lang.org"));
     assert!(html.contains("Rust"));
+}
+
+#[test]
+fn test_順序付きリスト() {
+    let md = "1. first\n2. second";
+    let html = render_markdown(md, None);
+    assert!(html.contains("<ol start=\"1\">"));
+    assert!(html.contains("<li>first</li>"));
+    assert!(html.contains("<li>second</li>"));
 }
 
 #[test]
@@ -179,6 +208,13 @@ fn test_unsafeスキームのリンクは無効化される() {
 }
 
 #[test]
+fn test_sanitize_hrefのホワイトスペースパディング付き危険urlは無効化される() {
+    let html = render_markdown("[click](  javascript:alert(1)  )", None);
+    assert!(html.contains(r##"<a href="#">click</a>"##));
+    assert!(!html.contains("javascript:alert(1)"));
+}
+
+#[test]
 fn test_見出し画像入りでもtocリンクが一致する() {
     let md = "# ![logo](x.png) Title";
     let html = render_markdown(md, None);
@@ -275,6 +311,15 @@ fn test_html_escapeでシングルクォートがエスケープされる() {
 }
 
 #[test]
+fn test_html_escapeで主要な特殊文字がエスケープされる() {
+    use markdown_view::renderer::html_escape;
+    assert_eq!(
+        html_escape("&<>'\"そのまま"),
+        "&amp;&lt;&gt;&#39;&quot;そのまま"
+    );
+}
+
+#[test]
 fn test_安全なリンクスキームは許可される() {
     let html = render_markdown("[mail](mailto:user@example.com)", None);
     assert!(html.contains("mailto:user@example.com"));
@@ -318,36 +363,78 @@ fn test_ローカルルートパスのリンクは許可される() {
     assert!(html.contains(r##"href="/page.html""##));
 }
 
+#[test]
+fn test_フルパイプラインxss対策_render_markdownからrender_pageまで() {
+    use markdown_view::template::{render_page, RenderPageParams};
+
+    let content = render_markdown(
+        "# Title\n<script>alert('xss')</script>\n[bad](javascript:alert(1))",
+        None,
+    );
+    let html = render_page(RenderPageParams {
+        title: "Test",
+        content: &content,
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
+
+    assert!(!html.contains("<script>alert('xss')</script>"));
+    assert!(html.contains(r##"<a href="#">bad</a>"##));
+}
+
 // --- テンプレート テスト ---
 
 #[test]
 fn test_render_pageのタイトルがエスケープされる() {
-    use markdown_view::template::render_page;
-    let html = render_page("<script>xss</script>", "", "", false, None, None);
+    use markdown_view::template::{render_page, RenderPageParams};
+    let html = render_page(RenderPageParams {
+        title: "<script>xss</script>",
+        content: "",
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
     assert!(html.contains("&lt;script&gt;xss&lt;/script&gt;"));
     assert!(!html.contains("<script>xss</script> - markdown-view"));
 }
 
 #[test]
 fn test_render_pageのダークモード() {
-    use markdown_view::template::render_page;
-    let light = render_page("t", "", "", false, None, None);
-    let dark = render_page("t", "", "", true, None, None);
+    use markdown_view::template::{render_page, RenderPageParams};
+    let light = render_page(RenderPageParams {
+        title: "t",
+        content: "",
+        toc: "",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
+    let dark = render_page(RenderPageParams {
+        title: "t",
+        content: "",
+        toc: "",
+        dark_mode: true,
+        file_list: None,
+        current_file: None,
+    });
     assert!(light.contains(r#"data-theme="light""#));
     assert!(dark.contains(r#"data-theme="dark""#));
 }
 
 #[test]
 fn test_render_pageの基本構造() {
-    use markdown_view::template::render_page;
-    let html = render_page(
-        "Test",
-        "<p>Hello</p>",
-        "<ul><li>H1</li></ul>",
-        false,
-        None,
-        None,
-    );
+    use markdown_view::template::{render_page, RenderPageParams};
+    let html = render_page(RenderPageParams {
+        title: "Test",
+        content: "<p>Hello</p>",
+        toc: "<ul><li>H1</li></ul>",
+        dark_mode: false,
+        file_list: None,
+        current_file: None,
+    });
     assert!(html.contains("<!DOCTYPE html>"));
     assert!(html.contains("<p>Hello</p>"));
     assert!(html.contains("<ul><li>H1</li></ul>"));

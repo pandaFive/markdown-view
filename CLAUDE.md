@@ -43,7 +43,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ### データフロー
 
-1. **初期表示**: HTTP GET `/` → `read_and_render` → `render_page`（フルHTML）
+1. **初期表示**: HTTP GET `/` → `read_and_render_file` → `render_page`（フルHTML）
 2. **ライブリロード**: notify検知 → `notify_update` → broadcast channel → WebSocket → クライアントJS
 3. **API**: GET `/api/content` → JSON（`UpdateMessage { content, toc }`）
 
@@ -58,7 +58,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ## セキュリティレイヤー
 
-- CSPヘッダー（`script-src 'unsafe-inline'`、`frame-ancestors 'none'`）
+- CSPヘッダー（`script-src 'sha256-...'`、`style-src 'sha256-...' 'unsafe-inline'`、`frame-ancestors 'none'`）
 - `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`
 - `sanitize_href`: 安全なスキーム（http/https/mailto/tel）とローカルパスのみ許可
 - `is_trusted_host`: localhost/127.0.0.0/8/::1のみ信頼
@@ -66,7 +66,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ## テスト構成
 
-- `tests/cli_test.rs` — CLI引数パース（clap test_helpers使用）
+- `tests/cli_test.rs` — CLI引数パース（clap の `try_parse_from` 使用）
 - `tests/renderer_test.rs` — Markdown変換、XSSサニタイズ、コードハイライト
 - `tests/toc_test.rs` — 目次生成、ネスト、重複ID
 - `tests/integration_test.rs` — HTTP/WebSocket統合テスト（実サーバー起動）
@@ -77,6 +77,6 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 ## コード規約
 
 - コメント・コミットメッセージは日本語
-- `eprintln!("[markdown-view] ...")` 形式でログ出力（tracing未導入）
+- `tracing::info!/warn!/error!` マクロで構造化ログ出力（初期化失敗時のみ `eprintln!` フォールバック）
 - syntect/pulldown-cmarkの静的リソースは`OnceLock`でlazy初期化
 - 公開関数に`///`ドキュメントコメントを付与

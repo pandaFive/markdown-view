@@ -5,7 +5,8 @@ use futures_util::StreamExt;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use markdown_view::server::{AppMode, AppState};
+use markdown_view::server::{AppMode, AppState, BroadcastMessage};
+use markdown_view::template::UpdateMessage;
 
 // ==============================
 // 単一ファイルモード テスト
@@ -37,6 +38,7 @@ async fn test_apiコンテンツ取得() {
     let json: serde_json::Value = resp.json().await.unwrap();
     let content = json["content"].as_str().unwrap();
     assert!(content.contains("<strong>bold</strong>"));
+    assert!(json.get("file").is_none());
 }
 
 #[tokio::test]
@@ -54,6 +56,22 @@ async fn test_httpは許可されないhostを拒否する() {
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     }
+}
+
+#[tokio::test]
+async fn test_単一ファイルモードでfileクエリは無視される() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Single Mode").await;
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/content?file=does-not-matter.md",
+        addr
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["content"].as_str().unwrap().contains("Single Mode"));
+    assert!(json.get("file").is_none());
 }
 
 #[tokio::test]
@@ -91,11 +109,14 @@ async fn test_websocketブロードキャスト受信() {
         .unwrap();
 
     // broadcastで更新を送信
-    let update = serde_json::json!({
-        "content": "<p>updated</p>",
-        "toc": ""
-    });
-    state.tx.send(update.to_string()).unwrap();
+    state
+        .tx()
+        .send(BroadcastMessage::Update(UpdateMessage::new(
+            "<p>updated</p>".to_string(),
+            "".to_string(),
+            None,
+        )))
+        .unwrap();
 
     // WebSocketで受信
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
@@ -117,12 +138,12 @@ async fn test_存在しないファイル時は500を返す() {
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_single_file(&file_path).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -143,6 +164,37 @@ async fn test_存在しないファイル時は500を返す() {
 }
 
 #[tokio::test]
+async fn test_non_utf8ファイル読み込み時は500を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("binary.md");
+    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    for path in ["/", "/api/content"] {
+        let resp = reqwest::get(format!("http://{}{}", addr, path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+#[tokio::test]
 async fn test_ファイル変更でwebsocket更新() {
     // 一時ファイルを作成
     let tmp_dir = tempfile::tempdir().unwrap();
@@ -150,12 +202,12 @@ async fn test_ファイル変更でwebsocket更新() {
     tokio::fs::write(&file_path, "# Before").await.unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_single_file(&file_path).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     // サーバー起動
     let router = markdown_view::server::create_router(state.clone());
@@ -166,7 +218,7 @@ async fn test_ファイル変更でwebsocket更新() {
     });
 
     // ファイル監視開始
-    markdown_view::watcher::watch_path(state.clone())
+    let _watch_handle = markdown_view::watcher::watch_path(state.clone())
         .await
         .unwrap();
 
@@ -208,6 +260,16 @@ async fn test_websocketは異なるoriginを拒否する() {
 }
 
 #[tokio::test]
+async fn test_websocketはoriginポート不一致を拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+
+    let url = format!("ws://{}/ws", addr);
+    let wrong_port_origin = format!("http://localhost:{}", addr.port() + 1);
+    let result = connect_ws(&url, &wrong_port_origin).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
 
@@ -234,7 +296,7 @@ async fn test_websocket切断時に購読が速やかに解放される() {
     // クライアント切断後、receiver_count が0へ戻ること
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if state.tx.receiver_count() == 0 {
+            if state.tx().receiver_count() == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -254,12 +316,12 @@ async fn test_ファイルサイズ上限超過で413を返す() {
     tokio::fs::write(&large_file, &content).await.unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_single_file(&large_file).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&large_file).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -273,6 +335,38 @@ async fn test_ファイルサイズ上限超過で413を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[tokio::test]
+async fn test_ファイルサイズ上限ちょうど10mbは200を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let limit_file = tmp_dir.path().join("limit.md");
+
+    // MAX_FILE_SIZE(10MB) ちょうどのファイル
+    let content = "x".repeat(10 * 1024 * 1024);
+    tokio::fs::write(&limit_file, &content).await.unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&limit_file).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    for path in ["/", "/api/content"] {
+        let resp = reqwest::get(format!("http://{}{}", addr, path))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 }
 
@@ -299,8 +393,12 @@ async fn test_セキュリティヘッダが設定されている() {
         .to_str()
         .unwrap();
     assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("script-src 'sha256-"));
+    assert!(csp.contains("style-src 'sha256-"));
+    assert!(csp.contains("'unsafe-inline'"));
     assert!(csp.contains("frame-ancestors 'none'"));
     assert!(csp.contains("object-src 'none'"));
+    assert!(!csp.contains("script-src 'unsafe-inline'"));
     assert!(!csp.contains("data:"));
 }
 
@@ -378,11 +476,7 @@ async fn test_ディレクトリモード_トラバーサル攻撃拒否() {
     let resp = reqwest::get(format!("http://{}/api/content?file=../../etc/passwd", addr))
         .await
         .unwrap();
-    // NotFoundまたはForbidden
-    assert!(
-        resp.status() == reqwest::StatusCode::NOT_FOUND
-            || resp.status() == reqwest::StatusCode::FORBIDDEN
-    );
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -402,7 +496,7 @@ async fn test_ディレクトリモード_非mdファイル拒否() {
     let resp = reqwest::get(format!("http://{}/api/content?file=notes.txt", addr))
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -416,13 +510,13 @@ async fn test_ディレクトリモード_隠しファイルの直接アクセ�
     ))
     .await
     .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // index経由でも同様
     let resp = reqwest::get(format!("http://{}/?file=.hidden/secret.md", addr))
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -436,6 +530,17 @@ async fn test_ディレクトリモード_ファイル指定でindex取得() {
 
     let body = resp.text().await.unwrap();
     assert!(body.contains("Guide"));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_アクティブファイルマーカーが表示される() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("class=\"file-tree-file active\""));
 }
 
 #[tokio::test]
@@ -493,12 +598,12 @@ async fn test_ディレクトリモード_ファイル名のhtmlエスケープ(
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_directory(tmp_dir.path()).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -524,12 +629,12 @@ async fn test_ディレクトリモード_空ディレクトリで404を返す()
     // .mdファイルを1つも置かない
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_directory(tmp_dir.path()).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -582,12 +687,12 @@ async fn test_ディレクトリモード_readmeなし時はアルファベッ�
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_directory(tmp_dir.path()).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -645,8 +750,12 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
         .unwrap();
 
     // broadcastでエラーJSONを送信（watcher.rsのbroadcast_errorと同じ形式）
-    let error_json = serde_json::json!({"error": "ファイル監視エラー: テスト用エラー"});
-    state.tx.send(error_json.to_string()).unwrap();
+    state
+        .tx()
+        .send(BroadcastMessage::Error(
+            "ファイル監視エラー: テスト用エラー".to_string(),
+        ))
+        .unwrap();
 
     // WebSocketでエラーJSONを受信
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
@@ -738,12 +847,12 @@ async fn setup_single_file_server(
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_single_file(&file_path).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -786,12 +895,12 @@ async fn setup_dir_server() -> (Arc<AppState>, std::net::SocketAddr, tempfile::T
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState {
-        mode: AppMode::new_directory(tmp_dir.path()).unwrap(),
-        dark_mode: false,
-        theme: None,
+    let state = Arc::new(AppState::new(
+        AppMode::new_directory(tmp_dir.path()).unwrap(),
+        false,
+        None,
         tx,
-    });
+    ));
 
     let router = markdown_view::server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

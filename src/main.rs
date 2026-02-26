@@ -9,8 +9,22 @@ use markdown_view::renderer::validate_theme;
 use markdown_view::server::{create_router, AppMode, AppState, MAX_FILE_SIZE};
 use markdown_view::watcher::watch_path;
 
+fn init_logging() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    if let Err(e) = tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(env_filter)
+        .try_init()
+    {
+        eprintln!("[markdown-view] ログシステムの初期化に失敗: {}", e);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
+
     let args = Args::parse();
 
     // パス存在チェック
@@ -54,15 +68,10 @@ async fn main() -> Result<()> {
     // broadcast チャネル
     let (tx, _rx) = broadcast::channel(16);
 
-    let state = Arc::new(AppState {
-        mode: mode.clone(),
-        dark_mode: args.dark,
-        theme: args.theme,
-        tx,
-    });
+    let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
 
     // ファイル/ディレクトリ監視開始
-    watch_path(state.clone())
+    let watcher_handle = watch_path(state.clone())
         .await
         .context("監視の開始に失敗")?;
 
@@ -78,25 +87,45 @@ async fn main() -> Result<()> {
     let url = format!("http://{}", local_addr);
 
     if let Some(p) = mode.single_file() {
-        eprintln!("markdown-view: {} をプレビュー中", p.display());
+        tracing::info!("markdown-view: {} をプレビュー中", p.display());
     } else if let Some(p) = mode.directory() {
-        eprintln!(
+        tracing::info!(
             "markdown-view: {} 内のMarkdownファイルをプレビュー中",
             p.display()
         );
     }
-    eprintln!("URL: {}", url);
-    eprintln!("Ctrl+C で終了");
+    tracing::info!("URL: {}", url);
+    tracing::info!("Ctrl+C で終了");
 
     // ブラウザ自動起動
     if !args.no_open {
         if let Err(e) = open::that(&url) {
-            eprintln!("ブラウザの起動に失敗しました: {}", e);
+            tracing::warn!("ブラウザの起動に失敗しました: {}", e);
         }
     }
 
     let router = create_router(state);
-    axum::serve(listener, router).await?;
+    let server_result = axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            // Ctrl+C受信時にHTTPサーバーをグレースフル停止する
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => {
+                    tracing::info!("[markdown-view] Ctrl+C を受信。終了します...");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "[markdown-view] シグナルハンドラの登録に失敗: {}。手動で終了してください",
+                        e
+                    );
+                    // シグナルを待てないため永遠に待機する（別手段でプロセスを終了させる）
+                    std::future::pending::<()>().await;
+                }
+            }
+        })
+        .await;
+
+    watcher_handle.shutdown().await;
+    server_result?;
 
     Ok(())
 }
