@@ -12,10 +12,13 @@ use markdown_view::watcher::watch_path;
 fn init_logging() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
+    if let Err(e) = tracing_subscriber::fmt()
         .with_target(false)
         .with_env_filter(env_filter)
-        .try_init();
+        .try_init()
+    {
+        eprintln!("[markdown-view] ログシステムの初期化に失敗: {}", e);
+    }
 }
 
 #[tokio::main]
@@ -105,7 +108,19 @@ async fn main() -> Result<()> {
     let server_result = axum::serve(listener, router)
         .with_graceful_shutdown(async {
             // Ctrl+C受信時にHTTPサーバーをグレースフル停止する
-            let _ = tokio::signal::ctrl_c().await;
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => {
+                    tracing::info!("[markdown-view] Ctrl+C を受信。終了します...");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "[markdown-view] シグナルハンドラの登録に失敗: {}。手動で終了してください",
+                        e
+                    );
+                    // シグナルを待てないため永遠に待機する（別手段でプロセスを終了させる）
+                    std::future::pending::<()>().await;
+                }
+            }
         })
         .await;
 

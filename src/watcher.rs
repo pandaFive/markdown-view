@@ -18,8 +18,17 @@ enum WatcherMessage {
 }
 
 fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, label: &str) {
-    if tx.blocking_send(msg).is_err() {
-        tracing::warn!("[markdown-view] 通知チャネルが閉じています: {}", label);
+    match tx.try_send(msg) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "[markdown-view] 監視メッセージ送信キューが満杯のため破棄: {}",
+                label
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!("[markdown-view] 通知チャネルが閉じています: {}", label);
+        }
     }
 }
 
@@ -107,7 +116,7 @@ pub async fn watch_path(state: Arc<AppState>) -> Result<WatchHandle> {
     } else if let Some(dir_path) = state.mode().directory().map(Path::to_path_buf) {
         watch_directory(state, dir_path).await
     } else {
-        unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
+        anyhow::bail!("未知のAppModeです")
     }
 }
 
@@ -563,28 +572,20 @@ mod tests {
     }
 
     #[test]
-    fn test_send_watcher_message_チャネル満杯時はドロップせず待機して送信する() {
+    fn test_send_watcher_message_チャネル満杯時はメッセージを破棄してブロックしない() {
         let (tx, mut rx) = mpsc::channel::<WatcherMessage>(1);
+        // チャネルを満杯にする
         tx.blocking_send(WatcherMessage::FileChanged(PathBuf::from("/tmp/first.md")))
             .unwrap();
 
-        let tx_for_thread = tx.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            send_watcher_message(
-                &tx_for_thread,
-                WatcherMessage::WatchError("満杯時テスト".to_string()),
-                "満杯時テスト",
-            );
-            done_tx.send(()).unwrap();
-        });
-
-        assert!(
-            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
-            "受信側が空ける前に送信が完了してはいけない"
+        // 満杯時にtry_sendで即座に破棄される（ブロックしない）
+        send_watcher_message(
+            &tx,
+            WatcherMessage::WatchError("満杯時テスト".to_string()),
+            "満杯時テスト",
         );
 
+        // 最初のメッセージのみ受信できる
         match rx.blocking_recv().unwrap() {
             WatcherMessage::FileChanged(path) => {
                 assert_eq!(path, PathBuf::from("/tmp/first.md"));
@@ -594,17 +595,11 @@ mod tests {
             }
         }
 
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("受信側が空いた後は送信が完了するはず");
-        match rx.blocking_recv().unwrap() {
-            WatcherMessage::WatchError(msg) => {
-                assert_eq!(msg, "満杯時テスト");
-            }
-            WatcherMessage::FileChanged(_) => panic!("2件目はWatchErrorを期待"),
-        }
-
-        handle.join().unwrap();
+        // 満杯時のメッセージは破棄されているため、追加メッセージはない
+        assert!(
+            rx.try_recv().is_err(),
+            "満杯時のメッセージは破棄されているはず"
+        );
     }
 
     #[test]

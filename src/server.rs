@@ -281,7 +281,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::http::header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
         ))
-        // CSP: script/styleはハッシュベース許可でunsafe-inlineを排除する。
+        // CSP: scriptはハッシュベース許可を維持し、unsafe-inlineを排除する。
+        // styleはsyntectのコードハイライトがインラインstyleを出力するため、
+        // style-srcでunsafe-inlineを許可する（script-srcには適用しない）。
         // img-srcは外部画像参照のため*を許可（CSP Level 2+では `*` に `data:` は含まれない）。
         // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
         // frame-ancestors 'none'でクリックジャッキングを防止。
@@ -295,10 +297,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 fn build_csp_header() -> HeaderValue {
     let (script_src, style_src) = csp_hash_sources();
     let csp = format!(
-        "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+        "default-src 'self'; script-src {}; style-src {} 'unsafe-inline'; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
-    HeaderValue::from_str(&csp).unwrap_or_else(|_| {
+    HeaderValue::from_str(&csp).unwrap_or_else(|e| {
+        tracing::error!(
+            "[markdown-view] CSPヘッダーの生成に失敗（フォールバックCSPを使用）: {} (CSP: {})",
+            e,
+            csp
+        );
         HeaderValue::from_static("default-src 'self'; object-src 'none'; frame-ancestors 'none'")
     })
 }
@@ -443,7 +450,8 @@ fn resolve_target_file(
 
         Ok((file_path, file_list))
     } else {
-        unreachable!("AppModeは単一ファイルまたはディレクトリのいずれか")
+        tracing::error!("[markdown-view] 未知のAppModeです");
+        Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -1065,7 +1073,7 @@ async fn read_and_render_file(
 /// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
 /// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
 /// 読み込みエラー時はエラーJSONをクライアントに送信する。
-/// JS側の `data.error` チェックでコンソールにエラーログが出力される（UI表示はなし）。
+/// JS側の `data.error` チェックでエラーバナーがページ上部に表示される。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx.receiver_count() == 0 {
         return;
