@@ -690,6 +690,15 @@ impl std::fmt::Display for ReadMarkdownError {
     }
 }
 
+impl std::error::Error for ReadMarkdownError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReadMarkdownError::Io(e) => Some(e),
+            ReadMarkdownError::TooLarge => None,
+        }
+    }
+}
+
 impl ReadMarkdownError {
     /// HTTPステータスコードへ変換する
     fn status_code(&self) -> StatusCode {
@@ -987,6 +996,8 @@ impl std::fmt::Display for ResolveFileError {
         }
     }
 }
+
+impl std::error::Error for ResolveFileError {}
 
 impl ResolveFileError {
     /// HTTPステータスコードへ変換する

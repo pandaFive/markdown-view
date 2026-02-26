@@ -183,13 +183,15 @@
 
 ### Low Priority
 
-- [ ] `AppMode` にバリデーション付きコンストラクタを追加
+- [x] `AppMode` にバリデーション付きコンストラクタを追加
   - ファイル: `src/server.rs`
   - 理由: `AppMode::SingleFile` に存在しないパスや非.mdを設定可能な現状を改善
+  - 対応: `AppMode::new_single_file` / `new_directory` を導入し、存在確認と `.md` 検証を実装
 
-- [ ] `ResolveFileError` に `std::error::Error` を実装
+- [x] `ResolveFileError` に `std::error::Error` を実装
   - ファイル: `src/server.rs`
   - 理由: 標準のエラーインターフェースに準拠し、`anyhow` との互換性を向上
+  - 対応: `impl std::error::Error for ResolveFileError {}` を追加
 
 - [x] `render_page` の6引数を構造体パラメータに変更
   - ファイル: `src/template.rs`, 呼び出し箇所全て
@@ -273,16 +275,18 @@
 
 ### 巨大な修正（要別途対応）
 
-- [ ] [Medium] `AppMode` にバリデーション付きコンストラクタ追加
+- [x] [Medium] `AppMode` にバリデーション付きコンストラクタ追加
   - ファイル: `src/server.rs`, `src/main.rs`, `tests/integration_test.rs`
   - 影響範囲: 全AppState生成箇所
   - 修正方針: `AppMode::new_single_file(path)` / `AppMode::new_directory(path)` で存在確認・.md検証
   - 理由: 型設計アナライザで5.5/10の評価。不変条件の強制が不十分
+  - 対応: `AppMode` コンストラクタを導入し、全生成箇所を `AppMode::new_*` 経由へ移行
 
-- [ ] [Low] `ResolveFileError`/`ReadMarkdownError` に `std::error::Error` 実装
+- [x] [Low] `ResolveFileError`/`ReadMarkdownError` に `std::error::Error` 実装
   - ファイル: `src/server.rs`
   - 修正方針: `impl std::error::Error for ResolveFileError {}` + `impl std::error::Error for ReadMarkdownError {}`
   - 理由: 標準エラーインターフェース準拠。anyhowとの互換性向上
+  - 対応: 両エラー型へ `std::error::Error` 実装を追加（`ReadMarkdownError::Io` は `source()` 連携）
 
 ## PR #4 レビュー Round 3 (レビュー日: 2026-02-25)
 
@@ -412,11 +416,12 @@
 
 ### 巨大な修正（要別途対応）
 
-- [ ] [Medium] `AppMode` に `CanonicalPath` newtypeで不変条件を型で表現
+- [x] [Medium] `AppMode` に `CanonicalPath` newtypeで不変条件を型で表現
   - ファイル: `src/server.rs`, `src/main.rs`, `src/watcher.rs`
   - 影響範囲: AppMode構築・パターンマッチ箇所すべて
   - 修正方針: `CanonicalPath(PathBuf)` newtypeを導入、`relative_path_of` の毎回canonicalizeを排除
   - 理由: type-design-analyzer 評価 4.0/10。繰り返しcanonicalize呼び出しの排除と型安全性向上
+  - 対応: `CanonicalPath` newtype + `AppModeKind` 内包化を導入し、モード判定/相対パス算出を型安全化
 
 - [x] [Medium] broadcast チャネルを `String` から型付きメッセージに変更
   - ファイル: `src/server.rs`, `src/template.rs`, `src/watcher.rs`
