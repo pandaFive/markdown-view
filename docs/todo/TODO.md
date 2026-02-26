@@ -91,11 +91,12 @@
   - 理由: 初期化後の監視エラーでライブリロードが静かに停止する
   - 対応: `WatcherMessage::WatchError` を通知タスクで `BroadcastMessage::Error` に変換して配信
 
-- [ ] [Medium] renderer/tocの見出し抽出ロジック統合（DRY違反）
+- [x] [Medium] renderer/tocの見出し抽出ロジック統合（DRY違反）
   - ファイル: `src/renderer.rs`, `src/toc.rs`
   - 影響範囲: render_markdown, generate_toc, extract_headings
   - 修正方針: 共通の見出し抽出関数を作成し、rendererとtocで共有。パーサーオプションも統一
   - 理由: 同じMarkdownを2回パースし、見出しID生成ロジックが2箇所に重複している
+  - 対応: `renderer::extract_headings` と `markdown_options()` を導入し、`toc` 側の重複実装を削除
 
 - [x] [Medium] broadcast チャネルを `String` から `UpdateMessage` 型に変更
   - ファイル: `src/server.rs`, `src/template.rs`, `src/watcher.rs`
