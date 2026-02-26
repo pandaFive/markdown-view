@@ -55,9 +55,10 @@
   - 理由: ログレベルの区別やフィルタリングができない
   - 対応: `tracing` + `tracing-subscriber` を導入し、`eprintln!` を `tracing` マクロへ置換
 
-- [ ] `html_escape` を単一パス実装に最適化
+- [x] `html_escape` を単一パス実装に最適化
   - ファイル: `src/renderer.rs:507-513`
   - 理由: 現在5回の`.replace()`チェーンで中間Stringが5回割り当てられる
+  - 対応: `for ch in text.chars()` の1パス変換へ置換し、中間割り当てを削減
 
 - [ ] ダークテーマCSS変数の重複排除
   - ファイル: `src/template.rs:72-104`

@@ -287,6 +287,15 @@ fn test_html_escapeでシングルクォートがエスケープされる() {
 }
 
 #[test]
+fn test_html_escapeで主要な特殊文字がエスケープされる() {
+    use markdown_view::renderer::html_escape;
+    assert_eq!(
+        html_escape("&<>'\"そのまま"),
+        "&amp;&lt;&gt;&#39;&quot;そのまま"
+    );
+}
+
+#[test]
 fn test_安全なリンクスキームは許可される() {
     let html = render_markdown("[mail](mailto:user@example.com)", None);
     assert!(html.contains("mailto:user@example.com"));
