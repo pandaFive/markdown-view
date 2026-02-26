@@ -112,11 +112,12 @@
   - 理由: 不変条件の強制。バリデーションなしに生成可能な現状を改善
   - 対応: フィールドをprivate化し `AppState::new()` と getter 群へ移行
 
-- [ ] [Medium] `render_markdown` のGod Function分割
+- [x] [Medium] `render_markdown` のGod Function分割
   - ファイル: `src/renderer.rs`
   - 影響範囲: render_markdown（390行、14個の可変状態変数）
   - 修正方針: RenderState構造体の導入、コードブロック/画像レンダリングの関数抽出、push_htmlヘルパーの追加
   - 理由: 可読性・保守性向上。新しいMarkdown要素追加時の状態管理バグリスクを低減
+  - 対応: `RenderState` を導入し、コードブロック/画像処理とHTML追記をメソッド化
 
 - [x] [Medium] `is_target_file` のアトミックセーブ対応
   - ファイル: `src/watcher.rs`
