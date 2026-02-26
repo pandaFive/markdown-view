@@ -179,7 +179,7 @@ impl AppMode {
             AppModeKind::Directory(base) => match file_path.strip_prefix(base.as_path()) {
                 Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
                 Err(_) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
                         file_path.display(),
                         base.as_path().display()
@@ -315,7 +315,7 @@ async fn index_handler(
     let update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
-            eprintln!("[markdown-view] index読み込みエラー: {}", e);
+            tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
             e.status_code()
         })?;
 
@@ -351,7 +351,7 @@ async fn api_content_handler(
     let mut update = read_and_render_file(&file_path, state.theme.as_deref())
         .await
         .map_err(|e| {
-            eprintln!("[markdown-view] api/content読み込みエラー: {}", e);
+            tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
             e.status_code()
         })?;
 
@@ -370,7 +370,7 @@ async fn api_files_handler(
 
     if let Some(base) = state.mode.directory() {
         let files = list_markdown_files(base).map_err(|e| {
-            eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         Ok(Json(files))
@@ -394,12 +394,12 @@ fn resolve_target_file(
         let mut precomputed_files: Option<Vec<String>> = None;
         let file_path = if let Some(rel) = query_file {
             resolve_file(base, rel).map_err(|e| {
-                eprintln!("[markdown-view] ファイル解決エラー: {}", e);
+                tracing::warn!("[markdown-view] ファイル解決エラー: {}", e);
                 e.status_code()
             })?
         } else {
             let files = list_markdown_files(base).map_err(|e| {
-                eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
             precomputed_files = Some(files.clone());
@@ -411,7 +411,7 @@ fn resolve_target_file(
 
             match default_file {
                 Some(rel) => resolve_file(base, rel).map_err(|e| {
-                    eprintln!("[markdown-view] デフォルトファイル解決エラー: {}", e);
+                    tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", e);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?,
                 None => {
@@ -424,7 +424,7 @@ fn resolve_target_file(
             match precomputed_files {
                 Some(files) => Some(files),
                 None => Some(list_markdown_files(base).map_err(|e| {
-                    eprintln!("[markdown-view] ファイル一覧取得エラー: {}", e);
+                    tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?),
             }
@@ -526,7 +526,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
+                tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
                 if let Err(e) = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1011,
@@ -534,7 +534,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     })))
                     .await
                 {
-                    eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+                    tracing::warn!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
                 }
                 return;
             }
@@ -542,7 +542,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         let msg = match BroadcastMessage::Update(update).to_json() {
             Ok(json) => json,
             Err(e) => {
-                eprintln!("[markdown-view] JSONシリアライズエラー: {}", e);
+                tracing::warn!("[markdown-view] JSONシリアライズエラー: {}", e);
                 if let Err(e) = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1011,
@@ -550,13 +550,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     })))
                     .await
                 {
-                    eprintln!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+                    tracing::warn!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
                 }
                 return;
             }
         };
         if let Err(e) = socket.send(Message::Text(msg.into())).await {
-            eprintln!("[markdown-view] WebSocket初期送信エラー: {}", e);
+            tracing::warn!("[markdown-view] WebSocket初期送信エラー: {}", e);
             return;
         }
     }
@@ -571,7 +571,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if let Err(e) = socket.send(Message::Pong(payload)).await {
-                            eprintln!("[markdown-view] WebSocket pong送信エラー: {}", e);
+                            tracing::warn!("[markdown-view] WebSocket pong送信エラー: {}", e);
                             break;
                         }
                     }
@@ -580,7 +580,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         // サーバーは配信専用のため、クライアント入力を処理しない設計。
                     }
                     Some(Err(e)) => {
-                        eprintln!("[markdown-view] WebSocket受信エラー: {}", e);
+                        tracing::warn!("[markdown-view] WebSocket受信エラー: {}", e);
                         break;
                     }
                     None => {
@@ -594,18 +594,18 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         let json = match msg.to_json() {
                             Ok(json) => json,
                             Err(e) => {
-                                eprintln!("[markdown-view] WebSocketメッセージJSON化エラー: {}", e);
+                                tracing::warn!("[markdown-view] WebSocketメッセージJSON化エラー: {}", e);
                                 continue;
                             }
                         };
                         if let Err(e) = socket.send(Message::Text(json.into())).await {
-                            eprintln!("[markdown-view] WebSocket送信エラー: {}", e);
+                            tracing::warn!("[markdown-view] WebSocket送信エラー: {}", e);
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         // 遅延クライアントに最新コンテンツを再送信（単一ファイルモードのみ）
-                        eprintln!(
+                        tracing::warn!(
                             "[markdown-view] WebSocketクライアントが{}メッセージ遅延",
                             n
                         );
@@ -614,14 +614,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
                                 Ok(result) => result,
                                 Err(e) => {
-                                    eprintln!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
+                                    tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
                                     if let Ok(error_json) = BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e)).to_json() {
                                         if let Err(e) = socket.send(Message::Text(error_json.into())).await {
-                                            eprintln!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
+                                            tracing::warn!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
                                             break;
                                         }
                                     } else {
-                                        eprintln!(
+                                        tracing::warn!(
                                             "[markdown-view] WebSocketエラーJSON生成にも失敗 (元エラー: {})",
                                             e
                                         );
@@ -632,12 +632,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             let resend = match BroadcastMessage::Update(update).to_json() {
                                 Ok(json) => json,
                                 Err(e) => {
-                                    eprintln!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
+                                    tracing::warn!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
                                     continue;
                                 }
                             };
                             if let Err(e) = socket.send(Message::Text(resend.into())).await {
-                                eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                tracing::warn!("[markdown-view] WebSocket再送信エラー: {}", e);
                                 break;
                             }
                         } else {
@@ -645,12 +645,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             match BroadcastMessage::Refresh.to_json() {
                                 Ok(json) => {
                                     if let Err(e) = socket.send(Message::Text(json.into())).await {
-                                        eprintln!("[markdown-view] WebSocket再送信エラー: {}", e);
+                                        tracing::warn!("[markdown-view] WebSocket再送信エラー: {}", e);
                                         break;
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("[markdown-view] リフレッシュJSONシリアライズエラー: {}", e);
+                                    tracing::warn!("[markdown-view] リフレッシュJSONシリアライズエラー: {}", e);
                                 }
                             }
                         }
@@ -718,7 +718,7 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
             visited_dirs.insert(canonical_base);
         }
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
                 "[markdown-view] ベースディレクトリの正規化に失敗（サイクル検出が不完全になる可能性あり）: {} ({})",
                 base_dir.display(),
                 e
@@ -739,7 +739,7 @@ fn list_markdown_files_recursive(
     depth: usize,
 ) -> std::io::Result<()> {
     if depth >= MAX_DIR_DEPTH {
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
             current_dir.display()
         );
@@ -750,7 +750,7 @@ fn list_markdown_files_recursive(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
                     current_dir.display(),
                     e
@@ -770,7 +770,7 @@ fn list_markdown_files_recursive(
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
                     path.display(),
                     e
@@ -791,7 +791,7 @@ fn list_markdown_files_recursive(
                         let canonical_base = match base_dir.canonicalize() {
                             Ok(cb) => cb,
                             Err(e) => {
-                                eprintln!(
+                                tracing::warn!(
                                     "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
                                     base_dir.display(),
                                     e
@@ -800,7 +800,7 @@ fn list_markdown_files_recursive(
                             }
                         };
                         if !resolved.starts_with(&canonical_base) {
-                            eprintln!(
+                            tracing::warn!(
                                 "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
                                 path.display(),
                                 resolved.display()
@@ -809,7 +809,7 @@ fn list_markdown_files_recursive(
                         }
                         // サイクル検出: 既に訪問済みのディレクトリはスキップ
                         if !visited_dirs.insert(resolved) {
-                            eprintln!(
+                            tracing::warn!(
                                 "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
                                 path.display()
                             );
@@ -817,7 +817,7 @@ fn list_markdown_files_recursive(
                         }
                     }
                     Err(e) => {
-                        eprintln!(
+                        tracing::warn!(
                             "[markdown-view] シンボリックリンクの正規化に失敗（スキップ）: {} ({})",
                             path.display(),
                             e
@@ -834,7 +834,7 @@ fn list_markdown_files_recursive(
                         }
                     }
                     Err(e) => {
-                        eprintln!(
+                        tracing::warn!(
                             "[markdown-view] ディレクトリ正規化に失敗（サイクル検出なしで続行）: {} ({})",
                             path.display(),
                             e
@@ -860,7 +860,7 @@ fn list_markdown_files_recursive(
                             }
                         }
                         Err(_) => {
-                            eprintln!(
+                            tracing::warn!(
                                 "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
                                 path.display(),
                                 base_dir.display()
@@ -899,7 +899,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
 
     let candidate = base_dir.join(rel_path);
     let canonical = candidate.canonicalize().map_err(|e| {
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] ファイルパス正規化失敗: {} ({})",
             candidate.display(),
             e
@@ -909,7 +909,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
 
     // ベースディレクトリ外へのアクセス防止
     let canonical_base = base_dir.canonicalize().map_err(|e| {
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] ベースディレクトリ正規化失敗: {} ({})",
             base_dir.display(),
             e
@@ -1053,7 +1053,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
     // fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため
     if state.mode.is_directory() && relative_path.is_none() {
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] 相対パス算出失敗のためブロードキャストをスキップ: {}",
             changed_file.display()
         );
@@ -1066,7 +1066,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
             BroadcastMessage::Update(update)
         }
         Err(e) => {
-            eprintln!("[markdown-view] 更新時読み込みエラー: {}", e);
+            tracing::warn!("[markdown-view] 更新時読み込みエラー: {}", e);
             BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e))
         }
     };

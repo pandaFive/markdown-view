@@ -50,9 +50,10 @@
   - 理由: 接続クライアントがいない場合の無駄なレンダリングを回避
   - 対応: `receiver_count()==0` で早期returnを実装
 
-- [ ] `eprintln!` を構造化ロギング（`log` or `tracing`）に置換
+- [x] `eprintln!` を構造化ロギング（`log` or `tracing`）に置換
   - ファイル: 全ソースファイル
   - 理由: ログレベルの区別やフィルタリングができない
+  - 対応: `tracing` + `tracing-subscriber` を導入し、`eprintln!` を `tracing` マクロへ置換
 
 - [ ] `html_escape` を単一パス実装に最適化
   - ファイル: `src/renderer.rs:507-513`

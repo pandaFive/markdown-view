@@ -9,8 +9,19 @@ use markdown_view::renderer::validate_theme;
 use markdown_view::server::{create_router, AppMode, AppState, MAX_FILE_SIZE};
 use markdown_view::watcher::watch_path;
 
+fn init_logging() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(env_filter)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
+
     let args = Args::parse();
 
     // パス存在チェック
@@ -73,20 +84,20 @@ async fn main() -> Result<()> {
     let url = format!("http://{}", local_addr);
 
     if let Some(p) = mode.single_file() {
-        eprintln!("markdown-view: {} をプレビュー中", p.display());
+        tracing::info!("markdown-view: {} をプレビュー中", p.display());
     } else if let Some(p) = mode.directory() {
-        eprintln!(
+        tracing::info!(
             "markdown-view: {} 内のMarkdownファイルをプレビュー中",
             p.display()
         );
     }
-    eprintln!("URL: {}", url);
-    eprintln!("Ctrl+C で終了");
+    tracing::info!("URL: {}", url);
+    tracing::info!("Ctrl+C で終了");
 
     // ブラウザ自動起動
     if !args.no_open {
         if let Err(e) = open::that(&url) {
-            eprintln!("ブラウザの起動に失敗しました: {}", e);
+            tracing::warn!("ブラウザの起動に失敗しました: {}", e);
         }
     }
 

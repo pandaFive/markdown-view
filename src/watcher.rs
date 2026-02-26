@@ -21,13 +21,13 @@ fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, 
     match tx.try_send(msg) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
-            eprintln!(
+            tracing::warn!(
                 "[markdown-view] 監視メッセージ送信キューが満杯のため破棄: {}",
                 label
             );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
-            eprintln!("[markdown-view] 通知チャネルが閉じています: {}", label);
+            tracing::warn!("[markdown-view] 通知チャネルが閉じています: {}", label);
         }
     }
 }
@@ -72,7 +72,7 @@ impl WatchHandle {
             runtime.watcher_thread.thread().unpark();
 
             if let Err(e) = runtime.watcher_thread.join() {
-                eprintln!(
+                tracing::warn!(
                     "[markdown-view] 監視スレッドの停止中にパニックを検出: {:?}",
                     e
                 );
@@ -82,7 +82,7 @@ impl WatchHandle {
                 .await
                 .is_err()
             {
-                eprintln!("[markdown-view] 通知タスク停止がタイムアウトしたためabortします");
+                tracing::warn!("[markdown-view] 通知タスク停止がタイムアウトしたためabortします");
                 runtime.notify_task.abort();
                 let _ = runtime.notify_task.await;
             }
@@ -96,7 +96,7 @@ impl Drop for WatchHandle {
             runtime.shutdown_flag.store(true, Ordering::Release);
             runtime.watcher_thread.thread().unpark();
             if let Err(e) = runtime.watcher_thread.join() {
-                eprintln!(
+                tracing::warn!(
                     "[markdown-view] 監視スレッドのDrop停止中にパニックを検出: {:?}",
                     e
                 );
@@ -158,7 +158,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                                     let path = match event.path.canonicalize() {
                                         Ok(p) => p,
                                         Err(e) => {
-                                            eprintln!(
+                                            tracing::warn!(
                                                 "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
                                                 event.path.display(),
                                                 e
@@ -177,7 +177,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                         }
                     }
                     Err(e) => {
-                        eprintln!("[markdown-view] ファイル監視エラー: {}", e);
+                        tracing::warn!("[markdown-view] ファイル監視エラー: {}", e);
                         send_watcher_message(
                             &rt_tx,
                             WatcherMessage::WatchError(e.to_string()),
@@ -195,7 +195,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                     .send(Err(format!("debouncerの初期化に失敗: {}", e)))
                     .is_err()
                 {
-                    eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
                 }
                 return;
             }
@@ -209,13 +209,13 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                 .send(Err(format!("ファイル監視の開始に失敗: {}", e)))
                 .is_err()
             {
-                eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
             }
             return;
         }
 
         if init_tx.send(Ok(())).is_err() {
-            eprintln!("[markdown-view] 初期化成功の通知先が既に閉じています");
+            tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
         }
 
         // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
@@ -243,7 +243,9 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                 }
             }
         }
-        eprintln!("[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です");
+        tracing::warn!(
+            "[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です"
+        );
     });
 
     Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
@@ -290,7 +292,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             let path = match event.path.canonicalize() {
                                 Ok(p) => p,
                                 Err(e) => {
-                                    eprintln!(
+                                    tracing::warn!(
                                         "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
                                         event.path.display(),
                                         e
@@ -301,7 +303,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
                             if !path.starts_with(&base_for_filter) {
-                                eprintln!(
+                                tracing::warn!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                                     path.display()
                                 );
@@ -322,7 +324,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                         }
                     }
                     Err(e) => {
-                        eprintln!("[markdown-view] ディレクトリ監視エラー: {}", e);
+                        tracing::warn!("[markdown-view] ディレクトリ監視エラー: {}", e);
                         send_watcher_message(
                             &rt_tx,
                             WatcherMessage::WatchError(e.to_string()),
@@ -340,7 +342,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                     .send(Err(format!("debouncerの初期化に失敗: {}", e)))
                     .is_err()
                 {
-                    eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
                 }
                 return;
             }
@@ -355,13 +357,13 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                 .send(Err(format!("ディレクトリ監視の開始に失敗: {}", e)))
                 .is_err()
             {
-                eprintln!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
             }
             return;
         }
 
         if init_tx.send(Ok(())).is_err() {
-            eprintln!("[markdown-view] 初期化成功の通知先が既に閉じています");
+            tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
         }
 
         // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
@@ -388,7 +390,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                 }
             }
         }
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です"
         );
     });
@@ -422,7 +424,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
             let canonical_path = match path.canonicalize() {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[markdown-view] 隠しファイル判定: パス正規化失敗（元パスで再試行）: {} ({})",
                         path.display(), e
                     );
@@ -432,7 +434,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
             let canonical_base = match base.canonicalize() {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[markdown-view] 隠しファイル判定: ベース正規化失敗（元パスで再試行）: {} ({})",
                         base.display(), e
                     );
@@ -445,7 +447,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
                     .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
                 Err(_) => {
                     // 相対パスが算出できない場合は安全側に倒す（隠しファイルとして除外）
-                    eprintln!(
+                    tracing::warn!(
                         "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
                         path.display()
                     );
@@ -464,7 +466,7 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
                 "[markdown-view] パス正規化に失敗（ファイル名比較にフォールバック）: {} ({})",
                 event_path.display(),
                 e

@@ -20,7 +20,7 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
     let ts = theme_set();
     let theme = resolve_theme(ts, theme_name);
     if theme.is_none() {
-        eprintln!("[markdown-view] テーマが見つかりません。ハイライトなしで出力します");
+        tracing::warn!("[markdown-view] テーマが見つかりません。ハイライトなしで出力します");
     }
 
     let mut options = Options::empty();
@@ -78,9 +78,10 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                                 ) {
                                     Ok(html) => Some(html),
                                     Err(e) => {
-                                        eprintln!(
+                                        tracing::warn!(
                                             "[markdown-view] コードハイライトエラー (lang={}): {}",
-                                            lang, e
+                                            lang,
+                                            e
                                         );
                                         None
                                     }
@@ -483,7 +484,7 @@ fn resolve_theme<'a>(
             return Some(theme);
         }
         let available: Vec<&str> = theme_set.themes.keys().map(|s| s.as_str()).collect();
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] 警告: テーマ '{}' が見つかりません。デフォルトテーマを使用します。利用可能: {:?}",
             name, available
         );
@@ -496,9 +497,10 @@ fn resolve_theme<'a>(
     // デフォルトテーマが見つからない場合、利用可能な最初のテーマにフォールバック
     let fallback = theme_set.themes.iter().next();
     if let Some((name, _)) = &fallback {
-        eprintln!(
+        tracing::warn!(
             "[markdown-view] 警告: デフォルトテーマ '{}' が見つかりません。'{}' を使用します",
-            DEFAULT_THEME, name
+            DEFAULT_THEME,
+            name
         );
     }
     fallback.map(|(_, theme)| theme)
