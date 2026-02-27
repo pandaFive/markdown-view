@@ -1214,8 +1214,20 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     let msg = match read_and_render_file(changed_file).await {
         Ok(update) => BroadcastMessage::Update(update.with_file(relative_path)),
         Err(e) => {
-            tracing::warn!("[markdown-view] 更新時読み込みエラー: {}", e);
-            BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message()))
+            let file_label = relative_path
+                .as_deref()
+                .or_else(|| changed_file.file_name().and_then(|n| n.to_str()))
+                .unwrap_or("unknown");
+            tracing::warn!(
+                "[markdown-view] 更新時読み込みエラー ({}): {}",
+                file_label,
+                e
+            );
+            BroadcastMessage::Error(format!(
+                "ファイル読み込みエラー ({}): {}",
+                file_label,
+                e.user_message()
+            ))
         }
     };
     // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）
