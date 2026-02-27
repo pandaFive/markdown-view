@@ -43,3 +43,11 @@
 - [ ] CSP fallbackヘッダーの弱化に関するコメント強化
   - ファイル: `src/server.rs` (L307-321)
   - 理由: フォールバックCSPが `script-src`/`style-src` ハッシュ制約を失う点の明示
+
+- [ ] `AppState.theme()` getter のデッドコード削除
+  - ファイル: `src/server.rs`
+  - 理由: `render_markdown` から `theme` パラメータ削除後、`theme()` accessor は未使用。`theme` フィールドは `syntax_css` 生成時のみ使用されるため getter 不要
+
+- [ ] `ReadMarkdownError::IntoResponse` のユニットテスト追加
+  - ファイル: `src/server.rs` (L795-801)
+  - 理由: 現在どのハンドラからも直接使用されていない安全ネット実装。`.into_response()` のJSONボディ形式を検証するテストがない
