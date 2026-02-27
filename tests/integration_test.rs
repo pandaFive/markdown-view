@@ -873,6 +873,153 @@ async fn test_単一ファイルモード_タブが表示されない() {
 }
 
 // ==============================
+// WebSocket close frame テスト
+// ==============================
+
+#[tokio::test]
+async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含まれる() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("binary.md");
+    // 非UTF-8バイト列を書き込む
+    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // サーバーがclose frameを送信するのを受信
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
+            assert_eq!(
+                frame.code,
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+            );
+            let reason: &str = frame.reason.as_ref();
+            assert_eq!(reason, "このファイルはUTF-8テキストではありません");
+        }
+        other => panic!("Close frameを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_websocket_削除済みファイルでclose_frameにuser_messageが含まれる() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("deleted.md");
+    tokio::fs::write(&file_path, "# before delete")
+        .await
+        .unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // AppMode生成後にファイルを削除
+    tokio::fs::remove_file(&file_path).await.unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
+            assert_eq!(
+                frame.code,
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+            );
+            let reason: &str = frame.reason.as_ref();
+            assert_eq!(reason, "ファイルの読み込みに失敗しました");
+        }
+        other => panic!("Close frameを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_websocket_サイズ超過ファイルでclose_frameにuser_messageが含まれる() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("large.md");
+    // MAX_FILE_SIZE(10MB) + 1バイトのファイルを作成
+    let content = "x".repeat(10 * 1024 * 1024 + 1);
+    tokio::fs::write(&file_path, &content).await.unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
+            assert_eq!(
+                frame.code,
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+            );
+            let reason: &str = frame.reason.as_ref();
+            assert_eq!(reason, "ファイルサイズが上限（10MB）を超えています");
+        }
+        other => panic!("Close frameを期待したが {:?} を受信", other),
+    }
+}
+
+// ==============================
 // ヘルパー関数
 // ==============================
 

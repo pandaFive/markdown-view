@@ -668,7 +668,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 if let Err(e) = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1011,
-                        reason: "ファイル読み込みエラー".into(),
+                        reason: e.user_message().into(),
                     })))
                     .await
                 {
