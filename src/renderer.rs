@@ -9,8 +9,8 @@ use syntect::util::LinesWithEndings;
 /// サニタイズ済みHTMLを表すnewtype
 ///
 /// `render_markdown` / `generate_toc` 経由でのみ生成する設計。
-/// コンストラクタは `pub(crate)` のため crate 内コードは呼び出し可能だが、
-/// renderer/toc 以外での使用は意図しない。
+/// コンストラクタは `pub(crate)` とし、
+/// `render_markdown` / `generate_toc` 経由利用を前提にする。
 /// 生文字列の混入を型で防止する。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
@@ -451,7 +451,12 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     state.push_html("</td>\n");
                 }
             }
-            _ => {}
+            other => {
+                tracing::debug!(
+                    "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
+                    other
+                );
+            }
         }
     }
 
@@ -497,7 +502,7 @@ pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
     let ts = theme_set();
     let Some(theme) = resolve_theme(ts, theme_name) else {
         tracing::warn!("[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません");
-        return String::new();
+        return highlight_disabled_notice_css();
     };
 
     match css_for_theme_with_class_style(theme, ClassStyle::SpacedPrefixed { prefix: "syn-" }) {
@@ -507,9 +512,30 @@ pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
                 "[markdown-view] 構文ハイライトCSS生成に失敗したため無効化します: {}",
                 e
             );
-            String::new()
+            highlight_disabled_notice_css()
         }
     }
+}
+
+fn highlight_disabled_notice_css() -> String {
+    r#"
+/* 構文ハイライト無効化時のユーザー通知 */
+body::before {
+  content: '構文ハイライトを無効化しました（テーマ読み込み失敗）';
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 1100;
+  background: #fff4ce;
+  color: #5c4500;
+  border: 1px solid #d9b84f;
+  border-radius: 0 0 0 6px;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.75rem;
+  font-family: sans-serif;
+}
+"#
+    .to_string()
 }
 
 fn markdown_options() -> Options {
@@ -585,7 +611,12 @@ pub fn extract_headings(input: &str) -> Vec<HeadingInfo> {
                 current_level = None;
                 in_heading_image = false;
             }
-            _ => {}
+            other => {
+                tracing::debug!(
+                    "[markdown-view] 見出し抽出で未処理イベントを無視: {:?}",
+                    other
+                );
+            }
         }
     }
 

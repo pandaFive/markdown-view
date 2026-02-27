@@ -419,6 +419,12 @@ async fn test_セキュリティヘッダが設定されている() {
     assert!(!csp.contains("script-src 'unsafe-inline'"));
     assert!(!csp.contains("style-src 'unsafe-inline'"));
     assert!(!csp.contains("data:"));
+    assert_eq!(
+        resp.headers()
+            .get("x-markdown-view-security-warning")
+            .unwrap(),
+        "none"
+    );
 }
 
 #[tokio::test]
@@ -486,6 +492,19 @@ async fn test_ディレクトリモード_ファイル指定コンテンツ取�
     assert!(content.contains("Guide"));
     // fileフィールドが含まれる
     assert_eq!(json["file"].as_str().unwrap(), "docs/guide.md");
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_content_file空文字は404を返す() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+
+    let resp = reqwest::get(format!("http://{}/api/content?file=", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["error"].as_str().is_some());
 }
 
 #[tokio::test]
