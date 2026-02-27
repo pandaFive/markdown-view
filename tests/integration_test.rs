@@ -5,8 +5,10 @@ use futures_util::StreamExt;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use markdown_view::renderer::render_markdown;
 use markdown_view::server::{AppMode, AppState, BroadcastMessage};
 use markdown_view::template::UpdateMessage;
+use markdown_view::toc::generate_toc;
 
 // ==============================
 // 単一ファイルモード テスト
@@ -55,6 +57,8 @@ async fn test_httpは許可されないhostを拒否する() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert!(json["error"].as_str().is_some());
     }
 }
 
@@ -112,8 +116,8 @@ async fn test_websocketブロードキャスト受信() {
     state
         .tx()
         .send(BroadcastMessage::Update(UpdateMessage::new(
-            "<p>updated</p>".to_string(),
-            "".to_string(),
+            render_markdown("updated"),
+            generate_toc("# updated"),
             None,
         )))
         .unwrap();
@@ -160,6 +164,11 @@ async fn test_存在しないファイル時は500を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルの読み込みに失敗しました"
+        );
     }
 }
 
@@ -191,6 +200,11 @@ async fn test_non_utf8ファイル読み込み時は500を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルの読み込みに失敗しました"
+        );
     }
 }
 
@@ -335,6 +349,11 @@ async fn test_ファイルサイズ上限超過で413を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルサイズが上限（10MB）を超えています"
+        );
     }
 }
 
@@ -395,10 +414,10 @@ async fn test_セキュリティヘッダが設定されている() {
     assert!(csp.contains("default-src 'self'"));
     assert!(csp.contains("script-src 'sha256-"));
     assert!(csp.contains("style-src 'sha256-"));
-    assert!(csp.contains("'unsafe-inline'"));
     assert!(csp.contains("frame-ancestors 'none'"));
     assert!(csp.contains("object-src 'none'"));
     assert!(!csp.contains("script-src 'unsafe-inline'"));
+    assert!(!csp.contains("style-src 'unsafe-inline'"));
     assert!(!csp.contains("data:"));
 }
 
@@ -487,6 +506,8 @@ async fn test_ディレクトリモード_存在しないファイル() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["error"].as_str().is_some());
 }
 
 #[tokio::test]

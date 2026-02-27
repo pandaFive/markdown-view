@@ -58,7 +58,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ## セキュリティレイヤー
 
-- CSPヘッダー（`script-src 'sha256-...'`、`style-src 'sha256-...' 'unsafe-inline'`、`frame-ancestors 'none'`）
+- CSPヘッダー（`script-src 'sha256-...'`、`style-src 'sha256-...'`、`frame-ancestors 'none'`）
 - `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`
 - `sanitize_href`: 安全なスキーム（http/https/mailto/tel）とローカルパスのみ許可
 - `is_trusted_host`: localhost/127.0.0.0/8/::1のみ信頼

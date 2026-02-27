@@ -2,8 +2,34 @@ use std::sync::OnceLock;
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
-use syntect::html::highlighted_html_for_string;
+use syntect::html::{css_for_theme_with_class_style, ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+
+/// サニタイズ済みHTMLを表すnewtype
+///
+/// `render_markdown` / `generate_toc` 経由でのみ生成する設計。
+/// コンストラクタは `pub(crate)` のため crate 内コードは呼び出し可能だが、
+/// renderer/toc 以外での使用は意図しない。
+/// 生文字列の混入を型で防止する。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct SanitizedHtml(String);
+
+impl SanitizedHtml {
+    /// サニタイズ済みHTML文字列として参照する
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// サニタイズ済みHTMLから構築する（crate内部専用）
+    ///
+    /// 呼び出し側がHTMLのサニタイズを保証する必要がある。
+    /// 外部からの生文字列に対して使用してはならない。
+    pub(crate) fn from_sanitized_html(html: String) -> Self {
+        Self(html)
+    }
+}
 
 struct RenderState {
     html_output: String,
@@ -48,43 +74,50 @@ impl RenderState {
         self.code_block_content.clear();
     }
 
-    fn finish_code_block(&mut self, ss: &SyntaxSet, theme: Option<&syntect::highlighting::Theme>) {
-        // コードブロック終了: syntectでハイライト（テーマが利用可能な場合のみ）
+    fn finish_code_block(&mut self, ss: &SyntaxSet) {
         if let Some(ref lang) = self.code_block_lang {
-            let highlighted = theme.and_then(|t| {
-                ss.find_syntax_by_token(lang)
-                    .or_else(|| ss.find_syntax_by_extension(lang))
-                    .and_then(|syntax| {
-                        match highlighted_html_for_string(&self.code_block_content, ss, syntax, t) {
-                            Ok(html) => Some(html),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[markdown-view] コードハイライトエラー (lang={}): {}",
-                                    lang,
-                                    e
-                                );
-                                None
-                            }
+            let highlighted = ss
+                .find_syntax_by_token(lang)
+                .or_else(|| ss.find_syntax_by_extension(lang))
+                .and_then(|syntax| {
+                    let mut generator = ClassedHTMLGenerator::new_with_class_style(
+                        syntax,
+                        ss,
+                        ClassStyle::SpacedPrefixed { prefix: "syn-" },
+                    );
+                    for line in LinesWithEndings::from(&self.code_block_content) {
+                        if let Err(e) = generator.parse_html_for_line_which_includes_newline(line) {
+                            tracing::warn!(
+                                "[markdown-view] コードハイライトエラー (lang={}): {}",
+                                lang,
+                                e
+                            );
+                            return None;
                         }
-                    })
-            });
+                    }
+                    Some(generator.finalize())
+                });
 
             if let Some(highlighted) = highlighted {
-                self.push_html(&add_code_block_class(highlighted));
+                self.push_html(&format!(
+                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    html_escape(lang),
+                    highlighted
+                ));
             } else {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
                     html_escape(lang),
                     html_escape(&self.code_block_content)
                 ));
             }
         } else {
-            // 言語指定なし
             self.push_html(&format!(
-                "<pre class=\"code-block\"><code>{}</code></pre>\n",
+                "<pre class=\"code-block\"><code class=\"syn-code\">{}</code></pre>\n",
                 html_escape(&self.code_block_content)
             ));
         }
+
         self.in_code_block = false;
         self.code_block_lang = None;
         self.code_block_content.clear();
@@ -121,21 +154,15 @@ impl RenderState {
 /// Markdownテキストを HTML に変換する
 ///
 /// - GFM拡張（テーブル、タスクリスト、取消線）対応
-/// - コードブロックはsyntectでテーマ付きハイライト
+/// - コードブロックはsyntectでクラスベースハイライト
 /// - 見出しにはスラッグIDを付与
 /// - raw HTMLは完全に除去される（XSS防止のため出力に含めない）
-pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
+pub fn render_markdown(input: &str) -> SanitizedHtml {
     if input.is_empty() {
-        return String::new();
+        return SanitizedHtml::from_sanitized_html(String::new());
     }
 
     let ss = syntax_set();
-    let ts = theme_set();
-    let theme = resolve_theme(ts, theme_name);
-    if theme.is_none() {
-        tracing::warn!("[markdown-view] テーマが見つかりません。ハイライトなしで出力します");
-    }
-
     let parser = Parser::new_ext(input, markdown_options());
 
     let mut state = RenderState::new();
@@ -153,7 +180,7 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 state.start_code_block(kind);
             }
             Event::End(TagEnd::CodeBlock) => {
-                state.finish_code_block(ss, theme);
+                state.finish_code_block(ss);
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 heading_level = Some(level as u8);
@@ -196,7 +223,6 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                 }
 
                 if state.image_src.is_some() {
-                    // altテキストは生テキストで蓄積し、出力時にエスケープする
                     state.image_alt.push_str(&text);
                     continue;
                 }
@@ -210,7 +236,6 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
             }
             Event::Code(text) => {
                 if state.image_src.is_some() {
-                    // altテキストは生テキストで蓄積し、出力時にエスケープする
                     state.image_alt.push_str(&text);
                     continue;
                 }
@@ -426,13 +451,11 @@ pub fn render_markdown(input: &str, theme_name: Option<&str>) -> String {
                     state.push_html("</td>\n");
                 }
             }
-            // 未対応のpulldown-cmarkイベントは無視する
-            // （FootnoteReference, MetadataBlock等、本ツールでは不要なイベント）
             _ => {}
         }
     }
 
-    state.html_output
+    SanitizedHtml::from_sanitized_html(state.html_output)
 }
 
 fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
@@ -463,6 +486,29 @@ pub fn validate_theme(name: &str) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(ts.themes.keys().cloned().collect())
+    }
+}
+
+/// syntectテーマからクラスベースのCSSを生成する
+///
+/// テーマが見つからない場合やCSS生成に失敗した場合は空文字列を返す。
+/// 空文字列の場合、構文ハイライトは無効化される。
+pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
+    let ts = theme_set();
+    let Some(theme) = resolve_theme(ts, theme_name) else {
+        tracing::warn!("[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません");
+        return String::new();
+    };
+
+    match css_for_theme_with_class_style(theme, ClassStyle::SpacedPrefixed { prefix: "syn-" }) {
+        Ok(css) => css,
+        Err(e) => {
+            tracing::warn!(
+                "[markdown-view] 構文ハイライトCSS生成に失敗したため無効化します: {}",
+                e
+            );
+            String::new()
+        }
     }
 }
 
@@ -593,7 +639,8 @@ fn resolve_theme<'a>(
         let available: Vec<&str> = theme_set.themes.keys().map(|s| s.as_str()).collect();
         tracing::warn!(
             "[markdown-view] 警告: テーマ '{}' が見つかりません。デフォルトテーマを使用します。利用可能: {:?}",
-            name, available
+            name,
+            available
         );
     }
 
@@ -601,7 +648,6 @@ fn resolve_theme<'a>(
         return Some(theme);
     }
 
-    // デフォルトテーマが見つからない場合、利用可能な最初のテーマにフォールバック
     let fallback = theme_set.themes.iter().next();
     if let Some((name, _)) = &fallback {
         tracing::warn!(
@@ -611,16 +657,6 @@ fn resolve_theme<'a>(
         );
     }
     fallback.map(|(_, theme)| theme)
-}
-
-fn add_code_block_class(highlighted_html: String) -> String {
-    if highlighted_html.starts_with("<pre ") {
-        highlighted_html.replacen("<pre ", "<pre class=\"code-block\" ", 1)
-    } else if highlighted_html.starts_with("<pre>") {
-        highlighted_html.replacen("<pre>", "<pre class=\"code-block\">", 1)
-    } else {
-        highlighted_html
-    }
 }
 
 /// リンク/画像URLを安全な形式に正規化する
@@ -643,7 +679,6 @@ fn is_safe_href(dest_url: &str) -> bool {
         return false;
     }
 
-    // プロトコル相対URL（//example.com/...）はリダイレクト先を制御可能なため拒否
     if dest_url.starts_with("//") {
         return false;
     }

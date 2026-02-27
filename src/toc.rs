@@ -1,15 +1,15 @@
-use crate::renderer::{extract_headings, html_escape, HeadingInfo};
+use crate::renderer::{extract_headings, html_escape, HeadingInfo, SanitizedHtml};
 
 /// MarkdownテキストからTOC（目次）HTMLを生成する
 ///
 /// 見出しがない場合は空文字列を返す
-pub fn generate_toc(input: &str) -> String {
+pub fn generate_toc(input: &str) -> SanitizedHtml {
     let headings = extract_headings(input);
     if headings.is_empty() {
-        return String::new();
+        return SanitizedHtml::from_sanitized_html(String::new());
     }
 
-    build_toc_html(&headings)
+    SanitizedHtml::from_sanitized_html(build_toc_html(&headings))
 }
 
 /// 見出し情報からネストされたTOC HTMLを構築する
