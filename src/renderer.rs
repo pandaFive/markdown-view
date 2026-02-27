@@ -8,7 +8,9 @@ use syntect::util::LinesWithEndings;
 
 /// サニタイズ済みHTMLを表すnewtype
 ///
-/// `render_markdown` / `generate_toc` 経由でのみ生成し、
+/// `render_markdown` / `generate_toc` 経由でのみ生成する設計。
+/// コンストラクタは `pub(crate)` のため crate 内コードは呼び出し可能だが、
+/// renderer/toc 以外での使用は意図しない。
 /// 生文字列の混入を型で防止する。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
@@ -20,17 +22,12 @@ impl SanitizedHtml {
         &self.0
     }
 
-    /// サニタイズ済みHTMLとして内部生成する
+    /// サニタイズ済みHTMLから構築する（crate内部専用）
+    ///
+    /// 呼び出し側がHTMLのサニタイズを保証する必要がある。
+    /// 外部からの生文字列に対して使用してはならない。
     pub(crate) fn from_sanitized_html(html: String) -> Self {
         Self(html)
-    }
-}
-
-impl std::ops::Deref for SanitizedHtml {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
     }
 }
 
@@ -103,20 +100,20 @@ impl RenderState {
 
             if let Some(highlighted) = highlighted {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
                     html_escape(lang),
                     highlighted
                 ));
             } else {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
                     html_escape(lang),
                     html_escape(&self.code_block_content)
                 ));
             }
         } else {
             self.push_html(&format!(
-                "<pre class=\"code-block\"><code>{}</code></pre>\n",
+                "<pre class=\"code-block\"><code class=\"syn-code\">{}</code></pre>\n",
                 html_escape(&self.code_block_content)
             ));
         }
@@ -160,7 +157,7 @@ impl RenderState {
 /// - コードブロックはsyntectでクラスベースハイライト
 /// - 見出しにはスラッグIDを付与
 /// - raw HTMLは完全に除去される（XSS防止のため出力に含めない）
-pub fn render_markdown(input: &str, _theme_name: Option<&str>) -> SanitizedHtml {
+pub fn render_markdown(input: &str) -> SanitizedHtml {
     if input.is_empty() {
         return SanitizedHtml::from_sanitized_html(String::new());
     }
@@ -493,6 +490,9 @@ pub fn validate_theme(name: &str) -> Result<(), Vec<String>> {
 }
 
 /// syntectテーマからクラスベースのCSSを生成する
+///
+/// テーマが見つからない場合やCSS生成に失敗した場合は空文字列を返す。
+/// 空文字列の場合、構文ハイライトは無効化される。
 pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
     let ts = theme_set();
     let Some(theme) = resolve_theme(ts, theme_name) else {

@@ -116,7 +116,7 @@ async fn test_websocketブロードキャスト受信() {
     state
         .tx()
         .send(BroadcastMessage::Update(UpdateMessage::new(
-            render_markdown("updated", None),
+            render_markdown("updated"),
             generate_toc("# updated"),
             None,
         )))
@@ -349,6 +349,11 @@ async fn test_ファイルサイズ上限超過で413を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルサイズが上限（10MB）を超えています"
+        );
     }
 }
 

@@ -5,180 +5,189 @@ use markdown_view::toc::generate_toc;
 
 #[test]
 fn test_基本パラグラフ() {
-    let html = render_markdown("Hello, world!", None);
-    assert!(html.contains("<p>Hello, world!</p>"));
+    let html = render_markdown("Hello, world!");
+    assert!(html.as_str().contains("<p>Hello, world!</p>"));
 }
 
 #[test]
 fn test_太字と斜体() {
-    let html = render_markdown("**bold** and *italic*", None);
-    assert!(html.contains("<strong>bold</strong>"));
-    assert!(html.contains("<em>italic</em>"));
+    let html = render_markdown("**bold** and *italic*");
+    assert!(html.as_str().contains("<strong>bold</strong>"));
+    assert!(html.as_str().contains("<em>italic</em>"));
 }
 
 #[test]
 fn test_gfmテーブル() {
     let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<table>"));
-    assert!(html.contains("<th>Name</th>"));
-    assert!(html.contains("<td>Alice</td>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<table>"));
+    assert!(html.as_str().contains("<th>Name</th>"));
+    assert!(html.as_str().contains("<td>Alice</td>"));
 }
 
 #[test]
 fn test_テーブルalignmentが反映される() {
     let md = "| L | C | R |\n|:--|:-:|--:|\n| 1 | 2 | 3 |";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<th class=\"align-left\">L</th>"));
-    assert!(html.contains("<th class=\"align-center\">C</th>"));
-    assert!(html.contains("<th class=\"align-right\">R</th>"));
-    assert!(html.contains("<td class=\"align-left\">1</td>"));
-    assert!(html.contains("<td class=\"align-center\">2</td>"));
-    assert!(html.contains("<td class=\"align-right\">3</td>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<th class=\"align-left\">L</th>"));
+    assert!(html.as_str().contains("<th class=\"align-center\">C</th>"));
+    assert!(html.as_str().contains("<th class=\"align-right\">R</th>"));
+    assert!(html.as_str().contains("<td class=\"align-left\">1</td>"));
+    assert!(html.as_str().contains("<td class=\"align-center\">2</td>"));
+    assert!(html.as_str().contains("<td class=\"align-right\">3</td>"));
 }
 
 #[test]
 fn test_タスクリスト() {
     let md = "- [x] Done\n- [ ] Todo";
-    let html = render_markdown(md, None);
-    assert!(html.contains("checkbox"));
-    assert!(html.contains("checked"));
-    assert!(html.contains("Todo"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("checkbox"));
+    assert!(html.as_str().contains("checked"));
+    assert!(html.as_str().contains("Todo"));
 }
 
 #[test]
 fn test_取消線() {
     let md = "~~deleted~~";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<del>deleted</del>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<del>deleted</del>"));
 }
 
 #[test]
 fn test_コードブロック_ハイライト() {
     let md = "```rust\nfn main() {}\n```";
-    let html = render_markdown(md, None);
+    let html = render_markdown(md);
     // syntectによるclass-basedハイライトが適用される
-    assert!(html.contains("<pre"));
-    assert!(html.contains("fn"));
+    assert!(html.as_str().contains("<pre"));
+    assert!(html.as_str().contains("class=\"syn-code language-rust\""));
+    assert!(html.as_str().contains("fn"));
 }
 
 #[test]
 fn test_未知言語コードブロックはフォールバック描画される() {
     let md = "```unknown-lang\nlet x = 1;\n```";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<pre class=\"code-block\"><code class=\"language-unknown-lang\">"));
-    assert!(html.contains("let x = 1;"));
+    let html = render_markdown(md);
+    assert!(html
+        .as_str()
+        .contains("<pre class=\"code-block\"><code class=\"syn-code language-unknown-lang\">"));
+    assert!(html.as_str().contains("let x = 1;"));
 }
 
 #[test]
 fn test_インラインコード() {
     let md = "Use `println!` macro";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<code>println!</code>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<code>println!</code>"));
 }
 
 #[test]
 fn test_空入力() {
-    let html = render_markdown("", None);
-    assert!(html.is_empty() || html.trim().is_empty());
+    let html = render_markdown("");
+    assert!(html.as_str().is_empty() || html.as_str().trim().is_empty());
 }
 
 #[test]
 fn test_見出し() {
     let md = "# Title\n## Subtitle";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<h1"));
-    assert!(html.contains("<h2"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<h1"));
+    assert!(html.as_str().contains("<h2"));
 }
 
 #[test]
 fn test_リンク() {
     let md = "[Rust](https://www.rust-lang.org)";
-    let html = render_markdown(md, None);
-    assert!(html.contains("href="));
-    assert!(html.contains("https://www.rust-lang.org"));
-    assert!(html.contains("Rust"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("href="));
+    assert!(html.as_str().contains("https://www.rust-lang.org"));
+    assert!(html.as_str().contains("Rust"));
 }
 
 #[test]
 fn test_順序付きリスト() {
     let md = "1. first\n2. second";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<ol start=\"1\">"));
-    assert!(html.contains("<li>first</li>"));
-    assert!(html.contains("<li>second</li>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<ol start=\"1\">"));
+    assert!(html.as_str().contains("<li>first</li>"));
+    assert!(html.as_str().contains("<li>second</li>"));
 }
 
 #[test]
 fn test_画像() {
     let md = "![alt text](image.png)";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<img"));
-    assert!(html.contains("src="));
-    assert!(html.contains("image.png"));
-    assert!(html.contains("alt text"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<img"));
+    assert!(html.as_str().contains("src="));
+    assert!(html.as_str().contains("image.png"));
+    assert!(html.as_str().contains("alt text"));
 }
 
 #[test]
 fn test_引用ブロック() {
     let md = "> This is a quote";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<blockquote>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<blockquote>"));
 }
 
 #[test]
 fn test_水平線() {
     let md = "---";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<hr"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<hr"));
 }
 
 #[test]
 fn test_rawhtml無効化() {
     // XSS防止: raw HTMLがそのままレンダリングされないことを確認
     let md = "<script>alert('xss')</script>";
-    let html = render_markdown(md, None);
-    assert!(!html.contains("<script>"));
+    let html = render_markdown(md);
+    assert!(!html.as_str().contains("<script>"));
 }
 
 #[test]
 fn test_見出しにidが付与される() {
     let md = "# Hello World";
-    let html = render_markdown(md, None);
-    assert!(html.contains(r##"id="hello-world""##));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains(r##"id="hello-world""##));
 }
 
 #[test]
 fn test_画像alt属性で属性注入されない() {
     let md = r#"![x" onerror="alert(1)](img.png)"#;
-    let html = render_markdown(md, None);
-    assert!(html.contains(r##"<img src="img.png" alt="x&quot; onerror=&quot;alert(1)" />"##));
-    assert!(!html.contains(r##"<img src="img.png" alt="x" onerror="alert(1)""##));
+    let html = render_markdown(md);
+    assert!(html
+        .as_str()
+        .contains(r##"<img src="img.png" alt="x&quot; onerror=&quot;alert(1)" />"##));
+    assert!(!html
+        .as_str()
+        .contains(r##"<img src="img.png" alt="x" onerror="alert(1)""##));
 }
 
 #[test]
 fn test_言語指定ありコードブロック終了後のテキストが吸い込まれない() {
     let md = "```rust\nfn main() {}\n```\nAfter";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<pre"));
-    assert!(html.contains("fn"));
-    assert!(html.contains("<p>After</p>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<pre"));
+    assert!(html.as_str().contains("fn"));
+    assert!(html.as_str().contains("<p>After</p>"));
 }
 
 #[test]
 fn test_言語指定なしコードブロックも正しく扱う() {
     let md = "```\nplain\n```\nAfter";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<pre class=\"code-block\"><code>plain"));
-    assert!(html.contains("<p>After</p>"));
+    let html = render_markdown(md);
+    assert!(html
+        .as_str()
+        .contains("<pre class=\"code-block\"><code class=\"syn-code\">plain"));
+    assert!(html.as_str().contains("<p>After</p>"));
 }
 
 #[test]
 fn test_見出し内インライン装飾が見出し要素内に収まる() {
     let md = "# Heading with *em* and `code`";
-    let html = render_markdown(md, None);
-    assert!(!html.contains("<em></em><h1"));
-    assert!(html.contains(
+    let html = render_markdown(md);
+    assert!(!html.as_str().contains("<em></em><h1"));
+    assert!(html.as_str().contains(
         r##"<h1 id="heading-with-em-and-code">Heading with <em>em</em> and <code>code</code></h1>"##
     ));
 }
@@ -186,44 +195,44 @@ fn test_見出し内インライン装飾が見出し要素内に収まる() {
 #[test]
 fn test_見出しidとtocリンクがインラインコード付き見出しで一致する() {
     let md = "# Title `x`";
-    let html = render_markdown(md, None);
+    let html = render_markdown(md);
     let toc = generate_toc(md);
-    assert!(html.contains(r##"id="title-x""##));
-    assert!(toc.contains(r##"href="#title-x""##));
+    assert!(html.as_str().contains(r##"id="title-x""##));
+    assert!(toc.as_str().contains(r##"href="#title-x""##));
 }
 
 #[test]
 fn test_複数テーブルでもヘッダセル閉じタグが壊れない() {
     let md = "| A | B |\n|---|---|\n| 1 | 2 |\n\n| C | D |\n|---|---|\n| 3 | 4 |";
-    let html = render_markdown(md, None);
-    assert!(html.contains("<th>A</th>"));
-    assert!(html.contains("<th>C</th>"));
-    assert!(!html.contains("<th>C</td>"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("<th>A</th>"));
+    assert!(html.as_str().contains("<th>C</th>"));
+    assert!(!html.as_str().contains("<th>C</td>"));
 }
 
 #[test]
 fn test_unsafeスキームのリンクは無効化される() {
     let md = "[click](javascript:alert(1))";
-    let html = render_markdown(md, None);
-    assert!(html.contains(r##"<a href="#">click</a>"##));
-    assert!(!html.contains("javascript:alert(1)"));
+    let html = render_markdown(md);
+    assert!(html.as_str().contains(r##"<a href="#">click</a>"##));
+    assert!(!html.as_str().contains("javascript:alert(1)"));
 }
 
 #[test]
 fn test_sanitize_hrefのホワイトスペースパディング付き危険urlは無効化される() {
-    let html = render_markdown("[click](  javascript:alert(1)  )", None);
-    assert!(html.contains(r##"<a href="#">click</a>"##));
-    assert!(!html.contains("javascript:alert(1)"));
+    let html = render_markdown("[click](  javascript:alert(1)  )");
+    assert!(html.as_str().contains(r##"<a href="#">click</a>"##));
+    assert!(!html.as_str().contains("javascript:alert(1)"));
 }
 
 #[test]
 fn test_見出し画像入りでもtocリンクが一致する() {
     let md = "# ![logo](x.png) Title";
-    let html = render_markdown(md, None);
+    let html = render_markdown(md);
     let toc = generate_toc(md);
-    assert!(html.contains(r##"id="title""##));
-    assert!(toc.contains(r##"href="#title""##));
-    assert!(!toc.contains(r##"href="#logo-title""##));
+    assert!(html.as_str().contains(r##"id="title""##));
+    assert!(toc.as_str().contains(r##"href="#title""##));
+    assert!(!toc.as_str().contains(r##"href="#logo-title""##));
 }
 
 #[test]
@@ -251,57 +260,57 @@ fn test_無効なテーマ名の検証が利用可能テーマ一覧を返す() 
 #[test]
 fn test_空スラッグ見出しにフォールバックidを付与する() {
     let md = "# !!!\n# ---";
-    let html = render_markdown(md, None);
+    let html = render_markdown(md);
     let toc = generate_toc(md);
-    assert!(html.contains(r##"<h1 id="section">!!!</h1>"##));
-    assert!(html.contains(r##"<h1 id="section-1">---</h1>"##));
-    assert!(toc.contains(r##"href="#section""##));
-    assert!(toc.contains(r##"href="#section-1""##));
+    assert!(html.as_str().contains(r##"<h1 id="section">!!!</h1>"##));
+    assert!(html.as_str().contains(r##"<h1 id="section-1">---</h1>"##));
+    assert!(toc.as_str().contains(r##"href="#section""##));
+    assert!(toc.as_str().contains(r##"href="#section-1""##));
 }
 
 #[test]
 fn test_複数行見出しでもtocリンクが一致する() {
     let md = "hello\nworld\n===";
-    let html = render_markdown(md, None);
+    let html = render_markdown(md);
     let toc = generate_toc(md);
-    assert!(html.contains(r##"id="hello-world""##));
-    assert!(toc.contains(r##"href="#hello-world""##));
+    assert!(html.as_str().contains(r##"id="hello-world""##));
+    assert!(toc.as_str().contains(r##"href="#hello-world""##));
 }
 
 #[test]
 fn test_危険なスキームのリンクがすべて無効化される() {
     // data: スキーム
-    let html = render_markdown("[click](data:text/html,<script>alert(1)</script>)", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("data:text/html"));
+    let html = render_markdown("[click](data:text/html,<script>alert(1)</script>)");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("data:text/html"));
 
     // vbscript: スキーム
-    let html = render_markdown("[click](vbscript:msgbox)", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("vbscript:"));
+    let html = render_markdown("[click](vbscript:msgbox)");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("vbscript:"));
 
     // file: スキーム
-    let html = render_markdown("[click](file:///etc/passwd)", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("file:///"));
+    let html = render_markdown("[click](file:///etc/passwd)");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("file:///"));
 }
 
 #[test]
 fn test_大文字混在スキームも無効化される() {
-    let html = render_markdown("[click](JAVASCRIPT:alert(1))", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("JAVASCRIPT:"));
+    let html = render_markdown("[click](JAVASCRIPT:alert(1))");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("JAVASCRIPT:"));
 
-    let html = render_markdown("[click](JaVaScRiPt:alert(1))", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("JaVaScRiPt:"));
+    let html = render_markdown("[click](JaVaScRiPt:alert(1))");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("JaVaScRiPt:"));
 }
 
 #[test]
 fn test_画像srcもunsafeスキームが無効化される() {
-    let html = render_markdown("![img](javascript:alert(1))", None);
-    assert!(html.contains(r##"src="#""##));
-    assert!(!html.contains("javascript:alert"));
+    let html = render_markdown("![img](javascript:alert(1))");
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("javascript:alert"));
 }
 
 #[test]
@@ -322,52 +331,52 @@ fn test_html_escapeで主要な特殊文字がエスケープされる() {
 
 #[test]
 fn test_安全なリンクスキームは許可される() {
-    let html = render_markdown("[mail](mailto:user@example.com)", None);
-    assert!(html.contains("mailto:user@example.com"));
+    let html = render_markdown("[mail](mailto:user@example.com)");
+    assert!(html.as_str().contains("mailto:user@example.com"));
 
-    let html = render_markdown("[tel](tel:+1234567890)", None);
-    assert!(html.contains("tel:+1234567890"));
+    let html = render_markdown("[tel](tel:+1234567890)");
+    assert!(html.as_str().contains("tel:+1234567890"));
 
-    let html = render_markdown("[link](https://example.com)", None);
-    assert!(html.contains("https://example.com"));
+    let html = render_markdown("[link](https://example.com)");
+    assert!(html.as_str().contains("https://example.com"));
 
     // 相対パス
-    let html = render_markdown("[link](./page.html)", None);
-    assert!(html.contains("./page.html"));
+    let html = render_markdown("[link](./page.html)");
+    assert!(html.as_str().contains("./page.html"));
 
     // アンカー
-    let html = render_markdown("[link](#section)", None);
-    assert!(html.contains("#section"));
+    let html = render_markdown("[link](#section)");
+    assert!(html.as_str().contains("#section"));
 }
 
 #[test]
 fn test_画像srcのdata_スキームが無効化される() {
-    let html = render_markdown("![img](data:image/png;base64,abc)", None);
-    assert!(html.contains(r##"src="#""##));
-    assert!(!html.contains("data:image/png"));
+    let html = render_markdown("![img](data:image/png;base64,abc)");
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("data:image/png"));
 }
 
 #[test]
 fn test_プロトコル相対urlが無効化される() {
-    let html = render_markdown("[click](//evil.example/path)", None);
-    assert!(html.contains(r##"href="#""##));
-    assert!(!html.contains("//evil.example"));
+    let html = render_markdown("[click](//evil.example/path)");
+    assert!(html.as_str().contains(r##"href="#""##));
+    assert!(!html.as_str().contains("//evil.example"));
 
-    let html = render_markdown("![img](//evil.example/img.png)", None);
-    assert!(html.contains(r##"src="#""##));
-    assert!(!html.contains("//evil.example"));
+    let html = render_markdown("![img](//evil.example/img.png)");
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("//evil.example"));
 }
 
 #[test]
 fn test_ローカルルートパスのリンクは許可される() {
-    let html = render_markdown("[link](/page.html)", None);
-    assert!(html.contains(r##"href="/page.html""##));
+    let html = render_markdown("[link](/page.html)");
+    assert!(html.as_str().contains(r##"href="/page.html""##));
 }
 
 #[test]
 fn test_空hrefはフォールバックされる() {
-    let html = render_markdown("[empty]()", None);
-    assert!(html.contains(r##"<a href="#">empty</a>"##));
+    let html = render_markdown("[empty]()");
+    assert!(html.as_str().contains(r##"<a href="#">empty</a>"##));
 }
 
 #[test]
@@ -396,10 +405,8 @@ fn test_フルパイプラインxss対策_render_markdownからrender_pageまで
     use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
     use markdown_view::toc::generate_toc;
 
-    let content = render_markdown(
-        "# Title\n<script>alert('xss')</script>\n[bad](javascript:alert(1))",
-        None,
-    );
+    let content =
+        render_markdown("# Title\n<script>alert('xss')</script>\n[bad](javascript:alert(1))");
     let toc = generate_toc("# Title");
     let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
@@ -411,8 +418,8 @@ fn test_フルパイプラインxss対策_render_markdownからrender_pageまで
         sidebar: SidebarParams::SingleFile,
     });
 
-    assert!(!html.contains("<script>alert('xss')</script>"));
-    assert!(html.contains(r##"<a href="#">bad</a>"##));
+    assert!(!html.as_str().contains("<script>alert('xss')</script>"));
+    assert!(html.as_str().contains(r##"<a href="#">bad</a>"##));
 }
 
 // --- テンプレート テスト ---
@@ -422,7 +429,7 @@ fn test_render_pageのタイトルがエスケープされる() {
     use markdown_view::renderer::{render_markdown, syntax_theme_css};
     use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
     use markdown_view::toc::generate_toc;
-    let content = render_markdown("xss", None);
+    let content = render_markdown("xss");
     let toc = generate_toc("# t");
     let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
@@ -433,8 +440,10 @@ fn test_render_pageのタイトルがエスケープされる() {
         syntax_css: &syntax_css,
         sidebar: SidebarParams::SingleFile,
     });
-    assert!(html.contains("&lt;script&gt;xss&lt;/script&gt;"));
-    assert!(!html.contains("<script>xss</script> - markdown-view"));
+    assert!(html.as_str().contains("&lt;script&gt;xss&lt;/script&gt;"));
+    assert!(!html
+        .as_str()
+        .contains("<script>xss</script> - markdown-view"));
 }
 
 #[test]
@@ -442,7 +451,7 @@ fn test_render_pageのダークモード() {
     use markdown_view::renderer::{render_markdown, syntax_theme_css};
     use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
     use markdown_view::toc::generate_toc;
-    let content = render_markdown("x", None);
+    let content = render_markdown("x");
     let toc = generate_toc("# t");
     let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let light = render_page(RenderPageParams {
@@ -470,7 +479,7 @@ fn test_render_pageの基本構造() {
     use markdown_view::renderer::{render_markdown, syntax_theme_css};
     use markdown_view::template::{render_page, RenderPageParams, SidebarParams};
     use markdown_view::toc::generate_toc;
-    let content = render_markdown("Hello", None);
+    let content = render_markdown("Hello");
     let toc = generate_toc("# H1");
     let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
     let html = render_page(RenderPageParams {
@@ -481,8 +490,8 @@ fn test_render_pageの基本構造() {
         syntax_css: &syntax_css,
         sidebar: SidebarParams::SingleFile,
     });
-    assert!(html.contains("<!DOCTYPE html>"));
-    assert!(html.contains("<p>Hello</p>"));
-    assert!(html.contains("<a href=\"#h1\">H1</a>"));
-    assert!(html.contains("Test - markdown-view"));
+    assert!(html.as_str().contains("<!DOCTYPE html>"));
+    assert!(html.as_str().contains("<p>Hello</p>"));
+    assert!(html.as_str().contains("<a href=\"#h1\">H1</a>"));
+    assert!(html.as_str().contains("Test - markdown-view"));
 }

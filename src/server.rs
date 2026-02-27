@@ -355,12 +355,10 @@ async fn index_handler(
             json_error(status, msg)
         })?;
 
-    let update = read_and_render_file(&file_path, state.theme.as_deref())
-        .await
-        .map_err(|e| {
-            tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
-            json_error(e.status_code(), e.user_message())
-        })?;
+    let update = read_and_render_file(&file_path).await.map_err(|e| {
+        tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
+        json_error(e.status_code(), e.user_message())
+    })?;
 
     let title = file_path
         .file_name()
@@ -408,12 +406,10 @@ async fn api_content_handler(
             json_error(status, msg)
         })?;
 
-    let mut update = read_and_render_file(&file_path, state.theme.as_deref())
-        .await
-        .map_err(|e| {
-            tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
-            json_error(e.status_code(), e.user_message())
-        })?;
+    let mut update = read_and_render_file(&file_path).await.map_err(|e| {
+        tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
+        json_error(e.status_code(), e.user_message())
+    })?;
 
     update.file = state.mode.relative_path_of(&file_path);
     Ok(Json(update))
@@ -595,6 +591,10 @@ fn normalize_authority(authority: &str) -> String {
             host
         }
     } else {
+        tracing::warn!(
+            "[markdown-view] authority解析に失敗（簡易正規化にフォールバック）: {:?}",
+            authority
+        );
         authority.trim().trim_end_matches('.').to_ascii_lowercase()
     }
 }
@@ -607,7 +607,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     // 単一ファイルモードのみ接続直後に初期コンテンツを送信
     // ディレクトリモードではクライアントが?fileパラメータで/api/contentをフェッチする
     if let Some(file_path) = state.mode.single_file() {
-        let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
+        let update = match read_and_render_file(file_path).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
@@ -695,7 +695,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         );
                         if let Some(file_path) = state.mode.single_file() {
                             // 単一ファイルモード: 最新コンテンツを再送信
-                            let update = match read_and_render_file(file_path, state.theme.as_deref()).await {
+                            let update = match read_and_render_file(file_path).await {
                                 Ok(result) => result,
                                 Err(e) => {
                                     tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
@@ -794,7 +794,9 @@ impl ReadMarkdownError {
 
 impl IntoResponse for ReadMarkdownError {
     fn into_response(self) -> axum::response::Response {
-        self.status_code().into_response()
+        let status = self.status_code();
+        let body = Json(UpdateMessage::error(self.user_message()));
+        (status, body).into_response()
     }
 }
 
@@ -1128,13 +1130,10 @@ async fn read_bytes_with_limit(file: tokio::fs::File) -> Result<Vec<u8>, ReadMar
 }
 
 /// ファイルを読み込んでレンダリングする
-async fn read_and_render_file(
-    file_path: &Path,
-    theme: Option<&str>,
-) -> Result<UpdateMessage, ReadMarkdownError> {
+async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMarkdownError> {
     let markdown = read_markdown_with_limit(file_path).await?;
     Ok(UpdateMessage::new(
-        render_markdown(&markdown, theme),
+        render_markdown(&markdown),
         generate_toc(&markdown),
         None,
     ))
@@ -1164,7 +1163,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         return;
     }
 
-    let msg = match read_and_render_file(changed_file, state.theme.as_deref()).await {
+    let msg = match read_and_render_file(changed_file).await {
         Ok(mut update) => {
             update.file = relative_path;
             BroadcastMessage::Update(update)

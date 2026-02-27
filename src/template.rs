@@ -1147,7 +1147,7 @@ mod tests {
     use crate::toc::generate_toc;
 
     fn test_content() -> SanitizedHtml {
-        render_markdown("content", None)
+        render_markdown("content")
     }
 
     fn test_toc() -> SanitizedHtml {
@@ -1478,5 +1478,37 @@ mod tests {
         assert!(html.contains("getElementById('ws-disconnect-banner')"));
         // data.error受信時にバナー表示を呼び出す
         assert!(html.contains("showWsServerErrorBanner(data.error);"));
+    }
+
+    #[test]
+    fn test_cspハッシュがrender_pageのstyle内容と一致する() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let (script_src, style_src) = csp_hash_sources(&syntax_css);
+
+        // render_pageに埋め込まれるCSS/JSと同一の内容からハッシュを計算
+        let expected_style_hash = {
+            let css_content = combined_css(&syntax_css);
+            let digest = sha2::Sha256::digest(css_content.as_bytes());
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            )
+        };
+        let expected_script_hash = {
+            let digest = sha2::Sha256::digest(JS.as_bytes());
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            )
+        };
+
+        assert_eq!(style_src, expected_style_hash, "style-srcハッシュが不一致");
+        assert_eq!(
+            script_src, expected_script_hash,
+            "script-srcハッシュが不一致"
+        );
     }
 }
