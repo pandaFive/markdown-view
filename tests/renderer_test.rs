@@ -96,6 +96,29 @@ fn test_空入力() {
 }
 
 #[test]
+fn test_大量入力1mbでもパニックせず描画できる() {
+    let mut md = String::with_capacity(1024 * 1024 + 64);
+    md.push_str("# Large\n\n");
+    md.push_str(&"a".repeat(1024 * 1024));
+
+    let html = render_markdown(&md);
+    assert!(html.as_str().contains("<h1 id=\"large\">Large</h1>"));
+    assert!(!html.as_str().is_empty());
+}
+
+#[test]
+fn test_深いネスト500階層でもパニックせず描画できる() {
+    let mut md = String::new();
+    for _ in 0..500 {
+        md.push_str("> ");
+    }
+    md.push_str("deep");
+
+    let html = render_markdown(&md);
+    assert!(html.as_str().contains("deep"));
+}
+
+#[test]
 fn test_見出し() {
     let md = "# Title\n## Subtitle";
     let html = render_markdown(md);

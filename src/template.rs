@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::renderer::{html_escape, SanitizedHtml};
+use crate::server::MAX_FILE_SIZE;
 
 /// サイドバー描画パラメータ
 pub enum SidebarParams<'a> {
@@ -99,18 +100,18 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         css = combined_css(params.syntax_css),
         sidebar_inner = sidebar_inner,
         content = params.content.as_str(),
-        js = JS,
+        js = inline_js(),
     )
 }
 
 /// コンテンツ更新用JSONメッセージ構造体（HTTP API・WebSocket共用）
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct UpdateMessage {
-    pub content: SanitizedHtml,
-    pub toc: SanitizedHtml,
+    content: SanitizedHtml,
+    toc: SanitizedHtml,
     /// ディレクトリモード時の変更ファイル相対パス（単一ファイルモードはNone）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    file: Option<String>,
 }
 
 impl UpdateMessage {
@@ -119,10 +120,31 @@ impl UpdateMessage {
         Self { content, toc, file }
     }
 
-    /// エラーJSONを生成する
-    pub fn error(message: impl AsRef<str>) -> serde_json::Value {
-        serde_json::json!({ "error": message.as_ref() })
+    /// コンテンツHTMLを返す
+    pub fn content(&self) -> &SanitizedHtml {
+        &self.content
     }
+
+    /// TOC HTMLを返す
+    pub fn toc(&self) -> &SanitizedHtml {
+        &self.toc
+    }
+
+    /// ディレクトリモード時の変更ファイル相対パスを返す
+    pub fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    /// fileフィールドを置き換えた新しいメッセージを返す
+    pub fn with_file(mut self, file: Option<String>) -> Self {
+        self.file = file;
+        self
+    }
+}
+
+/// エラーJSONを生成する
+pub fn error_message_json(message: impl AsRef<str>) -> serde_json::Value {
+    serde_json::json!({ "error": message.as_ref() })
 }
 
 const DARK_THEME_VARS: &str = r##"
@@ -537,7 +559,7 @@ pub fn combined_css(syntax_css: &str) -> String {
 /// 戻り値の順序: `(script-srcハッシュ, style-srcハッシュ)`
 pub fn csp_hash_sources(syntax_css: &str) -> (String, String) {
     let style_hash = sha256_base64(combined_css(syntax_css).as_bytes());
-    let script_hash = sha256_base64(JS.as_bytes());
+    let script_hash = sha256_base64(inline_js().as_bytes());
     (
         format!("'sha256-{}'", script_hash),
         format!("'sha256-{}'", style_hash),
@@ -552,14 +574,6 @@ fn sha256_base64(input: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(digest)
 }
 
-// セキュリティ注記:
-// innerHTML使用箇所: updateContent()内でサニタイズ済みHTMLのみを反映。
-// エスケープ経路: renderer.rs(render_markdown)でraw HTML除去
-//   -> server.rs(read_and_render_file)でテンプレートへ受け渡し
-//   -> template.rs(updateContent)で反映。
-// XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
-// raw HTMLが出力に含まれないようにしている（renderer.rs）。
-// DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
 /// ファイルツリーのノード（不正状態を表現しないenum）
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileTreeNode {
@@ -750,9 +764,25 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
     html
 }
 
+fn inline_js() -> String {
+    JS.replace(
+        "__MAX_FILE_SIZE_MB__",
+        &(MAX_FILE_SIZE / 1024 / 1024).to_string(),
+    )
+}
+
+// セキュリティ注記:
+// innerHTML使用箇所: updateContent()内でサニタイズ済みHTMLのみを反映。
+// エスケープ経路: renderer.rs(render_markdown)でraw HTML除去
+//   -> server.rs(read_and_render_file)でテンプレートへ受け渡し
+//   -> template.rs(updateContent)で反映。
+// XSS防止: pulldown-cmarkのEvent::Html/Event::InlineHtmlを除去し、
+// raw HTMLが出力に含まれないようにしている（renderer.rs）。
+// DNS Rebinding防止: 127.0.0.1バインド + Host/Originヘッダー検証（server.rs）。
 const JS: &str = r##"
 (function() {
   'use strict';
+  var MAX_FILE_SIZE_MB = __MAX_FILE_SIZE_MB__;
 
   // ディレクトリモード判定
   var htmlEl = document.documentElement;
@@ -814,8 +844,10 @@ const JS: &str = r##"
         data = JSON.parse(event.data);
       } catch (e) {
         console.error('[markdown-view] JSONパースエラー:', e);
+        showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
         return;
       }
+      hideWsParseErrorBanner();
       if (data.error) {
         console.error('[markdown-view] サーバーエラー:', data.error);
         showWsServerErrorBanner(data.error);
@@ -864,6 +896,34 @@ const JS: &str = r##"
     banner.className = 'error-banner disconnect';
     banner.textContent = 'ライブリロード接続が切断されました。ページをリロードしてください。';
     document.body.appendChild(banner);
+  }
+
+  // WebSocketメッセージのJSONパース失敗をユーザーへ通知する
+  function showWsParseErrorBanner(message) {
+    if (document.getElementById('ws-disconnect-banner')) return;
+    var banner = document.getElementById('ws-parse-error-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'ws-parse-error-banner';
+      banner.className = 'error-banner server';
+      var closeBtn = document.createElement('span');
+      closeBtn.textContent = '\u00d7';
+      closeBtn.className = 'error-banner-close';
+      closeBtn.onclick = hideWsParseErrorBanner;
+      banner.appendChild(closeBtn);
+      var msg = document.createElement('span');
+      msg.className = 'error-msg';
+      banner.appendChild(msg);
+      document.body.appendChild(banner);
+    }
+    banner.querySelector('.error-msg').textContent = message;
+  }
+
+  function hideWsParseErrorBanner() {
+    var banner = document.getElementById('ws-parse-error-banner');
+    if (banner) {
+      banner.remove();
+    }
   }
 
   // WebSocketからサーバーエラー通知を受信した時のバナーを表示する
@@ -941,7 +1001,7 @@ const JS: &str = r##"
         case 404:
           return '指定したファイルが見つかりません。';
         case 413:
-          return 'ファイルサイズが上限（10MB）を超えています。';
+          return 'ファイルサイズが上限（' + MAX_FILE_SIZE_MB + 'MB）を超えています。';
         case 500:
           return 'サーバー内部エラーが発生しました。';
         default:
@@ -1491,6 +1551,31 @@ mod tests {
     }
 
     #[test]
+    fn test_websocket_json_parse_error時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
+        });
+
+        assert!(html.contains("function showWsParseErrorBanner(message)"));
+        assert!(html.contains("function hideWsParseErrorBanner()"));
+        assert!(html.contains("ws-parse-error-banner"));
+        assert!(html.contains("showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');"));
+        assert!(html.contains("hideWsParseErrorBanner();"));
+    }
+
+    #[test]
     fn test_cspハッシュがrender_pageのstyle内容と一致する() {
         use base64::Engine as _;
         use sha2::Digest as _;
@@ -1508,7 +1593,7 @@ mod tests {
             )
         };
         let expected_script_hash = {
-            let digest = sha2::Sha256::digest(JS.as_bytes());
+            let digest = sha2::Sha256::digest(inline_js().as_bytes());
             format!(
                 "'sha256-{}'",
                 base64::engine::general_purpose::STANDARD.encode(digest)
@@ -1520,6 +1605,37 @@ mod tests {
             script_src, expected_script_hash,
             "script-srcハッシュが不一致"
         );
+    }
+
+    #[test]
+    fn test_csp_hash_sources_複数テーマでstyleハッシュが変化しscriptは固定() {
+        let dark_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let light_css = syntax_theme_css(Some("InspiredGitHub"));
+
+        let (dark_script, dark_style) = csp_hash_sources(&dark_css);
+        let (light_script, light_style) = csp_hash_sources(&light_css);
+
+        assert_eq!(
+            dark_script, light_script,
+            "script-srcハッシュはテーマによらず固定であるべき"
+        );
+        assert_ne!(
+            dark_style, light_style,
+            "style-srcハッシュはテーマごとに変化するべき"
+        );
+    }
+
+    #[test]
+    fn test_update_message_fileフィールドが直列化される() {
+        let message = UpdateMessage::new(
+            test_content(),
+            test_toc(),
+            Some("docs/guide.md".to_string()),
+        );
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("content").is_some());
+        assert!(value.get("toc").is_some());
     }
 
     #[test]

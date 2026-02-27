@@ -149,87 +149,99 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
     let watcher_thread = std::thread::Builder::new()
         .name("markdown-view-watcher-file".to_string())
         .spawn(move || {
-        let rt_tx = tx;
-        let debouncer = new_debouncer(
-            Duration::from_millis(DEBOUNCE_MS),
-            move |res: std::result::Result<
-                Vec<notify_debouncer_mini::DebouncedEvent>,
-                notify::Error,
-            >| {
-                match res {
-                    Ok(events) => {
-                        for event in events {
-                            if is_content_change_event(&event.kind) {
-                                // 対象ファイルの変更のみ通知
-                                if is_target_file(&event.path, &target_path) {
-                                    let path = match CanonicalPath::try_from_path(&event.path) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
-                                                event.path.display(),
-                                                e
+            let rt_tx = tx;
+            let panic_tx = rt_tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let debouncer = new_debouncer(
+                    Duration::from_millis(DEBOUNCE_MS),
+                    move |res: std::result::Result<
+                        Vec<notify_debouncer_mini::DebouncedEvent>,
+                        notify::Error,
+                    >| {
+                        match res {
+                            Ok(events) => {
+                                for event in events {
+                                    if is_content_change_event(&event.kind) {
+                                        // 対象ファイルの変更のみ通知
+                                        if is_target_file(&event.path, &target_path) {
+                                            let path = match CanonicalPath::try_from_path(&event.path) {
+                                                Ok(p) => p,
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
+                                                        event.path.display(),
+                                                        e
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                            send_watcher_message(
+                                                &rt_tx,
+                                                WatcherMessage::FileChanged(path),
+                                                "単一ファイル更新",
                                             );
-                                            continue;
+                                            break;
                                         }
-                                    };
-                                    send_watcher_message(
-                                        &rt_tx,
-                                        WatcherMessage::FileChanged(path),
-                                        "単一ファイル更新",
-                                    );
-                                    break;
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::warn!("[markdown-view] ファイル監視エラー: {}", e);
+                                send_watcher_message(
+                                    &rt_tx,
+                                    WatcherMessage::WatchError(e.to_string()),
+                                    "単一ファイル監視エラー",
+                                );
                             }
                         }
                     }
+                );
+
+                let mut debouncer = match debouncer {
+                    Ok(d) => d,
                     Err(e) => {
-                        tracing::warn!("[markdown-view] ファイル監視エラー: {}", e);
-                        send_watcher_message(
-                            &rt_tx,
-                            WatcherMessage::WatchError(e.to_string()),
-                            "単一ファイル監視エラー",
-                        );
+                        if init_tx
+                            .send(Err(format!("debouncerの初期化に失敗: {}", e)))
+                            .is_err()
+                        {
+                            tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                        }
+                        return;
                     }
-                }
-            },
-        );
+                };
 
-        let mut debouncer = match debouncer {
-            Ok(d) => d,
-            Err(e) => {
-                if init_tx
-                    .send(Err(format!("debouncerの初期化に失敗: {}", e)))
-                    .is_err()
+                if let Err(e) = debouncer
+                    .watcher()
+                    .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
                 {
-                    tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    if init_tx
+                        .send(Err(format!("ファイル監視の開始に失敗: {}", e)))
+                        .is_err()
+                    {
+                        tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    }
+                    return;
                 }
-                return;
+
+                if init_tx.send(Ok(())).is_err() {
+                    tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
+                }
+
+                // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
+                while !thread_shutdown_flag.load(Ordering::Acquire) {
+                    std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
+                }
+            }));
+
+            if result.is_err() {
+                tracing::error!("[markdown-view] 単一ファイル監視スレッドがパニックで停止しました");
+                send_watcher_message(
+                    &panic_tx,
+                    WatcherMessage::WatchError("監視スレッドがパニックで停止しました".to_string()),
+                    "単一ファイル監視パニック",
+                );
             }
-        };
-
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
-        {
-            if init_tx
-                .send(Err(format!("ファイル監視の開始に失敗: {}", e)))
-                .is_err()
-            {
-                tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
-            }
-            return;
-        }
-
-        if init_tx.send(Ok(())).is_err() {
-            tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
-        }
-
-        // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-        while !thread_shutdown_flag.load(Ordering::Acquire) {
-            std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
-        }
-    })
+        })
         .context("監視スレッドの起動に失敗")?;
 
     // 初期化結果を待機
@@ -274,112 +286,124 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
     let watcher_thread = std::thread::Builder::new()
         .name("markdown-view-watcher-dir".to_string())
         .spawn(move || {
-        let rt_tx = tx;
-        let debouncer = new_debouncer(
-            Duration::from_millis(DEBOUNCE_MS),
-            move |res: std::result::Result<
-                Vec<notify_debouncer_mini::DebouncedEvent>,
-                notify::Error,
-            >| {
-                match res {
-                    Ok(events) => {
-                        // 変更された.mdファイルを収集（重複排除）
-                        let mut notified: std::collections::HashSet<CanonicalPath> =
-                            std::collections::HashSet::new();
-                        for event in events {
-                            if !is_content_change_event(&event.kind) {
-                                continue;
-                            }
-                            // .md拡張子フィルタ
-                            let is_md = event
-                                .path
-                                .extension()
-                                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-                            if !is_md {
-                                continue;
-                            }
-                            let path = match CanonicalPath::try_from_path(&event.path) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
-                                        event.path.display(),
-                                        e
-                                    );
-                                    continue;
+            let rt_tx = tx;
+            let panic_tx = rt_tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let debouncer = new_debouncer(
+                    Duration::from_millis(DEBOUNCE_MS),
+                    move |res: std::result::Result<
+                        Vec<notify_debouncer_mini::DebouncedEvent>,
+                        notify::Error,
+                    >| {
+                        match res {
+                            Ok(events) => {
+                                // 変更された.mdファイルを収集（重複排除）
+                                let mut notified: std::collections::HashSet<CanonicalPath> =
+                                    std::collections::HashSet::new();
+                                for event in events {
+                                    if !is_content_change_event(&event.kind) {
+                                        continue;
+                                    }
+                                    // .md拡張子フィルタ
+                                    let is_md = event
+                                        .path
+                                        .extension()
+                                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+                                    if !is_md {
+                                        continue;
+                                    }
+                                    let path = match CanonicalPath::try_from_path(&event.path) {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
+                                                event.path.display(),
+                                                e
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    // canonicalize後のパスがベースディレクトリ内であることを確認
+                                    // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
+                                    if !path.as_path().starts_with(&base_dir) {
+                                        tracing::warn!(
+                                            "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
+                                            path.as_path().display()
+                                        );
+                                        continue;
+                                    }
+                                    // 隠しファイル除外（canonicalize後のパスで判定）
+                                    // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
+                                    if is_hidden_relative(path.as_path(), &base_dir) {
+                                        continue;
+                                    }
+                                    if notified.insert(path.clone()) {
+                                        send_watcher_message(
+                                            &rt_tx,
+                                            WatcherMessage::FileChanged(path),
+                                            "ディレクトリ更新",
+                                        );
+                                    }
                                 }
-                            };
-                            // canonicalize後のパスがベースディレクトリ内であることを確認
-                            // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                            if !path.as_path().starts_with(&base_dir) {
-                                tracing::warn!(
-                                    "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                                    path.as_path().display()
-                                );
-                                continue;
                             }
-                            // 隠しファイル除外（canonicalize後のパスで判定）
-                            // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                            if is_hidden_relative(path.as_path(), &base_dir) {
-                                continue;
-                            }
-                            if notified.insert(path.clone()) {
+                            Err(e) => {
+                                tracing::warn!("[markdown-view] ディレクトリ監視エラー: {}", e);
                                 send_watcher_message(
                                     &rt_tx,
-                                    WatcherMessage::FileChanged(path),
-                                    "ディレクトリ更新",
+                                    WatcherMessage::WatchError(e.to_string()),
+                                    "ディレクトリ監視エラー",
                                 );
                             }
                         }
                     }
+                );
+
+                let mut debouncer = match debouncer {
+                    Ok(d) => d,
                     Err(e) => {
-                        tracing::warn!("[markdown-view] ディレクトリ監視エラー: {}", e);
-                        send_watcher_message(
-                            &rt_tx,
-                            WatcherMessage::WatchError(e.to_string()),
-                            "ディレクトリ監視エラー",
-                        );
+                        if init_tx
+                            .send(Err(format!("debouncerの初期化に失敗: {}", e)))
+                            .is_err()
+                        {
+                            tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                        }
+                        return;
                     }
-                }
-            },
-        );
+                };
 
-        let mut debouncer = match debouncer {
-            Ok(d) => d,
-            Err(e) => {
-                if init_tx
-                    .send(Err(format!("debouncerの初期化に失敗: {}", e)))
-                    .is_err()
+                // ディレクトリモードでは再帰監視
+                if let Err(e) = debouncer
+                    .watcher()
+                    .watch(&watch_dir, notify::RecursiveMode::Recursive)
                 {
-                    tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    if init_tx
+                        .send(Err(format!("ディレクトリ監視の開始に失敗: {}", e)))
+                        .is_err()
+                    {
+                        tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                    }
+                    return;
                 }
-                return;
+
+                if init_tx.send(Ok(())).is_err() {
+                    tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
+                }
+
+                // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
+                while !thread_shutdown_flag.load(Ordering::Acquire) {
+                    std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
+                }
+            }));
+
+            if result.is_err() {
+                tracing::error!("[markdown-view] ディレクトリ監視スレッドがパニックで停止しました");
+                send_watcher_message(
+                    &panic_tx,
+                    WatcherMessage::WatchError("監視スレッドがパニックで停止しました".to_string()),
+                    "ディレクトリ監視パニック",
+                );
             }
-        };
-
-        // ディレクトリモードでは再帰監視
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(&watch_dir, notify::RecursiveMode::Recursive)
-        {
-            if init_tx
-                .send(Err(format!("ディレクトリ監視の開始に失敗: {}", e)))
-                .is_err()
-            {
-                tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
-            }
-            return;
-        }
-
-        if init_tx.send(Ok(())).is_err() {
-            tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
-        }
-
-        // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-        while !thread_shutdown_flag.load(Ordering::Acquire) {
-            std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
-        }
-    })
+        })
         .context("監視スレッドの起動に失敗")?;
 
     match init_rx.await {
@@ -480,11 +504,43 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
                 event_path.display(),
                 e
             );
-            // フォールバック: ファイル名と親ディレクトリが一致するかで判定
-            event_path.file_name() == target_path.file_name()
-                && event_path.parent() == target_path.parent()
+            // フォールバック:
+            // 1) ファイル名一致
+            // 2) 親ディレクトリを可能な限り正規化して一致判定
+            if event_path.file_name() != target_path.file_name() {
+                return false;
+            }
+            let Some(event_parent) = event_path.parent() else {
+                return false;
+            };
+            let Some(target_parent) = target_path.parent() else {
+                return false;
+            };
+
+            let event_parent_normalized = event_parent
+                .canonicalize()
+                .unwrap_or_else(|_| normalize_lexical_path(event_parent));
+            let target_parent_normalized = target_parent
+                .canonicalize()
+                .unwrap_or_else(|_| normalize_lexical_path(target_parent));
+
+            event_parent_normalized == target_parent_normalized
         }
     }
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// 監視エラーをbroadcastチャネル経由でWebSocketクライアントに通知する
@@ -642,6 +698,21 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
 
         assert!(is_target_file(&target, &canonical_target));
+    }
+
+    #[test]
+    fn test_is_target_file_正規化失敗時は非正規化親パスでも一致判定できる() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.md");
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(&target, "# target").unwrap();
+        let canonical_target = target.canonicalize().unwrap();
+
+        // event_pathのcanonicalizeを失敗させるために削除
+        std::fs::remove_file(&target).unwrap();
+        let non_normalized = dir.path().join("sub/../target.md");
+
+        assert!(is_target_file(&non_normalized, &canonical_target));
     }
 
     #[test]

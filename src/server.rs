@@ -6,7 +6,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::uri::Authority;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
@@ -16,7 +16,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::renderer::{render_markdown, syntax_theme_css};
 use crate::template::{
-    csp_hash_sources, render_page, RenderPageParams, SidebarParams, UpdateMessage,
+    csp_hash_sources, error_message_json, render_page, RenderPageParams, SidebarParams,
+    UpdateMessage,
 };
 use crate::toc::generate_toc;
 
@@ -37,6 +38,12 @@ impl CanonicalPath {
     /// `Path`として参照する
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+}
+
+impl AsRef<Path> for CanonicalPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
     }
 }
 
@@ -257,19 +264,30 @@ impl BroadcastMessage {
             BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
                 "refresh": true
             })),
-            BroadcastMessage::Error(message) => {
-                serde_json::to_string(&UpdateMessage::error(message))
-            }
+            BroadcastMessage::Error(message) => serde_json::to_string(&error_message_json(message)),
         }
     }
 }
 
-/// ファイルサイズ上限（10MB）: OOM防止
+/// ファイルサイズ上限: OOM防止
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+const FILE_SIZE_LIMIT_MB: u64 = MAX_FILE_SIZE / 1024 / 1024;
+
+fn file_size_limit_error_message() -> String {
+    format!(
+        "ファイルサイズが上限（{}MB）を超えています",
+        FILE_SIZE_LIMIT_MB
+    )
+}
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let csp_header = build_csp_header(state.syntax_css());
+    let (csp_header, csp_fallback) = build_csp_header(state.syntax_css());
+    let security_warning = if csp_fallback {
+        HeaderValue::from_static("csp-fallback")
+    } else {
+        HeaderValue::from_static("none")
+    };
     Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
@@ -294,26 +312,41 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::http::header::CONTENT_SECURITY_POLICY,
             csp_header,
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-markdown-view-security-warning"),
+            security_warning,
+        ))
         .with_state(state)
 }
 
-fn build_csp_header(syntax_css: &str) -> HeaderValue {
+fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {
     let (script_src, style_src) = csp_hash_sources(syntax_css);
     let csp = format!(
         "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
-    HeaderValue::from_str(&csp).unwrap_or_else(|e| {
-        tracing::error!(
-            "[markdown-view] CSPヘッダーの生成に失敗（フォールバックCSPを使用）: {} (CSP: {})",
-            e,
-            csp
-        );
-        // フォールバックは安全最小限（default/object/frame制約のみ）で継続起動する。
-        // ただし `script-src` / `style-src` のsha256制約は失われるため、
-        // インラインスクリプト・スタイル保護は低下する点に注意。
-        HeaderValue::from_static("default-src 'self'; object-src 'none'; frame-ancestors 'none'")
-    })
+    match HeaderValue::from_str(&csp) {
+        Ok(header) => (header, false),
+        Err(e) => {
+            tracing::error!(
+                "[markdown-view] CSPヘッダーの生成に失敗（フォールバックCSPを使用）: {} (CSP: {})",
+                e,
+                csp
+            );
+            tracing::warn!(
+                "[markdown-view] セキュリティ警告: フォールバックCSPのためscript/styleのsha256制約が無効です"
+            );
+            // フォールバックは安全最小限（default/object/frame制約のみ）で継続起動する。
+            // ただし `script-src` / `style-src` のsha256制約は失われるため、
+            // インラインスクリプト・スタイル保護は低下する点に注意。
+            (
+                HeaderValue::from_static(
+                    "default-src 'self'; object-src 'none'; frame-ancestors 'none'",
+                ),
+                true,
+            )
+        }
+    }
 }
 
 /// クエリパラメータ
@@ -325,7 +358,7 @@ struct FileQuery {
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
-    (status, Json(UpdateMessage::error(message)))
+    (status, Json(error_message_json(message)))
 }
 
 /// GET / : 初期HTMLページを返す
@@ -365,8 +398,8 @@ async fn index_handler(
 
     Ok(Html(render_page(RenderPageParams {
         title,
-        content: &update.content,
-        toc: &update.toc,
+        content: update.content(),
+        toc: update.toc(),
         dark_mode: state.dark_mode,
         syntax_css: state.syntax_css(),
         sidebar: match file_list.as_deref() {
@@ -402,13 +435,14 @@ async fn api_content_handler(
             json_error(status, msg)
         })?;
 
-    let mut update = read_and_render_file(&file_path).await.map_err(|e| {
+    let update = read_and_render_file(&file_path).await.map_err(|e| {
         tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
         json_error(e.status_code(), e.user_message())
     })?;
 
-    update.file = state.mode.relative_path_of(&file_path);
-    Ok(Json(update))
+    Ok(Json(
+        update.with_file(state.mode.relative_path_of(&file_path)),
+    ))
 }
 
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
@@ -595,6 +629,30 @@ fn normalize_authority(authority: &str) -> String {
     }
 }
 
+async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool {
+    let payload = serde_json::to_string(&error_message_json(message))
+        .unwrap_or_else(|_| r#"{"error":"内部エラーが発生しました"}"#.to_string());
+    if let Err(e) = socket.send(Message::Text(payload.into())).await {
+        tracing::warn!("[markdown-view] WebSocket内部エラー通知送信失敗: {}", e);
+        return false;
+    }
+    true
+}
+
+async fn lagged_recovery_message(state: &AppState) -> BroadcastMessage {
+    if let Some(file_path) = state.mode.single_file() {
+        match read_and_render_file(file_path).await {
+            Ok(update) => BroadcastMessage::Update(update),
+            Err(e) => {
+                tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
+                BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message()))
+            }
+        }
+    } else {
+        BroadcastMessage::Refresh
+    }
+}
+
 /// WebSocket接続を処理する
 /// broadcastチャネルからメッセージを受信してクライアントに転送
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
@@ -623,6 +681,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!("[markdown-view] JSONシリアライズエラー: {}", e);
+                if !notify_ws_internal_error(&mut socket, "更新メッセージの直列化に失敗しました")
+                    .await
+                {
+                    return;
+                }
                 if let Err(e) = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1011,
@@ -675,6 +738,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             Ok(json) => json,
                             Err(e) => {
                                 tracing::warn!("[markdown-view] WebSocketメッセージJSON化エラー: {}", e);
+                                if !notify_ws_internal_error(
+                                    &mut socket,
+                                    "WebSocketメッセージの直列化に失敗しました",
+                                )
+                                .await
+                                {
+                                    break;
+                                }
                                 continue;
                             }
                         };
@@ -684,55 +755,31 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // 遅延クライアントに最新コンテンツを再送信（単一ファイルモードのみ）
+                        // 遅延クライアントの回復処理:
+                        // 単一ファイルモードは再読み込み、ディレクトリモードはrefresh通知。
                         tracing::warn!(
                             "[markdown-view] WebSocketクライアントが{}メッセージ遅延",
                             n
                         );
-                        if let Some(file_path) = state.mode.single_file() {
-                            // 単一ファイルモード: 最新コンテンツを再送信
-                            let update = match read_and_render_file(file_path).await {
-                                Ok(result) => result,
-                                Err(e) => {
-                                    tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
-                                    if let Ok(error_json) = BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message())).to_json() {
-                                        if let Err(e) = socket.send(Message::Text(error_json.into())).await {
-                                            tracing::warn!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
-                                            break;
-                                        }
-                                    } else {
-                                        tracing::warn!(
-                                            "[markdown-view] WebSocketエラーJSON生成にも失敗 (元エラー: {})",
-                                            e
-                                        );
-                                    }
-                                    continue;
+                        let recovery = lagged_recovery_message(state.as_ref()).await;
+                        let payload = match recovery.to_json() {
+                            Ok(json) => json,
+                            Err(e) => {
+                                tracing::warn!("[markdown-view] 遅延回復メッセージの直列化に失敗: {}", e);
+                                if !notify_ws_internal_error(
+                                    &mut socket,
+                                    "遅延回復メッセージの直列化に失敗しました",
+                                )
+                                .await
+                                {
+                                    break;
                                 }
-                            };
-                            let resend = match BroadcastMessage::Update(update).to_json() {
-                                Ok(json) => json,
-                                Err(e) => {
-                                    tracing::warn!("[markdown-view] 再送信JSONシリアライズエラー: {}", e);
-                                    continue;
-                                }
-                            };
-                            if let Err(e) = socket.send(Message::Text(resend.into())).await {
-                                tracing::warn!("[markdown-view] WebSocket再送信エラー: {}", e);
-                                break;
+                                continue;
                             }
-                        } else {
-                            // ディレクトリモード: クライアントにリフレッシュを促す
-                            match BroadcastMessage::Refresh.to_json() {
-                                Ok(json) => {
-                                    if let Err(e) = socket.send(Message::Text(json.into())).await {
-                                        tracing::warn!("[markdown-view] WebSocket再送信エラー: {}", e);
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("[markdown-view] リフレッシュJSONシリアライズエラー: {}", e);
-                                }
-                            }
+                        };
+                        if let Err(e) = socket.send(Message::Text(payload.into())).await {
+                            tracing::warn!("[markdown-view] WebSocket遅延回復メッセージ送信エラー: {}", e);
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -755,9 +802,7 @@ impl std::fmt::Display for ReadMarkdownError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadMarkdownError::Io(e) => write!(f, "I/Oエラー: {}", e),
-            ReadMarkdownError::TooLarge => {
-                write!(f, "ファイルサイズが上限（10MB）を超えています")
-            }
+            ReadMarkdownError::TooLarge => write!(f, "{}", file_size_limit_error_message()),
             ReadMarkdownError::NotUtf8 => {
                 write!(f, "ファイルがUTF-8テキストではありません")
             }
@@ -785,11 +830,11 @@ impl ReadMarkdownError {
     }
 
     /// クライアント向けの安全なエラーメッセージを返す
-    fn user_message(&self) -> &'static str {
+    fn user_message(&self) -> String {
         match self {
-            ReadMarkdownError::Io(_) => "ファイルの読み込みに失敗しました",
-            ReadMarkdownError::TooLarge => "ファイルサイズが上限（10MB）を超えています",
-            ReadMarkdownError::NotUtf8 => "このファイルはUTF-8テキストではありません",
+            ReadMarkdownError::Io(_) => "ファイルの読み込みに失敗しました".to_string(),
+            ReadMarkdownError::TooLarge => file_size_limit_error_message(),
+            ReadMarkdownError::NotUtf8 => "このファイルはUTF-8テキストではありません".to_string(),
         }
     }
 }
@@ -797,7 +842,7 @@ impl ReadMarkdownError {
 impl IntoResponse for ReadMarkdownError {
     fn into_response(self) -> axum::response::Response {
         let status = self.status_code();
-        let body = Json(UpdateMessage::error(self.user_message()));
+        let body = Json(error_message_json(self.user_message()));
         (status, body).into_response()
     }
 }
@@ -815,22 +860,15 @@ const MAX_DIR_DEPTH: usize = 32;
 /// - 最大`MAX_FILE_LIST`件まで
 /// - 最大`MAX_DIR_DEPTH`階層まで走査
 /// - ベースディレクトリからの相対パスで返す（アルファベット順ソート）
+///
+/// 注意: 走査中に`MAX_FILE_LIST`へ到達した場合は早期終了するため、
+/// 1000件超のディレクトリでは「全体をソートした先頭1000件」を保証しない。
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
     let mut visited_dirs = std::collections::HashSet::new();
     // ベースディレクトリ自体を訪問済みに登録（サイクル検出の起点）
-    match base_dir.canonicalize() {
-        Ok(canonical_base) => {
-            visited_dirs.insert(canonical_base);
-        }
-        Err(e) => {
-            tracing::warn!(
-                "[markdown-view] ベースディレクトリの正規化に失敗（サイクル検出が不完全になる可能性あり）: {} ({})",
-                base_dir.display(),
-                e
-            );
-        }
-    }
+    let canonical_base = base_dir.canonicalize()?;
+    visited_dirs.insert(canonical_base);
     list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs, 0)?;
     files.sort();
     files.truncate(MAX_FILE_LIST);
@@ -1114,7 +1152,13 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
         .map_err(ReadMarkdownError::Io)?;
     let buffer = read_bytes_with_limit(file).await?;
 
-    String::from_utf8(buffer).map_err(|_| ReadMarkdownError::NotUtf8)
+    String::from_utf8(buffer).map_err(|e| {
+        tracing::warn!(
+            "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+            e.utf8_error().valid_up_to()
+        );
+        ReadMarkdownError::NotUtf8
+    })
 }
 
 async fn read_bytes_with_limit(file: tokio::fs::File) -> Result<Vec<u8>, ReadMarkdownError> {
@@ -1168,10 +1212,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     }
 
     let msg = match read_and_render_file(changed_file).await {
-        Ok(mut update) => {
-            update.file = relative_path;
-            BroadcastMessage::Update(update)
-        }
+        Ok(update) => BroadcastMessage::Update(update.with_file(relative_path)),
         Err(e) => {
             tracing::warn!("[markdown-view] 更新時読み込みエラー: {}", e);
             BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message()))
@@ -1298,6 +1339,22 @@ mod tests {
         assert!(is_allowed_ws_origin(&headers));
     }
 
+    #[test]
+    fn test_broadcast_message_refreshのjson直列化() {
+        let json = BroadcastMessage::Refresh.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, serde_json::json!({ "refresh": true }));
+    }
+
+    #[test]
+    fn test_broadcast_message_errorのjson直列化() {
+        let json = BroadcastMessage::Error("watcher error".to_string())
+            .to_json()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, serde_json::json!({ "error": "watcher error" }));
+    }
+
     // --- resolve_file テスト ---
 
     fn create_test_dir() -> tempfile::TempDir {
@@ -1332,6 +1389,26 @@ mod tests {
     fn test_resolve_file_トラバーサル拒否() {
         let dir = create_test_dir();
         let result = resolve_file(dir.path(), "../../../etc/passwd");
+        assert!(matches!(
+            result,
+            Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_file_バックスラッシュ型トラバーサルを拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "..\\..\\..\\etc\\passwd");
+        assert!(matches!(
+            result,
+            Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_file_urlエンコード型トラバーサルを拒否() {
+        let dir = create_test_dir();
+        let result = resolve_file(dir.path(), "docs/%2e%2e/%2e%2e/etc/passwd.md");
         assert!(matches!(
             result,
             Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
@@ -1458,6 +1535,25 @@ mod tests {
         assert_eq!(files, sorted);
     }
 
+    #[test]
+    fn test_list_markdown_files_最大1000件で打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_FILE_LIST + 200) {
+            let path = dir.path().join(format!("doc-{i:04}.md"));
+            std::fs::write(path, "# x").unwrap();
+        }
+
+        let files = list_markdown_files(dir.path()).unwrap();
+        assert_eq!(files.len(), MAX_FILE_LIST);
+    }
+
+    #[test]
+    fn test_list_markdown_files_ベースディレクトリ正規化失敗はエラーを返す() {
+        let missing = PathBuf::from("/path/that/does/not/exist");
+        let result = list_markdown_files(&missing);
+        assert!(result.is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_list_markdown_files_シンボリックリンクサイクルでハングしない() {
@@ -1563,6 +1659,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_notify_update_ディレクトリモードで読み込み失敗時はerrorを送信する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let target = base_dir.path().join("README.md");
+        std::fs::write(&target, "# before").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_directory(base_dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        std::fs::remove_file(&target).unwrap();
+        notify_update(&state, &target).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル読み込みエラー"));
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_単一ファイルモードは再読み込みしたupdateを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# title").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+
+        let msg = lagged_recovery_message(&state).await;
+        match msg {
+            BroadcastMessage::Update(update) => {
+                assert!(update.content().as_str().contains("title"));
+            }
+            other => panic!("Updateを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_ディレクトリモードはrefreshを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# title").unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+
+        let msg = lagged_recovery_message(&state).await;
+        assert!(matches!(msg, BroadcastMessage::Refresh));
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_単一ファイル読み込み失敗時はerrorを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("missing.md");
+        std::fs::write(&file_path, "# title").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+
+        std::fs::remove_file(&file_path).unwrap();
+        let msg = lagged_recovery_message(&state).await;
+        match msg {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル読み込みエラー"));
+            }
+            other => panic!("Errorを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_read_markdown_error_into_response_too_largeのjson形式() {
         let response = ReadMarkdownError::TooLarge.into_response();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1574,7 +1755,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "error": "ファイルサイズが上限（10MB）を超えています"
+                "error": format!("ファイルサイズが上限（{}MB）を超えています", FILE_SIZE_LIMIT_MB)
             })
         );
     }
@@ -1593,6 +1774,23 @@ mod tests {
             value,
             serde_json::json!({
                 "error": "ファイルの読み込みに失敗しました"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_markdown_error_into_response_not_utf8のjson形式() {
+        let response = ReadMarkdownError::NotUtf8.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": "このファイルはUTF-8テキストではありません"
             })
         );
     }
@@ -1662,5 +1860,21 @@ mod tests {
 
         let result = AppMode::new_single_file(&file_path);
         assert!(matches!(result, Err(AppModeBuildError::NotMarkdown(_))));
+    }
+
+    #[test]
+    fn test_app_mode_new_single_file_ディレクトリ指定は拒否() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = AppMode::new_single_file(dir.path());
+        assert!(matches!(result, Err(AppModeBuildError::NotFile(_))));
+    }
+
+    #[test]
+    fn test_app_mode_new_directory_ファイル指定は拒否() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, "# note").unwrap();
+        let result = AppMode::new_directory(&file_path);
+        assert!(matches!(result, Err(AppModeBuildError::NotDirectory(_))));
     }
 }
