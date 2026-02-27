@@ -64,6 +64,15 @@ fn test_コードブロック_ハイライト() {
 }
 
 #[test]
+fn test_コードハイライトはクラスベースでインラインstyleを出力しない() {
+    let md = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+    let html = render_markdown(md);
+    assert!(html.as_str().contains("class=\"syn-code language-rust\""));
+    assert!(html.as_str().contains("class=\"syn-"));
+    assert!(!html.as_str().contains("style=\""));
+}
+
+#[test]
 fn test_未知言語コードブロックはフォールバック描画される() {
     let md = "```unknown-lang\nlet x = 1;\n```";
     let html = render_markdown(md);
@@ -240,6 +249,13 @@ fn test_テーマ指定でハイライト出力が変わる() {
     let dark = syntax_theme_css(Some("base16-ocean.dark"));
     let light = syntax_theme_css(Some("InspiredGitHub"));
     assert_ne!(dark, light);
+}
+
+#[test]
+fn test_syntax_theme_css_noneはデフォルトテーマで非空cssを返す() {
+    let css = syntax_theme_css(None);
+    assert!(!css.trim().is_empty());
+    assert!(css.contains(".syn-"));
 }
 
 #[test]
