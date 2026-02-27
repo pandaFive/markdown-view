@@ -679,6 +679,9 @@ fn is_safe_href(dest_url: &str) -> bool {
         return false;
     }
 
+    // `//example.com` のようなプロトコル相対URLは拒否する。
+    // 現在ページのスキームを継承して外部サイトへ遷移できるため、
+    // ローカル参照のみ許可するポリシーを迂回する余地を作らない。
     if dest_url.starts_with("//") {
         return false;
     }
@@ -714,4 +717,34 @@ pub fn html_escape(text: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::template::UpdateMessage;
+
+    #[test]
+    fn test_sanitized_html_serde_transparentで文字列として直列化される() {
+        let html = SanitizedHtml::from_sanitized_html("<p>x</p>".to_string());
+        let value = serde_json::to_value(&html).unwrap();
+        assert_eq!(value, serde_json::Value::String("<p>x</p>".to_string()));
+    }
+
+    #[test]
+    fn test_sanitized_htmlがupdate_message内でも文字列として直列化される() {
+        let update = UpdateMessage::new(
+            SanitizedHtml::from_sanitized_html("<p>content</p>".to_string()),
+            SanitizedHtml::from_sanitized_html("<ul><li>toc</li></ul>".to_string()),
+            None,
+        );
+        let value = serde_json::to_value(update).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "content": "<p>content</p>",
+                "toc": "<ul><li>toc</li></ul>"
+            })
+        );
+    }
 }

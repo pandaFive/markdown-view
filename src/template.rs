@@ -533,6 +533,7 @@ pub fn combined_css(syntax_css: &str) -> String {
 
 /// インラインCSS/JS用のCSPハッシュソースを返す
 ///
+/// `combined_css` と `JS` のハッシュは毎回計算する（キャッシュなし）。
 /// 戻り値の順序: `(script-srcハッシュ, style-srcハッシュ)`
 pub fn csp_hash_sources(syntax_css: &str) -> (String, String) {
     let style_hash = sha256_base64(combined_css(syntax_css).as_bytes());
@@ -569,6 +570,16 @@ pub enum FileTreeNode {
         name: String,
         children: Vec<FileTreeNode>,
     },
+}
+
+impl FileTreeNode {
+    /// ノード名を返す
+    pub fn name(&self) -> &str {
+        match self {
+            FileTreeNode::File { name, .. } => name,
+            FileTreeNode::Directory { name, .. } => name,
+        }
+    }
 }
 
 /// フラットなファイルパスのリストからツリー構造を構築する
@@ -689,15 +700,15 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
         current_path: &str,
     ) {
         for node in nodes {
+            let escaped_name = html_escape(node.name());
             match node {
-                FileTreeNode::File { name, full_path } => {
+                FileTreeNode::File { full_path, .. } => {
                     let is_active = current_file == Some(full_path.as_str());
                     let class = if is_active {
                         "file-tree-file active"
                     } else {
                         "file-tree-file"
                     };
-                    let escaped_name = html_escape(name);
                     let escaped_path = html_escape(full_path);
                     html.push_str(&format!(
                         "<li class=\"{class}\"><a href=\"#\" data-file=\"{path}\"><span class=\"tree-icon\">📄</span>{name}</a></li>\n",
@@ -714,7 +725,6 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
                     };
                     let is_open = active_dirs.contains(&dir_path);
                     let open_attr = if is_open { " open" } else { "" };
-                    let escaped_name = html_escape(name);
                     html.push_str(&format!(
                         "<li>\n<details class=\"file-tree-dir\"{open}>\n<summary><span class=\"tree-icon-chevron\">▶</span><span class=\"tree-icon\">📁</span>{name}</summary>\n<ul class=\"file-tree-children\">\n",
                         open = open_attr,
@@ -1510,5 +1520,12 @@ mod tests {
             script_src, expected_script_hash,
             "script-srcハッシュが不一致"
         );
+    }
+
+    #[test]
+    fn test_combined_css_空のsyntax_cssはベースcssのみを返す() {
+        let combined = combined_css("");
+        assert_eq!(combined, css());
+        assert!(!combined.trim().is_empty());
     }
 }

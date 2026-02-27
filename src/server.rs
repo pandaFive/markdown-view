@@ -198,7 +198,6 @@ impl AppMode {
 pub struct AppState {
     mode: AppMode,
     dark_mode: bool,
-    theme: Option<String>,
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
 }
@@ -215,7 +214,6 @@ impl AppState {
             syntax_css: syntax_theme_css(theme.as_deref()),
             mode,
             dark_mode,
-            theme,
             tx,
         }
     }
@@ -228,11 +226,6 @@ impl AppState {
     /// ダークモード設定を返す
     pub fn dark_mode(&self) -> bool {
         self.dark_mode
-    }
-
-    /// テーマ名を返す
-    pub fn theme(&self) -> Option<&str> {
-        self.theme.as_deref()
     }
 
     /// 構文ハイライト用CSSを返す
@@ -316,6 +309,9 @@ fn build_csp_header(syntax_css: &str) -> HeaderValue {
             e,
             csp
         );
+        // フォールバックは安全最小限（default/object/frame制約のみ）で継続起動する。
+        // ただし `script-src` / `style-src` のsha256制約は失われるため、
+        // インラインスクリプト・スタイル保護は低下する点に注意。
         HeaderValue::from_static("default-src 'self'; object-src 'none'; frame-ancestors 'none'")
     })
 }
@@ -752,6 +748,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 enum ReadMarkdownError {
     Io(std::io::Error),
     TooLarge,
+    NotUtf8,
 }
 
 impl std::fmt::Display for ReadMarkdownError {
@@ -761,6 +758,9 @@ impl std::fmt::Display for ReadMarkdownError {
             ReadMarkdownError::TooLarge => {
                 write!(f, "ファイルサイズが上限（10MB）を超えています")
             }
+            ReadMarkdownError::NotUtf8 => {
+                write!(f, "ファイルがUTF-8テキストではありません")
+            }
         }
     }
 }
@@ -769,7 +769,7 @@ impl std::error::Error for ReadMarkdownError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ReadMarkdownError::Io(e) => Some(e),
-            ReadMarkdownError::TooLarge => None,
+            ReadMarkdownError::TooLarge | ReadMarkdownError::NotUtf8 => None,
         }
     }
 }
@@ -780,6 +780,7 @@ impl ReadMarkdownError {
         match self {
             ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            ReadMarkdownError::NotUtf8 => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
@@ -788,6 +789,7 @@ impl ReadMarkdownError {
         match self {
             ReadMarkdownError::Io(_) => "ファイルの読み込みに失敗しました",
             ReadMarkdownError::TooLarge => "ファイルサイズが上限（10MB）を超えています",
+            ReadMarkdownError::NotUtf8 => "このファイルはUTF-8テキストではありません",
         }
     }
 }
@@ -1087,9 +1089,9 @@ impl std::error::Error for ResolveFileError {}
 
 impl ResolveFileError {
     /// HTTPステータスコードへ変換する
+    ///
+    /// エラー種別で応答を分けるとファイル存在有無の推測材料になるため、404に統一する
     pub fn status_code(&self) -> StatusCode {
-        // エラー種別で応答を分けるとファイル存在有無の推測材料になるため、404に統一する
-        let _ = self;
         StatusCode::NOT_FOUND
     }
 }
@@ -1112,8 +1114,7 @@ async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdo
         .map_err(ReadMarkdownError::Io)?;
     let buffer = read_bytes_with_limit(file).await?;
 
-    String::from_utf8(buffer)
-        .map_err(|e| ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    String::from_utf8(buffer).map_err(|_| ReadMarkdownError::NotUtf8)
 }
 
 async fn read_bytes_with_limit(file: tokio::fs::File) -> Result<Vec<u8>, ReadMarkdownError> {
@@ -1130,6 +1131,9 @@ async fn read_bytes_with_limit(file: tokio::fs::File) -> Result<Vec<u8>, ReadMar
 }
 
 /// ファイルを読み込んでレンダリングする
+///
+/// 戻り値の`file`フィールドは常に`None`。
+/// ディレクトリモードでは呼び出し側で相対パスを設定すること。
 async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMarkdownError> {
     let markdown = read_markdown_with_limit(file_path).await?;
     Ok(UpdateMessage::new(
@@ -1144,8 +1148,8 @@ async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMar
 /// `changed_file`: 変更されたファイルの絶対パス（canonicalize済み）
 /// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
 /// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
-/// 読み込みエラー時はエラーJSONをクライアントに送信する。
-/// JS側の `data.error` チェックでエラーバナーがページ上部に表示される。
+/// 読み込みエラー時はerrorフィールドを含むJSONをクライアントに送信する
+/// （クライアント側の表示処理はtemplate.rs参照）。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx.receiver_count() == 0 {
         return;
@@ -1556,6 +1560,41 @@ mod tests {
             rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_read_markdown_error_into_response_too_largeのjson形式() {
+        let response = ReadMarkdownError::TooLarge.into_response();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": "ファイルサイズが上限（10MB）を超えています"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_markdown_error_into_response_ioのjson形式() {
+        let io_error = std::io::Error::other("disk failure");
+        let response = ReadMarkdownError::Io(io_error).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": "ファイルの読み込みに失敗しました"
+            })
+        );
     }
 
     // --- AppMode テスト ---

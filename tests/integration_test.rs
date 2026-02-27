@@ -173,7 +173,7 @@ async fn test_存在しないファイル時は500を返す() {
 }
 
 #[tokio::test]
-async fn test_non_utf8ファイル読み込み時は500を返す() {
+async fn test_non_utf8ファイル読み込み時は422を返す() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("binary.md");
     tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
@@ -199,11 +199,11 @@ async fn test_non_utf8ファイル読み込み時は500を返す() {
         let resp = reqwest::get(format!("http://{}{}", addr, path))
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         let json: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(
             json["error"].as_str().unwrap(),
-            "ファイルの読み込みに失敗しました"
+            "このファイルはUTF-8テキストではありません"
         );
     }
 }

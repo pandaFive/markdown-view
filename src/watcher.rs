@@ -41,7 +41,8 @@ const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 /// 監視実行中ハンドル
 ///
-/// `shutdown()` は通知タスクの終了を一定時間待つグレースフル停止を行う。
+/// `shutdown()` は通知タスクの終了を2秒（`SHUTDOWN_TIMEOUT_SECS`）待つ
+/// グレースフル停止を行う。
 /// `Drop` は待機せず即時abortするフォールバック停止を行う。
 pub struct WatchHandle {
     runtime: Option<WatchRuntime>,
@@ -265,7 +266,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
 
     let watch_dir = dir_path.clone();
     // イベントコールバック内で相対パスの隠しファイル判定に使用
-    let canonical_base_dir = dir_path.clone();
+    // dir_pathはAppMode::new_directory()でcanonicalize済み
+    let base_dir = dir_path.clone();
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let thread_shutdown_flag = shutdown_flag.clone();
 
@@ -282,7 +284,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                 match res {
                     Ok(events) => {
                         // 変更された.mdファイルを収集（重複排除）
-                        let mut notified = std::collections::HashSet::new();
+                        let mut notified: std::collections::HashSet<CanonicalPath> =
+                            std::collections::HashSet::new();
                         for event in events {
                             if !is_content_change_event(&event.kind) {
                                 continue;
@@ -308,7 +311,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             };
                             // canonicalize後のパスがベースディレクトリ内であることを確認
                             // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                            if !path.as_path().starts_with(&canonical_base_dir) {
+                            if !path.as_path().starts_with(&base_dir) {
                                 tracing::warn!(
                                     "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                                     path.as_path().display()
@@ -317,10 +320,10 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                             }
                             // 隠しファイル除外（canonicalize後のパスで判定）
                             // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                            if is_hidden_relative(path.as_path(), &canonical_base_dir) {
+                            if is_hidden_relative(path.as_path(), &base_dir) {
                                 continue;
                             }
-                            if notified.insert(path.as_path().to_path_buf()) {
+                            if notified.insert(path.clone()) {
                                 send_watcher_message(
                                     &rt_tx,
                                     WatcherMessage::FileChanged(path),

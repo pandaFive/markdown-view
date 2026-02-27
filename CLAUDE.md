@@ -54,7 +54,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - **TOCTOU対策**: `read_markdown_with_limit`で二段階サイズチェック（metadata + take）
 - **CSS/JS完全埋め込み**: 外部ファイル不要、単一HTMLで完結
 - **notifyはstd::thread**: notifyがsync APIのため、mpscチャネルでtokioにブリッジ
-- **見出しID生成ロジックがrendererとtocで重複**: `slugify`/`generate_unique_id`は共有しているが、パース自体は2回行われる（既知のDRY違反、docs/todo/TODO.md参照）
+- **見出しパースが2回実行される**: `slugify`/`generate_unique_id`/`extract_headings`は共有済みだが、`render_markdown`と`generate_toc`で別々にpulldown-cmarkパースが走る（既知のトレードオフ）
 
 ## セキュリティレイヤー
 
