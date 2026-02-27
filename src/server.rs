@@ -359,7 +359,7 @@ async fn index_handler(
         .await
         .map_err(|e| {
             tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
-            json_error(e.status_code(), e.to_string())
+            json_error(e.status_code(), e.user_message())
         })?;
 
     let title = file_path
@@ -412,7 +412,7 @@ async fn api_content_handler(
         .await
         .map_err(|e| {
             tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
-            json_error(e.status_code(), e.to_string())
+            json_error(e.status_code(), e.user_message())
         })?;
 
     update.file = state.mode.relative_path_of(&file_path);
@@ -699,7 +699,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 Ok(result) => result,
                                 Err(e) => {
                                     tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
-                                    if let Ok(error_json) = BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e)).to_json() {
+                                    if let Ok(error_json) = BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message())).to_json() {
                                         if let Err(e) = socket.send(Message::Text(error_json.into())).await {
                                             tracing::warn!("[markdown-view] WebSocketエラーJSON送信失敗: {}", e);
                                             break;
@@ -780,6 +780,14 @@ impl ReadMarkdownError {
         match self {
             ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        }
+    }
+
+    /// クライアント向けの安全なエラーメッセージを返す
+    fn user_message(&self) -> &'static str {
+        match self {
+            ReadMarkdownError::Io(_) => "ファイルの読み込みに失敗しました",
+            ReadMarkdownError::TooLarge => "ファイルサイズが上限（10MB）を超えています",
         }
     }
 }
@@ -1163,7 +1171,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         }
         Err(e) => {
             tracing::warn!("[markdown-view] 更新時読み込みエラー: {}", e);
-            BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e))
+            BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message()))
         }
     };
     // 受信者がいない場合は正常（クライアント接続時に最新をフェッチするため）

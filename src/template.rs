@@ -469,6 +469,35 @@ body {
   justify-content: center;
 }
 
+/* エラーバナー */
+.error-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 16px;
+  background: #d32f2f;
+  color: #fff;
+  text-align: center;
+  font-size: 14px;
+}
+
+.error-banner.disconnect {
+  z-index: 9999;
+}
+
+.error-banner.server,
+.error-banner.fetch {
+  z-index: 9998;
+}
+
+.error-banner-close {
+  cursor: pointer;
+  float: right;
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* モバイル対応 */
 @media (max-width: 768px) {
   .sidebar {
@@ -822,7 +851,7 @@ const JS: &str = r##"
     if (document.getElementById('ws-disconnect-banner')) return;
     var banner = document.createElement('div');
     banner.id = 'ws-disconnect-banner';
-    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9999;font-size:14px;';
+    banner.className = 'error-banner disconnect';
     banner.textContent = 'ライブリロード接続が切断されました。ページをリロードしてください。';
     document.body.appendChild(banner);
   }
@@ -835,10 +864,10 @@ const JS: &str = r##"
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'ws-server-error-banner';
-      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9998;font-size:14px;';
+      banner.className = 'error-banner server';
       var closeBtn = document.createElement('span');
       closeBtn.textContent = '\u00d7';
-      closeBtn.style.cssText = 'cursor:pointer;float:right;font-size:18px;line-height:1;';
+      closeBtn.className = 'error-banner-close';
       closeBtn.onclick = hideWsServerErrorBanner;
       banner.appendChild(closeBtn);
       var msg = document.createElement('span');
@@ -865,10 +894,10 @@ const JS: &str = r##"
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'file-fetch-error-banner';
-      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px 16px;background:#d32f2f;color:#fff;text-align:center;z-index:9998;font-size:14px;';
+      banner.className = 'error-banner fetch';
       var closeBtn = document.createElement('span');
       closeBtn.textContent = '\u00d7';
-      closeBtn.style.cssText = 'cursor:pointer;float:right;font-size:18px;line-height:1;';
+      closeBtn.className = 'error-banner-close';
       closeBtn.onclick = hideFileFetchErrorBanner;
       banner.appendChild(closeBtn);
       var msg = document.createElement('span');
@@ -1378,6 +1407,9 @@ mod tests {
         assert!(html.contains("function showFileFetchErrorBanner(message)"));
         assert!(html.contains("function hideFileFetchErrorBanner()"));
         assert!(html.contains("file-fetch-error-banner"));
+        assert!(html.contains("className = 'error-banner fetch'"));
+        assert!(html.contains(".error-banner {"));
+        assert!(!html.contains("style.cssText ="));
         // 閉じるボタンが存在する
         assert!(html.contains("closeBtn.onclick = hideFileFetchErrorBanner"));
         // WebSocket切断バナー表示中はfetchエラーバナーを抑制する
@@ -1438,6 +1470,8 @@ mod tests {
         assert!(html.contains("function showWsServerErrorBanner(message)"));
         assert!(html.contains("function hideWsServerErrorBanner()"));
         assert!(html.contains("ws-server-error-banner"));
+        assert!(html.contains("className = 'error-banner server'"));
+        assert!(html.contains("className = 'error-banner disconnect'"));
         // 閉じるボタンが存在する
         assert!(html.contains("closeBtn.onclick = hideWsServerErrorBanner"));
         // WebSocket切断バナー表示中はサーバーエラーバナーを抑制する

@@ -164,6 +164,11 @@ async fn test_存在しないファイル時は500を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルの読み込みに失敗しました"
+        );
     }
 }
 
@@ -195,6 +200,11 @@ async fn test_non_utf8ファイル読み込み時は500を返す() {
             .await
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            "ファイルの読み込みに失敗しました"
+        );
     }
 }
 
