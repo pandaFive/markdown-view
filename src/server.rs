@@ -1193,6 +1193,8 @@ async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMar
 /// ディレクトリモードでは相対パス算出に失敗した場合、ブロードキャストをスキップする
 /// （fileフィールドなしで送信すると全クライアントのコンテンツが上書きされるため）。
 /// 読み込みエラー時はerrorフィールドを含むJSONをクライアントに送信する
+/// （エラーメッセージにはファイル名を含め、ディレクトリモードでは相対パス、
+/// 単一ファイルモードではファイル名のみを表示する）。
 /// （クライアント側の表示処理はtemplate.rs参照）。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx.receiver_count() == 0 {
@@ -1214,10 +1216,18 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     let msg = match read_and_render_file(changed_file).await {
         Ok(update) => BroadcastMessage::Update(update.with_file(relative_path)),
         Err(e) => {
+            // ディレクトリモード: 相対パス（"docs/file.md"）
+            // 単一ファイルモード: ファイル名のみ（"file.md"、relative_pathはNone）
+            // フォールバック: パスにファイル名がない場合はdisplay()で全体表示
             let file_label = relative_path
                 .as_deref()
-                .or_else(|| changed_file.file_name().and_then(|n| n.to_str()))
-                .unwrap_or("unknown");
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    changed_file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| changed_file.display().to_string());
             tracing::warn!(
                 "[markdown-view] 更新時読み込みエラー ({}): {}",
                 file_label,
@@ -1692,6 +1702,44 @@ mod tests {
         match received {
             BroadcastMessage::Error(message) => {
                 assert!(message.contains("ファイル読み込みエラー"));
+                assert!(
+                    message.contains("README.md"),
+                    "エラーメッセージにファイル名が含まれるべき: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_ファイル名不明時はdisplay表示がエラーに含まれる() {
+        // 単一ファイルモードでrelative_pathはNone
+        // Pathが "/" の場合、file_name()もNoneを返すためdisplay()フォールバックが使われる
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("dummy.md");
+        std::fs::write(&file_path, "# dummy").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        // ルートパス "/" はfile_name()がNoneを返す
+        notify_update(&state, std::path::Path::new("/")).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(
+                    message.contains("/"),
+                    "ファイル名不明時はdisplay()表示が含まれるべき: {}",
+                    message
+                );
             }
             other => panic!("Errorメッセージを期待したが {:?} を受信", other),
         }
