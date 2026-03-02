@@ -4,9 +4,19 @@
 
 ### Low Priority
 
-- [ ] 統合テストの`.unwrap()`チェーンを`.expect()`に置き換え
-  - ファイル: `tests/integration_test.rs` L1159-1163, L1197-1201
+- [x] 統合テストの`.unwrap()`チェーンを`.expect()`に置き換え
+  - ファイル: `tests/integration_test.rs` L1159-1163, L1186-1190, L1197-1201
   - 理由: テスト失敗時のエラーメッセージが不明瞭
+  - 対応済み: 2026-03-02
+
+- [ ] 統合テストの残りの`.unwrap()`チェーンも`.expect()`に統一
+  - ファイル: `tests/integration_test.rs` L90-94, L111-113, L126-130, L245-247, L255-259 付近
+  - 理由: 同じ `tokio::time::timeout(read.next()).await.unwrap().unwrap().unwrap()` パターンが残っており、一貫性向上のため
+
+- [ ] WebSocketメッセージ受信後の`.unwrap()`も`.expect()`に改善
+  - ファイル: `tests/integration_test.rs` L1165, L1203 付近
+  - 対象: `msg.into_text().unwrap()` や `serde_json::from_str(&text).unwrap()`
+  - 理由: テスト診断性の更なる向上（今回のスコープ外だが関連する改善）
 
 ## PRレビュー: SanitizedHtmlコンストラクタ可視性厳格化 (レビュー日: 2026-03-02)
 

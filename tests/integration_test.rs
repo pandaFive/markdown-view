@@ -1158,9 +1158,9 @@ async fn test_ディレクトリモード_notify_updateエラーにファイル�
 
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -1185,9 +1185,9 @@ async fn test_単一ファイルモード_notify_updateエラーにファイル�
     // 初期メッセージを消費
     let _initial = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("初期メッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("初期メッセージの読み取りに失敗");
 
     // 元のファイルを削除してからnotify_updateを呼び出す
     let file_path = tmp_dir.path().join("test.md");
@@ -1196,9 +1196,9 @@ async fn test_単一ファイルモード_notify_updateエラーにファイル�
 
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
