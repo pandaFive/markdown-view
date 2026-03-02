@@ -2,29 +2,13 @@
 
 ## 包括的PRレビュー Round 3 (レビュー日: 2026-02-27)
 
-### エラー処理
-
-- [x] ~~WebSocket close frameで`user_message()`を使用~~ (完了: 2026-02-28)
-
-- [x] ~~`notify_update`エラーブロードキャストにファイル名を含める~~ (完了: 2026-03-01)
-
 ### 型設計
 
 - [ ] `SanitizedHtml`コンストラクタ可視性の厳格化
   - ファイル: `src/renderer.rs`
   - 理由: `pub(crate)`がrenderer/toc以外からの呼び出しを型レベルで防止できない
 
-## PRレビュー: WebSocket close frame修正 (レビュー日: 2026-02-28)
-
-### Low Priority
-
-- [x] ~~WebSocket close codeをエラーバリアント別に精緻化~~ (完了: 2026-03-02)
-
 ## PRレビュー: notify_updateエラーファイル名修正 (レビュー日: 2026-03-01)
-
-### Medium（スコープ外）
-
-- [x] ~~`lagged_recovery_message`のエラーメッセージにもファイル名を含める~~ (完了: 2026-03-01, PR #19)
 
 ### Low Priority
 
