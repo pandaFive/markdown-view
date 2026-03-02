@@ -810,13 +810,6 @@ const JS: &str = r##"
     isMouseSelecting = false;
     // mouseup後もテキストが選択状態（ハイライト表示）のままなのでDOMを更新しない。
     // selectionchangeで選択が解除された（isCollapsed）時点で適用する。
-    // 30秒以上選択が維持される場合はタイムアウトでフォールバック適用
-    if (pendingUpdate && !pendingUpdateTimer) {
-      pendingUpdateTimer = setTimeout(function() {
-        pendingUpdateTimer = null;
-        applyPendingUpdate();
-      }, 30000);
-    }
   });
 
   // テキスト選択が完全に解除された時に保留更新を適用
@@ -843,6 +836,11 @@ const JS: &str = r##"
     if (pendingUpdateTimer) {
       clearTimeout(pendingUpdateTimer);
       pendingUpdateTimer = null;
+    }
+    // ディレクトリモード: ファイル切り替え後は古い更新を破棄
+    if (isDirMode && pendingUpdate.file && pendingUpdate.file !== currentFile) {
+      pendingUpdate = null;
+      return;
     }
     var data = pendingUpdate;
     pendingUpdate = null;
@@ -931,6 +929,14 @@ const JS: &str = r##"
         // 有効な更新を受信した時点でエラーバナーをクリア（DOM反映は延期）
         hideWsServerErrorBanner();
         hideFileFetchErrorBanner();
+        // 30秒以上選択が維持される場合のフォールバックタイマー
+        // mouseup後にWS受信した場合にもタイマーが確実に起動する
+        if (!pendingUpdateTimer) {
+          pendingUpdateTimer = setTimeout(function() {
+            pendingUpdateTimer = null;
+            applyPendingUpdate();
+          }, 30000);
+        }
         return;
       }
       updateContent(data);
