@@ -1,13 +1,5 @@
 # TODO Issues
 
-## 包括的PRレビュー Round 3 (レビュー日: 2026-02-27)
-
-### 型設計
-
-- [x] `SanitizedHtml`コンストラクタ可視性の厳格化
-  - ファイル: `src/renderer/mod.rs`（`src/renderer.rs`から移動）
-  - 対応: `pub(crate)` → `pub(in crate::renderer)` に変更、`toc.rs`をrendererサブモジュール化
-
 ## PRレビュー: notify_updateエラーファイル名修正 (レビュー日: 2026-03-01)
 
 ### Low Priority
