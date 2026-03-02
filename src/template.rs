@@ -793,6 +793,7 @@ const JS: &str = r##"
   // マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
   // 選択操作中は更新を保留し、選択完了後に適用する
   var pendingUpdate = null;
+  var pendingUpdateTimer = null;
   var isMouseSelecting = false;
 
   document.addEventListener('mousedown', function(e) {
@@ -806,8 +807,14 @@ const JS: &str = r##"
   document.addEventListener('mouseup', function() {
     if (!isMouseSelecting) return;
     isMouseSelecting = false;
-    // 選択が解除されたら保留中の更新を適用
-    applyPendingUpdate();
+    // 選択中は即更新しない。selectionchangeで選択解除時に適用される。
+    // ただし30秒以上保留が続く場合はフォールバックで適用
+    if (pendingUpdate && !pendingUpdateTimer) {
+      pendingUpdateTimer = setTimeout(function() {
+        pendingUpdateTimer = null;
+        applyPendingUpdate();
+      }, 30000);
+    }
   });
 
   // テキスト選択が完全に解除された時に保留更新を適用
@@ -827,6 +834,10 @@ const JS: &str = r##"
 
   function applyPendingUpdate() {
     if (!pendingUpdate) return;
+    if (pendingUpdateTimer) {
+      clearTimeout(pendingUpdateTimer);
+      pendingUpdateTimer = null;
+    }
     var data = pendingUpdate;
     pendingUpdate = null;
     updateContent(data);
