@@ -644,8 +644,20 @@ async fn lagged_recovery_message(state: &AppState) -> BroadcastMessage {
         match read_and_render_file(file_path).await {
             Ok(update) => BroadcastMessage::Update(update),
             Err(e) => {
-                tracing::warn!("[markdown-view] WebSocket再送信読み込みエラー: {}", e);
-                BroadcastMessage::Error(format!("ファイル読み込みエラー: {}", e.user_message()))
+                let file_label = file_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file_path.display().to_string());
+                tracing::warn!(
+                    "[markdown-view] WebSocket再送信読み込みエラー ({}): {}",
+                    file_label,
+                    e
+                );
+                BroadcastMessage::Error(format!(
+                    "ファイル読み込みエラー ({}): {}",
+                    file_label,
+                    e.user_message()
+                ))
             }
         }
     } else {
@@ -1798,6 +1810,11 @@ mod tests {
         match msg {
             BroadcastMessage::Error(message) => {
                 assert!(message.contains("ファイル読み込みエラー"));
+                assert!(
+                    message.contains("missing.md"),
+                    "ファイル名がエラーメッセージに含まれること: {}",
+                    message
+                );
             }
             other => panic!("Errorを期待したが {:?} を受信", other),
         }
