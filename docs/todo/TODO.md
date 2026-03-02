@@ -6,9 +6,7 @@
 
 - [x] ~~WebSocket close frameで`user_message()`を使用~~ (完了: 2026-02-28)
 
-- [ ] `notify_update`エラーブロードキャストにファイル名を含める
-  - ファイル: `src/server.rs` (`notify_update`)
-  - 理由: ディレクトリモードで複数ファイル編集時にどのファイルでエラーが起きたか不明
+- [x] ~~`notify_update`エラーブロードキャストにファイル名を含める~~ (完了: 2026-03-01)
 
 ### 型設計
 
@@ -25,3 +23,22 @@
   - 現状: 全バリアントで`1011`（Internal Error）を使用
   - 推奨: `Io`→1011、`TooLarge`→1009（Message Too Big）、`NotUtf8`→1003（Unsupported Data）
   - 理由: RFC 6455準拠のセマンティクス改善。ローカルツールのため実影響は最小限
+
+## PRレビュー: notify_updateエラーファイル名修正 (レビュー日: 2026-03-01)
+
+### Medium（スコープ外）
+
+- [ ] `lagged_recovery_message`のエラーメッセージにもファイル名を含める
+  - ファイル: `src/server.rs` L642-654
+  - 理由: `notify_update`にはファイル名が含まれるが`lagged_recovery_message`には含まれず、UXが不統一
+  - 対応方針: `file_path.file_name()`でファイル名を取得して同様のフォーマットに統一
+
+### Low Priority
+
+- [ ] 単一ファイルモードのnotify_updateエラーのユニットテスト追加
+  - ファイル: `src/server.rs` (テスト)
+  - 理由: 統合テストは存在するが、軽量なユニットテストで高速フィードバックを得る
+
+- [ ] 統合テストの`.unwrap()`チェーンを`.expect()`に置き換え
+  - ファイル: `tests/integration_test.rs` L1159-1163, L1197-1201
+  - 理由: テスト失敗時のエラーメッセージが不明瞭

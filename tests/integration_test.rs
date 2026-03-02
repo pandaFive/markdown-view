@@ -1138,3 +1138,75 @@ async fn connect_ws_with_host(
     }
     tokio_tungstenite::connect_async(request).await
 }
+
+// ==============================
+// notify_update エラーブロードキャスト テスト
+// ==============================
+
+#[tokio::test]
+async fn test_ディレクトリモード_notify_updateエラーにファイル名が含まれる() {
+    let (state, addr, _tmp_dir) = setup_dir_server().await;
+
+    // WebSocket接続
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 存在しないファイルのパスを作成（ディレクトリモード内の相対パスが算出できるよう、ベースディレクトリ配下にする）
+    let nonexistent_file = _tmp_dir.path().join("docs/nonexistent.md");
+    markdown_view::server::notify_update(&state, &nonexistent_file).await;
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
+    // エラーメッセージにファイル名（相対パス）が含まれることを検証
+    assert!(
+        error_msg.contains("docs/nonexistent.md"),
+        "エラーメッセージにファイル名が含まれるべき: {}",
+        error_msg
+    );
+}
+
+#[tokio::test]
+async fn test_単一ファイルモード_notify_updateエラーにファイル名が含まれる() {
+    let (state, addr, tmp_dir) = setup_single_file_server("# Test").await;
+
+    // WebSocket接続
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 初期メッセージを消費
+    let _initial = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // 元のファイルを削除してからnotify_updateを呼び出す
+    let file_path = tmp_dir.path().join("test.md");
+    tokio::fs::remove_file(&file_path).await.unwrap();
+    markdown_view::server::notify_update(&state, &file_path).await;
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
+    // エラーメッセージにファイル名が含まれることを検証
+    assert!(
+        error_msg.contains("test.md"),
+        "エラーメッセージにファイル名が含まれるべき: {}",
+        error_msg
+    );
+}
