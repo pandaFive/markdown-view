@@ -789,6 +789,51 @@ const JS: &str = r##"
   var isDirMode = htmlEl.getAttribute('data-dir-mode') === 'true';
   var currentFile = htmlEl.getAttribute('data-current-file') || '';
 
+  // テキスト選択中のDOM更新延期機構
+  // マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
+  // 選択操作中は更新を保留し、選択完了後に適用する
+  var pendingUpdate = null;
+  var isMouseSelecting = false;
+
+  document.addEventListener('mousedown', function(e) {
+    // コンテンツ領域でのマウスダウンを追跡
+    var contentEl = document.getElementById('content');
+    if (contentEl && contentEl.contains(e.target)) {
+      isMouseSelecting = true;
+    }
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!isMouseSelecting) return;
+    isMouseSelecting = false;
+    // 選択が解除されたら保留中の更新を適用
+    applyPendingUpdate();
+  });
+
+  // テキスト選択が完全に解除された時に保留更新を適用
+  document.addEventListener('selectionchange', function() {
+    if (isMouseSelecting) return;
+    var sel = window.getSelection();
+    if (sel && sel.isCollapsed && pendingUpdate) {
+      applyPendingUpdate();
+    }
+  });
+
+  function isTextSelected() {
+    if (isMouseSelecting) return true;
+    var sel = window.getSelection();
+    return sel && !sel.isCollapsed;
+  }
+
+  function applyPendingUpdate() {
+    if (!pendingUpdate) return;
+    var data = pendingUpdate;
+    pendingUpdate = null;
+    updateContent(data);
+    hideWsServerErrorBanner();
+    hideFileFetchErrorBanner();
+  }
+
   // URLの?fileパラメータを取得
   function getFileParam() {
     var params = new URLSearchParams(location.search);
@@ -861,6 +906,11 @@ const JS: &str = r##"
       // ディレクトリモード: 自分の表示ファイルと一致する更新のみ適用
       if (isDirMode && data.file) {
         if (data.file !== currentFile) return;
+      }
+      // テキスト選択中はDOM更新を延期して選択破壊を防止
+      if (isTextSelected()) {
+        pendingUpdate = data;
+        return;
       }
       updateContent(data);
       // WebSocket経由の成功更新で各種エラーバナーをクリア
