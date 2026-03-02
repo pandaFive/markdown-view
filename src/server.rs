@@ -679,7 +679,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
                 if let Err(e) = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1011,
+                        code: e.close_code(),
                         reason: e.user_message().into(),
                     })))
                     .await
@@ -838,6 +838,15 @@ impl ReadMarkdownError {
             ReadMarkdownError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ReadMarkdownError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ReadMarkdownError::NotUtf8 => StatusCode::UNPROCESSABLE_ENTITY,
+        }
+    }
+
+    /// WebSocket close frameのclose codeを返す（RFC 6455準拠）
+    fn close_code(&self) -> u16 {
+        match self {
+            ReadMarkdownError::Io(_) => 1011,    // Internal Error
+            ReadMarkdownError::TooLarge => 1009, // Message Too Big
+            ReadMarkdownError::NotUtf8 => 1003,  // Unsupported Data
         }
     }
 
@@ -1387,6 +1396,26 @@ mod tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value, serde_json::json!({ "error": "watcher error" }));
+    }
+
+    // --- ReadMarkdownError::close_code テスト ---
+
+    #[test]
+    fn test_close_code_ioエラーは1011を返す() {
+        let err = ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, ""));
+        assert_eq!(err.close_code(), 1011);
+    }
+
+    #[test]
+    fn test_close_code_too_largeは1009を返す() {
+        let err = ReadMarkdownError::TooLarge;
+        assert_eq!(err.close_code(), 1009);
+    }
+
+    #[test]
+    fn test_close_code_not_utf8は1003を返す() {
+        let err = ReadMarkdownError::NotUtf8;
+        assert_eq!(err.close_code(), 1003);
     }
 
     // --- resolve_file テスト ---

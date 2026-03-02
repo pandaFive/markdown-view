@@ -18,20 +18,13 @@
 
 ### Low Priority
 
-- [ ] WebSocket close codeをエラーバリアント別に精緻化
-  - ファイル: `src/server.rs` L668-672
-  - 現状: 全バリアントで`1011`（Internal Error）を使用
-  - 推奨: `Io`→1011、`TooLarge`→1009（Message Too Big）、`NotUtf8`→1003（Unsupported Data）
-  - 理由: RFC 6455準拠のセマンティクス改善。ローカルツールのため実影響は最小限
+- [x] ~~WebSocket close codeをエラーバリアント別に精緻化~~ (完了: 2026-03-02)
 
 ## PRレビュー: notify_updateエラーファイル名修正 (レビュー日: 2026-03-01)
 
 ### Medium（スコープ外）
 
-- [ ] `lagged_recovery_message`のエラーメッセージにもファイル名を含める
-  - ファイル: `src/server.rs` L642-654
-  - 理由: `notify_update`にはファイル名が含まれるが`lagged_recovery_message`には含まれず、UXが不統一
-  - 対応方針: `file_path.file_name()`でファイル名を取得して同様のフォーマットに統一
+- [x] ~~`lagged_recovery_message`のエラーメッセージにもファイル名を含める~~ (完了: 2026-03-01, PR #19)
 
 ### Low Priority
 

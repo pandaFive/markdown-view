@@ -915,7 +915,7 @@ async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含�
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
             assert_eq!(
                 frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Unsupported
             );
             let reason: &str = frame.reason.as_ref();
             assert_eq!(reason, "このファイルはUTF-8テキストではありません");
@@ -1010,7 +1010,7 @@ async fn test_websocket_サイズ超過ファイルでclose_frameにuser_message
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
             assert_eq!(
                 frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size
             );
             let reason: &str = frame.reason.as_ref();
             assert_eq!(reason, "ファイルサイズが上限（10MB）を超えています");
