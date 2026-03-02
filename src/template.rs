@@ -789,6 +789,66 @@ const JS: &str = r##"
   var isDirMode = htmlEl.getAttribute('data-dir-mode') === 'true';
   var currentFile = htmlEl.getAttribute('data-current-file') || '';
 
+  // テキスト選択中のDOM更新延期機構
+  // マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
+  // 選択操作中は更新を保留し、選択解除（selectionchange + isCollapsed）後に適用する。
+  // 選択が長時間維持される場合は30秒タイムアウトでフォールバック適用する。
+  var pendingUpdate = null;
+  var pendingUpdateTimer = null;
+  var isMouseSelecting = false;
+
+  document.addEventListener('mousedown', function(e) {
+    // コンテンツ領域でのマウスダウンを追跡
+    var contentEl = document.getElementById('content');
+    if (contentEl && contentEl.contains(e.target)) {
+      isMouseSelecting = true;
+    }
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!isMouseSelecting) return;
+    isMouseSelecting = false;
+    // mouseup後もテキストが選択状態（ハイライト表示）のままなのでDOMを更新しない。
+    // selectionchangeで選択が解除された（isCollapsed）時点で適用する。
+  });
+
+  // テキスト選択が完全に解除された時に保留更新を適用
+  // ドラッグ中もselectionchangeが頻発するため、isMouseSelectingで除外する
+  document.addEventListener('selectionchange', function() {
+    if (isMouseSelecting) return;
+    var sel = window.getSelection();
+    if (sel && sel.isCollapsed && pendingUpdate) {
+      applyPendingUpdate();
+    }
+  });
+
+  // テキスト選択中かを判定（ドラッグ操作中 or 選択範囲が存在）
+  // mousedown直後はgetSelection()がまだ更新されない場合があるため、
+  // isMouseSelectingフラグで補完する
+  function isTextSelected() {
+    if (isMouseSelecting) return true;
+    var sel = window.getSelection();
+    return sel && !sel.isCollapsed;
+  }
+
+  function applyPendingUpdate() {
+    if (!pendingUpdate) return;
+    if (pendingUpdateTimer) {
+      clearTimeout(pendingUpdateTimer);
+      pendingUpdateTimer = null;
+    }
+    // ディレクトリモード: ファイル切り替え後は古い更新を破棄
+    if (isDirMode && pendingUpdate.file && pendingUpdate.file !== currentFile) {
+      pendingUpdate = null;
+      return;
+    }
+    var data = pendingUpdate;
+    pendingUpdate = null;
+    updateContent(data);
+    hideWsServerErrorBanner();
+    hideFileFetchErrorBanner();
+  }
+
   // URLの?fileパラメータを取得
   function getFileParam() {
     var params = new URLSearchParams(location.search);
@@ -861,6 +921,23 @@ const JS: &str = r##"
       // ディレクトリモード: 自分の表示ファイルと一致する更新のみ適用
       if (isDirMode && data.file) {
         if (data.file !== currentFile) return;
+      }
+      // テキスト選択中はDOM更新を延期して選択破壊を防止
+      // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
+      if (isTextSelected()) {
+        pendingUpdate = data;
+        // 有効な更新を受信した時点でエラーバナーをクリア（DOM反映は延期）
+        hideWsServerErrorBanner();
+        hideFileFetchErrorBanner();
+        // 30秒以上選択が維持される場合のフォールバックタイマー
+        // mouseup後にWS受信した場合にもタイマーが確実に起動する
+        if (!pendingUpdateTimer) {
+          pendingUpdateTimer = setTimeout(function() {
+            pendingUpdateTimer = null;
+            applyPendingUpdate();
+          }, 30000);
+        }
+        return;
       }
       updateContent(data);
       // WebSocket経由の成功更新で各種エラーバナーをクリア
@@ -1017,6 +1094,13 @@ const JS: &str = r##"
   // サーバーサイドでサニタイズ済みのHTMLを反映する
   // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
   function updateContent(data) {
+    // 直接更新が実行されるため、保留中の更新とタイマーをクリア
+    // ファイル遷移やrefreshで古い保留更新が適用されるのを防ぐ
+    if (pendingUpdateTimer) {
+      clearTimeout(pendingUpdateTimer);
+      pendingUpdateTimer = null;
+    }
+    pendingUpdate = null;
     var scrollY = window.scrollY;
     var contentEl = document.getElementById('content');
     var tocEl = document.getElementById('toc');
