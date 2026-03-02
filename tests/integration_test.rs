@@ -89,9 +89,9 @@ async fn test_websocket接続() {
     // 接続直後に初期コンテンツが送信される
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -110,7 +110,7 @@ async fn test_websocketブロードキャスト受信() {
     // 初期メッセージを消費
     let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap();
+        .expect("初期メッセージ受信がタイムアウト");
 
     // broadcastで更新を送信
     state
@@ -125,9 +125,9 @@ async fn test_websocketブロードキャスト受信() {
     // WebSocketで受信
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     let text = msg.into_text().unwrap();
     assert!(text.contains("updated"));
@@ -244,7 +244,7 @@ async fn test_ファイル変更でwebsocket更新() {
     // 初期メッセージを消費
     let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap();
+        .expect("初期メッセージ受信がタイムアウト");
 
     // ファイルを変更
     tokio::fs::write(&file_path, "# After Change")
@@ -254,9 +254,9 @@ async fn test_ファイル変更でwebsocket更新() {
     // WebSocketで更新を受信（debounce 300ms + αのタイムアウト）
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -303,7 +303,7 @@ async fn test_websocket切断時に購読が速やかに解放される() {
     // 初期メッセージを受信して購読開始を確定
     let _ = tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
         .await
-        .unwrap();
+        .expect("初期メッセージ受信がタイムアウト");
 
     drop(ws_stream);
 
@@ -599,12 +599,14 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
 
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
     assert!(json["content"].as_str().unwrap().contains("README"));
     assert_eq!(json["file"].as_str().unwrap(), "README.md");
 }
@@ -787,7 +789,7 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
     // 単一ファイルモード: 初期メッセージを消費
     let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap();
+        .expect("初期メッセージ受信がタイムアウト");
 
     // broadcastでエラーJSONを送信（watcher.rsのbroadcast_errorと同じ形式）
     state
@@ -800,12 +802,14 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
     // WebSocketでエラーJSONを受信
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
     assert!(json["error"].as_str().unwrap().contains("テスト用エラー"));
     // contentフィールドは存在しない
     assert!(json.get("content").is_none());
@@ -907,9 +911,9 @@ async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含�
     // サーバーがclose frameを送信するのを受信
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     match msg {
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
@@ -956,9 +960,9 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
 
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     match msg {
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
@@ -1002,9 +1006,9 @@ async fn test_websocket_サイズ超過ファイルでclose_frameにuser_message
 
     let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
 
     match msg {
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
@@ -1162,8 +1166,10 @@ async fn test_ディレクトリモード_notify_updateエラーにファイル�
         .expect("WebSocketストリームが予期せず終了")
         .expect("WebSocketメッセージの読み取りに失敗");
 
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
     let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
     // エラーメッセージにファイル名（相対パス）が含まれることを検証
     assert!(
@@ -1200,8 +1206,10 @@ async fn test_単一ファイルモード_notify_updateエラーにファイル�
         .expect("WebSocketストリームが予期せず終了")
         .expect("WebSocketメッセージの読み取りに失敗");
 
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
     let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
     // エラーメッセージにファイル名が含まれることを検証
     assert!(
