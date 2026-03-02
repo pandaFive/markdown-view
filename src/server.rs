@@ -1787,6 +1787,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで読み込み失敗時はファイル名を含むエラーを送信する(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        std::fs::remove_file(&file_path).unwrap();
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(
+                    message.contains("ファイル読み込みエラー"),
+                    "エラーメッセージにプレフィックスが含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    message.contains("ファイルの読み込みに失敗しました"),
+                    "エラーメッセージにユーザー向けメッセージが含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    message.contains("test.md"),
+                    "エラーメッセージにファイル名が含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    !message.contains("No such file"),
+                    "ユーザー向けメッセージにOS内部エラーが含まれるべきではない: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードでサイズ超過時はtoo_largeエラーを送信する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("large.md");
+        std::fs::write(&file_path, "# large").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        // set_lenでメタデータ上のサイズのみ変更し、metadata().len()による事前チェックで上限超過を検出させる
+        let f = std::fs::File::options()
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(
+                    message.contains("ファイルサイズが上限"),
+                    "エラーメッセージにサイズ超過メッセージが含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    message.contains("large.md"),
+                    "エラーメッセージにファイル名が含まれるべき: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで非utf8ファイルはnot_utf8エラーを送信する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("binary.md");
+        std::fs::write(&file_path, "# valid").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        // 非UTF-8バイト列で上書き
+        std::fs::write(&file_path, b"\xff\xfe\x80\x81").unwrap();
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(
+                    message.contains("UTF-8"),
+                    "エラーメッセージにUTF-8が含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    message.contains("binary.md"),
+                    "エラーメッセージにファイル名が含まれるべき: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで受信者ゼロ時は送信をスキップする() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        // _rxをドロップして受信者ゼロにする
+        drop(_rx);
+
+        // ファイルを削除しておく（受信者ゼロで早期リターンされるため、読み込みは実行されないはず）
+        std::fs::remove_file(&file_path).unwrap();
+        notify_update(&state, &file_path).await;
+
+        // 事後にsubscribeしてもメッセージは届かない
+        let mut rx = state.tx().subscribe();
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "受信者ゼロ時はメッセージが送信されないべき"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで正常更新時はupdateを送信する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("hello.md");
+        std::fs::write(&file_path, "# hello world").unwrap();
+
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        );
+        let mut rx = state.tx().subscribe();
+
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Update(update) => {
+                assert!(
+                    update.content().as_str().contains("hello world"),
+                    "コンテンツに'hello world'が含まれるべき: {}",
+                    update.content().as_str()
+                );
+                assert!(
+                    update.toc().as_str().contains("hello-world"),
+                    "TOCに見出しリンクが含まれるべき: {}",
+                    update.toc().as_str()
+                );
+                assert!(
+                    update.file().is_none(),
+                    "単一ファイルモードではfileはNoneであるべき: {:?}",
+                    update.file()
+                );
+            }
+            other => panic!("Updateメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_lagged_recovery_message_単一ファイルモードは再読み込みしたupdateを返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("test.md");
