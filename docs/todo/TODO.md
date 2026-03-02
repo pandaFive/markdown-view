@@ -4,9 +4,9 @@
 
 ### 型設計
 
-- [ ] `SanitizedHtml`コンストラクタ可視性の厳格化
-  - ファイル: `src/renderer.rs`
-  - 理由: `pub(crate)`がrenderer/toc以外からの呼び出しを型レベルで防止できない
+- [x] `SanitizedHtml`コンストラクタ可視性の厳格化
+  - ファイル: `src/renderer/mod.rs`（`src/renderer.rs`から移動）
+  - 対応: `pub(crate)` → `pub(in crate::renderer)` に変更、`toc.rs`をrendererサブモジュール化
 
 ## PRレビュー: notify_updateエラーファイル名修正 (レビュー日: 2026-03-01)
 
@@ -19,6 +19,16 @@
 - [ ] 統合テストの`.unwrap()`チェーンを`.expect()`に置き換え
   - ファイル: `tests/integration_test.rs` L1159-1163, L1197-1201
   - 理由: テスト失敗時のエラーメッセージが不明瞭
+
+## PRレビュー: SanitizedHtmlコンストラクタ可視性厳格化 (レビュー日: 2026-03-02)
+
+### Low Priority
+
+- [ ] `SanitizedHtml` structのdocコメント表現をより正確にする
+  - ファイル: `src/renderer/mod.rs` L15
+  - 現状: 「`render_markdown` / `generate_toc` 経由でのみ生成する設計」
+  - 提案: 「`render_markdown` / `generate_toc` が主たる生成経路」（テストコードや将来のサブモジュールからも構築可能なため）
+  - 理由: 設計意図としては現状で十分理解可能。低リスク
 
 ## PRレビュー: テキスト選択中DOM更新延期 (レビュー日: 2026-03-02)
 

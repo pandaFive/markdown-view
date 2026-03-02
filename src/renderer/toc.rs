@@ -1,4 +1,4 @@
-use crate::renderer::{extract_headings, html_escape, HeadingInfo, SanitizedHtml};
+use super::{extract_headings, html_escape, HeadingInfo, SanitizedHtml};
 
 /// MarkdownテキストからTOC（目次）HTMLを生成する
 ///

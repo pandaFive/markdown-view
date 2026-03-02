@@ -1,3 +1,10 @@
+//! Markdown→HTML変換とTOC生成を担当するモジュール。
+//!
+//! このモジュールとそのサブモジュールは [`SanitizedHtml`] の構築権を持つ
+//! 信頼境界を構成する。サブモジュールの追加はセキュリティ影響を伴う。
+
+pub mod toc;
+
 use std::sync::OnceLock;
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
@@ -9,8 +16,8 @@ use syntect::util::LinesWithEndings;
 /// サニタイズ済みHTMLを表すnewtype
 ///
 /// `render_markdown` / `generate_toc` 経由でのみ生成する設計。
-/// コンストラクタは `pub(crate)` とし、
-/// `render_markdown` / `generate_toc` 経由利用を前提にする。
+/// コンストラクタは `pub(in crate::renderer)` とし、
+/// `renderer`モジュールツリー内でのみ構築可能にする。
 /// 生文字列の混入を型で防止する。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
@@ -22,11 +29,11 @@ impl SanitizedHtml {
         &self.0
     }
 
-    /// サニタイズ済みHTMLから構築する（crate内部専用）
+    /// サニタイズ済みHTMLから構築する（rendererモジュール内部専用）
     ///
     /// 呼び出し側がHTMLのサニタイズを保証する必要がある。
     /// 外部からの生文字列に対して使用してはならない。
-    pub(crate) fn from_sanitized_html(html: String) -> Self {
+    pub(in crate::renderer) fn from_sanitized_html(html: String) -> Self {
         Self(html)
     }
 }
