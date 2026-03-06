@@ -12,6 +12,7 @@
 - **ダークモード** — OS設定に自動追従 / `--dark` で強制切り替え
 - **セキュア設計** — localhost限定バインド、XSS防止、CSPヘッダー
 - **ゼロ設定** — 外部ファイル不要、単一バイナリで完結
+- **複数同時起動** — 使用中ポートを避けて別ディレクトリのプレビューを並行起動可能
 
 ## インストール
 
@@ -56,7 +57,7 @@ markdown-view docs/
   <PATH>                プレビューするMarkdownファイルまたはディレクトリのパス
 
 オプション:
-  -p, --port <PORT>     HTTPサーバーのポート番号 [デフォルト: 3000]
+  -p, --port <PORT>     優先するHTTPサーバーのポート番号（使用中なら次の空きポートを探す） [デフォルト: 3000]
       --no-open         ブラウザの自動起動を無効にする
       --dark            ダークモードを強制する
       --theme <THEME>   シンタックスハイライトのテーマ名
@@ -69,6 +70,10 @@ markdown-view docs/
 ```bash
 # ポートを指定して起動
 markdown-view docs/guide.md --port 8080
+
+# 2つのディレクトリを同時に起動（2つ目は空きポートへ自動フォールバック）
+markdown-view docs/
+markdown-view notes/
 
 # ディレクトリを指定してプレビュー
 markdown-view ./docs
