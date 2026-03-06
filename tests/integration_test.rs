@@ -265,6 +265,54 @@ async fn test_ファイル変更でwebsocket更新() {
 }
 
 #[tokio::test]
+async fn test_ファイル削除でwebsocketエラー通知() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("watch_delete.md");
+    tokio::fs::write(&file_path, "# Before").await.unwrap();
+
+    let (tx, _rx) = broadcast::channel(16);
+    let state = Arc::new(AppState::new(
+        AppMode::new_single_file(&file_path).unwrap(),
+        false,
+        None,
+        tx,
+    ));
+
+    let router = markdown_view::server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let _watch_handle = markdown_view::watcher::watch_path(state.clone())
+        .await
+        .unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .expect("初期メッセージ受信がタイムアウト");
+
+    tokio::fs::remove_file(&file_path).await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗");
+
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let error = json["error"].as_str().expect("errorフィールドが存在する");
+    assert!(error.contains("ファイル読み込みエラー"));
+    assert!(error.contains("watch_delete.md"));
+}
+
+#[tokio::test]
 async fn test_websocketは異なるoriginを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
 

@@ -7,12 +7,14 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use tokio::sync::mpsc;
 
-use crate::server::{notify_update, AppState, BroadcastMessage, CanonicalPath};
+use crate::server::{notify_update, AppState, BroadcastMessage};
 
 /// ファイル監視からtokioタスクへのメッセージ型
 enum WatcherMessage {
-    /// ファイル変更検知（canonicalize済みパス）
-    FileChanged(CanonicalPath),
+    /// ファイル変更検知
+    ///
+    /// 削除イベントではcanonicalizeに失敗しうるため、生のパスを保持する。
+    FileChanged(PathBuf),
     /// 監視ランタイムエラー（notify debouncerコールバック由来）
     WatchError(String),
 }
@@ -164,20 +166,9 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                                     if is_content_change_event(&event.kind) {
                                         // 対象ファイルの変更のみ通知
                                         if is_target_file(&event.path, &target_path) {
-                                            let path = match CanonicalPath::try_from_path(&event.path) {
-                                                Ok(p) => p,
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
-                                                        event.path.display(),
-                                                        e
-                                                    );
-                                                    continue;
-                                                }
-                                            };
                                             send_watcher_message(
                                                 &rt_tx,
-                                                WatcherMessage::FileChanged(path),
+                                                WatcherMessage::FileChanged(event.path.clone()),
                                                 "単一ファイル更新",
                                             );
                                             break;
@@ -194,7 +185,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                                 );
                             }
                         }
-                    }
+                    },
                 );
 
                 let mut debouncer = match debouncer {
@@ -204,7 +195,9 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                             .send(Err(format!("debouncerの初期化に失敗: {}", e)))
                             .is_err()
                         {
-                            tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
+                            tracing::warn!(
+                                "[markdown-view] 初期化エラーの通知先が既に閉じています"
+                            );
                         }
                         return;
                     }
@@ -255,7 +248,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, changed_path.as_path()).await;
+                    notify_update(&state, &changed_path).await;
                 }
                 WatcherMessage::WatchError(error_msg) => {
                     broadcast_error(&state, &error_msg);
@@ -298,7 +291,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                         match res {
                             Ok(events) => {
                                 // 変更された.mdファイルを収集（重複排除）
-                                let mut notified: std::collections::HashSet<CanonicalPath> =
+                                let mut notified: std::collections::HashSet<PathBuf> =
                                     std::collections::HashSet::new();
                                 for event in events {
                                     if !is_content_change_event(&event.kind) {
@@ -312,35 +305,25 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                                     if !is_md {
                                         continue;
                                     }
-                                    let path = match CanonicalPath::try_from_path(&event.path) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "[markdown-view] イベントパスの正規化に失敗（スキップ）: {} ({})",
-                                                event.path.display(),
-                                                e
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    // canonicalize後のパスがベースディレクトリ内であることを確認
-                                    // （symlink経由でディレクトリ外のファイルが変更された場合を防止）
-                                    if !path.as_path().starts_with(&base_dir) {
+                                    // パスがベースディレクトリ内であることを確認する。
+                                    // 削除イベントではcanonicalizeできないため、語彙的正規化でフォールバックする。
+                                    if !is_within_base_dir(&event.path, &base_dir) {
                                         tracing::warn!(
                                             "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                                            path.as_path().display()
+                                            event.path.display()
                                         );
                                         continue;
                                     }
                                     // 隠しファイル除外（canonicalize後のパスで判定）
                                     // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                                    if is_hidden_relative(path.as_path(), &base_dir) {
+                                    if is_hidden_relative(&event.path, &base_dir) {
                                         continue;
                                     }
-                                    if notified.insert(path.clone()) {
+                                    let normalized_event_path = normalize_lexical_path(&event.path);
+                                    if notified.insert(normalized_event_path.clone()) {
                                         send_watcher_message(
                                             &rt_tx,
-                                            WatcherMessage::FileChanged(path),
+                                            WatcherMessage::FileChanged(normalized_event_path),
                                             "ディレクトリ更新",
                                         );
                                     }
@@ -416,7 +399,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, changed_path.as_path()).await;
+                    notify_update(&state, &changed_path).await;
                 }
                 WatcherMessage::WatchError(error_msg) => {
                     broadcast_error(&state, &error_msg);
@@ -543,6 +526,17 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     normalized
 }
 
+fn is_within_base_dir(path: &Path, base: &Path) -> bool {
+    match path.canonicalize() {
+        Ok(canonical_path) => canonical_path.starts_with(base),
+        Err(_) => {
+            let normalized_path = normalize_lexical_path(path);
+            let normalized_base = normalize_lexical_path(base);
+            normalized_path.starts_with(&normalized_base)
+        }
+    }
+}
+
 /// 監視エラーをbroadcastチャネル経由でWebSocketクライアントに通知する
 ///
 /// `server.rs:notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
@@ -620,12 +614,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.md");
         std::fs::write(&path, "# test").unwrap();
-        let canonical = CanonicalPath::try_from_path(&path).unwrap();
-        tx.send(WatcherMessage::FileChanged(canonical.clone()))
+        tx.send(WatcherMessage::FileChanged(path.clone()))
             .await
             .unwrap();
         match rx.recv().await.unwrap() {
-            WatcherMessage::FileChanged(p) => assert_eq!(p, canonical),
+            WatcherMessage::FileChanged(p) => assert_eq!(p, path),
             WatcherMessage::WatchError(_) => panic!("FileChangedを期待したがWatchErrorを受信"),
         }
 
@@ -645,9 +638,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first.md");
         std::fs::write(&first, "# first").unwrap();
-        let first_canonical = CanonicalPath::try_from_path(&first).unwrap();
         // チャネルを満杯にする
-        tx.blocking_send(WatcherMessage::FileChanged(first_canonical.clone()))
+        tx.blocking_send(WatcherMessage::FileChanged(first.clone()))
             .unwrap();
 
         // 満杯時にtry_sendで即座に破棄される（ブロックしない）
@@ -660,7 +652,7 @@ mod tests {
         // 最初のメッセージのみ受信できる
         match rx.blocking_recv().unwrap() {
             WatcherMessage::FileChanged(path) => {
-                assert_eq!(path, first_canonical);
+                assert_eq!(path, first);
             }
             WatcherMessage::WatchError(_) => {
                 panic!("最初のメッセージはFileChangedを期待")
@@ -762,6 +754,20 @@ mod tests {
 
         // fail-safe: trueを返す（隠しファイルとして除外）
         assert!(is_hidden_relative(unrelated, base));
+    }
+
+    #[test]
+    fn test_is_within_base_dir_削除済みパスでもベース配下ならtrue() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sub/../target.md");
+        assert!(is_within_base_dir(&target, dir.path()));
+    }
+
+    #[test]
+    fn test_is_within_base_dir_ベース外パスはfalse() {
+        let base = Path::new("/tmp/base");
+        let outside = Path::new("/tmp/other/target.md");
+        assert!(!is_within_base_dir(outside, base));
     }
 
     #[tokio::test]
