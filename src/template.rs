@@ -831,11 +831,28 @@ const JS: &str = r##"
     return sel && !sel.isCollapsed;
   }
 
+  function ensurePendingUpdateTimer() {
+    if (!pendingUpdateTimer) {
+      pendingUpdateTimer = setTimeout(function() {
+        pendingUpdateTimer = null;
+        applyPendingUpdate();
+      }, 30000);
+    }
+  }
+
   function applyPendingUpdate() {
     if (!pendingUpdate) return;
     if (pendingUpdateTimer) {
       clearTimeout(pendingUpdateTimer);
       pendingUpdateTimer = null;
+    }
+    if (pendingUpdate.refresh) {
+      var refreshFile = pendingUpdate.file;
+      pendingUpdate = null;
+      if (isDirMode && refreshFile) {
+        selectFile(refreshFile, false);
+      }
+      return;
     }
     // ディレクトリモード: ファイル切り替え後は古い更新を破棄
     if (isDirMode && pendingUpdate.file && pendingUpdate.file !== currentFile) {
@@ -915,6 +932,11 @@ const JS: &str = r##"
       }
       // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
       if (data.refresh && isDirMode && currentFile) {
+        if (isTextSelected()) {
+          pendingUpdate = { refresh: true, file: currentFile };
+          ensurePendingUpdateTimer();
+          return;
+        }
         selectFile(currentFile, false);
         return;
       }
@@ -931,12 +953,7 @@ const JS: &str = r##"
         hideFileFetchErrorBanner();
         // 30秒以上選択が維持される場合のフォールバックタイマー
         // mouseup後にWS受信した場合にもタイマーが確実に起動する
-        if (!pendingUpdateTimer) {
-          pendingUpdateTimer = setTimeout(function() {
-            pendingUpdateTimer = null;
-            applyPendingUpdate();
-          }, 30000);
-        }
+        ensurePendingUpdateTimer();
         return;
       }
       updateContent(data);
@@ -1657,6 +1674,33 @@ mod tests {
         assert!(html.contains("ws-parse-error-banner"));
         assert!(html.contains("showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');"));
         assert!(html.contains("hideWsParseErrorBanner();"));
+    }
+
+    #[test]
+    fn test_websocket_refresh時もテキスト選択延期機構を通る() {
+        let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
+        });
+
+        assert!(html.contains("function ensurePendingUpdateTimer()"));
+        assert!(html.contains("if (data.refresh && isDirMode && currentFile) {"));
+        assert!(html.contains("if (isTextSelected()) {"));
+        assert!(html.contains("pendingUpdate = { refresh: true, file: currentFile };"));
+        assert!(html.contains("ensurePendingUpdateTimer();"));
+        assert!(html.contains("if (pendingUpdate.refresh) {"));
+        assert!(html.contains("selectFile(refreshFile, false);"));
     }
 
     #[test]
