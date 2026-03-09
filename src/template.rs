@@ -5,7 +5,7 @@ use crate::server::MAX_FILE_SIZE;
 
 /// サイドバー描画パラメータ
 pub enum SidebarParams<'a> {
-    /// 単一ファイルモード（目次のみ表示）
+    /// 単一ファイルモード（ブランド・目次検索・目次を表示）
     SingleFile,
     /// ディレクトリモード（ファイル一覧 + 目次）
     Directory {
@@ -139,7 +139,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
       <span class="theme-icon theme-icon-light">☀</span>
       <span class="theme-icon theme-icon-dark">☾</span>
     </button>
-    <button id="sidebar-open" class="sidebar-open" aria-label="目次を開く">☰</button>
+    <button id="sidebar-open" class="sidebar-open" aria-label="サイドバーを開く">☰</button>
   </div>
 </header>
 <div class="reading-progress" aria-hidden="true">
@@ -441,6 +441,10 @@ body::before {
   border: 1px solid var(--panel-border);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.18);
+}
+
+[data-theme="dark"] .sidebar-utility {
+  background: rgba(61, 66, 104, 0.15);
 }
 
 .sidebar-search {
@@ -1310,9 +1314,13 @@ const JS: &str = r##"
         input.style.opacity = '0';
         document.body.appendChild(input);
         input.select();
-        document.execCommand('copy');
+        var success = document.execCommand('copy');
         input.remove();
-        resolve();
+        if (success) {
+          resolve();
+        } else {
+          reject(new Error('execCommand("copy") returned false'));
+        }
       } catch (error) {
         reject(error);
       }
@@ -1345,7 +1353,8 @@ const JS: &str = r##"
         url.hash = heading.id;
         copyText(url.toString()).then(function() {
           flashCopiedState(button, 'Copied', '#');
-        }).catch(function() {
+        }).catch(function(err) {
+          console.warn('[markdown-view] コピーに失敗:', err);
           flashCopiedState(button, 'Failed', '#');
         });
       });
@@ -1365,7 +1374,8 @@ const JS: &str = r##"
       button.addEventListener('click', function() {
         copyText(code.innerText || code.textContent || '').then(function() {
           flashCopiedState(button, 'Copied', 'Copy');
-        }).catch(function() {
+        }).catch(function(err) {
+          console.warn('[markdown-view] コピーに失敗:', err);
           flashCopiedState(button, 'Failed', 'Copy');
         });
       });
@@ -1414,11 +1424,11 @@ const JS: &str = r##"
     }
     var data = pendingUpdate;
     pendingUpdate = null;
-      updateContent(data);
-      hideWsServerErrorBanner();
-      hideFileFetchErrorBanner();
-      setLiveStatus('live', 'Live');
-    }
+    updateContent(data);
+    hideWsServerErrorBanner();
+    hideFileFetchErrorBanner();
+    setLiveStatus('live', 'Live');
+  }
 
   // URLの?fileパラメータを取得
   function getFileParam() {
@@ -1475,10 +1485,10 @@ const JS: &str = r##"
       try {
         data = JSON.parse(event.data);
       } catch (e) {
-      console.error('[markdown-view] JSONパースエラー:', e);
-      showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
-      setLiveStatus('error', 'Invalid stream');
-      return;
+        console.error('[markdown-view] JSONパースエラー:', e);
+        showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
+        setLiveStatus('error', 'Invalid stream');
+        return;
       }
       hideWsParseErrorBanner();
       if (data.error) {
@@ -1936,7 +1946,9 @@ const JS: &str = r##"
         next = prefersDark ? 'light' : 'dark';
       }
       htmlEl.setAttribute('data-theme', next);
-      try { localStorage.setItem('mdview-theme', next); } catch(e) {}
+      try { localStorage.setItem('mdview-theme', next); } catch(e) {
+        console.warn('[markdown-view] テーマ設定の保存に失敗:', e.message);
+      }
     });
 
     // 保存されたテーマを復元
@@ -1945,7 +1957,9 @@ const JS: &str = r##"
       if (saved === 'light' || saved === 'dark') {
         htmlEl.setAttribute('data-theme', saved);
       }
-    } catch(e) {}
+    } catch(e) {
+      console.warn('[markdown-view] テーマ設定の読込に失敗:', e.message);
+    }
   }
 
   connectWS();
@@ -2241,6 +2255,10 @@ mod tests {
         assert!(html.contains("function setupTocFilter()"));
         assert!(html.contains("className = 'code-copy'"));
         assert!(html.contains("className = 'heading-anchor'"));
+        assert!(html.contains("id=\"theme-toggle\""));
+        assert!(html.contains("theme-icon-light"));
+        assert!(html.contains("theme-icon-dark"));
+        assert!(html.contains("localStorage.setItem('mdview-theme'"));
     }
 
     #[test]
