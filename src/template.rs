@@ -32,7 +32,7 @@ pub struct RenderPageParams<'a> {
 pub fn render_page(params: RenderPageParams<'_>) -> String {
     let escaped_title = html_escape(params.title);
 
-    let (dir_mode_attr, sidebar_inner) = match params.sidebar {
+    let (dir_mode_attr, sidebar_inner, mode_label, file_count_label) = match params.sidebar {
         SidebarParams::Directory {
             file_list,
             current_file,
@@ -44,7 +44,19 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
                 html_escape(current_file.unwrap_or(""))
             );
             let html = format!(
-                r##"  <div class="sidebar-tabs">
+                r##"  <div class="sidebar-brand">
+    <p class="sidebar-kicker">Workspace</p>
+    <h2>Documents</h2>
+    <p class="sidebar-caption">ディレクトリ内のMarkdownを切り替えて閲覧できます。</p>
+  </div>
+  <div class="sidebar-utility">
+    <label class="sidebar-search">
+      <span>絞り込み</span>
+      <input id="file-filter" type="search" placeholder="ファイル名で検索" autocomplete="off">
+    </label>
+    <p id="file-filter-summary" class="sidebar-summary">{file_count} files</p>
+  </div>
+  <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
     <button class="sidebar-tab" data-tab="toc">目次</button>
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="閉じる">×</button>
@@ -54,23 +66,44 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 {tree_html}    </div>
   </div>
   <div class="sidebar-panel" id="panel-toc">
+    <label class="sidebar-search sidebar-search-compact">
+      <span>目次検索</span>
+      <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
+    </label>
     <nav id="toc">{toc}</nav>
   </div>"##,
                 tree_html = tree_html,
                 toc = params.toc.as_str(),
+                file_count = file_list.len(),
             );
-            (attr, html)
+            (
+                attr,
+                html,
+                "Directory".to_string(),
+                format!("{} files", file_list.len()),
+            )
         }
         SidebarParams::SingleFile => (
             String::new(),
             format!(
-                r##"  <div class="sidebar-header">
+                r##"  <div class="sidebar-brand">
+    <p class="sidebar-kicker">Workspace</p>
+    <h2>Outline</h2>
+    <p class="sidebar-caption">このドキュメントの見出しを追跡します。</p>
+  </div>
+  <div class="sidebar-header">
     <h2>目次</h2>
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
+  <label class="sidebar-search sidebar-search-compact">
+    <span>目次検索</span>
+    <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
+  </label>
   <nav id="toc">{toc}</nav>"##,
                 toc = params.toc.as_str(),
             ),
+            "Single file".to_string(),
+            "1 file".to_string(),
         ),
     };
 
@@ -84,13 +117,40 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 <style>{css}</style>
 </head>
 <body>
+<div class="app-shell">
 <aside id="sidebar" class="sidebar">
 {sidebar_inner}
 </aside>
-<button id="sidebar-open" class="sidebar-open" aria-label="目次を開く">☰</button>
-<main id="content" class="content">
+<div class="workspace">
+<header class="topbar">
+  <div class="topbar-copy">
+    <p class="topbar-kicker">Markdown Workspace</p>
+    <h1 id="document-title" class="document-title">{title}</h1>
+    <div class="document-meta">
+      <span class="meta-pill meta-pill-strong" id="doc-mode">{mode_label}</span>
+      <span class="meta-pill" id="doc-file-count">{file_count_label}</span>
+      <span class="meta-pill" id="doc-heading-count">見出し 0</span>
+      <span class="meta-pill" id="doc-char-count">文字 0</span>
+      <span class="meta-pill live-pill" id="live-status">Live</span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button id="theme-toggle" class="topbar-btn" aria-label="テーマ切替">
+      <span class="theme-icon theme-icon-light">☀</span>
+      <span class="theme-icon theme-icon-dark">☾</span>
+    </button>
+    <button id="sidebar-open" class="sidebar-open" aria-label="目次を開く">☰</button>
+  </div>
+</header>
+<div class="reading-progress" aria-hidden="true">
+  <div id="reading-progress-bar" class="reading-progress-bar"></div>
+</div>
+<main id="content" class="content" data-title="{title}">
 {content}
 </main>
+</div>
+</div>
+<button id="back-to-top" class="back-to-top" aria-label="ページ上部へ戻る">↑</button>
 <script>{js}</script>
 </body>
 </html>"##,
@@ -101,6 +161,8 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         sidebar_inner = sidebar_inner,
         content = params.content.as_str(),
         js = inline_js(),
+        mode_label = mode_label,
+        file_count_label = file_count_label,
     )
 }
 
@@ -148,19 +210,28 @@ pub fn error_message_json(message: impl AsRef<str>) -> serde_json::Value {
 }
 
 const DARK_THEME_VARS: &str = r##"
-  --bg: #0d1117;
-  --fg: #e6edf3;
-  --sidebar-bg: #161b22;
-  --sidebar-border: #30363d;
-  --link: #58a6ff;
-  --code-bg: #161b22;
-  --blockquote-border: #30363d;
-  --blockquote-fg: #8b949e;
-  --table-border: #30363d;
-  --table-alt-bg: #161b22;
-  --hr-color: #21262d;
-  --toc-active: #58a6ff;
-  --toc-hover-bg: #1c2128;
+  --bg: #1a1b26;
+  --bg-accent: radial-gradient(circle at top, rgba(122, 162, 247, 0.10), transparent 32%), radial-gradient(circle at 80% 20%, rgba(187, 154, 247, 0.08), transparent 24%), linear-gradient(180deg, #1e2030 0%, #16161e 100%);
+  --fg: #c0caf5;
+  --muted: #565f89;
+  --sidebar-bg: rgba(22, 22, 30, 0.88);
+  --sidebar-border: rgba(61, 66, 104, 0.35);
+  --panel-bg: rgba(26, 27, 38, 0.78);
+  --panel-border: rgba(61, 66, 104, 0.30);
+  --panel-shadow: 0 24px 80px rgba(0, 0, 0, 0.40);
+  --link: #7aa2f7;
+  --code-bg: #16161e;
+  --blockquote-border: rgba(122, 162, 247, 0.40);
+  --blockquote-fg: #9aa5ce;
+  --table-border: rgba(61, 66, 104, 0.40);
+  --table-alt-bg: rgba(255, 255, 255, 0.02);
+  --hr-color: rgba(61, 66, 104, 0.40);
+  --toc-active: #bb9af7;
+  --toc-hover-bg: rgba(122, 162, 247, 0.08);
+  --pill-bg: rgba(61, 66, 104, 0.20);
+  --pill-strong-bg: rgba(187, 154, 247, 0.16);
+  --accent: #bb9af7;
+  --accent-soft: rgba(187, 154, 247, 0.14);
 "##;
 
 const CSS_TEMPLATE: &str = r##"
@@ -168,19 +239,28 @@ const CSS_TEMPLATE: &str = r##"
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg: #ffffff;
-  --fg: #24292f;
-  --sidebar-bg: #f6f8fa;
-  --sidebar-border: #d0d7de;
-  --link: #0969da;
-  --code-bg: #f6f8fa;
-  --blockquote-border: #d0d7de;
-  --blockquote-fg: #57606a;
-  --table-border: #d0d7de;
-  --table-alt-bg: #f6f8fa;
-  --hr-color: #d8dee4;
-  --toc-active: #0969da;
-  --toc-hover-bg: #eaeef2;
+  --bg: #f2f2f2;
+  --bg-accent: linear-gradient(180deg, #f6f6f6 0%, #eaeaea 100%);
+  --fg: #1a1a1a;
+  --muted: #737373;
+  --sidebar-bg: rgba(245, 245, 245, 0.88);
+  --sidebar-border: rgba(0, 0, 0, 0.10);
+  --panel-bg: rgba(250, 250, 250, 0.80);
+  --panel-border: rgba(0, 0, 0, 0.08);
+  --panel-shadow: 0 28px 80px rgba(0, 0, 0, 0.06);
+  --link: #3d3d3d;
+  --code-bg: #e8e8e8;
+  --blockquote-border: rgba(0, 0, 0, 0.22);
+  --blockquote-fg: #525252;
+  --table-border: rgba(0, 0, 0, 0.10);
+  --table-alt-bg: rgba(0, 0, 0, 0.03);
+  --hr-color: rgba(0, 0, 0, 0.10);
+  --toc-active: #1a1a1a;
+  --toc-hover-bg: rgba(0, 0, 0, 0.05);
+  --pill-bg: rgba(255, 255, 255, 0.60);
+  --pill-strong-bg: rgba(0, 0, 0, 0.07);
+  --accent: #1a1a1a;
+  --accent-soft: rgba(0, 0, 0, 0.06);
 }
 
 [data-theme="dark"] {
@@ -194,44 +274,216 @@ __DARK_THEME_VARS__
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-  background: var(--bg);
+  font-family: "IBM Plex Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  background: var(--bg-accent);
   color: var(--fg);
-  line-height: 1.6;
-  display: flex;
+  line-height: 1.7;
   min-height: 100vh;
+  position: relative;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  opacity: 0.2;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.5), transparent 92%);
+}
+
+.app-shell {
+  display: flex;
+  width: 100%;
+}
+
+.workspace {
+  flex: 1;
+  min-width: 0;
+  padding: 1.5rem 1.5rem 4rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 auto 1rem;
+  max-width: 1040px;
+  padding: 1.35rem 1.5rem 1.1rem;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  backdrop-filter: blur(18px);
+  border-radius: 22px;
+  box-shadow: var(--panel-shadow);
+}
+
+.topbar-kicker,
+.sidebar-kicker {
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.document-title,
+.sidebar-brand h2 {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Yu Mincho", serif;
+  font-weight: 700;
+  line-height: 1.08;
+}
+
+.document-title {
+  font-size: clamp(1.9rem, 3vw, 3.2rem);
+  margin-bottom: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.document-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.meta-pill-strong {
+  color: var(--fg);
+  background: var(--pill-strong-bg);
+}
+
+.live-pill {
+  color: var(--accent);
+}
+
+.live-pill::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.45rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0.28rem var(--accent-soft);
+}
+
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  z-index: 1000;
+  overflow: hidden;
+  background: transparent;
+}
+
+.reading-progress-bar {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--link));
+  transition: width 0.18s ease;
+}
+
+.live-pill[data-state="retry"],
+.live-pill[data-state="offline"],
+.live-pill[data-state="error"] {
+  color: #f7768e;
 }
 
 /* サイドバー */
 .sidebar {
-  width: 280px;
-  min-width: 280px;
+  width: 320px;
+  min-width: 320px;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
-  padding: 1rem;
+  padding: 1.2rem 1rem;
   overflow-y: auto;
   position: sticky;
   top: 0;
   height: 100vh;
-  transition: transform 0.3s ease;
+  transition: transform 0.3s ease, box-shadow 0.2s ease;
   display: flex;
   flex-direction: column;
+  gap: 0.85rem;
+  backdrop-filter: blur(14px);
+}
+
+.sidebar-brand {
+  padding: 0.35rem 0.25rem 0;
+}
+
+.sidebar-brand h2 {
+  font-size: 1.9rem;
+  margin-bottom: 0.35rem;
+}
+
+.sidebar-caption {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.sidebar-utility {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.sidebar-search {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.sidebar-search-compact {
+  margin: 0.25rem 0 0.75rem;
+}
+
+.sidebar-search input {
+  width: 100%;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.65);
+  padding: 0.7rem 0.8rem;
+  color: var(--fg);
+}
+
+[data-theme="dark"] .sidebar-search input {
+  background: rgba(22, 22, 30, 0.50);
+}
+
+.sidebar-summary {
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .sidebar-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--sidebar-border);
+  padding: 0.25rem 0.1rem 0;
 }
 
 .sidebar-header h2 {
   font-size: 0.875rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--blockquote-fg);
+  color: var(--muted);
 }
 
 .sidebar-toggle {
@@ -243,16 +495,58 @@ body {
   color: var(--fg);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.topbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.8rem;
+  min-height: 2.8rem;
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid var(--sidebar-border);
+  border-radius: 14px;
+  padding: 0.25rem;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: var(--fg);
+  transition: background 0.15s ease;
+}
+
+.topbar-btn:hover {
+  background: var(--toc-hover-bg);
+}
+
+[data-theme="dark"] .topbar-btn {
+  background: rgba(61, 66, 104, 0.20);
+}
+
+/* テーマアイコン切替 */
+.theme-icon { display: none; }
+[data-theme="light"] .theme-icon-light,
+:root:not([data-theme]) .theme-icon-light { display: inline; }
+[data-theme="dark"] .theme-icon-dark { display: inline; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-icon-light { display: none; }
+  :root:not([data-theme="light"]) .theme-icon-dark { display: inline; }
+}
+
 .sidebar-open {
   display: none;
-  position: fixed;
-  top: 0.75rem;
-  left: 0.75rem;
-  z-index: 1000;
-  background: var(--sidebar-bg);
+  align-items: center;
+  justify-content: center;
+  min-width: 2.8rem;
+  min-height: 2.8rem;
+  background: rgba(255, 255, 255, 0.4);
   border: 1px solid var(--sidebar-border);
-  border-radius: 4px;
-  padding: 0.25rem 0.5rem;
+  border-radius: 14px;
+  padding: 0.25rem 0.65rem;
   cursor: pointer;
   font-size: 1.25rem;
   color: var(--fg);
@@ -271,23 +565,39 @@ body {
 
 #toc a {
   display: block;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
+  padding: 0.42rem 0.55rem;
+  border-radius: 10px;
   color: var(--fg);
   text-decoration: none;
   font-size: 0.875rem;
-  transition: background 0.15s;
+  transition: background 0.15s, transform 0.15s;
 }
 
-#toc a:hover { background: var(--toc-hover-bg); }
-#toc a.active { color: var(--toc-active); font-weight: 600; }
+#toc a:hover {
+  background: var(--toc-hover-bg);
+  transform: translateX(2px);
+}
+
+#toc a.active {
+  color: var(--toc-active);
+  font-weight: 600;
+  background: var(--accent-soft);
+}
 
 /* メインコンテンツ */
 .content {
-  flex: 1;
-  max-width: 900px;
+  max-width: 1040px;
   margin: 0 auto;
-  padding: 2rem 3rem;
+  padding: 2.25rem clamp(1.2rem, 4vw, 3.5rem) 3rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(18px);
+}
+
+[data-theme="dark"] .content {
+  background: rgba(22, 22, 30, 0.80);
 }
 
 .content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
@@ -295,10 +605,45 @@ body {
   margin-bottom: 0.5em;
   font-weight: 600;
   line-height: 1.25;
+  scroll-margin-top: 7rem;
 }
 
-.content h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
-.content h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
+.content h1, .content h2 {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Yu Mincho", serif;
+}
+
+.content .heading-anchor {
+  margin-left: 0.5rem;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid var(--table-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  vertical-align: middle;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.content h1:hover .heading-anchor,
+.content h2:hover .heading-anchor,
+.content h3:hover .heading-anchor,
+.content h4:hover .heading-anchor,
+.content h5:hover .heading-anchor,
+.content h6:hover .heading-anchor,
+.content .heading-anchor:focus {
+  opacity: 1;
+}
+
+.content .heading-anchor:hover,
+.content .heading-anchor.copied {
+  color: var(--fg);
+  background: var(--accent-soft);
+}
+
+.content h1 { font-size: 2.4em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
+.content h2 { font-size: 1.75em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
 .content h3 { font-size: 1.25em; }
 
 .content p { margin-bottom: 1em; }
@@ -315,12 +660,36 @@ body {
 }
 
 .content pre.code-block {
+  position: relative;
   background: var(--code-bg);
-  padding: 1rem;
-  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  border-radius: 16px;
   overflow-x: auto;
   margin-bottom: 1em;
   line-height: 1.45;
+  border: 1px solid var(--table-border);
+}
+
+.content .code-copy {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  border: 1px solid var(--table-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--fg);
+  padding: 0.28rem 0.7rem;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+[data-theme="dark"] .content .code-copy {
+  background: rgba(22, 22, 30, 0.50);
+}
+
+.content .code-copy.copied {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .content pre.code-block code {
@@ -331,9 +700,11 @@ body {
 
 .content blockquote {
   border-left: 4px solid var(--blockquote-border);
-  padding: 0.5rem 1rem;
+  padding: 0.75rem 1rem;
   margin-bottom: 1em;
   color: var(--blockquote-fg);
+  background: rgba(255, 255, 255, 0.24);
+  border-radius: 0 14px 14px 0;
 }
 
 .content table {
@@ -372,7 +743,7 @@ body {
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--sidebar-border);
-  margin-bottom: 0.5rem;
+  margin-top: 0.15rem;
   flex-shrink: 0;
 }
 
@@ -404,6 +775,7 @@ body {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0.25rem 0 1rem;
 }
 
 /* ファイル一覧 */
@@ -424,24 +796,32 @@ body {
 
 .file-list a {
   display: block;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
+  padding: 0.42rem 0.55rem;
+  border-radius: 10px;
   color: var(--fg);
   text-decoration: none;
   font-size: 0.8125rem;
-  transition: background 0.15s;
+  transition: background 0.15s, transform 0.15s;
   word-break: break-all;
 }
 
-.file-list a:hover { background: var(--toc-hover-bg); }
-.file-tree-file.active a { color: var(--toc-active); font-weight: 600; }
+.file-list a:hover {
+  background: var(--toc-hover-bg);
+  transform: translateX(2px);
+}
+
+.file-tree-file.active a {
+  color: var(--toc-active);
+  font-weight: 600;
+  background: var(--accent-soft);
+}
 
 /* ファイルツリー */
 .file-tree-dir > summary {
   cursor: pointer;
   font-size: 0.8125rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 4px;
+  padding: 0.35rem 0.45rem;
+  border-radius: 10px;
   list-style: none;
   color: var(--fg);
   font-weight: 500;
@@ -494,14 +874,16 @@ body {
 /* エラーバナー */
 .error-banner {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  padding: 8px 16px;
-  background: #d32f2f;
-  color: #fff;
-  text-align: center;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 2rem));
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: #f7768e;
+  color: #1a1b26;
   font-size: 14px;
+  box-shadow: 0 20px 40px rgba(127, 29, 29, 0.28);
 }
 
 .error-banner.disconnect {
@@ -520,6 +902,30 @@ body {
   line-height: 1;
 }
 
+.back-to-top {
+  position: fixed;
+  right: 1.4rem;
+  bottom: 1.4rem;
+  width: 3rem;
+  height: 3rem;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--fg);
+  box-shadow: var(--panel-shadow);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.back-to-top.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
 /* モバイル対応 */
 @media (max-width: 768px) {
   .sidebar {
@@ -528,14 +934,19 @@ body {
     top: 0;
     z-index: 999;
     transform: translateX(-100%);
-    width: 280px;
+    width: min(88vw, 320px);
+    min-width: min(88vw, 320px);
     box-shadow: 2px 0 8px rgba(0,0,0,0.15);
   }
   .sidebar.open { transform: translateX(0); }
   .sidebar-toggle { display: block; }
   .sidebar-tabs .sidebar-toggle { display: block; }
-  .sidebar-open { display: block; }
-  .content { padding: 1.5rem 1rem; padding-top: 3rem; }
+  .sidebar-open { display: inline-flex; }
+  .workspace { padding: 1rem 0.85rem 3.5rem; }
+  .topbar { padding: 1.1rem 1rem 0.95rem; border-radius: 18px; }
+  .document-title { font-size: 1.7rem; }
+  .content { padding: 1.45rem 1rem 2rem; border-radius: 20px; }
+  .back-to-top { right: 0.85rem; bottom: 0.85rem; }
 }
 "##;
 
@@ -788,6 +1199,13 @@ const JS: &str = r##"
   var htmlEl = document.documentElement;
   var isDirMode = htmlEl.getAttribute('data-dir-mode') === 'true';
   var currentFile = htmlEl.getAttribute('data-current-file') || '';
+  var documentTitleEl = document.getElementById('document-title');
+  var docHeadingCountEl = document.getElementById('doc-heading-count');
+  var docCharCountEl = document.getElementById('doc-char-count');
+  var liveStatusEl = document.getElementById('live-status');
+  var readingProgressBar = document.getElementById('reading-progress-bar');
+  var backToTop = document.getElementById('back-to-top');
+  var contentRoot = document.getElementById('content');
 
   // テキスト選択中のDOM更新延期機構
   // マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
@@ -840,6 +1258,141 @@ const JS: &str = r##"
     }
   }
 
+  function setLiveStatus(state, label) {
+    if (!liveStatusEl) return;
+    liveStatusEl.textContent = label;
+    liveStatusEl.dataset.state = state;
+  }
+
+  function updateDocumentStats() {
+    if (!contentRoot) return;
+    var headings = contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6').length;
+    var text = (contentRoot.textContent || '').replace(/\s+/g, '');
+    if (docHeadingCountEl) {
+      docHeadingCountEl.textContent = '見出し ' + headings;
+    }
+    if (docCharCountEl) {
+      docCharCountEl.textContent = '文字 ' + text.length;
+    }
+  }
+
+  function updateReadingProgress() {
+    var scrollTop = window.scrollY || window.pageYOffset;
+    var maxScroll = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
+    var progress = Math.min(100, Math.max(0, (scrollTop / maxScroll) * 100));
+    if (readingProgressBar) {
+      readingProgressBar.style.width = progress + '%';
+    }
+    if (backToTop) {
+      backToTop.classList.toggle('visible', scrollTop > 360);
+    }
+  }
+
+  function syncDocumentChrome(file) {
+    var title = file ? file.split('/').pop() : (contentRoot ? contentRoot.getAttribute('data-title') : '');
+    if (!title) title = 'markdown-view';
+    if (documentTitleEl) {
+      documentTitleEl.textContent = title;
+    }
+    document.title = title + ' - markdown-view';
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function(resolve, reject) {
+      try {
+        var input = document.createElement('textarea');
+        input.value = text;
+        input.setAttribute('readonly', 'readonly');
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  function flashCopiedState(button, copiedLabel, baseLabel) {
+    if (!button) return;
+    button.classList.add('copied');
+    button.textContent = copiedLabel;
+    setTimeout(function() {
+      button.classList.remove('copied');
+      button.textContent = baseLabel;
+    }, 1200);
+  }
+
+  function enhanceContentInteractions() {
+    if (!contentRoot) return;
+
+    var headings = contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
+    headings.forEach(function(heading) {
+      if (!heading.id || heading.querySelector('.heading-anchor')) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'heading-anchor';
+      button.textContent = '#';
+      button.setAttribute('aria-label', '見出しリンクをコピー');
+      button.addEventListener('click', function() {
+        var url = new URL(location.href);
+        url.hash = heading.id;
+        copyText(url.toString()).then(function() {
+          flashCopiedState(button, 'Copied', '#');
+        }).catch(function() {
+          flashCopiedState(button, 'Failed', '#');
+        });
+      });
+      heading.appendChild(button);
+    });
+
+    var blocks = contentRoot.querySelectorAll('pre.code-block');
+    blocks.forEach(function(block) {
+      if (block.querySelector('.code-copy')) return;
+      var code = block.querySelector('code');
+      if (!code) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'code-copy';
+      button.textContent = 'Copy';
+      button.setAttribute('aria-label', 'コードをコピー');
+      button.addEventListener('click', function() {
+        copyText(code.innerText || code.textContent || '').then(function() {
+          flashCopiedState(button, 'Copied', 'Copy');
+        }).catch(function() {
+          flashCopiedState(button, 'Failed', 'Copy');
+        });
+      });
+      block.appendChild(button);
+    });
+  }
+
+  function setupTocFilter() {
+    var input = document.getElementById('toc-filter');
+    var toc = document.getElementById('toc');
+    if (!input || !toc) return;
+
+    var applyFilter = function() {
+      var query = input.value.trim().toLowerCase();
+      var items = toc.querySelectorAll('li');
+      items.forEach(function(item) {
+        var link = item.querySelector(':scope > a');
+        if (!link) return;
+        var matched = !query || link.textContent.toLowerCase().indexOf(query) !== -1;
+        item.hidden = !matched;
+      });
+    };
+
+    input.addEventListener('input', applyFilter);
+    applyFilter();
+  }
+
   function applyPendingUpdate() {
     if (!pendingUpdate) return;
     if (pendingUpdateTimer) {
@@ -861,10 +1414,11 @@ const JS: &str = r##"
     }
     var data = pendingUpdate;
     pendingUpdate = null;
-    updateContent(data);
-    hideWsServerErrorBanner();
-    hideFileFetchErrorBanner();
-  }
+      updateContent(data);
+      hideWsServerErrorBanner();
+      hideFileFetchErrorBanner();
+      setLiveStatus('live', 'Live');
+    }
 
   // URLの?fileパラメータを取得
   function getFileParam() {
@@ -913,6 +1467,7 @@ const JS: &str = r##"
 
     ws.onopen = function() {
       reconnectAttempts = 0;
+      setLiveStatus('live', 'Live');
     };
 
     ws.onmessage = function(event) {
@@ -920,14 +1475,16 @@ const JS: &str = r##"
       try {
         data = JSON.parse(event.data);
       } catch (e) {
-        console.error('[markdown-view] JSONパースエラー:', e);
-        showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
-        return;
+      console.error('[markdown-view] JSONパースエラー:', e);
+      showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
+      setLiveStatus('error', 'Invalid stream');
+      return;
       }
       hideWsParseErrorBanner();
       if (data.error) {
         console.error('[markdown-view] サーバーエラー:', data.error);
         showWsServerErrorBanner(data.error);
+        setLiveStatus('error', 'Server error');
         return;
       }
       // ディレクトリモード: サーバーからリフレッシュ要求時は現在ファイルを再取得
@@ -960,14 +1517,17 @@ const JS: &str = r##"
       // WebSocket経由の成功更新で各種エラーバナーをクリア
       hideWsServerErrorBanner();
       hideFileFetchErrorBanner();
+      setLiveStatus('live', 'Live');
     };
 
     ws.onclose = function() {
+      setLiveStatus('retry', 'Reconnecting');
       scheduleReconnect();
     };
 
     ws.onerror = function(event) {
       console.error('[markdown-view] WebSocketエラー:', event);
+      setLiveStatus('error', 'Socket error');
       ws.close();
     };
   }
@@ -985,6 +1545,7 @@ const JS: &str = r##"
 
   function showDisconnectBanner() {
     if (document.getElementById('ws-disconnect-banner')) return;
+    setLiveStatus('offline', 'Offline');
     var banner = document.createElement('div');
     banner.id = 'ws-disconnect-banner';
     banner.className = 'error-banner disconnect';
@@ -1131,9 +1692,14 @@ const JS: &str = r##"
 
     requestAnimationFrame(function() {
       window.scrollTo(0, scrollY);
+      updateReadingProgress();
     });
 
     setupTocTracking();
+    updateDocumentStats();
+    syncDocumentChrome(currentFile);
+    enhanceContentInteractions();
+    setupTocFilter();
   }
 
   // ディレクトリモード: ファイル選択
@@ -1172,9 +1738,8 @@ const JS: &str = r##"
         setFileParam(currentFile, true);
         updateFileListActive(currentFile);
       }
-      // タイトル更新
-      var fileName = currentFile.split('/').pop() || currentFile;
-      document.title = fileName + ' - markdown-view';
+      syncDocumentChrome(currentFile);
+      setLiveStatus('live', 'Live');
     })
     .catch(function(err) {
       console.error('[markdown-view] ファイル取得エラー:', err);
@@ -1186,6 +1751,7 @@ const JS: &str = r##"
       // URLを元に戻す（pushHistory時はpushState、popstate時はreplaceState）
       setFileParam(previousFile, !pushHistory);
       showFileFetchErrorBanner(getFileFetchErrorMessage(err));
+      setLiveStatus('error', 'Fetch failed');
     });
   }
 
@@ -1220,6 +1786,52 @@ const JS: &str = r##"
         selectFile(link.getAttribute('data-file'));
       });
     });
+  }
+
+  function setupFileFilter() {
+    var input = document.getElementById('file-filter');
+    var summary = document.getElementById('file-filter-summary');
+    if (!input) return;
+
+    var updateSummary = function(visible, total) {
+      if (!summary) return;
+      if (input.value.trim()) {
+        summary.textContent = visible + ' / ' + total + ' files';
+      } else {
+        summary.textContent = total + ' files';
+      }
+    };
+
+    var applyFilter = function() {
+      var query = input.value.trim().toLowerCase();
+      var fileItems = document.querySelectorAll('.file-tree-file');
+      var total = fileItems.length;
+      var visible = 0;
+
+      fileItems.forEach(function(item) {
+        var link = item.querySelector('a[data-file]');
+        var matched = !query || (link && link.getAttribute('data-file').toLowerCase().indexOf(query) !== -1);
+        item.hidden = !matched;
+        if (matched) visible++;
+      });
+
+      var dirs = document.querySelectorAll('.file-tree-dir');
+      dirs.forEach(function(dir) {
+        var descendants = dir.querySelectorAll('.file-tree-file');
+        var hasVisibleChild = Array.prototype.some.call(descendants, function(item) {
+          return !item.hidden;
+        });
+        dir.parentElement.hidden = !hasVisibleChild;
+        if (query && hasVisibleChild) {
+          dir.open = true;
+        }
+      });
+
+      updateSummary(visible, total);
+    };
+
+    input.addEventListener('input', applyFilter);
+    updateSummary(document.querySelectorAll('.file-tree-file').length, document.querySelectorAll('.file-tree-file').length);
   }
 
   // タブ切り替え設定
@@ -1302,11 +1914,53 @@ const JS: &str = r##"
     });
   }
 
+  if (backToTop) {
+    backToTop.addEventListener('click', function() {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+
+  // テーマ切替
+  var themeToggle = document.getElementById('theme-toggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', function() {
+      var current = htmlEl.getAttribute('data-theme');
+      var next;
+      if (current === 'dark') {
+        next = 'light';
+      } else if (current === 'light') {
+        next = 'dark';
+      } else {
+        // data-themeなし → システム設定の逆にする
+        var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        next = prefersDark ? 'light' : 'dark';
+      }
+      htmlEl.setAttribute('data-theme', next);
+      try { localStorage.setItem('mdview-theme', next); } catch(e) {}
+    });
+
+    // 保存されたテーマを復元
+    try {
+      var saved = localStorage.getItem('mdview-theme');
+      if (saved === 'light' || saved === 'dark') {
+        htmlEl.setAttribute('data-theme', saved);
+      }
+    } catch(e) {}
+  }
+
   connectWS();
   setupTocTracking();
+  updateDocumentStats();
+  updateReadingProgress();
+  syncDocumentChrome(currentFile);
+  enhanceContentInteractions();
+  setupTocFilter();
+  window.addEventListener('scroll', updateReadingProgress, { passive: true });
+  window.addEventListener('resize', updateReadingProgress);
   if (isDirMode) {
     setupFileList();
     setupTabs();
+    setupFileFilter();
   }
 })();
 "##;
@@ -1535,6 +2189,8 @@ mod tests {
         // パネルが存在する
         assert!(html.contains("id=\"panel-files\""));
         assert!(html.contains("id=\"panel-toc\""));
+        assert!(html.contains("id=\"file-filter\""));
+        assert!(html.contains("id=\"file-filter-summary\""));
     }
 
     #[test]
@@ -1554,6 +2210,37 @@ mod tests {
         // タブボタンのHTML要素が存在しない（CSSクラス定義ではなくHTML構造を検証）
         assert!(!html.contains("data-tab=\"files\""));
         assert!(!html.contains("id=\"panel-files\""));
+        assert!(!html.contains("id=\"file-filter\""));
+    }
+
+    #[test]
+    fn test_読書ワークスペース用uiが描画される() {
+        let content = test_content();
+        let toc = test_toc();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "A Title",
+            content: &content,
+            toc: &toc,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(html.contains("class=\"topbar\""));
+        assert!(html.contains("id=\"document-title\""));
+        assert!(html.contains("id=\"doc-heading-count\""));
+        assert!(html.contains("id=\"doc-char-count\""));
+        assert!(html.contains("id=\"reading-progress-bar\""));
+        assert!(html.contains("id=\"back-to-top\""));
+        assert!(html.contains("function updateDocumentStats()"));
+        assert!(html.contains("function updateReadingProgress()"));
+        assert!(html.contains("function syncDocumentChrome(file)"));
+        assert!(html.contains("id=\"toc-filter\""));
+        assert!(html.contains("function enhanceContentInteractions()"));
+        assert!(html.contains("function setupTocFilter()"));
+        assert!(html.contains("className = 'code-copy'"));
+        assert!(html.contains("className = 'heading-anchor'"));
     }
 
     #[test]

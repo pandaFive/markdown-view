@@ -533,4 +533,8 @@ fn test_render_pageの基本構造() {
     assert!(html.as_str().contains("<p>Hello</p>"));
     assert!(html.as_str().contains("<a href=\"#h1\">H1</a>"));
     assert!(html.as_str().contains("Test - markdown-view"));
+    assert!(html.as_str().contains("id=\"document-title\""));
+    assert!(html.as_str().contains("id=\"live-status\""));
+    assert!(html.as_str().contains("id=\"reading-progress-bar\""));
+    assert!(html.as_str().contains("id=\"toc-filter\""));
 }
