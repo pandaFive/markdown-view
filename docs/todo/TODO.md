@@ -28,29 +28,29 @@
 
 ### Low Priority
 
-- [ ] `mode_label`/`file_count_label` の値をテストで検証する
+- [x] `mode_label`/`file_count_label` の値をテストで検証する
   - ファイル: `src/template.rs` (mod tests)
   - 内容: SingleFileモードで"Single file"/"1 file"、Directoryモードで"Directory"/"{N} files"が出力されることを検証
   - 理由: 現在はHTML要素の存在のみ確認、値の正確性は未検証
 
-- [ ] JSコメント `// ディレクトリモード判定` を実態に合わせて更新
+- [x] JSコメント `// ディレクトリモード判定` を実態に合わせて更新
   - ファイル: `src/template.rs` (JS内 L1198付近)
   - 現状: コメント直後にディレクトリモード以外のDOM参照が多数追加されている
   - 提案: `// グローバルDOM参照の初期化` に変更
 
-- [ ] `.sidebar-open` を `.topbar-btn` クラスと統合してCSS重複を削減
+- [x] `.sidebar-open` を `.topbar-btn` クラスと統合してCSS重複を削減
   - ファイル: `src/template.rs` (CSS)
   - 内容: 8+のプロパティが重複。HTML側で `topbar-btn` クラスを付与し `.sidebar-open` 固有スタイルのみ残す
 
-- [ ] コピーハンドラのJS共通化
+- [x] コピーハンドラのJS共通化
   - ファイル: `src/template.rs` (JS `enhanceContentInteractions`)
   - 内容: heading-anchorとcode-copyで `copyText().then().catch()` が同一パターンで重複。`handleCopyClick(button, text, baseLabel)` に抽出
 
-- [ ] `setupTocFilter`/`setupFileFilter` のフィルタロジック汎用化
+- [x] `setupTocFilter`/`setupFileFilter` のフィルタロジック汎用化
   - ファイル: `src/template.rs` (JS)
   - 内容: 80%同一のフィルタ処理を `setupFilterableList(inputId, itemSelector, ...)` に統合
 
-- [ ] `setLiveStatus` のラベル自動導出
+- [x] `setLiveStatus` のラベル自動導出
   - ファイル: `src/template.rs` (JS)
   - 内容: `setLiveStatus('live', 'Live')` が5箇所で重複。state→labelマッピングを内部化し `setLiveStatus('live')` で完結させる
 
@@ -58,29 +58,29 @@
 
 ### Low Priority
 
-- [ ] `ensure_allowed_request_host`でHost拒否時にwarnログ出力を追加
+- [x] `ensure_allowed_request_host`でHost拒否時にwarnログ出力を追加
   - ファイル: `src/server.rs` L384
   - 内容: DNS Rebinding攻撃検出のため、拒否されたHostヘッダー値をログに記録
   - 理由: セキュリティ監査時の可視性向上。現在は403を返すのみでログなし
 
-- [ ] `resolve_target_file_or_error`のcatch-all `_`アームにwarnログ追加
+- [x] `resolve_target_file_or_error`のcatch-all `_`アームにwarnログ追加
   - ファイル: `src/server.rs` L405
   - 内容: 予期しないStatusCodeが発生した場合にログで検知可能にする
   - 理由: 将来のエラーパス追加時にコンパイラ警告がないため、ログで補完
 
-- [ ] `UrlPolicy`/`TargetResolveContext`に`#[derive(Debug)]`追加
+- [x] `UrlPolicy`/`TargetResolveContext`に`#[derive(Debug)]`追加
   - ファイル: `src/renderer/mod.rs` L564、`src/server.rs` L356
   - 理由: デバッグ・テスト失敗時の診断性向上。コスト0
 
-- [ ] 新ヘルパー関数にdocコメント追加
+- [x] 新ヘルパー関数にdocコメント追加
   - ファイル: `src/server.rs`（`ensure_allowed_request_host` L384、`resolve_target_file_or_error` L395、`read_rendered_update_or_error` L411）
   - 理由: CLAUDE.md規約は公開関数対象だが、主要ヘルパーの可読性向上のため
 
-- [ ] CSPコメントの「renderer.rs 側」→「renderer モジュール側」に修正
+- [x] CSPコメントの「renderer.rs 側」→「renderer モジュール側」に修正
   - ファイル: `src/server.rs` L307
   - 理由: template.rsのモジュール分割と整合性を取るため
 
-- [ ] `UrlPolicy`に`PartialEq, Eq`追加検討
+- [x] `UrlPolicy`に`PartialEq, Eq`追加検討
   - ファイル: `src/renderer/mod.rs` L564
   - 理由: 他enum（`HeadingInfo`等）との一貫性。現在比較用途なし
 
