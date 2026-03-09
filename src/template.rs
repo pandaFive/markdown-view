@@ -232,6 +232,11 @@ const DARK_THEME_VARS: &str = r##"
   --pill-strong-bg: rgba(187, 154, 247, 0.16);
   --accent: #bb9af7;
   --accent-soft: rgba(187, 154, 247, 0.14);
+  --sidebar-utility-bg: rgba(61, 66, 104, 0.15);
+  --search-input-bg: rgba(22, 22, 30, 0.50);
+  --topbar-btn-bg: rgba(61, 66, 104, 0.20);
+  --content-bg: rgba(22, 22, 30, 0.80);
+  --code-copy-bg: rgba(22, 22, 30, 0.50);
 "##;
 
 const CSS_TEMPLATE: &str = r##"
@@ -261,6 +266,11 @@ const CSS_TEMPLATE: &str = r##"
   --pill-strong-bg: rgba(0, 0, 0, 0.07);
   --accent: #1a1a1a;
   --accent-soft: rgba(0, 0, 0, 0.06);
+  --sidebar-utility-bg: rgba(255, 255, 255, 0.18);
+  --search-input-bg: rgba(255, 255, 255, 0.65);
+  --topbar-btn-bg: rgba(255, 255, 255, 0.4);
+  --content-bg: rgba(255, 255, 255, 0.8);
+  --code-copy-bg: rgba(255, 255, 255, 0.72);
 }
 
 [data-theme="dark"] {
@@ -440,11 +450,7 @@ body::before {
   padding: 0.8rem;
   border: 1px solid var(--panel-border);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.18);
-}
-
-[data-theme="dark"] .sidebar-utility {
-  background: rgba(61, 66, 104, 0.15);
+  background: var(--sidebar-utility-bg);
 }
 
 .sidebar-search {
@@ -462,13 +468,9 @@ body::before {
   width: 100%;
   border: 1px solid var(--sidebar-border);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.65);
+  background: var(--search-input-bg);
   padding: 0.7rem 0.8rem;
   color: var(--fg);
-}
-
-[data-theme="dark"] .sidebar-search input {
-  background: rgba(22, 22, 30, 0.50);
 }
 
 .sidebar-summary {
@@ -512,7 +514,7 @@ body::before {
   justify-content: center;
   min-width: 2.8rem;
   min-height: 2.8rem;
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--topbar-btn-bg);
   border: 1px solid var(--sidebar-border);
   border-radius: 14px;
   padding: 0.25rem;
@@ -524,10 +526,6 @@ body::before {
 
 .topbar-btn:hover {
   background: var(--toc-hover-bg);
-}
-
-[data-theme="dark"] .topbar-btn {
-  background: rgba(61, 66, 104, 0.20);
 }
 
 /* テーマアイコン切替 */
@@ -595,13 +593,9 @@ body::before {
   padding: 2.25rem clamp(1.2rem, 4vw, 3.5rem) 3rem;
   border: 1px solid var(--panel-border);
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--content-bg);
   box-shadow: var(--panel-shadow);
   backdrop-filter: blur(18px);
-}
-
-[data-theme="dark"] .content {
-  background: rgba(22, 22, 30, 0.80);
 }
 
 .content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
@@ -680,15 +674,11 @@ body::before {
   right: 0.7rem;
   border: 1px solid var(--table-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--code-copy-bg);
   color: var(--fg);
   padding: 0.28rem 0.7rem;
   font-size: 0.74rem;
   cursor: pointer;
-}
-
-[data-theme="dark"] .content .code-copy {
-  background: rgba(22, 22, 30, 0.50);
 }
 
 .content .code-copy.copied {
