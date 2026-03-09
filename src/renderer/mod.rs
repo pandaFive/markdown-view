@@ -561,7 +561,7 @@ pub struct HeadingInfo {
     pub id: String,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum UrlPolicy {
     Link,
     Image,

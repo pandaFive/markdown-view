@@ -304,7 +304,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // CSP: scriptはハッシュベース許可を維持し、unsafe-inlineを排除する。
         // styleはsyntect class-basedハイライトを使用し、unsafe-inlineを許可しない。
         // img-srcは同一オリジンのみに制限し、Markdown経由の外部画像読込を既定拒否する。
-        // renderer.rs 側でリンクと画像に個別のURLポリシーを適用する。
+        // renderer モジュール側でリンクと画像に個別のURLポリシーを適用する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -353,7 +353,7 @@ struct FileQuery {
     file: Option<String>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 enum TargetResolveContext {
     Index,
     ApiContent,
@@ -381,10 +381,19 @@ fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
     (status, Json(error_message_json(message)))
 }
 
+/// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
     if is_allowed_request_host(headers) {
         Ok(())
     } else {
+        let host = headers
+            .get(HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<missing-or-invalid>");
+        tracing::warn!(
+            "[markdown-view] 許可されていないHostヘッダーを拒否: {}",
+            host
+        );
         Err(json_error(
             StatusCode::FORBIDDEN,
             "許可されていないHostヘッダーです",
@@ -392,6 +401,7 @@ fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
     }
 }
 
+/// 対象ファイル解決エラーをエンドポイント文脈に応じたAPIエラーへ変換する。
 fn resolve_target_file_or_error(
     state: &AppState,
     query_file: Option<&str>,
@@ -402,12 +412,20 @@ fn resolve_target_file_or_error(
         let msg = match status {
             StatusCode::NOT_FOUND => context.not_found_message(),
             StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-            _ => "ファイル解決に失敗しました",
+            other => {
+                tracing::warn!(
+                    "[markdown-view] 予期しないファイル解決ステータスを検出: context={:?}, status={}",
+                    context,
+                    other
+                );
+                "ファイル解決に失敗しました"
+            }
         };
         json_error(status, msg)
     })
 }
 
+/// Markdownの読み込みと描画を行い、失敗時はAPI応答用のエラーへ変換する。
 async fn read_rendered_update_or_error(
     file_path: &Path,
     context: TargetResolveContext,
