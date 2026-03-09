@@ -155,6 +155,13 @@ fn test_画像() {
 }
 
 #[test]
+fn test_外部画像urlは既定で無効化される() {
+    let html = render_markdown("![remote](https://evil.example/track.png)");
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("https://evil.example/track.png"));
+}
+
+#[test]
 fn test_引用ブロック() {
     let md = "> This is a quote";
     let html = render_markdown(md);

@@ -303,10 +303,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         ))
         // CSP: scriptはハッシュベース許可を維持し、unsafe-inlineを排除する。
         // styleはsyntect class-basedハイライトを使用し、unsafe-inlineを許可しない。
-        // img-srcは外部画像参照のため*を許可（CSP Level 2+では `*` に `data:` は含まれない）。
-        // プライバシー注意: 外部画像はトラッキングピクセルとして悪用可能なため、
-        // 秘密情報を含む文書では信頼済みドメインのみに制限する運用を推奨する。
-        // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
+        // img-srcは同一オリジンのみに制限し、Markdown経由の外部画像読込を既定拒否する。
+        // renderer.rs 側でリンクと画像に個別のURLポリシーを適用する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -322,7 +320,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {
     let (script_src, style_src) = csp_hash_sources(syntax_css);
     let csp = format!(
-        "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+        "default-src 'self'; script-src {}; style-src {}; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
     match HeaderValue::from_str(&csp) {
@@ -355,10 +353,73 @@ struct FileQuery {
     file: Option<String>,
 }
 
+#[derive(Copy, Clone)]
+enum TargetResolveContext {
+    Index,
+    ApiContent,
+}
+
+impl TargetResolveContext {
+    fn not_found_message(self) -> &'static str {
+        match self {
+            Self::Index => "表示可能なMarkdownファイルが見つかりません",
+            Self::ApiContent => "指定したファイルが見つかりません",
+        }
+    }
+
+    fn read_error_log_label(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::ApiContent => "api/content",
+        }
+    }
+}
+
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
     (status, Json(error_message_json(message)))
+}
+
+fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
+    if is_allowed_request_host(headers) {
+        Ok(())
+    } else {
+        Err(json_error(
+            StatusCode::FORBIDDEN,
+            "許可されていないHostヘッダーです",
+        ))
+    }
+}
+
+fn resolve_target_file_or_error(
+    state: &AppState,
+    query_file: Option<&str>,
+    include_file_list: bool,
+    context: TargetResolveContext,
+) -> Result<(PathBuf, Option<Vec<String>>), ApiError> {
+    resolve_target_file(state, query_file, include_file_list).map_err(|status| {
+        let msg = match status {
+            StatusCode::NOT_FOUND => context.not_found_message(),
+            StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
+            _ => "ファイル解決に失敗しました",
+        };
+        json_error(status, msg)
+    })
+}
+
+async fn read_rendered_update_or_error(
+    file_path: &Path,
+    context: TargetResolveContext,
+) -> Result<UpdateMessage, ApiError> {
+    read_and_render_file(file_path).await.map_err(|e| {
+        tracing::warn!(
+            "[markdown-view] {}読み込みエラー: {}",
+            context.read_error_log_label(),
+            e
+        );
+        json_error(e.status_code(), e.user_message())
+    })
 }
 
 /// GET / : 初期HTMLページを返す
@@ -367,27 +428,16 @@ async fn index_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
-    let (file_path, file_list) =
-        resolve_target_file(&state, query.file.as_deref(), true).map_err(|status| {
-            let msg = match status {
-                StatusCode::NOT_FOUND => "表示可能なMarkdownファイルが見つかりません",
-                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-                _ => "ファイル解決に失敗しました",
-            };
-            json_error(status, msg)
-        })?;
+    let (file_path, file_list) = resolve_target_file_or_error(
+        &state,
+        query.file.as_deref(),
+        true,
+        TargetResolveContext::Index,
+    )?;
 
-    let update = read_and_render_file(&file_path).await.map_err(|e| {
-        tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
-        json_error(e.status_code(), e.user_message())
-    })?;
+    let update = read_rendered_update_or_error(&file_path, TargetResolveContext::Index).await?;
 
     let title = file_path
         .file_name()
@@ -418,27 +468,17 @@ async fn api_content_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
-    let (file_path, _) =
-        resolve_target_file(&state, query.file.as_deref(), false).map_err(|status| {
-            let msg = match status {
-                StatusCode::NOT_FOUND => "指定したファイルが見つかりません",
-                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-                _ => "ファイル解決に失敗しました",
-            };
-            json_error(status, msg)
-        })?;
+    let (file_path, _) = resolve_target_file_or_error(
+        &state,
+        query.file.as_deref(),
+        false,
+        TargetResolveContext::ApiContent,
+    )?;
 
-    let update = read_and_render_file(&file_path).await.map_err(|e| {
-        tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
-        json_error(e.status_code(), e.user_message())
-    })?;
+    let update =
+        read_rendered_update_or_error(&file_path, TargetResolveContext::ApiContent).await?;
 
     Ok(Json(
         update.with_file(state.mode.relative_path_of(&file_path)),
@@ -450,12 +490,7 @@ async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
     if let Some(base) = state.mode.directory() {
         let files = list_markdown_files(base).map_err(|e| {
@@ -481,7 +516,11 @@ fn resolve_target_file(
     include_file_list: bool,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
     if let Some(path) = state.mode.single_file() {
-        Ok((path.to_path_buf(), None))
+        let canonical = revalidate_single_file_target(path).map_err(|e| {
+            tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", e);
+            e.status_code()
+        })?;
+        Ok((canonical, None))
     } else if let Some(base) = state.mode.directory() {
         let mut precomputed_files: Option<Vec<String>> = None;
         let file_path = if let Some(rel) = query_file {
@@ -1108,6 +1147,29 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     }
 
     Ok(canonical)
+}
+
+/// 単一ファイルモードの対象ファイルを安全に再検証する
+///
+/// 起動後にファイルがシンボリックリンクへ差し替えられても、
+/// 初期化時と同じcanonical pathのMarkdownファイルのみ許可する。
+fn revalidate_single_file_target(expected_path: &Path) -> Result<PathBuf, ResolveFileError> {
+    let canonical = expected_path
+        .canonicalize()
+        .map_err(|_| ResolveFileError::NotFound)?;
+
+    if canonical != expected_path {
+        return Err(ResolveFileError::Traversal);
+    }
+
+    if !canonical.is_file() {
+        return Err(ResolveFileError::NotFound);
+    }
+
+    match canonical.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => Ok(canonical),
+        _ => Err(ResolveFileError::NotMarkdown),
+    }
 }
 
 /// resolve_file のエラー型
