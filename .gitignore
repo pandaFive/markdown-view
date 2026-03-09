@@ -1,2 +1,5 @@
 /target
 docs/plans/*
+node_modules/
+playwright-report/
+test-results/

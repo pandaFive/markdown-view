@@ -15,7 +15,7 @@ use syntect::util::LinesWithEndings;
 
 /// サニタイズ済みHTMLを表すnewtype
 ///
-/// `render_markdown` / `generate_toc` 経由でのみ生成する設計。
+/// `render_markdown` / `generate_toc` が主たる生成経路。
 /// コンストラクタは `pub(in crate::renderer)` とし、
 /// `renderer`モジュールツリー内でのみ構築可能にする。
 /// 生文字列の混入を型で防止する。

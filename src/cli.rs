@@ -9,7 +9,7 @@ pub struct Args {
     /// プレビューするMarkdownファイルまたはディレクトリのパス
     pub path: PathBuf,
 
-    /// HTTPサーバーのポート番号
+    /// 優先するHTTPサーバーのポート番号（使用中なら次の空きポートを探す）
     #[arg(short, long, default_value_t = 3000)]
     pub port: u16,
 

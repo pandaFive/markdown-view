@@ -21,6 +21,41 @@ fn init_logging() {
     }
 }
 
+async fn bind_preview_listener(
+    preferred_port: u16,
+) -> Result<(tokio::net::TcpListener, std::net::SocketAddr, bool)> {
+    if preferred_port == 0 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("ポート自動割り当てに失敗")?;
+        let local_addr = listener
+            .local_addr()
+            .context("ローカルアドレスの取得に失敗")?;
+        return Ok((listener, local_addr, false));
+    }
+
+    for port in preferred_port..=u16::MAX {
+        let bind_addr = format!("127.0.0.1:{}", port);
+        match tokio::net::TcpListener::bind(&bind_addr).await {
+            Ok(listener) => {
+                let local_addr = listener
+                    .local_addr()
+                    .context("ローカルアドレスの取得に失敗")?;
+                return Ok((listener, local_addr, port != preferred_port));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("ポート {} へのバインドに失敗", port));
+            }
+        }
+    }
+
+    bail!(
+        "ポート {} 以上で利用可能なポートが見つかりませんでした",
+        preferred_port
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -76,14 +111,7 @@ async fn main() -> Result<()> {
         .context("監視の開始に失敗")?;
 
     // HTTPサーバー起動（127.0.0.1のみにバインド）
-    let bind_addr = format!("127.0.0.1:{}", args.port);
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await
-        .with_context(|| format!("ポート {} へのバインドに失敗", args.port))?;
-
-    let local_addr = listener
-        .local_addr()
-        .context("ローカルアドレスの取得に失敗")?;
+    let (listener, local_addr, port_fallback) = bind_preview_listener(args.port).await?;
     let url = format!("http://{}", local_addr);
 
     if let Some(p) = mode.single_file() {
@@ -92,6 +120,13 @@ async fn main() -> Result<()> {
         tracing::info!(
             "markdown-view: {} 内のMarkdownファイルをプレビュー中",
             p.display()
+        );
+    }
+    if port_fallback {
+        tracing::warn!(
+            "[markdown-view] ポート {} は使用中のため、空きポート {} を使用します",
+            args.port,
+            local_addr.port()
         );
     }
     tracing::info!("URL: {}", url);
@@ -128,4 +163,37 @@ async fn main() -> Result<()> {
     server_result?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_bind_preview_listener_空きポートなら指定ポートを使う() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("空きポート確保");
+        let port = reserved.local_addr().expect("ローカルアドレス取得").port();
+        drop(reserved);
+
+        let (listener, addr, port_fallback) =
+            bind_preview_listener(port).await.expect("リスナー起動");
+        assert_eq!(addr.port(), port);
+        assert!(!port_fallback);
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn test_bind_preview_listener_指定ポート使用中なら次の空きポートを使う() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("空きポート確保");
+        let port = reserved.local_addr().expect("ローカルアドレス取得").port();
+
+        let (listener, addr, port_fallback) = bind_preview_listener(port)
+            .await
+            .expect("フォールバック起動");
+        assert_ne!(addr.port(), port);
+        assert!(addr.port() > port);
+        assert!(port_fallback);
+        drop(listener);
+        drop(reserved);
+    }
 }
