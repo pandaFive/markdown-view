@@ -303,10 +303,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         ))
         // CSP: scriptはハッシュベース許可を維持し、unsafe-inlineを排除する。
         // styleはsyntect class-basedハイライトを使用し、unsafe-inlineを許可しない。
-        // img-srcは外部画像参照のため*を許可（CSP Level 2+では `*` に `data:` は含まれない）。
-        // プライバシー注意: 外部画像はトラッキングピクセルとして悪用可能なため、
-        // 秘密情報を含む文書では信頼済みドメインのみに制限する運用を推奨する。
-        // sanitize_hrefはリンクhrefとimg srcの両方に適用される（renderer.rs参照）。
+        // img-srcは同一オリジンのみに制限し、Markdown経由の外部画像読込を既定拒否する。
+        // renderer.rs 側でリンクと画像に個別のURLポリシーを適用する。
         // frame-ancestors 'none'でクリックジャッキングを防止。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
@@ -322,7 +320,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {
     let (script_src, style_src) = csp_hash_sources(syntax_css);
     let csp = format!(
-        "default-src 'self'; script-src {}; style-src {}; img-src *; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
+        "default-src 'self'; script-src {}; style-src {}; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
     match HeaderValue::from_str(&csp) {
@@ -355,10 +353,73 @@ struct FileQuery {
     file: Option<String>,
 }
 
+#[derive(Copy, Clone)]
+enum TargetResolveContext {
+    Index,
+    ApiContent,
+}
+
+impl TargetResolveContext {
+    fn not_found_message(self) -> &'static str {
+        match self {
+            Self::Index => "表示可能なMarkdownファイルが見つかりません",
+            Self::ApiContent => "指定したファイルが見つかりません",
+        }
+    }
+
+    fn read_error_log_label(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::ApiContent => "api/content",
+        }
+    }
+}
+
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
     (status, Json(error_message_json(message)))
+}
+
+fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
+    if is_allowed_request_host(headers) {
+        Ok(())
+    } else {
+        Err(json_error(
+            StatusCode::FORBIDDEN,
+            "許可されていないHostヘッダーです",
+        ))
+    }
+}
+
+fn resolve_target_file_or_error(
+    state: &AppState,
+    query_file: Option<&str>,
+    include_file_list: bool,
+    context: TargetResolveContext,
+) -> Result<(PathBuf, Option<Vec<String>>), ApiError> {
+    resolve_target_file(state, query_file, include_file_list).map_err(|status| {
+        let msg = match status {
+            StatusCode::NOT_FOUND => context.not_found_message(),
+            StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
+            _ => "ファイル解決に失敗しました",
+        };
+        json_error(status, msg)
+    })
+}
+
+async fn read_rendered_update_or_error(
+    file_path: &Path,
+    context: TargetResolveContext,
+) -> Result<UpdateMessage, ApiError> {
+    read_and_render_file(file_path).await.map_err(|e| {
+        tracing::warn!(
+            "[markdown-view] {}読み込みエラー: {}",
+            context.read_error_log_label(),
+            e
+        );
+        json_error(e.status_code(), e.user_message())
+    })
 }
 
 /// GET / : 初期HTMLページを返す
@@ -367,27 +428,16 @@ async fn index_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
-    let (file_path, file_list) =
-        resolve_target_file(&state, query.file.as_deref(), true).map_err(|status| {
-            let msg = match status {
-                StatusCode::NOT_FOUND => "表示可能なMarkdownファイルが見つかりません",
-                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-                _ => "ファイル解決に失敗しました",
-            };
-            json_error(status, msg)
-        })?;
+    let (file_path, file_list) = resolve_target_file_or_error(
+        &state,
+        query.file.as_deref(),
+        true,
+        TargetResolveContext::Index,
+    )?;
 
-    let update = read_and_render_file(&file_path).await.map_err(|e| {
-        tracing::warn!("[markdown-view] index読み込みエラー: {}", e);
-        json_error(e.status_code(), e.user_message())
-    })?;
+    let update = read_rendered_update_or_error(&file_path, TargetResolveContext::Index).await?;
 
     let title = file_path
         .file_name()
@@ -418,27 +468,17 @@ async fn api_content_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
-    let (file_path, _) =
-        resolve_target_file(&state, query.file.as_deref(), false).map_err(|status| {
-            let msg = match status {
-                StatusCode::NOT_FOUND => "指定したファイルが見つかりません",
-                StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-                _ => "ファイル解決に失敗しました",
-            };
-            json_error(status, msg)
-        })?;
+    let (file_path, _) = resolve_target_file_or_error(
+        &state,
+        query.file.as_deref(),
+        false,
+        TargetResolveContext::ApiContent,
+    )?;
 
-    let update = read_and_render_file(&file_path).await.map_err(|e| {
-        tracing::warn!("[markdown-view] api/content読み込みエラー: {}", e);
-        json_error(e.status_code(), e.user_message())
-    })?;
+    let update =
+        read_rendered_update_or_error(&file_path, TargetResolveContext::ApiContent).await?;
 
     Ok(Json(
         update.with_file(state.mode.relative_path_of(&file_path)),
@@ -450,12 +490,7 @@ async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    if !is_allowed_request_host(&headers) {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "許可されていないHostヘッダーです",
-        ));
-    }
+    ensure_allowed_request_host(&headers)?;
 
     if let Some(base) = state.mode.directory() {
         let files = list_markdown_files(base).map_err(|e| {
@@ -481,7 +516,11 @@ fn resolve_target_file(
     include_file_list: bool,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
     if let Some(path) = state.mode.single_file() {
-        Ok((path.to_path_buf(), None))
+        let canonical = revalidate_single_file_target(path).map_err(|e| {
+            tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", e);
+            e.status_code()
+        })?;
+        Ok((canonical, None))
     } else if let Some(base) = state.mode.directory() {
         let mut precomputed_files: Option<Vec<String>> = None;
         let file_path = if let Some(rel) = query_file {
@@ -641,7 +680,15 @@ async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool
 
 async fn lagged_recovery_message(state: &AppState) -> BroadcastMessage {
     if let Some(file_path) = state.mode.single_file() {
-        match read_and_render_file(file_path).await {
+        // シンボリックリンク差し替え検証（WebSocket経路）
+        let validated_path = match revalidate_single_file_target(file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("[markdown-view] WebSocket再送信時のファイル検証失敗: {}", e);
+                return BroadcastMessage::Error(format!("ファイル検証エラー: {}", e));
+            }
+        };
+        match read_and_render_file(&validated_path).await {
             Ok(update) => BroadcastMessage::Update(update),
             Err(e) => {
                 let file_label = file_path
@@ -673,7 +720,27 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     // 単一ファイルモードのみ接続直後に初期コンテンツを送信
     // ディレクトリモードではクライアントが?fileパラメータで/api/contentをフェッチする
     if let Some(file_path) = state.mode.single_file() {
-        let update = match read_and_render_file(file_path).await {
+        // シンボリックリンク差し替え検証（WebSocket経路）
+        let validated_path = match revalidate_single_file_target(file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", e);
+                if let Err(send_err) = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1008, // Policy Violation
+                        reason: "ファイル検証に失敗しました".into(),
+                    })))
+                    .await
+                {
+                    tracing::warn!(
+                        "[markdown-view] WebSocket closeフレーム送信エラー: {}",
+                        send_err
+                    );
+                }
+                return;
+            }
+        };
+        let update = match read_and_render_file(&validated_path).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
@@ -1110,6 +1177,35 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     Ok(canonical)
 }
 
+/// 単一ファイルモードの対象ファイルを安全に再検証する
+///
+/// 起動後にファイルがシンボリックリンクへ差し替えられた場合を検出するため、
+/// canonicalize結果が渡されたパスと一致することを確認する。
+/// 不一致（シンボリックリンク経由）の場合はTraversalエラーを返す。
+fn revalidate_single_file_target(expected_path: &Path) -> Result<PathBuf, ResolveFileError> {
+    let canonical = expected_path.canonicalize().map_err(|e| {
+        tracing::warn!(
+            "[markdown-view] 単一ファイルパス正規化失敗: {} ({})",
+            expected_path.display(),
+            e
+        );
+        ResolveFileError::NotFound
+    })?;
+
+    if canonical != expected_path {
+        return Err(ResolveFileError::Traversal);
+    }
+
+    if !canonical.is_file() {
+        return Err(ResolveFileError::NotFound);
+    }
+
+    match canonical.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => Ok(canonical),
+        _ => Err(ResolveFileError::NotMarkdown),
+    }
+}
+
 /// resolve_file のエラー型
 #[derive(Debug, PartialEq)]
 pub enum ResolveFileError {
@@ -1222,6 +1318,30 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         return;
     }
 
+    // 単一ファイルモードではシンボリックリンク差し替えを検証
+    let read_path: &Path = if let Some(expected) = state.mode.single_file() {
+        match revalidate_single_file_target(expected) {
+            Ok(_) => changed_file,
+            Err(e) => {
+                let file_label = changed_file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| changed_file.display().to_string());
+                tracing::warn!(
+                    "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
+                    file_label,
+                    e
+                );
+                let msg =
+                    BroadcastMessage::Error(format!("ファイル検証エラー ({}): {}", file_label, e));
+                let _ = state.tx.send(msg);
+                return;
+            }
+        }
+    } else {
+        changed_file
+    };
+
     let relative_path = state.mode.relative_path_of(changed_file);
 
     // ディレクトリモードで相対パスが算出できない場合はブロードキャストをスキップ
@@ -1234,7 +1354,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         return;
     }
 
-    let msg = match read_and_render_file(changed_file).await {
+    let msg = match read_and_render_file(read_path).await {
         Ok(update) => BroadcastMessage::Update(update.with_file(relative_path)),
         Err(e) => {
             // ディレクトリモード: 相対パス（"docs/file.md"）
@@ -1809,13 +1929,8 @@ mod tests {
         match received {
             BroadcastMessage::Error(message) => {
                 assert!(
-                    message.contains("ファイル読み込みエラー"),
-                    "エラーメッセージにプレフィックスが含まれるべき: {}",
-                    message
-                );
-                assert!(
-                    message.contains("ファイルの読み込みに失敗しました"),
-                    "エラーメッセージにユーザー向けメッセージが含まれるべき: {}",
+                    message.contains("ファイル検証エラー"),
+                    "revalidate失敗時は検証エラーを返すべき: {}",
                     message
                 );
                 assert!(
@@ -2032,10 +2147,9 @@ mod tests {
         let msg = lagged_recovery_message(&state).await;
         match msg {
             BroadcastMessage::Error(message) => {
-                assert!(message.contains("ファイル読み込みエラー"));
                 assert!(
-                    message.contains("missing.md"),
-                    "ファイル名がエラーメッセージに含まれること: {}",
+                    message.contains("ファイル検証エラー"),
+                    "revalidate失敗時は検証エラーを返すべき: {}",
                     message
                 );
             }
@@ -2176,5 +2290,61 @@ mod tests {
         std::fs::write(&file_path, "# note").unwrap();
         let result = AppMode::new_directory(&file_path);
         assert!(matches!(result, Err(AppModeBuildError::NotDirectory(_))));
+    }
+
+    #[test]
+    fn test_revalidate_single_file_target_正常なファイルを許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.md");
+        std::fs::write(&file_path, "# test").unwrap();
+        let canonical = file_path
+            .canonicalize()
+            .expect("テスト前提: canonicalizeが成功すること");
+        let result = revalidate_single_file_target(&canonical);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), canonical);
+    }
+
+    #[test]
+    fn test_revalidate_single_file_target_存在しないファイルはnotfoundを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("nonexistent.md");
+        let result = revalidate_single_file_target(&file_path);
+        assert_eq!(result, Err(ResolveFileError::NotFound));
+    }
+
+    #[test]
+    fn test_revalidate_single_file_target_ディレクトリはnotfoundを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir
+            .path()
+            .canonicalize()
+            .expect("テスト前提: canonicalizeが成功すること");
+        let result = revalidate_single_file_target(&canonical);
+        assert_eq!(result, Err(ResolveFileError::NotFound));
+    }
+
+    #[test]
+    fn test_revalidate_single_file_target_非mdファイルはnotmarkdownを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+        let canonical = file_path
+            .canonicalize()
+            .expect("テスト前提: canonicalizeが成功すること");
+        let result = revalidate_single_file_target(&canonical);
+        assert_eq!(result, Err(ResolveFileError::NotMarkdown));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_revalidate_single_file_target_シンボリックリンクはtraversalを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_file = dir.path().join("real.md");
+        std::fs::write(&real_file, "# real").unwrap();
+        let link_path = dir.path().join("link.md");
+        std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
+        let result = revalidate_single_file_target(&link_path);
+        assert_eq!(result, Err(ResolveFileError::Traversal));
     }
 }

@@ -155,6 +155,31 @@ fn test_画像() {
 }
 
 #[test]
+fn test_外部画像urlは既定で無効化される() {
+    let html = render_markdown("![remote](https://evil.example/track.png)");
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("https://evil.example/track.png"));
+}
+
+#[test]
+fn test_リンクは外部urlを許可し画像は拒否する() {
+    let html = render_markdown("[click](https://example.com) ![img](https://example.com/pic.png)");
+    // リンクhrefは外部URLを保持する
+    assert!(html.as_str().contains(r#"href="https://example.com""#));
+    // 画像srcは外部URLを無効化する
+    assert!(html.as_str().contains(r##"src="#""##));
+    assert!(!html.as_str().contains("https://example.com/pic.png"));
+}
+
+#[test]
+fn test_画像srcのmailtoとtelスキームは拒否される() {
+    let html_mailto = render_markdown("![img](mailto:test@example.com)");
+    assert!(html_mailto.as_str().contains(r##"src="#""##));
+    let html_tel = render_markdown("![img](tel:+1234567890)");
+    assert!(html_tel.as_str().contains(r##"src="#""##));
+}
+
+#[test]
 fn test_引用ブロック() {
     let md = "> This is a quote";
     let html = render_markdown(md);

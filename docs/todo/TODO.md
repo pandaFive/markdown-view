@@ -53,3 +53,38 @@
 - [ ] `setLiveStatus` のラベル自動導出
   - ファイル: `src/template.rs` (JS)
   - 内容: `setLiveStatus('live', 'Live')` が5箇所で重複。state→labelマッピングを内部化し `setLiveStatus('live')` で完結させる
+
+## PRレビュー: セキュリティ強化とtemplate分割 (レビュー日: 2026-03-09)
+
+### Low Priority
+
+- [ ] `ensure_allowed_request_host`でHost拒否時にwarnログ出力を追加
+  - ファイル: `src/server.rs` L384
+  - 内容: DNS Rebinding攻撃検出のため、拒否されたHostヘッダー値をログに記録
+  - 理由: セキュリティ監査時の可視性向上。現在は403を返すのみでログなし
+
+- [ ] `resolve_target_file_or_error`のcatch-all `_`アームにwarnログ追加
+  - ファイル: `src/server.rs` L405
+  - 内容: 予期しないStatusCodeが発生した場合にログで検知可能にする
+  - 理由: 将来のエラーパス追加時にコンパイラ警告がないため、ログで補完
+
+- [ ] `UrlPolicy`/`TargetResolveContext`に`#[derive(Debug)]`追加
+  - ファイル: `src/renderer/mod.rs` L564、`src/server.rs` L356
+  - 理由: デバッグ・テスト失敗時の診断性向上。コスト0
+
+- [ ] 新ヘルパー関数にdocコメント追加
+  - ファイル: `src/server.rs`（`ensure_allowed_request_host` L384、`resolve_target_file_or_error` L395、`read_rendered_update_or_error` L411）
+  - 理由: CLAUDE.md規約は公開関数対象だが、主要ヘルパーの可読性向上のため
+
+- [ ] CSPコメントの「renderer.rs 側」→「renderer モジュール側」に修正
+  - ファイル: `src/server.rs` L307
+  - 理由: template.rsのモジュール分割と整合性を取るため
+
+- [ ] `UrlPolicy`に`PartialEq, Eq`追加検討
+  - ファイル: `src/renderer/mod.rs` L564
+  - 理由: 他enum（`HeadingInfo`等）との一貫性。現在比較用途なし
+
+- [ ] `TargetResolveContext`の抽象度評価
+  - ファイル: `src/server.rs` L356-376
+  - 内容: 現状2メソッド×2バリアントで薄い抽象化。将来エンドポイント固有の処理が増えなければ`&'static str`パラメータに簡素化を検討
+  - 理由: 過剰設計にならないよう定期的に評価

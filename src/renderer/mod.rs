@@ -142,7 +142,7 @@ impl RenderState {
 
     fn finish_image(&mut self) -> Option<String> {
         let src = self.image_src.take()?;
-        let safe_src = sanitize_href(&src);
+        let safe_src = sanitize_image_src(&src);
         let mut image_html = format!(
             "<img src=\"{}\" alt=\"{}\"",
             html_escape(&safe_src),
@@ -357,7 +357,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
 
-                let safe_dest = sanitize_href(&dest_url);
+                let safe_dest = sanitize_link_href(&dest_url);
                 let mut link_html = format!("<a href=\"{}\"", html_escape(&safe_dest));
                 if !title.is_empty() {
                     link_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
@@ -561,6 +561,18 @@ pub struct HeadingInfo {
     pub id: String,
 }
 
+#[derive(Copy, Clone)]
+enum UrlPolicy {
+    Link,
+    Image,
+}
+
+impl UrlPolicy {
+    fn allows_remote(self) -> bool {
+        matches!(self, Self::Link)
+    }
+}
+
 /// Markdownから見出し情報を抽出する
 ///
 /// 画像altは見出しテキストから除外し、`render_markdown`と同じID生成ルールを適用する。
@@ -697,22 +709,35 @@ fn resolve_theme<'a>(
     fallback.map(|(_, theme)| theme)
 }
 
-/// リンク/画像URLを安全な形式に正規化する
+/// リンクURLを安全な形式に正規化する
 ///
-/// 前後の空白を除去し、許可スキーム以外は `"#"` に置き換える。
-fn sanitize_href(dest_url: &str) -> String {
+/// 前後の空白を除去し、ローカル参照・相対パス・許可スキーム(http/https/mailto/tel)
+/// 以外は `"#"` に置き換える。
+fn sanitize_link_href(dest_url: &str) -> String {
+    sanitize_url(dest_url, UrlPolicy::Link)
+}
+
+/// 画像URLを安全な形式に正規化する
+///
+/// ローカル参照以外は `"#"` に置き換える。
+fn sanitize_image_src(dest_url: &str) -> String {
+    sanitize_url(dest_url, UrlPolicy::Image)
+}
+
+fn sanitize_url(dest_url: &str, policy: UrlPolicy) -> String {
     let trimmed = dest_url.trim();
-    if is_safe_href(trimmed) {
+    if is_safe_href(trimmed, policy) {
         trimmed.to_string()
     } else {
         "#".to_string()
     }
 }
 
-/// URLが許可スキームかどうか判定する
+/// URLが許可ポリシーに一致するか判定する
 ///
-/// `http/https/mailto/tel` とローカル参照（`/`, `./`, `../`, `#`, `?`）のみ許可する。
-fn is_safe_href(dest_url: &str) -> bool {
+/// `UrlPolicy::Link` は `http/https/mailto/tel` とローカル参照を許可する。
+/// `UrlPolicy::Image` はローカル参照のみ許可する。
+fn is_safe_href(dest_url: &str, policy: UrlPolicy) -> bool {
     if dest_url.is_empty() {
         return false;
     }
@@ -736,6 +761,10 @@ fn is_safe_href(dest_url: &str) -> bool {
     let Some(colon_pos) = dest_url.find(':') else {
         return true;
     };
+
+    if !policy.allows_remote() {
+        return false;
+    }
 
     let scheme = dest_url[..colon_pos].to_ascii_lowercase();
     matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel")
