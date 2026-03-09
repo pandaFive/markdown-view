@@ -711,7 +711,8 @@ fn resolve_theme<'a>(
 
 /// リンクURLを安全な形式に正規化する
 ///
-/// 前後の空白を除去し、許可スキーム以外は `"#"` に置き換える。
+/// 前後の空白を除去し、ローカル参照・相対パス・許可スキーム(http/https/mailto/tel)
+/// 以外は `"#"` に置き換える。
 fn sanitize_link_href(dest_url: &str) -> String {
     sanitize_url(dest_url, UrlPolicy::Link)
 }

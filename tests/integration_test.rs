@@ -150,9 +150,16 @@ async fn test_存在しないファイル時は404を返す() {
 
     assert_json_error_for_paths(
         addr,
-        &["/", "/api/content"],
+        &["/"],
         reqwest::StatusCode::NOT_FOUND,
-        None,
+        Some("表示可能なMarkdownファイルが見つかりません"),
+    )
+    .await;
+    assert_json_error_for_paths(
+        addr,
+        &["/api/content"],
+        reqwest::StatusCode::NOT_FOUND,
+        Some("指定したファイルが見つかりません"),
     )
     .await;
 }
@@ -248,7 +255,7 @@ async fn test_ファイル削除でwebsocketエラー通知() {
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let error = json["error"].as_str().expect("errorフィールドが存在する");
-    assert!(error.contains("ファイル読み込みエラー"));
+    assert!(error.contains("ファイル検証エラー"));
     assert!(error.contains("watch_delete.md"));
 }
 
@@ -397,13 +404,13 @@ async fn test_単一ファイルモード_シンボリックリンク差し替�
     fs::remove_file(&file_path).unwrap();
     symlink(&outside_path, &file_path).unwrap();
 
-    let resp = reqwest::get(format!("http://{}/api/content", addr))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(json["error"].as_str().is_some());
+    assert_json_error_for_paths(
+        addr,
+        &["/", "/api/content"],
+        reqwest::StatusCode::NOT_FOUND,
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -947,10 +954,10 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
             assert_eq!(
                 frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error
+                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
             );
             let reason: &str = frame.reason.as_ref();
-            assert_eq!(reason, "ファイルの読み込みに失敗しました");
+            assert_eq!(reason, "ファイル検証に失敗しました");
         }
         other => panic!("Close frameを期待したが {:?} を受信", other),
     }
