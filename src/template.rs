@@ -232,6 +232,7 @@ const DARK_THEME_VARS: &str = r##"
   --pill-strong-bg: rgba(187, 154, 247, 0.16);
   --accent: #bb9af7;
   --accent-soft: rgba(187, 154, 247, 0.14);
+  --blockquote-bg: rgba(255, 255, 255, 0.04);
   --sidebar-utility-bg: rgba(61, 66, 104, 0.15);
   --search-input-bg: rgba(22, 22, 30, 0.50);
   --topbar-btn-bg: rgba(61, 66, 104, 0.20);
@@ -266,6 +267,7 @@ const CSS_TEMPLATE: &str = r##"
   --pill-strong-bg: rgba(0, 0, 0, 0.07);
   --accent: #1a1a1a;
   --accent-soft: rgba(0, 0, 0, 0.06);
+  --blockquote-bg: rgba(0, 0, 0, 0.03);
   --sidebar-utility-bg: rgba(255, 255, 255, 0.18);
   --search-input-bg: rgba(255, 255, 255, 0.65);
   --topbar-btn-bg: rgba(255, 255, 255, 0.4);
@@ -545,7 +547,7 @@ body::before {
   justify-content: center;
   min-width: 2.8rem;
   min-height: 2.8rem;
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--topbar-btn-bg);
   border: 1px solid var(--sidebar-border);
   border-radius: 14px;
   padding: 0.25rem 0.65rem;
@@ -697,7 +699,7 @@ body::before {
   padding: 0.75rem 1rem;
   margin-bottom: 1em;
   color: var(--blockquote-fg);
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--blockquote-bg);
   border-radius: 0 14px 14px 0;
 }
 

@@ -37,3 +37,19 @@
   - ファイル: `src/template.rs` (JS内 L1198付近)
   - 現状: コメント直後にディレクトリモード以外のDOM参照が多数追加されている
   - 提案: `// グローバルDOM参照の初期化` に変更
+
+- [ ] `.sidebar-open` を `.topbar-btn` クラスと統合してCSS重複を削減
+  - ファイル: `src/template.rs` (CSS)
+  - 内容: 8+のプロパティが重複。HTML側で `topbar-btn` クラスを付与し `.sidebar-open` 固有スタイルのみ残す
+
+- [ ] コピーハンドラのJS共通化
+  - ファイル: `src/template.rs` (JS `enhanceContentInteractions`)
+  - 内容: heading-anchorとcode-copyで `copyText().then().catch()` が同一パターンで重複。`handleCopyClick(button, text, baseLabel)` に抽出
+
+- [ ] `setupTocFilter`/`setupFileFilter` のフィルタロジック汎用化
+  - ファイル: `src/template.rs` (JS)
+  - 内容: 80%同一のフィルタ処理を `setupFilterableList(inputId, itemSelector, ...)` に統合
+
+- [ ] `setLiveStatus` のラベル自動導出
+  - ファイル: `src/template.rs` (JS)
+  - 内容: `setLiveStatus('live', 'Live')` が5箇所で重複。state→labelマッピングを内部化し `setLiveStatus('live')` で完結させる
