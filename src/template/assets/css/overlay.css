@@ -1,0 +1,77 @@
+/* エラーバナー */
+.error-banner {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 2rem));
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: #f7768e;
+  color: #1a1b26;
+  font-size: 14px;
+  box-shadow: 0 20px 40px rgba(127, 29, 29, 0.28);
+}
+
+.error-banner.disconnect {
+  z-index: 9999;
+}
+
+.error-banner.server,
+.error-banner.fetch {
+  z-index: 9998;
+}
+
+.error-banner-close {
+  cursor: pointer;
+  float: right;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.back-to-top {
+  position: fixed;
+  right: 1.4rem;
+  bottom: 1.4rem;
+  width: 3rem;
+  height: 3rem;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--fg);
+  box-shadow: var(--panel-shadow);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.back-to-top.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+/* モバイル対応 */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 999;
+    transform: translateX(-100%);
+    width: min(88vw, 320px);
+    min-width: min(88vw, 320px);
+    box-shadow: 2px 0 8px rgba(0,0,0,0.15);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-toggle { display: block; }
+  .sidebar-tabs .sidebar-toggle { display: block; }
+  .sidebar-open { display: inline-flex; }
+  .workspace { padding: 1rem 0.85rem 3.5rem; }
+  .topbar { padding: 1.1rem 1rem 0.95rem; border-radius: 18px; }
+  .document-title { font-size: 1.7rem; }
+  .content { padding: 1.45rem 1rem 2rem; border-radius: 20px; }
+  .back-to-top { right: 0.85rem; bottom: 0.85rem; }
+}

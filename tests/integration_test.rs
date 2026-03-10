@@ -4,7 +4,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
-use futures_util::StreamExt;
+use futures_util::{stream::SplitStream, StreamExt};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -12,6 +12,10 @@ use markdown_view::renderer::render_markdown;
 use markdown_view::server::{AppMode, AppState, BroadcastMessage};
 use markdown_view::template::UpdateMessage;
 use markdown_view::toc::generate_toc;
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsReadHalf = SplitStream<WsStream>;
 
 // ==============================
 // 単一ファイルモード テスト
@@ -90,11 +94,7 @@ async fn test_websocket接続() {
     let (mut _write, mut read) = ws_stream.split();
 
     // 接続直後に初期コンテンツが送信される
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -111,9 +111,7 @@ async fn test_websocketブロードキャスト受信() {
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
-    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト");
+    consume_initial_ws_message(&mut read).await;
 
     // broadcastで更新を送信
     state
@@ -126,11 +124,7 @@ async fn test_websocketブロードキャスト受信() {
         .unwrap();
 
     // WebSocketで受信
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg.into_text().unwrap();
     assert!(text.contains("updated"));
@@ -166,12 +160,8 @@ async fn test_存在しないファイル時は404を返す() {
 
 #[tokio::test]
 async fn test_non_utf8ファイル読み込み時は422を返す() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("binary.md");
-    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
-        .await
-        .unwrap();
-    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (_state, addr, _tmp_dir, _file_path) =
+        setup_single_file_server_with_bytes("binary.md", &[0xff, 0xfe, 0xfd]).await;
 
     assert_json_error_for_paths(
         addr,
@@ -202,9 +192,7 @@ async fn test_ファイル変更でwebsocket更新() {
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
-    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト");
+    consume_initial_ws_message(&mut read).await;
 
     // ファイルを変更
     tokio::fs::write(&file_path, "# After Change")
@@ -212,11 +200,7 @@ async fn test_ファイル変更でwebsocket更新() {
         .unwrap();
 
     // WebSocketで更新を受信（debounce 300ms + αのタイムアウト）
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -240,17 +224,11 @@ async fn test_ファイル削除でwebsocketエラー通知() {
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト");
+    consume_initial_ws_message(&mut read).await;
 
     tokio::fs::remove_file(&file_path).await.unwrap();
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -296,7 +274,7 @@ async fn test_websocket切断時に購読が速やかに解放される() {
     let (mut ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
 
     // 初期メッセージを受信して購読開始を確定
-    let _ = tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
+    tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
         .await
         .expect("初期メッセージ受信がタイムアウト");
 
@@ -583,11 +561,7 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
     let file_path = tmp_dir.path().join("README.md");
     markdown_view::server::notify_update(&state, &file_path).await;
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg
         .into_text()
@@ -773,9 +747,7 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
     let (_write, mut read) = ws_stream.split();
 
     // 単一ファイルモード: 初期メッセージを消費
-    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト");
+    consume_initial_ws_message(&mut read).await;
 
     // broadcastでエラーJSONを送信（watcher.rsのbroadcast_errorと同じ形式）
     state
@@ -786,11 +758,7 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
         .unwrap();
 
     // WebSocketでエラーJSONを受信
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
+    let msg = next_ws_message(&mut read).await;
 
     let text = msg
         .into_text()
@@ -868,74 +836,26 @@ async fn test_単一ファイルモード_タブが表示されない() {
 
 #[tokio::test]
 async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含まれる() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("binary.md");
-    // 非UTF-8バイト列を書き込む
-    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
-        .await
-        .unwrap();
-
-    let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
-        AppMode::new_single_file(&file_path).unwrap(),
-        false,
-        None,
-        tx,
-    ));
-
-    let router = markdown_view::server::create_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let (_state, addr, _tmp_dir, _file_path) =
+        setup_single_file_server_with_bytes("binary.md", &[0xff, 0xfe, 0xfd]).await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
     // サーバーがclose frameを送信するのを受信
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
-
-    match msg {
-        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
-            assert_eq!(
-                frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Unsupported
-            );
-            let reason: &str = frame.reason.as_ref();
-            assert_eq!(reason, "このファイルはUTF-8テキストではありません");
-        }
-        other => panic!("Close frameを期待したが {:?} を受信", other),
-    }
+    assert_close_frame_message(
+        &mut read,
+        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Unsupported,
+        "このファイルはUTF-8テキストではありません",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_websocket_削除済みファイルでclose_frameにuser_messageが含まれる() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("deleted.md");
-    tokio::fs::write(&file_path, "# before delete")
-        .await
-        .unwrap();
-
-    let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
-        AppMode::new_single_file(&file_path).unwrap(),
-        false,
-        None,
-        tx,
-    ));
-
-    let router = markdown_view::server::create_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let (_state, addr, _tmp_dir, file_path) =
+        setup_single_file_server_with_bytes("deleted.md", b"# before delete").await;
 
     // AppMode生成後にファイルを削除
     tokio::fs::remove_file(&file_path).await.unwrap();
@@ -944,69 +864,30 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
-
-    match msg {
-        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
-            assert_eq!(
-                frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
-            );
-            let reason: &str = frame.reason.as_ref();
-            assert_eq!(reason, "ファイル検証に失敗しました");
-        }
-        other => panic!("Close frameを期待したが {:?} を受信", other),
-    }
+    assert_close_frame_message(
+        &mut read,
+        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+        "ファイル検証に失敗しました",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_websocket_サイズ超過ファイルでclose_frameにuser_messageが含まれる() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("large.md");
-    // MAX_FILE_SIZE(10MB) + 1バイトのファイルを作成
     let content = "x".repeat(10 * 1024 * 1024 + 1);
-    tokio::fs::write(&file_path, &content).await.unwrap();
-
-    let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
-        AppMode::new_single_file(&file_path).unwrap(),
-        false,
-        None,
-        tx,
-    ));
-
-    let router = markdown_view::server::create_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let (_state, addr, _tmp_dir, _file_path) =
+        setup_single_file_server_with_bytes("large.md", content.as_bytes()).await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
-
-    match msg {
-        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
-            assert_eq!(
-                frame.code,
-                tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size
-            );
-            let reason: &str = frame.reason.as_ref();
-            assert_eq!(reason, "ファイルサイズが上限（10MB）を超えています");
-        }
-        other => panic!("Close frameを期待したが {:?} を受信", other),
-    }
+    assert_close_frame_message(
+        &mut read,
+        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size,
+        "ファイルサイズが上限（10MB）を超えています",
+    )
+    .await;
 }
 
 // ==============================
@@ -1049,6 +930,22 @@ async fn setup_single_file_server_from_path(
     let state = build_single_file_state(file_path);
     let addr = spawn_test_server(state.clone()).await;
     (state, addr)
+}
+
+async fn setup_single_file_server_with_bytes(
+    file_name: &str,
+    content: &[u8],
+) -> (
+    Arc<AppState>,
+    std::net::SocketAddr,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join(file_name);
+    tokio::fs::write(&file_path, content).await.unwrap();
+    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    (state, addr, tmp_dir, file_path)
 }
 
 async fn assert_json_error_for_paths(
@@ -1126,9 +1023,7 @@ async fn connect_ws(
     origin: &str,
 ) -> Result<
     (
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        WsStream,
         tokio_tungstenite::tungstenite::handshake::client::Response,
     ),
     tokio_tungstenite::tungstenite::Error,
@@ -1142,9 +1037,7 @@ async fn connect_ws_with_host(
     host: Option<&str>,
 ) -> Result<
     (
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        WsStream,
         tokio_tungstenite::tungstenite::handshake::client::Response,
     ),
     tokio_tungstenite::tungstenite::Error,
@@ -1159,6 +1052,36 @@ async fn connect_ws_with_host(
             .insert("Host", host.parse().expect("Hostヘッダは妥当な値"));
     }
     tokio_tungstenite::connect_async(request).await
+}
+
+async fn next_ws_message(read: &mut WsReadHalf) -> tokio_tungstenite::tungstenite::Message {
+    tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .expect("WebSocketメッセージ受信がタイムアウト")
+        .expect("WebSocketストリームが予期せず終了")
+        .expect("WebSocketメッセージの読み取りに失敗")
+}
+
+async fn consume_initial_ws_message(read: &mut WsReadHalf) {
+    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .expect("初期メッセージ受信がタイムアウト");
+}
+
+async fn assert_close_frame_message(
+    read: &mut WsReadHalf,
+    expected_code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode,
+    expected_reason: &str,
+) {
+    let msg = next_ws_message(read).await;
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
+            assert_eq!(frame.code, expected_code);
+            let reason: &str = frame.reason.as_ref();
+            assert_eq!(reason, expected_reason);
+        }
+        other => panic!("Close frameを期待したが {:?} を受信", other),
+    }
 }
 
 // ==============================

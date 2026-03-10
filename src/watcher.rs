@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::server::{notify_update, AppState, BroadcastMessage};
 
@@ -40,6 +40,10 @@ const DEBOUNCE_MS: u64 = 300;
 const WATCHER_THREAD_PARK_MS: u64 = 250;
 /// shutdown() のグレースフル停止待機秒数
 const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+/// notify から tokio へ橋渡しするチャネル容量
+const WATCHER_MESSAGE_BUFFER: usize = 32;
+
+type InitResult = std::result::Result<(), String>;
 
 /// 監視実行中ハンドル
 ///
@@ -140,10 +144,10 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
     let target_path = file_path.clone();
 
     // tokio::sync::mpscでnotifyからtokioにブリッジ
-    let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
+    let (tx, rx) = mpsc::channel::<WatcherMessage>(WATCHER_MESSAGE_BUFFER);
 
     // 初期化エラーを親タスクに伝播するための oneshot チャネル
-    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+    let (init_tx, init_rx) = oneshot::channel::<InitResult>();
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let thread_shutdown_flag = shutdown_flag.clone();
 
@@ -220,10 +224,7 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                     tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
                 }
 
-                // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-                while !thread_shutdown_flag.load(Ordering::Acquire) {
-                    std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
-                }
+                keep_watcher_thread_alive(&thread_shutdown_flag);
             }));
 
             if result.is_err() {
@@ -237,37 +238,21 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
         })
         .context("監視スレッドの起動に失敗")?;
 
-    // 初期化結果を待機
-    match init_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => anyhow::bail!(e),
-        Err(_) => anyhow::bail!("ファイル監視スレッドが予期せず終了しました"),
-    }
-
-    let notify_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, &changed_path).await;
-                }
-                WatcherMessage::WatchError(error_msg) => {
-                    broadcast_error(&state, &error_msg);
-                }
-            }
-        }
-        tracing::warn!(
-            "[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です"
-        );
-    });
+    await_watcher_init(init_rx, "ファイル監視スレッドが予期せず終了しました").await?;
+    let notify_task = spawn_notify_task(
+        state,
+        rx,
+        "[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です",
+    );
 
     Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
 }
 
 /// ディレクトリの再帰監視
 async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<WatchHandle> {
-    let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
+    let (tx, rx) = mpsc::channel::<WatcherMessage>(WATCHER_MESSAGE_BUFFER);
 
-    let (init_tx, init_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+    let (init_tx, init_rx) = oneshot::channel::<InitResult>();
 
     let watch_dir = dir_path.clone();
     // イベントコールバック内で相対パスの隠しファイル判定に使用
@@ -372,10 +357,7 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                     tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
                 }
 
-                // スレッドを維持（debouncerのlifetimeのため、spurious wakeupで再parkする）
-                while !thread_shutdown_flag.load(Ordering::Acquire) {
-                    std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
-                }
+                keep_watcher_thread_alive(&thread_shutdown_flag);
             }));
 
             if result.is_err() {
@@ -389,13 +371,39 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
         })
         .context("監視スレッドの起動に失敗")?;
 
-    match init_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => anyhow::bail!(e),
-        Err(_) => anyhow::bail!("ディレクトリ監視スレッドが予期せず終了しました"),
-    }
+    await_watcher_init(init_rx, "ディレクトリ監視スレッドが予期せず終了しました").await?;
+    let notify_task = spawn_notify_task(
+        state,
+        rx,
+        "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です",
+    );
 
-    let notify_task = tokio::spawn(async move {
+    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
+}
+
+fn keep_watcher_thread_alive(shutdown_flag: &AtomicBool) {
+    while !shutdown_flag.load(Ordering::Acquire) {
+        std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
+    }
+}
+
+async fn await_watcher_init(
+    init_rx: oneshot::Receiver<InitResult>,
+    unexpected_exit: &'static str,
+) -> Result<()> {
+    match init_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => anyhow::bail!(e),
+        Err(_) => anyhow::bail!(unexpected_exit),
+    }
+}
+
+fn spawn_notify_task(
+    state: Arc<AppState>,
+    mut rx: mpsc::Receiver<WatcherMessage>,
+    closed_message: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
                 WatcherMessage::FileChanged(changed_path) => {
@@ -406,12 +414,8 @@ async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<Watc
                 }
             }
         }
-        tracing::warn!(
-            "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です"
-        );
-    });
-
-    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
+        tracing::warn!("{}", closed_message);
+    })
 }
 
 /// レンダリング更新が必要なイベント種別か判定する
@@ -554,6 +558,32 @@ mod tests {
     use crate::server::AppMode;
     use tokio::sync::broadcast;
 
+    fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(name);
+        std::fs::write(&file_path, content).unwrap();
+        (dir, file_path)
+    }
+
+    fn create_single_file_state(
+        name: &str,
+        content: &str,
+    ) -> (tempfile::TempDir, PathBuf, Arc<AppState>) {
+        let (dir, file_path) = create_markdown_fixture(name, content);
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+        (dir, file_path, state)
+    }
+
+    fn spawn_idle_watcher_thread(shutdown_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || keep_watcher_thread_alive(&shutdown_flag))
+    }
+
     #[test]
     fn test_連続更新イベントも更新対象に含まれる() {
         assert!(is_content_change_event(&DebouncedEventKind::Any));
@@ -562,17 +592,7 @@ mod tests {
 
     #[test]
     fn test_broadcast_errorがエラーjsonを送信する() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = tmp_dir.path().join("test.md");
-        std::fs::write(&file_path, "# test").unwrap();
-
-        let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(
-            AppMode::new_single_file(&file_path).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let (_tmp_dir, _file_path, state) = create_single_file_state("test.md", "# test");
         let mut rx = state.tx().subscribe();
 
         broadcast_error(&state, "テストエラーメッセージ");
@@ -588,17 +608,8 @@ mod tests {
 
     #[test]
     fn test_broadcast_errorは受信者なしでもパニックしない() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = tmp_dir.path().join("test.md");
-        std::fs::write(&file_path, "# test").unwrap();
-
-        let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(
-            AppMode::new_single_file(&file_path).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let (_tmp_dir, _file_path, state) = create_single_file_state("test.md", "# test");
+        let _rx = state.tx().subscribe();
         // _rxをドロップして受信者をゼロにする
         drop(_rx);
 
@@ -635,9 +646,7 @@ mod tests {
     #[test]
     fn test_send_watcher_message_チャネル満杯時はメッセージを破棄してブロックしない() {
         let (tx, mut rx) = mpsc::channel::<WatcherMessage>(1);
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first.md");
-        std::fs::write(&first, "# first").unwrap();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
         // チャネルを満杯にする
         tx.blocking_send(WatcherMessage::FileChanged(first.clone()))
             .unwrap();
@@ -668,10 +677,8 @@ mod tests {
 
     #[test]
     fn test_is_target_file_正規化成功時は完全一致のみtrue() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.md");
+        let (dir, target) = create_markdown_fixture("target.md", "# target");
         let other = dir.path().join("other.md");
-        std::fs::write(&target, "# target").unwrap();
         std::fs::write(&other, "# other").unwrap();
 
         let canonical_target = target.canonicalize().unwrap();
@@ -681,9 +688,7 @@ mod tests {
 
     #[test]
     fn test_is_target_file_正規化失敗時は同名かつ同一親ディレクトリでフォールバック一致() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.md");
-        std::fs::write(&target, "# target").unwrap();
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
         let canonical_target = target.canonicalize().unwrap();
 
         // event_pathのcanonicalizeを失敗させるために削除
@@ -694,10 +699,8 @@ mod tests {
 
     #[test]
     fn test_is_target_file_正規化失敗時は非正規化親パスでも一致判定できる() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.md");
+        let (dir, target) = create_markdown_fixture("target.md", "# target");
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        std::fs::write(&target, "# target").unwrap();
         let canonical_target = target.canonicalize().unwrap();
 
         // event_pathのcanonicalizeを失敗させるために削除
@@ -709,9 +712,7 @@ mod tests {
 
     #[test]
     fn test_is_target_file_正規化失敗フォールバックでも親ディレクトリ不一致はfalse() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.md");
-        std::fs::write(&target, "# target").unwrap();
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
         let canonical_target = target.canonicalize().unwrap();
 
         let other_dir = tempfile::tempdir().unwrap();
@@ -773,12 +774,7 @@ mod tests {
     #[tokio::test]
     async fn test_watchhandle_shutdownはタイムアウト後にabortする() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = shutdown_flag.clone();
-        let watcher_thread = std::thread::spawn(move || {
-            while !thread_flag.load(Ordering::Acquire) {
-                std::thread::park_timeout(Duration::from_millis(10));
-            }
-        });
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
         let notify_task = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
@@ -799,12 +795,7 @@ mod tests {
         }
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = shutdown_flag.clone();
-        let watcher_thread = std::thread::spawn(move || {
-            while !thread_flag.load(Ordering::Acquire) {
-                std::thread::park_timeout(Duration::from_millis(10));
-            }
-        });
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
         let dropped = Arc::new(AtomicBool::new(false));
         let dropped_for_task = dropped.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();

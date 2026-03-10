@@ -1,0 +1,172 @@
+/* リセットと基本設定 */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f2f2f2;
+  --bg-accent: linear-gradient(180deg, #f6f6f6 0%, #eaeaea 100%);
+  --fg: #1a1a1a;
+  --muted: #737373;
+  --sidebar-bg: rgba(245, 245, 245, 0.88);
+  --sidebar-border: rgba(0, 0, 0, 0.10);
+  --panel-bg: rgba(250, 250, 250, 0.80);
+  --panel-border: rgba(0, 0, 0, 0.08);
+  --panel-shadow: 0 28px 80px rgba(0, 0, 0, 0.06);
+  --link: #3d3d3d;
+  --code-bg: #e8e8e8;
+  --blockquote-border: rgba(0, 0, 0, 0.22);
+  --blockquote-fg: #525252;
+  --table-border: rgba(0, 0, 0, 0.10);
+  --table-alt-bg: rgba(0, 0, 0, 0.03);
+  --hr-color: rgba(0, 0, 0, 0.10);
+  --toc-active: #1a1a1a;
+  --toc-hover-bg: rgba(0, 0, 0, 0.05);
+  --pill-bg: rgba(255, 255, 255, 0.60);
+  --pill-strong-bg: rgba(0, 0, 0, 0.07);
+  --accent: #1a1a1a;
+  --accent-soft: rgba(0, 0, 0, 0.06);
+  --blockquote-bg: rgba(0, 0, 0, 0.03);
+  --sidebar-utility-bg: rgba(255, 255, 255, 0.18);
+  --search-input-bg: rgba(255, 255, 255, 0.65);
+  --topbar-btn-bg: rgba(255, 255, 255, 0.4);
+  --content-bg: rgba(255, 255, 255, 0.8);
+  --code-copy-bg: rgba(255, 255, 255, 0.72);
+}
+
+[data-theme="dark"] {
+__DARK_THEME_VARS__
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+__DARK_THEME_VARS__
+  }
+}
+
+body {
+  font-family: "IBM Plex Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  background: var(--bg-accent);
+  color: var(--fg);
+  line-height: 1.7;
+  min-height: 100vh;
+  position: relative;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  opacity: 0.2;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.5), transparent 92%);
+}
+
+.app-shell {
+  display: flex;
+  width: 100%;
+}
+
+.workspace {
+  flex: 1;
+  min-width: 0;
+  padding: 1.5rem 1.5rem 4rem;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 auto 1rem;
+  max-width: 1040px;
+  padding: 1.35rem 1.5rem 1.1rem;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  backdrop-filter: blur(18px);
+  border-radius: 22px;
+  box-shadow: var(--panel-shadow);
+}
+
+.topbar-kicker,
+.sidebar-kicker {
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.document-title,
+.sidebar-brand h2 {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Yu Mincho", serif;
+  font-weight: 700;
+  line-height: 1.08;
+}
+
+.document-title {
+  font-size: clamp(1.9rem, 3vw, 3.2rem);
+  margin-bottom: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.document-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.meta-pill-strong {
+  color: var(--fg);
+  background: var(--pill-strong-bg);
+}
+
+.live-pill {
+  color: var(--accent);
+}
+
+.live-pill::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.45rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0.28rem var(--accent-soft);
+}
+
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  z-index: 1000;
+  overflow: hidden;
+  background: transparent;
+}
+
+.reading-progress-bar {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--link));
+  transition: width 0.18s ease;
+}
+
+.live-pill[data-state="retry"],
+.live-pill[data-state="offline"],
+.live-pill[data-state="error"] {
+  color: #f7768e;
+}
