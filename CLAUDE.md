@@ -37,9 +37,9 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
   ├── server.rs     公開ファサード（モジュール再エクスポート）
   │   ├── state.rs      サーバー状態とモード判定（AppState, AppMode, CanonicalPath）
   │   ├── routes.rs     axumルーター、HTTP/WebSocketハンドラ
-  │   ├── files.rs      ファイル探索、検証、読み込み、描画
+  │   ├── files.rs      ファイル探索、検証、読み込み、描画、ファイルサイズ定数
   │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
-  │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型、ファイルサイズ定数
+  │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型
   │   └── websocket.rs  WebSocketセッション管理、変更通知ブロードキャスト
   ├── renderer.rs   Markdown→HTML変換（pulldown-cmark + syntectハイライト）
   ├── toc.rs        Markdown→目次HTML生成

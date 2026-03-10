@@ -8,18 +8,6 @@ use crate::template::{error_message_json, UpdateMessage};
 /// HTTP APIエラー応答の共通型
 pub(super) type ApiError = (StatusCode, Json<serde_json::Value>);
 
-/// ファイルサイズ上限: OOM防止
-pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-const FILE_SIZE_LIMIT_MB: u64 = MAX_FILE_SIZE / 1024 / 1024;
-
-/// ファイルサイズ超過時のユーザー向けエラーメッセージを返す。
-pub(super) fn file_size_limit_error_message() -> String {
-    format!(
-        "ファイルサイズが上限（{}MB）を超えています",
-        FILE_SIZE_LIMIT_MB
-    )
-}
-
 /// WebSocket broadcastメッセージ
 #[derive(Debug, Clone)]
 pub enum BroadcastMessage {
