@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
-use super::super::guards::json_error;
-use super::super::messages::ApiError;
-use super::super::state::AppState;
 use super::catalog::list_markdown_files;
+use crate::server::guards::json_error;
+use crate::server::messages::ApiError;
+use crate::server::state::AppState;
 use crate::template::UpdateMessage;
 
 #[derive(Debug, Clone)]

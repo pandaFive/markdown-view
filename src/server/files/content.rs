@@ -5,13 +5,13 @@ use axum::response::IntoResponse;
 use axum::Json;
 use tokio::io::AsyncReadExt;
 
-use super::super::messages::{ApiError, BroadcastMessage};
-use super::super::state::AppState;
 use super::resolve::{
     resolve_change_target, resolve_single_file_target, ResolveFileError, ResolvedTarget,
     RouteTargetRequest,
 };
 use crate::renderer::render_markdown;
+use crate::server::messages::{ApiError, BroadcastMessage};
+use crate::server::state::AppState;
 use crate::template::{error_message_json, UpdateMessage};
 use crate::toc::generate_toc;
 
@@ -58,7 +58,7 @@ pub(in crate::server) async fn load_route_update(
                 target.file_label(),
                 error
             );
-            super::super::guards::json_error(error.status_code(), error.user_message())
+            crate::server::guards::json_error(error.status_code(), error.user_message())
         })
 }
 
