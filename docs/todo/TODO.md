@@ -71,3 +71,35 @@
   - ファイル: `src/watcher.rs` L14-23
   - 内容: 将来コンシューマが増えた場合に`WatchErrorKind`列挙型への移行を検討
   - 理由: 現在は単一コンシューマのため優先度低
+
+## PRレビュー: server files取得フロー集約 (レビュー日: 2026-03-10)
+
+### 巨大な修正（要別途対応）
+
+- [ ] [Medium] validate-build-renderパターンの3重重複を共通ヘルパーに抽出
+  - ファイル: `src/server/files.rs` L148-260
+  - 影響範囲: `initial_socket_update`, `lagged_recovery_broadcast_message`, `update_broadcast_message`
+  - 修正方針: 共通の`validate_and_render`ヘルパーを抽出し、各関数をエラーマッピングのみのラッパーに
+  - 理由: 3関数のエラーハンドリング戦略が異なり統一にアーキテクチャ検討が必要
+
+### Low Priority
+
+- [ ] `file_label`算出ロジックが`ResolvedTarget::new`と`update_broadcast_message`で重複
+  - ファイル: `src/server/files.rs` L217-220
+  - 内容: 共通関数`file_display_name(path: &Path) -> String`を抽出
+  - 理由: Issue #1（パラメータ削除）修正後に再評価
+
+- [ ] `lagged_recovery_message`が単純な委譲関数。直接呼び出しで除去可能
+  - ファイル: `src/server/websocket.rs` L27-29
+  - 内容: `lagged_recovery_broadcast_message`を直接呼び出しに変更
+  - 理由: websocket.rsとfiles.rsの両方を変更する必要あり
+
+- [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
+  - ファイル: `src/server/websocket.rs` L34-40
+  - 内容: 中間変数に束縛してから`if let`で分岐
+  - 理由: 可読性改善のみでリスクに見合わない
+
+- [ ] `ResolvedTarget::update`メソッド名を`attach_file_info`等に改名
+  - ファイル: `src/server/files.rs` L69
+  - 内容: `UpdateMessage`との名前衝突を解消
+  - 理由: 全呼び出し元に影響し他の修正と同時に行うと差分が大きくなる

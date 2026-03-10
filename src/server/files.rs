@@ -8,7 +8,7 @@ use axum::Json;
 use tokio::io::AsyncReadExt;
 
 use super::guards::json_error;
-use super::messages::ApiError;
+use super::messages::{ApiError, BroadcastMessage};
 use super::state::AppState;
 use crate::renderer::render_markdown;
 use crate::template::{error_message_json, UpdateMessage};
@@ -24,14 +24,87 @@ const MAX_FILE_LIST: usize = 1000;
 /// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
 const MAX_DIR_DEPTH: usize = 32;
 
+#[derive(Debug, Clone)]
+/// ファイル解決結果。ターゲットファイルのパス、ファイル一覧、相対パス、表示用ラベルを保持する。
+pub(super) struct ResolvedTarget {
+    file_path: PathBuf,
+    file_list: Option<Vec<String>>,
+    relative_path: Option<String>,
+    file_label: String,
+}
+
+impl ResolvedTarget {
+    fn new(
+        file_path: PathBuf,
+        file_list: Option<Vec<String>>,
+        relative_path: Option<String>,
+    ) -> Self {
+        let file_label = relative_path
+            .clone()
+            .or_else(|| {
+                file_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| file_path.display().to_string());
+        Self {
+            file_path,
+            file_list,
+            relative_path,
+            file_label,
+        }
+    }
+
+    pub(super) fn file_path(&self) -> &Path {
+        &self.file_path
+    }
+
+    pub(super) fn file_list(&self) -> Option<&[String]> {
+        self.file_list.as_deref()
+    }
+
+    pub(super) fn relative_path(&self) -> Option<&str> {
+        self.relative_path.as_deref()
+    }
+
+    fn update(&self, update: UpdateMessage) -> UpdateMessage {
+        update.with_file(self.relative_path.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+/// WebSocket初期化時のエラー。closeフレームのコードと理由を保持する。
+pub(super) struct SocketInitError {
+    close_code: u16,
+    reason: String,
+}
+
+impl SocketInitError {
+    fn new(close_code: u16, reason: impl Into<String>) -> Self {
+        Self {
+            close_code,
+            reason: reason.into(),
+        }
+    }
+
+    pub(super) fn close_code(&self) -> u16 {
+        self.close_code
+    }
+
+    pub(super) fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
 /// 対象ファイル解決エラーをエンドポイント文脈に応じたAPIエラーへ変換する。
 pub(super) fn resolve_target_file_or_error(
     state: &AppState,
     query_file: Option<&str>,
     include_file_list: bool,
     not_found_message: &'static str,
-) -> Result<(PathBuf, Option<Vec<String>>), ApiError> {
-    resolve_target_file(state, query_file, include_file_list).map_err(|status| {
+) -> Result<ResolvedTarget, ApiError> {
+    let (file_path, file_list) =
+        resolve_target_file(state, query_file, include_file_list).map_err(|status| {
         let msg = match status {
             StatusCode::NOT_FOUND => not_found_message,
             StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
@@ -45,21 +118,154 @@ pub(super) fn resolve_target_file_or_error(
             }
         };
         json_error(status, msg)
-    })
+    })?;
+    Ok(build_resolved_target(
+        state,
+        file_path,
+        file_list,
+        "ターゲットファイルの相対パス算出失敗",
+    ))
 }
 
 /// Markdownの読み込みと描画を行い、失敗時はAPI応答用のエラーへ変換する。
 pub(super) async fn read_rendered_update_or_error(
-    file_path: &Path,
+    target: &ResolvedTarget,
     read_error_log_label: &'static str,
 ) -> Result<UpdateMessage, ApiError> {
-    read_and_render_file(file_path).await.map_err(|e| {
-        tracing::warn!(
-            "[markdown-view] {}読み込みエラー: {}",
-            read_error_log_label,
-            e
-        );
-        json_error(e.status_code(), e.user_message())
+    read_and_render_file(target.file_path())
+        .await
+        .map(|update| target.update(update))
+        .map_err(|e| {
+            tracing::warn!(
+                "[markdown-view] {}読み込みエラー ({}): {}",
+                read_error_log_label,
+                target.file_label,
+                e
+            );
+            json_error(e.status_code(), e.user_message())
+        })
+}
+
+/// WebSocket接続時の初期コンテンツを取得する。
+///
+/// 単一ファイルモード: ファイルを読み込みSome(UpdateMessage)を返す。
+/// ディレクトリモード: Noneを返す（初期コンテンツなし）。
+pub(super) async fn initial_socket_update(
+    state: &AppState,
+) -> Result<Option<UpdateMessage>, SocketInitError> {
+    let Some(file_path) = state.mode().single_file() else {
+        return Ok(None);
+    };
+
+    let validated_path = revalidate_single_file_target(file_path).map_err(|e| {
+        tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", e);
+        SocketInitError::new(1008, format!("ファイル検証に失敗しました: {}", e))
+    })?;
+    let target = build_resolved_target(
+        state,
+        validated_path,
+        None,
+        "WebSocket初期ターゲットの相対パス算出失敗",
+    );
+    let update = read_and_render_file(target.file_path())
+        .await
+        .map_err(|e| {
+            tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
+            SocketInitError::new(e.close_code(), e.user_message())
+        })?;
+    Ok(Some(target.update(update)))
+}
+
+/// WebSocketクライアント遅延時の回復メッセージを生成する。
+///
+/// 単一ファイルモード: ファイルを再読み込みしてUpdateを返す。
+/// ディレクトリモード: Refreshを返す（クライアント側で再取得させる）。
+pub(super) async fn lagged_recovery_broadcast_message(state: &AppState) -> BroadcastMessage {
+    let Some(file_path) = state.mode().single_file() else {
+        return BroadcastMessage::Refresh;
+    };
+
+    let validated_path = match revalidate_single_file_target(file_path) {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::warn!("[markdown-view] WebSocket再送信時のファイル検証失敗: {}", e);
+            return BroadcastMessage::Error(format!("ファイル検証エラー: {}", e));
+        }
+    };
+    let target = build_resolved_target(
+        state,
+        validated_path,
+        None,
+        "WebSocket再送信ターゲットの相対パス算出失敗",
+    );
+    match read_and_render_file(target.file_path()).await {
+        Ok(update) => BroadcastMessage::Update(target.update(update)),
+        Err(e) => {
+            tracing::warn!(
+                "[markdown-view] WebSocket再送信読み込みエラー ({}): {}",
+                target.file_label,
+                e
+            );
+            BroadcastMessage::Error(format!(
+                "ファイル読み込みエラー ({}): {}",
+                target.file_label,
+                e.user_message()
+            ))
+        }
+    }
+}
+
+/// ファイル変更イベントからブロードキャスト用メッセージを生成する。
+///
+/// Noneを返した場合、ブロードキャストをスキップすべきことを示す
+/// （ディレクトリモードで相対パスが算出できない場合）。
+pub(super) async fn update_broadcast_message(
+    state: &AppState,
+    changed_file: &Path,
+) -> Option<BroadcastMessage> {
+    let target = if let Some(expected) = state.mode().single_file() {
+        if let Err(e) = revalidate_single_file_target(expected) {
+            let file_label = expected
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| expected.display().to_string());
+            tracing::warn!(
+                "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
+                file_label,
+                e
+            );
+            return Some(BroadcastMessage::Error(format!(
+                "ファイル検証エラー ({}): {}",
+                file_label, e
+            )));
+        }
+        build_resolved_target(
+            state,
+            changed_file.to_path_buf(),
+            None,
+            "更新対象の相対パス算出失敗",
+        )
+    } else {
+        match build_update_target(state, changed_file) {
+            Some(target) => target,
+            None => return None,
+        }
+    };
+
+    Some(match read_and_render_file(target.file_path()).await {
+        Ok(update) => BroadcastMessage::Update(target.update(update)),
+        Err(e) => {
+            tracing::warn!(
+                "[markdown-view] 更新時読み込みエラー ({}): {}",
+                target.file_label,
+                e
+            );
+            BroadcastMessage::Error(format!(
+                "ファイル読み込みエラー ({}): {}",
+                target.file_label,
+                e.user_message()
+            ))
+        }
     })
 }
 
@@ -124,6 +330,42 @@ pub(super) fn resolve_target_file(
         tracing::error!("[markdown-view] 未知のAppModeです");
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
+}
+
+fn build_resolved_target(
+    state: &AppState,
+    file_path: PathBuf,
+    file_list: Option<Vec<String>>,
+    warn_label: &'static str,
+) -> ResolvedTarget {
+    let relative_path = state.mode().relative_path_of(&file_path);
+    if state.mode().is_directory() && relative_path.is_none() {
+        tracing::warn!(
+            "[markdown-view] {}: {} はベース {} の配下ではありません",
+            warn_label,
+            file_path.display(),
+            state.mode().base_dir().display()
+        );
+        // これは意図的な graceful degradation であり、relative_path が None でもページ描画自体は継続できる。
+        // HTTP経路(resolve_target_file_or_error経由)ではサイドバーのファイルハイライトだけが効かなくなり、
+        // コンテンツ表示そのものには影響しない。
+        // 一方で WebSocket経路(build_update_target経由)では relative_path が None の場合に None を返し、
+        // 当該更新のブロードキャストをスキップする対策を既に入れている。
+    }
+    ResolvedTarget::new(file_path, file_list, relative_path)
+}
+
+fn build_update_target(state: &AppState, changed_file: &Path) -> Option<ResolvedTarget> {
+    let target = build_resolved_target(
+        state,
+        changed_file.to_path_buf(),
+        None,
+        "相対パス算出失敗のためブロードキャストをスキップ",
+    );
+    if state.mode().is_directory() && target.relative_path.is_none() {
+        return None;
+    }
+    Some(target)
 }
 
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
@@ -527,8 +769,10 @@ mod tests {
 
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use tokio::sync::broadcast;
 
     use super::*;
+    use crate::server::{AppMode, AppState};
 
     #[test]
     fn test_close_code_ioエラーは1011を返す() {
@@ -852,6 +1096,48 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_target_file_or_error_ディレクトリモードでrelative_pathとfile_listを返す() {
+        let dir = create_test_dir();
+        let state = create_directory_state(dir.path());
+
+        let target = resolve_target_file_or_error(
+            &state,
+            Some("docs/api.md"),
+            true,
+            "表示可能なMarkdownファイルが見つかりません",
+        )
+        .unwrap();
+
+        assert_eq!(target.relative_path(), Some("docs/api.md"));
+        assert!(target.file_list().is_some());
+        assert!(target.file_path().ends_with("docs/api.md"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_socket_update_単一ファイルモードでupdateを返す() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+        let state = create_single_file_state(&file_path);
+
+        let update = initial_socket_update(&state).await.unwrap().unwrap();
+        assert!(update.content().as_str().contains("title"));
+    }
+
+    #[tokio::test]
+    async fn test_update_broadcast_message_ディレクトリモードでfileを含むupdateを返す() {
+        let dir = create_test_dir();
+        let state = create_directory_state(dir.path());
+        let target = dir.path().join("docs/api.md");
+
+        let message = update_broadcast_message(&state, &target).await.unwrap();
+        match message {
+            BroadcastMessage::Update(update) => {
+                assert_eq!(update.file(), Some("docs/api.md"));
+            }
+            other => panic!("Updateを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[test]
     fn test_revalidate_single_file_target_正常なファイルを許可する() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let canonical = file_path.canonicalize().unwrap();
@@ -916,5 +1202,17 @@ mod tests {
         let file_path = dir.path().join(name);
         std::fs::write(&file_path, content).unwrap();
         (dir, file_path)
+    }
+
+    fn create_single_file_state(file_path: &std::path::Path) -> AppState {
+        let mode = AppMode::new_single_file(file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(4);
+        AppState::new(mode, false, None, tx)
+    }
+
+    fn create_directory_state(dir_path: &std::path::Path) -> AppState {
+        let mode = AppMode::new_directory(dir_path).unwrap();
+        let (tx, _rx) = broadcast::channel(4);
+        AppState::new(mode, false, None, tx)
     }
 }

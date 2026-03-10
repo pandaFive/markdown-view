@@ -871,7 +871,7 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
     assert_close_frame_message(
         &mut read,
         tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
-        "ファイル検証に失敗しました",
+        "ファイル検証に失敗しました: ファイルが見つかりません",
     )
     .await;
 }
