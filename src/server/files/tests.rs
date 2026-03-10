@@ -1,0 +1,462 @@
+use std::path::PathBuf;
+
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use tokio::sync::broadcast;
+
+use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
+use super::content::{read_bytes_with_limit, ReadMarkdownError};
+use super::resolve::revalidate_single_file_target;
+use super::*;
+use crate::server::{AppMode, AppState, BroadcastMessage};
+
+#[test]
+fn test_close_code_ioエラーは1011を返す() {
+    let err = ReadMarkdownError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, ""));
+    assert_eq!(err.close_code(), 1011);
+}
+
+#[test]
+fn test_close_code_too_largeは1009を返す() {
+    let err = ReadMarkdownError::TooLarge;
+    assert_eq!(err.close_code(), 1009);
+}
+
+#[test]
+fn test_close_code_not_utf8は1003を返す() {
+    let err = ReadMarkdownError::NotUtf8;
+    assert_eq!(err.close_code(), 1003);
+}
+
+#[test]
+fn test_resolve_file_正常なパス() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "README.md");
+    assert!(result.is_ok());
+    assert!(result.unwrap().ends_with("README.md"));
+}
+
+#[test]
+fn test_resolve_file_サブディレクトリのパス() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "docs/api.md");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_resolve_file_トラバーサル拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "../../../etc/passwd");
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+    ));
+}
+
+#[test]
+fn test_resolve_file_バックスラッシュ型トラバーサルを拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "..\\..\\..\\etc\\passwd");
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+    ));
+}
+
+#[test]
+fn test_resolve_file_urlエンコード型トラバーサルを拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "docs/%2e%2e/%2e%2e/etc/passwd.md");
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+    ));
+}
+
+#[test]
+fn test_resolve_file_絶対パス拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "/etc/passwd");
+    assert_eq!(result, Err(ResolveFileError::InvalidPath));
+}
+
+#[test]
+fn test_resolve_file_存在しないファイル() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "nonexistent.md");
+    assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[test]
+fn test_resolve_file_非md拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "notes.txt");
+    assert_eq!(result, Err(ResolveFileError::NotMarkdown));
+}
+
+#[test]
+fn test_resolve_file_隠しファイル拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), ".hidden/secret.md");
+    assert_eq!(result, Err(ResolveFileError::Hidden));
+}
+
+#[test]
+fn test_resolve_file_隠しドットファイル拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), ".dotfile.md");
+    assert_eq!(result, Err(ResolveFileError::Hidden));
+}
+
+#[test]
+fn test_resolve_file_nulバイト拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "README\0.md");
+    assert_eq!(result, Err(ResolveFileError::InvalidPath));
+}
+
+#[test]
+fn test_resolve_file_ディレクトリパス拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "docs");
+    assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[test]
+fn test_resolve_file_空パス拒否() {
+    let dir = create_test_dir();
+    let result = resolve_file(dir.path(), "");
+    assert_eq!(result, Err(ResolveFileError::EmptyPath));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_シンボリックリンクによるトラバーサル拒否() {
+    let dir = create_test_dir();
+    let outside_dir = tempfile::tempdir().unwrap();
+    std::fs::write(outside_dir.path().join("secret.md"), "# Secret").unwrap();
+
+    std::os::unix::fs::symlink(
+        outside_dir.path().join("secret.md"),
+        dir.path().join("link.md"),
+    )
+    .unwrap();
+
+    let result = resolve_file(dir.path(), "link.md");
+    assert_eq!(result, Err(ResolveFileError::Traversal));
+}
+
+#[test]
+fn test_list_markdown_files_基本動作() {
+    let dir = create_test_dir();
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(files.contains(&"README.md".to_string()));
+    assert!(files.contains(&"guide.md".to_string()));
+    assert!(files.contains(&"docs/api.md".to_string()));
+}
+
+#[test]
+fn test_list_markdown_files_非md除外() {
+    let dir = create_test_dir();
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(!files.iter().any(|f| f.ends_with(".txt")));
+}
+
+#[test]
+fn test_list_markdown_files_隠しファイル除外() {
+    let dir = create_test_dir();
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(!files.iter().any(|f| f.contains(".hidden")));
+    assert!(!files.iter().any(|f| f.starts_with('.')));
+}
+
+#[test]
+fn test_list_markdown_files_空ディレクトリ() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(files.is_empty());
+}
+
+#[test]
+fn test_list_markdown_files_ソート済み() {
+    let dir = create_test_dir();
+    let files = list_markdown_files(dir.path()).unwrap();
+    let mut sorted = files.clone();
+    sorted.sort();
+    assert_eq!(files, sorted);
+}
+
+#[test]
+fn test_list_markdown_files_最大1000件で打ち切る() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..(MAX_FILE_LIST + 200) {
+        let path = dir.path().join(format!("doc-{i:04}.md"));
+        std::fs::write(path, "# x").unwrap();
+    }
+
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert_eq!(files.len(), MAX_FILE_LIST);
+}
+
+#[test]
+fn test_list_markdown_files_ベースディレクトリ正規化失敗はエラーを返す() {
+    let missing = PathBuf::from("/path/that/does/not/exist");
+    let result = list_markdown_files(&missing);
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_list_markdown_files_シンボリックリンクサイクルでハングしない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/doc.md"), "# Doc").unwrap();
+
+    std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop")).unwrap();
+
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(files.contains(&"README.md".to_string()));
+    assert!(files.contains(&"sub/doc.md".to_string()));
+    assert!(
+        !files.iter().any(|f| f.contains("loop/")),
+        "サイクル経由のエントリが含まれてはいけない: {:?}",
+        files
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_list_markdown_files_自己参照シンボリックリンクでハングしない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+
+    std::os::unix::fs::symlink(".", dir.path().join("loop")).unwrap();
+
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(files.contains(&"README.md".to_string()));
+    assert!(
+        !files.iter().any(|f| f.contains("loop/")),
+        "サイクル経由のエントリが含まれてはいけない: {:?}",
+        files
+    );
+}
+
+#[test]
+fn test_list_markdown_files_深度上限を超えるパスは除外される() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("root.md"), "# root").unwrap();
+
+    let mut current = dir.path().to_path_buf();
+    for i in 0..=MAX_DIR_DEPTH {
+        current = current.join(format!("d{}", i));
+        std::fs::create_dir_all(&current).unwrap();
+    }
+    std::fs::write(current.join("deep.md"), "# deep").unwrap();
+
+    let files = list_markdown_files(dir.path()).unwrap();
+    assert!(files.contains(&"root.md".to_string()));
+    assert!(!files.iter().any(|f| f.ends_with("deep.md")));
+}
+
+#[test]
+fn test_list_markdown_files_recursive_通常ディレクトリcanonicalize失敗時はスキップ扱い() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing-dir");
+    assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ").is_none());
+}
+
+#[tokio::test]
+async fn test_read_bytes_with_limit_takeによる第2段階チェックで超過を検出する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large.md");
+    tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+        .await
+        .unwrap();
+
+    let file = tokio::fs::File::open(&file_path).await.unwrap();
+    let result = read_bytes_with_limit(file).await;
+    assert!(matches!(result, Err(ReadMarkdownError::TooLarge)));
+}
+
+#[tokio::test]
+async fn test_read_markdown_error_into_response_too_largeのjson形式() {
+    let response = ReadMarkdownError::TooLarge.into_response();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": "ファイルサイズが上限（10MB）を超えています"
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_read_markdown_error_into_response_ioのjson形式() {
+    let io_error = std::io::Error::other("disk failure");
+    let response = ReadMarkdownError::Io(io_error).into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": "ファイルの読み込みに失敗しました"
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_read_markdown_error_into_response_not_utf8のjson形式() {
+    let response = ReadMarkdownError::NotUtf8.into_response();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": "このファイルはUTF-8テキストではありません"
+        })
+    );
+}
+
+#[test]
+fn test_resolve_route_target_page_ディレクトリモードでrelative_pathとfile_listを返す() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::page(Some("docs/api.md"))).unwrap();
+
+    assert_eq!(target.relative_path(), Some("docs/api.md"));
+    assert!(target.file_list().is_some());
+    assert!(target.file_path().ends_with("docs/api.md"));
+}
+
+#[test]
+fn test_resolve_route_target_api_contentはfile_listを含まない() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_content(Some("docs/api.md"))).unwrap();
+
+    assert_eq!(target.relative_path(), Some("docs/api.md"));
+    assert!(target.file_list().is_none());
+}
+
+#[tokio::test]
+async fn test_load_initial_socket_update_単一ファイルモードでupdateを返す() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+
+    let update = load_initial_socket_update(&state).await.unwrap().unwrap();
+    assert!(update.content().as_str().contains("title"));
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_ディレクトリモードでfileを含むupdateを返す() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let target = dir.path().join("docs/api.md");
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .unwrap();
+    match message {
+        BroadcastMessage::Update(update) => {
+            assert_eq!(update.file(), Some("docs/api.md"));
+        }
+        other => panic!("Updateを期待したが {:?} を受信", other),
+    }
+}
+
+#[test]
+fn test_revalidate_single_file_target_正常なファイルを許可する() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+    let canonical = file_path.canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), canonical);
+}
+
+#[test]
+fn test_revalidate_single_file_target_存在しないファイルはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("nonexistent.md");
+    let result = revalidate_single_file_target(&file_path);
+    assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[test]
+fn test_revalidate_single_file_target_ディレクトリはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical);
+    assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[test]
+fn test_revalidate_single_file_target_非mdファイルはnotmarkdownを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.txt");
+    std::fs::write(&file_path, "hello").unwrap();
+    let canonical = file_path.canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical);
+    assert_eq!(result, Err(ResolveFileError::NotMarkdown));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_revalidate_single_file_target_シンボリックリンクはtraversalを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_file = dir.path().join("real.md");
+    std::fs::write(&real_file, "# real").unwrap();
+    let link_path = dir.path().join("link.md");
+    std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
+    let result = revalidate_single_file_target(&link_path);
+    assert_eq!(result, Err(ResolveFileError::Traversal));
+}
+
+fn create_test_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+    std::fs::write(dir.path().join("guide.md"), "# Guide").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "text file").unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/api.md"), "# API").unwrap();
+    std::fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+    std::fs::write(dir.path().join(".hidden/secret.md"), "# Secret").unwrap();
+    std::fs::write(dir.path().join(".dotfile.md"), "# Dot").unwrap();
+    dir
+}
+
+fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join(name);
+    std::fs::write(&file_path, content).unwrap();
+    (dir, file_path)
+}
+
+fn create_single_file_state(file_path: &std::path::Path) -> AppState {
+    let mode = AppMode::new_single_file(file_path).unwrap();
+    let (tx, _rx) = broadcast::channel(4);
+    AppState::new(mode, false, None, tx)
+}
+
+fn create_directory_state(dir_path: &std::path::Path) -> AppState {
+    let mode = AppMode::new_directory(dir_path).unwrap();
+    let (tx, _rx) = broadcast::channel(4);
+    AppState::new(mode, false, None, tx)
+}

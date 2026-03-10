@@ -103,3 +103,32 @@
   - ファイル: `src/server/files.rs` L69
   - 内容: `UpdateMessage`との名前衝突を解消
   - 理由: 全呼び出し元に影響し他の修正と同時に行うと差分が大きくなる
+
+## PRレビュー: server files責務分割 (レビュー日: 2026-03-10)
+
+### Low Priority
+
+- [ ] `SocketInitError`の可視性整理
+  - ファイル: `src/server/files/content.rs` L24
+  - 内容: `pub(in crate::server)`だが`mod.rs`で再エクスポートされず実質`pub(super)`相当。再エクスポート追加か可視性縮小
+  - 理由: 現状動作に問題なし。将来の保守性向上
+
+- [ ] `build_lagged_recovery_message`ディレクトリモードのテスト追加
+  - ファイル: `src/server/files/content.rs` L92
+  - 内容: ディレクトリモードで`BroadcastMessage::Refresh`を返すパスのテスト
+  - 理由: リファクタ前から存在する既存ギャップ
+
+- [ ] `load_route_update`エラーマッピングのテスト追加
+  - ファイル: `src/server/files/content.rs` L47
+  - 内容: `ReadMarkdownError` → `ApiError`変換のユニットテスト
+  - 理由: リファクタ前から存在する既存ギャップ
+
+- [ ] `resolve_request_target`デフォルトファイル選択のテスト追加
+  - ファイル: `src/server/files/resolve.rs` L167
+  - 内容: `query_file`なし時のREADME優先選択ロジックのテスト
+  - 理由: リファクタ前から存在する既存ギャップ
+
+- [ ] `resolve.rs` L240のコメント詳細化
+  - ファイル: `src/server/files/resolve.rs` L240
+  - 内容: `build_resolved_target`のgraceful degradationコメントにWebSocketパスの安全性文脈を復元
+  - 理由: 旧5行→新1行に簡略化され保守者向け情報が減少
