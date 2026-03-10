@@ -167,27 +167,21 @@ impl AppMode {
     /// ディレクトリモード時にファイルの相対パスを計算する
     ///
     /// `file_path` はcanonicalize済みの絶対パスであること。
-    /// strip_prefix失敗時はエラーログを出力してNoneを返す。
+    /// strip_prefix失敗時はNoneを返す。
     /// 単一ファイルモードでは常にNoneを返す。
     pub fn relative_path_of(&self, file_path: &Path) -> Option<String> {
         match &self.0 {
-            AppModeKind::Directory(base) => match file_path.strip_prefix(base.as_path()) {
-                Ok(relative) => Some(relative.to_string_lossy().replace('\\', "/")),
-                Err(_) => {
-                    tracing::warn!(
-                        "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
-                        file_path.display(),
-                        base.as_path().display()
-                    );
-                    None
-                }
-            },
+            AppModeKind::Directory(base) => file_path
+                .strip_prefix(base.as_path())
+                .ok()
+                .map(|relative| relative.to_string_lossy().replace('\\', "/")),
             AppModeKind::SingleFile(_) => None,
         }
     }
 }
 
 /// サーバー共有状態
+#[derive(Debug)]
 pub struct AppState {
     mode: AppMode,
     dark_mode: bool,
@@ -234,9 +228,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use tokio::sync::broadcast;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -328,16 +320,5 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("docs")).unwrap();
         std::fs::write(dir.path().join("docs/api.md"), "# API").unwrap();
         dir
-    }
-
-    #[allow(dead_code)]
-    fn create_single_file_state(file_path: &Path) -> AppState {
-        let (tx, _rx) = broadcast::channel(16);
-        AppState::new(
-            AppMode::new_single_file(file_path).unwrap(),
-            false,
-            None,
-            tx,
-        )
     }
 }

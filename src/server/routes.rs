@@ -65,6 +65,18 @@ struct FileQuery {
     file: Option<String>,
 }
 
+fn relative_path_or_warn(state: &AppState, file_path: &std::path::Path) -> Option<String> {
+    let relative_path = state.mode().relative_path_of(file_path);
+    if state.mode().is_directory() && relative_path.is_none() {
+        tracing::warn!(
+            "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
+            file_path.display(),
+            state.mode().base_dir().display()
+        );
+    }
+    relative_path
+}
+
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
@@ -87,7 +99,7 @@ async fn index_handler(
         .and_then(|n| n.to_str())
         .unwrap_or("markdown-view");
 
-    let current_file = state.mode().relative_path_of(&file_path);
+    let current_file = relative_path_or_warn(&state, &file_path);
 
     Ok(Html(render_page(RenderPageParams {
         title,
@@ -124,7 +136,7 @@ async fn api_content_handler(
         read_rendered_update_or_error(&file_path, TargetResolveContext::ApiContent).await?;
 
     Ok(Json(
-        update.with_file(state.mode().relative_path_of(&file_path)),
+        update.with_file(relative_path_or_warn(&state, &file_path)),
     ))
 }
 
