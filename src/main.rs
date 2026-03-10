@@ -1,13 +1,20 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 use markdown_view::cli::Args;
 use markdown_view::renderer::validate_theme;
-use markdown_view::server::{create_router, AppMode, AppState, MAX_FILE_SIZE};
-use markdown_view::watcher::watch_path;
+use markdown_view::server::{
+    create_router, spawn_watch_event_forwarder, AppMode, AppState, MAX_FILE_SIZE,
+};
+use markdown_view::watcher::Watcher;
+
+/// 監視イベント転送タスクの停止待機秒数
+const WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 fn init_logging() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -54,6 +61,39 @@ async fn bind_preview_listener(
         "ポート {} 以上で利用可能なポートが見つかりませんでした",
         preferred_port
     )
+}
+
+async fn shutdown_watch_forwarder(mut watch_forwarder: JoinHandle<()>) {
+    match tokio::time::timeout(
+        Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS),
+        &mut watch_forwarder,
+    )
+    .await
+    {
+        Ok(join_result) => {
+            if let Err(e) = join_result {
+                tracing::warn!(
+                    "[markdown-view] 監視イベント転送タスクの終了待機に失敗: {}",
+                    e
+                );
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                "[markdown-view] 監視イベント転送タスク停止がタイムアウトしたためabortします"
+            );
+            watch_forwarder.abort();
+            if let Err(e) = watch_forwarder.await {
+                if e.is_cancelled() {
+                    return;
+                }
+                tracing::warn!(
+                    "[markdown-view] 監視イベント転送タスクの終了待機に失敗: {}",
+                    e
+                );
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -106,9 +146,10 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
 
     // ファイル/ディレクトリ監視開始
-    let watcher_handle = watch_path(state.clone())
+    let (watcher, watch_events) = Watcher::spawn(mode.clone())
         .await
         .context("監視の開始に失敗")?;
+    let watch_forwarder = spawn_watch_event_forwarder(state.clone(), watch_events);
 
     // HTTPサーバー起動（127.0.0.1のみにバインド）
     let (listener, local_addr, port_fallback) = bind_preview_listener(args.port).await?;
@@ -159,7 +200,8 @@ async fn main() -> Result<()> {
         })
         .await;
 
-    watcher_handle.shutdown().await;
+    watcher.shutdown();
+    shutdown_watch_forwarder(watch_forwarder).await;
     server_result?;
 
     Ok(())
@@ -195,5 +237,25 @@ mod tests {
         assert!(port_fallback);
         drop(listener);
         drop(reserved);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_watch_forwarder_タイムアウト後にabortする() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let watch_forwarder = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("転送タスク起動");
+
+        let start = std::time::Instant::now();
+        shutdown_watch_forwarder(watch_forwarder).await;
+        assert!(start.elapsed() >= Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_watch_forwarder_即時終了タスクを正常終了させる() {
+        let watch_forwarder = tokio::spawn(async {});
+        shutdown_watch_forwarder(watch_forwarder).await;
     }
 }

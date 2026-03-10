@@ -1,26 +1,49 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify::RecursiveMode;
+use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::server::{notify_update, AppState, BroadcastMessage};
+use crate::server::AppMode;
 
-/// ファイル監視からtokioタスクへのメッセージ型
-enum WatcherMessage {
+/// ファイル監視が外部へ公開するイベント
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchEvent {
     /// ファイル変更検知
     ///
     /// 削除イベントではcanonicalizeに失敗しうるため、生のパスを保持する。
     FileChanged(PathBuf),
     /// 監視ランタイムエラー（notify debouncerコールバック由来）
-    WatchError(String),
+    Error(String),
 }
 
-fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, label: &str) {
-    match tx.try_send(msg) {
+#[derive(Debug, Clone)]
+enum WatchStrategy {
+    SingleFile { target_path: PathBuf },
+    Directory { base_dir: PathBuf },
+}
+
+#[derive(Clone)]
+struct WatchConfig {
+    watch_dir: PathBuf,
+    recursive_mode: RecursiveMode,
+    thread_name: &'static str,
+    unexpected_exit: &'static str,
+    start_error_prefix: &'static str,
+    watch_error_prefix: &'static str,
+    panic_message: &'static str,
+    change_label: &'static str,
+    error_label: &'static str,
+    strategy: WatchStrategy,
+}
+
+fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &str) {
+    match tx.try_send(event) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
@@ -38,156 +61,167 @@ fn send_watcher_message(tx: &mpsc::Sender<WatcherMessage>, msg: WatcherMessage, 
 const DEBOUNCE_MS: u64 = 300;
 /// 監視スレッドのpark待機間隔（ミリ秒）
 const WATCHER_THREAD_PARK_MS: u64 = 250;
-/// shutdown() のグレースフル停止待機秒数
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 /// notify から tokio へ橋渡しするチャネル容量
 const WATCHER_MESSAGE_BUFFER: usize = 32;
 
 type InitResult = std::result::Result<(), String>;
 
-/// 監視実行中ハンドル
+/// 監視実行中ランタイム
 ///
-/// `shutdown()` は通知タスクの終了を2秒（`SHUTDOWN_TIMEOUT_SECS`）待つ
-/// グレースフル停止を行う。
-/// `Drop` は待機せず即時abortするフォールバック停止を行う。
-pub struct WatchHandle {
+/// `shutdown()` は監視スレッドを停止する。
+/// `Drop` は待機せず同じ停止処理を行う。
+pub struct Watcher {
     runtime: Option<WatchRuntime>,
 }
+
+/// shutdown() のグレースフル停止待機秒数
+const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 struct WatchRuntime {
     shutdown_flag: Arc<AtomicBool>,
     watcher_thread: std::thread::JoinHandle<()>,
-    notify_task: tokio::task::JoinHandle<()>,
 }
 
-impl WatchHandle {
-    fn new(
-        shutdown_flag: Arc<AtomicBool>,
-        watcher_thread: std::thread::JoinHandle<()>,
-        notify_task: tokio::task::JoinHandle<()>,
-    ) -> Self {
+impl WatchRuntime {
+    /// 監視スレッドに停止を通知し、完了を待機する
+    ///
+    /// `SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
+    /// （プロセス終了時にOSが回収する）。
+    fn stop(self) {
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.watcher_thread.thread().unpark();
+
+        let start = std::time::Instant::now();
+        while !self.watcher_thread.is_finished() {
+            if start.elapsed() > Duration::from_secs(SHUTDOWN_TIMEOUT_SECS) {
+                tracing::warn!("[markdown-view] 監視スレッドの停止がタイムアウトしました");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if let Err(e) = self.watcher_thread.join() {
+            tracing::warn!(
+                "[markdown-view] 監視スレッドの停止中にパニックを検出: {:?}",
+                e
+            );
+        }
+    }
+}
+
+impl Watcher {
+    /// 監視を開始し、監視イベント受信用チャネルを返す
+    pub async fn spawn(mode: AppMode) -> Result<(Self, mpsc::Receiver<WatchEvent>)> {
+        let config = WatchConfig::from_mode(&mode)?;
+        let (tx, rx) = mpsc::channel::<WatchEvent>(WATCHER_MESSAGE_BUFFER);
+        let (init_tx, init_rx) = oneshot::channel::<InitResult>();
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let thread_shutdown_flag = shutdown_flag.clone();
+        let unexpected_exit = config.unexpected_exit;
+        let watcher_thread = spawn_watcher_thread(config, tx, init_tx, thread_shutdown_flag)?;
+
+        await_watcher_init(init_rx, unexpected_exit).await?;
+        Ok((Self::new(shutdown_flag, watcher_thread), rx))
+    }
+
+    fn new(shutdown_flag: Arc<AtomicBool>, watcher_thread: std::thread::JoinHandle<()>) -> Self {
         Self {
             runtime: Some(WatchRuntime {
                 shutdown_flag,
                 watcher_thread,
-                notify_task,
             }),
         }
     }
 
-    /// 監視スレッドと通知タスクを停止する
-    pub async fn shutdown(mut self) {
-        if let Some(mut runtime) = self.runtime.take() {
-            runtime.shutdown_flag.store(true, Ordering::Release);
-            runtime.watcher_thread.thread().unpark();
-
-            if let Err(e) = runtime.watcher_thread.join() {
-                tracing::warn!(
-                    "[markdown-view] 監視スレッドの停止中にパニックを検出: {:?}",
-                    e
-                );
-            }
-
-            if tokio::time::timeout(
-                Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
-                &mut runtime.notify_task,
-            )
-            .await
-            .is_err()
-            {
-                tracing::warn!("[markdown-view] 通知タスク停止がタイムアウトしたためabortします");
-                runtime.notify_task.abort();
-                let _ = runtime.notify_task.await;
-            }
+    /// 監視スレッドを停止する
+    pub fn shutdown(mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.stop();
         }
     }
 }
 
-impl Drop for WatchHandle {
+impl Drop for Watcher {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_flag.store(true, Ordering::Release);
-            runtime.watcher_thread.thread().unpark();
-            if let Err(e) = runtime.watcher_thread.join() {
-                tracing::warn!(
-                    "[markdown-view] 監視スレッドのDrop停止中にパニックを検出: {:?}",
-                    e
-                );
-            }
-            runtime.notify_task.abort();
+            runtime.stop();
         }
     }
 }
 
-/// ファイルまたはディレクトリの監視を開始する
-///
-/// notify + debouncer でファイル変更を検知し、
-/// tokioランタイムにブリッジしてbroadcastで通知する
-pub async fn watch_path(state: Arc<AppState>) -> Result<WatchHandle> {
-    if let Some(file_path) = state.mode().single_file().map(Path::to_path_buf) {
-        watch_single_file(state, file_path).await
-    } else if let Some(dir_path) = state.mode().directory().map(Path::to_path_buf) {
-        watch_directory(state, dir_path).await
-    } else {
-        anyhow::bail!("未知のAppModeです")
+impl WatchConfig {
+    fn from_mode(mode: &AppMode) -> Result<Self> {
+        if let Some(file_path) = mode.single_file() {
+            let watch_dir = file_path
+                .parent()
+                .context("親ディレクトリが取得できません")?
+                .to_path_buf();
+            Ok(Self {
+                watch_dir,
+                recursive_mode: RecursiveMode::NonRecursive,
+                thread_name: "markdown-view-watcher-file",
+                unexpected_exit: "ファイル監視スレッドが予期せず終了しました",
+                start_error_prefix: "ファイル監視の開始に失敗",
+                watch_error_prefix: "ファイル監視エラー",
+                panic_message: "単一ファイル監視スレッドがパニックで停止しました",
+                change_label: "単一ファイル更新",
+                error_label: "単一ファイル監視エラー",
+                strategy: WatchStrategy::SingleFile {
+                    target_path: file_path.to_path_buf(),
+                },
+            })
+        } else if let Some(dir_path) = mode.directory() {
+            Ok(Self {
+                watch_dir: dir_path.to_path_buf(),
+                recursive_mode: RecursiveMode::Recursive,
+                thread_name: "markdown-view-watcher-dir",
+                unexpected_exit: "ディレクトリ監視スレッドが予期せず終了しました",
+                start_error_prefix: "ディレクトリ監視の開始に失敗",
+                watch_error_prefix: "ディレクトリ監視エラー",
+                panic_message: "ディレクトリ監視スレッドがパニックで停止しました",
+                change_label: "ディレクトリ更新",
+                error_label: "ディレクトリ監視エラー",
+                strategy: WatchStrategy::Directory {
+                    base_dir: dir_path.to_path_buf(),
+                },
+            })
+        } else {
+            anyhow::bail!("未知のAppModeです")
+        }
     }
 }
 
-/// 単一ファイルの監視
-async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<WatchHandle> {
-    // 監視対象ディレクトリ（ファイルの親ディレクトリ）
-    let watch_dir = file_path
-        .parent()
-        .context("親ディレクトリが取得できません")?
-        .to_path_buf();
-
-    let target_path = file_path.clone();
-
-    // tokio::sync::mpscでnotifyからtokioにブリッジ
-    let (tx, rx) = mpsc::channel::<WatcherMessage>(WATCHER_MESSAGE_BUFFER);
-
-    // 初期化エラーを親タスクに伝播するための oneshot チャネル
-    let (init_tx, init_rx) = oneshot::channel::<InitResult>();
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let thread_shutdown_flag = shutdown_flag.clone();
-
-    // debouncerをstd::threadで起動（notifyはsyncスレッドで動作）
-    let watcher_thread = std::thread::Builder::new()
-        .name("markdown-view-watcher-file".to_string())
+fn spawn_watcher_thread(
+    config: WatchConfig,
+    tx: mpsc::Sender<WatchEvent>,
+    init_tx: oneshot::Sender<InitResult>,
+    thread_shutdown_flag: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>> {
+    let thread_name = config.thread_name.to_string();
+    let spawn_context = format!("監視スレッド {} の起動に失敗", config.thread_name);
+    std::thread::Builder::new()
+        .name(thread_name)
         .spawn(move || {
             let rt_tx = tx;
             let panic_tx = rt_tx.clone();
+            let watch_dir = config.watch_dir;
+            let recursive_mode = config.recursive_mode;
+            let start_error_prefix = config.start_error_prefix;
+            let watch_error_prefix = config.watch_error_prefix;
+            let panic_message = config.panic_message;
+            let change_label = config.change_label;
+            let error_label = config.error_label;
+            let strategy = config.strategy;
+            let mut init_tx = Some(init_tx);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
-                    move |res: std::result::Result<
-                        Vec<notify_debouncer_mini::DebouncedEvent>,
-                        notify::Error,
-                    >| {
-                        match res {
-                            Ok(events) => {
-                                for event in events {
-                                    if is_content_change_event(&event.kind) {
-                                        // 対象ファイルの変更のみ通知
-                                        if is_target_file(&event.path, &target_path) {
-                                            send_watcher_message(
-                                                &rt_tx,
-                                                WatcherMessage::FileChanged(event.path.clone()),
-                                                "単一ファイル更新",
-                                            );
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("[markdown-view] ファイル監視エラー: {}", e);
-                                send_watcher_message(
-                                    &rt_tx,
-                                    WatcherMessage::WatchError(e.to_string()),
-                                    "単一ファイル監視エラー",
-                                );
-                            }
+                    move |res: std::result::Result<Vec<DebouncedEvent>, notify::Error>| match res {
+                        Ok(events) => {
+                            handle_debounced_events(&strategy, events, &rt_tx, change_label);
+                        }
+                        Err(e) => {
+                            tracing::warn!("[markdown-view] {}: {}", watch_error_prefix, e);
+                            send_watch_event(&rt_tx, WatchEvent::Error(e.to_string()), error_label);
                         }
                     },
                 );
@@ -195,190 +229,57 @@ async fn watch_single_file(state: Arc<AppState>, file_path: PathBuf) -> Result<W
                 let mut debouncer = match debouncer {
                     Ok(d) => d,
                     Err(e) => {
-                        if init_tx
-                            .send(Err(format!("debouncerの初期化に失敗: {}", e)))
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                "[markdown-view] 初期化エラーの通知先が既に閉じています"
-                            );
-                        }
+                        send_init_result(
+                            &mut init_tx,
+                            Err(format!("debouncerの初期化に失敗: {}", e)),
+                        );
                         return;
                     }
                 };
 
-                if let Err(e) = debouncer
-                    .watcher()
-                    .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
-                {
-                    if init_tx
-                        .send(Err(format!("ファイル監視の開始に失敗: {}", e)))
-                        .is_err()
-                    {
-                        tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
-                    }
+                if let Err(e) = debouncer.watcher().watch(&watch_dir, recursive_mode) {
+                    send_init_result(&mut init_tx, Err(format!("{}: {}", start_error_prefix, e)));
                     return;
                 }
 
-                if init_tx.send(Ok(())).is_err() {
-                    tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
-                }
+                send_init_result(&mut init_tx, Ok(()));
 
                 keep_watcher_thread_alive(&thread_shutdown_flag);
             }));
 
-            if result.is_err() {
-                tracing::error!("[markdown-view] 単一ファイル監視スレッドがパニックで停止しました");
-                send_watcher_message(
+            if let Err(panic_payload) = result {
+                let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "不明なパニック".to_string()
+                };
+                tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
+                send_watch_event(
                     &panic_tx,
-                    WatcherMessage::WatchError("監視スレッドがパニックで停止しました".to_string()),
-                    "単一ファイル監視パニック",
+                    WatchEvent::Error(format!(
+                        "監視スレッドがパニックで停止しました: {}",
+                        panic_detail
+                    )),
+                    error_label,
                 );
             }
         })
-        .context("監視スレッドの起動に失敗")?;
-
-    await_watcher_init(init_rx, "ファイル監視スレッドが予期せず終了しました").await?;
-    let notify_task = spawn_notify_task(
-        state,
-        rx,
-        "[markdown-view] ファイル変更通知タスクが終了しました。ライブリロードは無効です",
-    );
-
-    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
+        .context(spawn_context)
 }
 
-/// ディレクトリの再帰監視
-async fn watch_directory(state: Arc<AppState>, dir_path: PathBuf) -> Result<WatchHandle> {
-    let (tx, rx) = mpsc::channel::<WatcherMessage>(WATCHER_MESSAGE_BUFFER);
-
-    let (init_tx, init_rx) = oneshot::channel::<InitResult>();
-
-    let watch_dir = dir_path.clone();
-    // イベントコールバック内で相対パスの隠しファイル判定に使用
-    // dir_pathはAppMode::new_directory()でcanonicalize済み
-    let base_dir = dir_path.clone();
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let thread_shutdown_flag = shutdown_flag.clone();
-
-    let watcher_thread = std::thread::Builder::new()
-        .name("markdown-view-watcher-dir".to_string())
-        .spawn(move || {
-            let rt_tx = tx;
-            let panic_tx = rt_tx.clone();
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let debouncer = new_debouncer(
-                    Duration::from_millis(DEBOUNCE_MS),
-                    move |res: std::result::Result<
-                        Vec<notify_debouncer_mini::DebouncedEvent>,
-                        notify::Error,
-                    >| {
-                        match res {
-                            Ok(events) => {
-                                // 変更された.mdファイルを収集（重複排除）
-                                let mut notified: std::collections::HashSet<PathBuf> =
-                                    std::collections::HashSet::new();
-                                for event in events {
-                                    if !is_content_change_event(&event.kind) {
-                                        continue;
-                                    }
-                                    // .md拡張子フィルタ
-                                    let is_md = event
-                                        .path
-                                        .extension()
-                                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-                                    if !is_md {
-                                        continue;
-                                    }
-                                    // パスがベースディレクトリ内であることを確認する。
-                                    // 削除イベントではcanonicalizeできないため、語彙的正規化でフォールバックする。
-                                    if !is_within_base_dir(&event.path, &base_dir) {
-                                        tracing::warn!(
-                                            "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                                            event.path.display()
-                                        );
-                                        continue;
-                                    }
-                                    // 隠しファイル除外（canonicalize後のパスで判定）
-                                    // symlink経由で隠しディレクトリ内のファイルにアクセスするケースを防止
-                                    if is_hidden_relative(&event.path, &base_dir) {
-                                        continue;
-                                    }
-                                    let normalized_event_path = normalize_lexical_path(&event.path);
-                                    if notified.insert(normalized_event_path.clone()) {
-                                        send_watcher_message(
-                                            &rt_tx,
-                                            WatcherMessage::FileChanged(normalized_event_path),
-                                            "ディレクトリ更新",
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("[markdown-view] ディレクトリ監視エラー: {}", e);
-                                send_watcher_message(
-                                    &rt_tx,
-                                    WatcherMessage::WatchError(e.to_string()),
-                                    "ディレクトリ監視エラー",
-                                );
-                            }
-                        }
-                    }
-                );
-
-                let mut debouncer = match debouncer {
-                    Ok(d) => d,
-                    Err(e) => {
-                        if init_tx
-                            .send(Err(format!("debouncerの初期化に失敗: {}", e)))
-                            .is_err()
-                        {
-                            tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
-                        }
-                        return;
-                    }
-                };
-
-                // ディレクトリモードでは再帰監視
-                if let Err(e) = debouncer
-                    .watcher()
-                    .watch(&watch_dir, notify::RecursiveMode::Recursive)
-                {
-                    if init_tx
-                        .send(Err(format!("ディレクトリ監視の開始に失敗: {}", e)))
-                        .is_err()
-                    {
-                        tracing::warn!("[markdown-view] 初期化エラーの通知先が既に閉じています");
-                    }
-                    return;
-                }
-
-                if init_tx.send(Ok(())).is_err() {
-                    tracing::warn!("[markdown-view] 初期化成功の通知先が既に閉じています");
-                }
-
-                keep_watcher_thread_alive(&thread_shutdown_flag);
-            }));
-
-            if result.is_err() {
-                tracing::error!("[markdown-view] ディレクトリ監視スレッドがパニックで停止しました");
-                send_watcher_message(
-                    &panic_tx,
-                    WatcherMessage::WatchError("監視スレッドがパニックで停止しました".to_string()),
-                    "ディレクトリ監視パニック",
-                );
-            }
-        })
-        .context("監視スレッドの起動に失敗")?;
-
-    await_watcher_init(init_rx, "ディレクトリ監視スレッドが予期せず終了しました").await?;
-    let notify_task = spawn_notify_task(
-        state,
-        rx,
-        "[markdown-view] ディレクトリ変更通知タスクが終了しました。ライブリロードは無効です",
-    );
-
-    Ok(WatchHandle::new(shutdown_flag, watcher_thread, notify_task))
+fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: InitResult) {
+    if let Some(tx) = init_tx.take() {
+        if tx.send(result).is_err() {
+            tracing::warn!("[markdown-view] 初期化通知先が既に閉じています");
+        }
+    } else {
+        tracing::warn!(
+            "[markdown-view] send_init_resultが二重に呼び出されました（結果を破棄）: {:?}",
+            result.err()
+        );
+    }
 }
 
 fn keep_watcher_thread_alive(shutdown_flag: &AtomicBool) {
@@ -398,24 +299,60 @@ async fn await_watcher_init(
     }
 }
 
-fn spawn_notify_task(
-    state: Arc<AppState>,
-    mut rx: mpsc::Receiver<WatcherMessage>,
-    closed_message: &'static str,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                WatcherMessage::FileChanged(changed_path) => {
-                    notify_update(&state, &changed_path).await;
-                }
-                WatcherMessage::WatchError(error_msg) => {
-                    broadcast_error(&state, &error_msg);
+fn handle_debounced_events(
+    strategy: &WatchStrategy,
+    events: Vec<DebouncedEvent>,
+    tx: &mpsc::Sender<WatchEvent>,
+    change_label: &str,
+) {
+    match strategy {
+        WatchStrategy::SingleFile { target_path } => {
+            for event in events {
+                if is_content_change_event(&event.kind) && is_target_file(&event.path, target_path)
+                {
+                    send_watch_event(
+                        tx,
+                        WatchEvent::FileChanged(event.path.clone()),
+                        change_label,
+                    );
+                    break;
                 }
             }
         }
-        tracing::warn!("{}", closed_message);
-    })
+        WatchStrategy::Directory { base_dir } => {
+            let mut notified = HashSet::new();
+            for event in events {
+                if !is_content_change_event(&event.kind) {
+                    continue;
+                }
+                let is_md = event
+                    .path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+                if !is_md {
+                    continue;
+                }
+                if !is_within_base_dir(&event.path, base_dir) {
+                    tracing::warn!(
+                        "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
+                        event.path.display()
+                    );
+                    continue;
+                }
+                if is_hidden_relative(&event.path, base_dir) {
+                    continue;
+                }
+                let normalized_event_path = normalize_lexical_path(&event.path);
+                if notified.insert(normalized_event_path.clone()) {
+                    send_watch_event(
+                        tx,
+                        WatchEvent::FileChanged(normalized_event_path),
+                        change_label,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// レンダリング更新が必要なイベント種別か判定する
@@ -541,43 +478,16 @@ fn is_within_base_dir(path: &Path, base: &Path) -> bool {
     }
 }
 
-/// 監視エラーをbroadcastチャネル経由でWebSocketクライアントに通知する
-///
-/// `notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
-/// 受信者がいない場合は正常（クライアント未接続時）。
-fn broadcast_error(state: &AppState, error_msg: &str) {
-    let _ = state.tx().send(BroadcastMessage::Error(format!(
-        "ファイル監視エラー: {}",
-        error_msg
-    )));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::AppMode;
-    use tokio::sync::broadcast;
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join(name);
         std::fs::write(&file_path, content).unwrap();
         (dir, file_path)
-    }
-
-    fn create_single_file_state(
-        name: &str,
-        content: &str,
-    ) -> (tempfile::TempDir, PathBuf, Arc<AppState>) {
-        let (dir, file_path) = create_markdown_fixture(name, content);
-        let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(
-            AppMode::new_single_file(&file_path).unwrap(),
-            false,
-            None,
-            tx,
-        ));
-        (dir, file_path, state)
     }
 
     fn spawn_idle_watcher_thread(shutdown_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
@@ -590,80 +500,53 @@ mod tests {
         assert!(is_content_change_event(&DebouncedEventKind::AnyContinuous));
     }
 
-    #[test]
-    fn test_broadcast_errorがエラーjsonを送信する() {
-        let (_tmp_dir, _file_path, state) = create_single_file_state("test.md", "# test");
-        let mut rx = state.tx().subscribe();
-
-        broadcast_error(&state, "テストエラーメッセージ");
-
-        let received = rx.try_recv().unwrap();
-        match received {
-            BroadcastMessage::Error(msg) => {
-                assert_eq!(msg, "ファイル監視エラー: テストエラーメッセージ");
-            }
-            other => panic!("Errorを期待したが {:?} を受信", other),
-        }
-    }
-
-    #[test]
-    fn test_broadcast_errorは受信者なしでもパニックしない() {
-        let (_tmp_dir, _file_path, state) = create_single_file_state("test.md", "# test");
-        let _rx = state.tx().subscribe();
-        // _rxをドロップして受信者をゼロにする
-        drop(_rx);
-
-        // パニックしないことを確認
-        broadcast_error(&state, "受信者なしエラー");
-    }
-
     #[tokio::test]
-    async fn test_mpscチャネルでwatchermessageを送受信できる() {
-        let (tx, mut rx) = mpsc::channel::<WatcherMessage>(32);
+    async fn test_mpscチャネルでwatcheventを送受信できる() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(32);
 
         // FileChanged variant
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.md");
         std::fs::write(&path, "# test").unwrap();
-        tx.send(WatcherMessage::FileChanged(path.clone()))
+        tx.send(WatchEvent::FileChanged(path.clone()))
             .await
             .unwrap();
         match rx.recv().await.unwrap() {
-            WatcherMessage::FileChanged(p) => assert_eq!(p, path),
-            WatcherMessage::WatchError(_) => panic!("FileChangedを期待したがWatchErrorを受信"),
+            WatchEvent::FileChanged(p) => assert_eq!(p, path),
+            WatchEvent::Error(_) => panic!("FileChangedを期待したがErrorを受信"),
         }
 
-        // WatchError variant
-        tx.send(WatcherMessage::WatchError("テストエラー".to_string()))
+        // Error variant
+        tx.send(WatchEvent::Error("テストエラー".to_string()))
             .await
             .unwrap();
         match rx.recv().await.unwrap() {
-            WatcherMessage::WatchError(msg) => assert_eq!(msg, "テストエラー"),
-            WatcherMessage::FileChanged(_) => panic!("WatchErrorを期待したがFileChangedを受信"),
+            WatchEvent::Error(msg) => assert_eq!(msg, "テストエラー"),
+            WatchEvent::FileChanged(_) => panic!("Errorを期待したがFileChangedを受信"),
         }
     }
 
     #[test]
-    fn test_send_watcher_message_チャネル満杯時はメッセージを破棄してブロックしない() {
-        let (tx, mut rx) = mpsc::channel::<WatcherMessage>(1);
+    fn test_send_watch_event_チャネル満杯時はメッセージを破棄してブロックしない() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         // チャネルを満杯にする
-        tx.blocking_send(WatcherMessage::FileChanged(first.clone()))
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
             .unwrap();
 
         // 満杯時にtry_sendで即座に破棄される（ブロックしない）
-        send_watcher_message(
+        send_watch_event(
             &tx,
-            WatcherMessage::WatchError("満杯時テスト".to_string()),
+            WatchEvent::Error("満杯時テスト".to_string()),
             "満杯時テスト",
         );
 
         // 最初のメッセージのみ受信できる
         match rx.blocking_recv().unwrap() {
-            WatcherMessage::FileChanged(path) => {
+            WatchEvent::FileChanged(path) => {
                 assert_eq!(path, first);
             }
-            WatcherMessage::WatchError(_) => {
+            WatchEvent::Error(_) => {
                 panic!("最初のメッセージはFileChangedを期待")
             }
         }
@@ -772,48 +655,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watchhandle_shutdownはタイムアウト後にabortする() {
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let notify_task = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        });
+    async fn test_watcher_spawn_単一ファイルモードでイベント受信できる() {
+        let (_dir, file_path) = create_markdown_fixture("watch.md", "# before");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (watcher, mut rx) = Watcher::spawn(mode).await.unwrap();
 
-        let handle = WatchHandle::new(shutdown_flag, watcher_thread, notify_task);
-        let start = std::time::Instant::now();
-        handle.shutdown().await;
-        assert!(start.elapsed() >= Duration::from_secs(SHUTDOWN_TIMEOUT_SECS));
-    }
+        tokio::fs::write(&file_path, "# after").await.unwrap();
 
-    #[tokio::test]
-    async fn test_watchhandle_dropはフォールバック停止でabortする() {
-        struct TaskDropFlag(Arc<AtomicBool>);
-        impl Drop for TaskDropFlag {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
+        let received = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match received {
+            WatchEvent::FileChanged(changed_path) => {
+                assert_eq!(
+                    changed_path.file_name(),
+                    Some(std::ffi::OsStr::new("watch.md"))
+                );
+            }
+            WatchEvent::Error(message) => {
+                panic!("FileChangedを期待したが Error({}) を受信", message)
             }
         }
 
+        watcher.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_watcher_shutdownで監視スレッドを停止できる() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let dropped_for_task = dropped.clone();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let notify_task = tokio::spawn(async move {
-            let _guard = TaskDropFlag(dropped_for_task);
-            let _ = started_tx.send(());
-            std::future::pending::<()>().await;
-        });
+        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread);
+        watcher.shutdown();
+        assert!(shutdown_flag.load(Ordering::Acquire));
+    }
 
-        let handle = WatchHandle::new(shutdown_flag, watcher_thread, notify_task);
-        started_rx.await.unwrap();
-        drop(handle);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !dropped.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+    #[tokio::test]
+    async fn test_watcher_dropはフォールバック停止を行う() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
+        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread);
+
+        drop(watcher);
+        assert!(shutdown_flag.load(Ordering::Acquire));
     }
 }

@@ -11,4 +11,4 @@ pub use self::files::{list_markdown_files, resolve_file, ResolveFileError};
 pub use self::messages::{BroadcastMessage, MAX_FILE_SIZE};
 pub use self::routes::create_router;
 pub use self::state::{AppMode, AppModeBuildError, AppState, CanonicalPath, CanonicalPathError};
-pub use self::websocket::notify_update;
+pub use self::websocket::{notify_update, spawn_watch_event_forwarder};

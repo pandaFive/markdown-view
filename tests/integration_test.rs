@@ -182,9 +182,11 @@ async fn test_ファイル変更でwebsocket更新() {
     let (state, addr) = setup_single_file_server_from_path(&file_path).await;
 
     // ファイル監視開始
-    let _watch_handle = markdown_view::watcher::watch_path(state.clone())
+    let (_watcher, watch_events) = markdown_view::watcher::Watcher::spawn(state.mode().clone())
         .await
         .unwrap();
+    let _watch_forwarder =
+        markdown_view::server::spawn_watch_event_forwarder(state.clone(), watch_events);
 
     // WebSocket接続
     let url = format!("ws://{}/ws", addr);
@@ -216,9 +218,11 @@ async fn test_ファイル削除でwebsocketエラー通知() {
 
     let (state, addr) = setup_single_file_server_from_path(&file_path).await;
 
-    let _watch_handle = markdown_view::watcher::watch_path(state.clone())
+    let (_watcher, watch_events) = markdown_view::watcher::Watcher::spawn(state.mode().clone())
         .await
         .unwrap();
+    let _watch_forwarder =
+        markdown_view::server::spawn_watch_event_forwarder(state.clone(), watch_events);
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();

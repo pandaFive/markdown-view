@@ -3,3 +3,7 @@ docs/plans/*
 node_modules/
 playwright-report/
 test-results/
+
+AGENTS.md
+.serena/*
+.playwright-mcp/*

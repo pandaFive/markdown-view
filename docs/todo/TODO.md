@@ -46,3 +46,35 @@
   - ファイル: `src/server/state.rs` L191
   - 内容: 診断性向上のためDebug traitを導出
   - 理由: サーバー状態のログ出力・デバッグ支援
+
+## PRレビュー: watcher APIリファクタリング (レビュー日: 2026-03-10)
+
+### 巨大な修正（要別途対応）
+
+- [ ] [Medium] `WatchConfig`の`&'static str`フィールド6つを`WatchStrategy`メソッドに統合
+  - ファイル: `src/watcher.rs` L32-43, L144-176
+  - 影響範囲: `WatchConfig`, `WatchStrategy`, `spawn_watcher_thread`
+  - 修正方針: `WatchStrategy`にラベル導出メソッドを追加し、`WatchConfig`を`(watch_dir, strategy)`に簡素化。`recursive_mode`も`strategy`から導出
+  - 理由: 30行以上の変更が必要。コピペミスリスクの排除とコード簡素化
+
+### Low Priority
+
+- [ ] `handle_debounced_events()`のユニットテスト追加
+  - ファイル: `src/watcher.rs` L273-327
+  - 内容: SingleFile/Directoryの両戦略、非`.md`ファイル、隠しファイル、重複排除のテスト
+  - 理由: コアイベント処理ロジックの回帰防止
+
+- [ ] `Watcher::spawn`ディレクトリモードのend-to-endテスト追加
+  - ファイル: `src/watcher.rs` テストモジュール
+  - 内容: `test_watcher_spawn_単一ファイルモードでイベント受信できる`のディレクトリ版
+  - 理由: ディレクトリモード固有のフィルタリングの検証
+
+- [ ] `WatchStrategy`で`CanonicalPath`型を使用
+  - ファイル: `src/watcher.rs` L26-29
+  - 内容: `PathBuf`の代わりに既存の`CanonicalPath` newtypeを使い、正規化の不変条件を型で保証
+  - 理由: 型安全性の向上
+
+- [ ] `WatchEvent::Error(String)`の構造化エラー化
+  - ファイル: `src/watcher.rs` L14-23
+  - 内容: 将来コンシューマが増えた場合に`WatchErrorKind`列挙型への移行を検討
+  - 理由: 現在は単一コンシューマのため優先度低
