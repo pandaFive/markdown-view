@@ -1,11 +1,14 @@
+//! WebSocketセッションと変更通知ブロードキャストを管理する。
+
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use tokio::sync::broadcast;
 
 use super::files::{read_and_render_file, revalidate_single_file_target};
-use super::{AppState, BroadcastMessage};
+use super::messages::BroadcastMessage;
+use super::state::AppState;
 use crate::template::error_message_json;
 
 async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool {
@@ -59,18 +62,7 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", e);
-                if let Err(send_err) = socket
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1008,
-                        reason: "ファイル検証に失敗しました".into(),
-                    })))
-                    .await
-                {
-                    tracing::warn!(
-                        "[markdown-view] WebSocket closeフレーム送信エラー: {}",
-                        send_err
-                    );
-                }
+                let _ = send_close_frame(&mut socket, 1008, "ファイル検証に失敗しました").await;
                 return;
             }
         };
@@ -78,15 +70,7 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", e);
-                if let Err(e) = socket
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: e.close_code(),
-                        reason: e.user_message().into(),
-                    })))
-                    .await
-                {
-                    tracing::warn!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
-                }
+                let _ = send_close_frame(&mut socket, e.close_code(), e.user_message()).await;
                 return;
             }
         };
@@ -99,15 +83,7 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 {
                     return;
                 }
-                if let Err(e) = socket
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1011,
-                        reason: "内部エラー".into(),
-                    })))
-                    .await
-                {
-                    tracing::warn!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
-                }
+                let _ = send_close_frame(&mut socket, 1011, "内部エラー").await;
                 return;
             }
         };
@@ -198,6 +174,21 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
+async fn send_close_frame(socket: &mut WebSocket, code: u16, reason: impl Into<String>) -> bool {
+    let reason = reason.into();
+    if let Err(e) = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await
+    {
+        tracing::warn!("[markdown-view] WebSocket closeフレーム送信エラー: {}", e);
+        return false;
+    }
+    true
+}
+
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
 /// ディレクトリモードでは変更ファイルの相対パスを`file`フィールドに含め、
@@ -267,4 +258,250 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         }
     };
     let _ = state.tx().send(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use tokio::sync::broadcast;
+
+    use super::*;
+    use crate::server::{AppMode, AppState, MAX_FILE_SIZE};
+
+    #[tokio::test]
+    async fn test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ() {
+        let base_dir = tempfile::tempdir().unwrap();
+        std::fs::write(base_dir.path().join("README.md"), "# README").unwrap();
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("outside.md");
+        std::fs::write(&outside_file, "# outside").unwrap();
+        let outside_canonical = outside_file.canonicalize().unwrap();
+
+        let state = create_directory_state(base_dir.path());
+        let mut rx = state.tx().subscribe();
+
+        notify_update(&state, &outside_canonical).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_ディレクトリモードで読み込み失敗時はerrorを送信する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let target = base_dir.path().join("README.md");
+        std::fs::write(&target, "# before").unwrap();
+
+        let state = create_directory_state(base_dir.path());
+        let mut rx = state.tx().subscribe();
+
+        std::fs::remove_file(&target).unwrap();
+        notify_update(&state, &target).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル読み込みエラー"));
+                assert!(
+                    message.contains("README.md"),
+                    "エラーメッセージにファイル名が含まれるべき: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_ファイル名不明時はdisplay表示がエラーに含まれる() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("dummy.md");
+        std::fs::write(&file_path, "# dummy").unwrap();
+
+        let state = create_single_file_state(&file_path);
+        let mut rx = state.tx().subscribe();
+
+        notify_update(&state, Path::new("/")).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(
+                    message.contains("/"),
+                    "ファイル名不明時はdisplay()表示が含まれるべき: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで読み込み失敗時はファイル名を含むエラーを送信する(
+    ) {
+        let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
+        let mut rx = state.tx().subscribe();
+
+        std::fs::remove_file(&file_path).unwrap();
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル検証エラー"));
+                assert!(message.contains("test.md"));
+                assert!(!message.contains("No such file"));
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードでサイズ超過時はtoo_largeエラーを送信する() {
+        let (_dir, file_path, state) = create_single_file_state_with_fixture("large.md", "# large");
+        let mut rx = state.tx().subscribe();
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+        file.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイルサイズが上限"));
+                assert!(message.contains("large.md"));
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで非utf8ファイルはnot_utf8エラーを送信する() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("binary.md", "# valid");
+        let mut rx = state.tx().subscribe();
+
+        std::fs::write(&file_path, b"\xff\xfe\x80\x81").unwrap();
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("UTF-8"));
+                assert!(message.contains("binary.md"));
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで受信者ゼロ時は送信をスキップする() {
+        let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        std::fs::remove_file(&file_path).unwrap();
+        notify_update(&state, &file_path).await;
+
+        let mut rx = state.tx().subscribe();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_notify_update_単一ファイルモードで正常更新時はupdateを送信する() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("hello.md", "# hello world");
+        let mut rx = state.tx().subscribe();
+
+        notify_update(&state, &file_path).await;
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Update(update) => {
+                assert!(update.content().as_str().contains("hello world"));
+                assert!(update.toc().as_str().contains("hello-world"));
+                assert!(update.file().is_none());
+            }
+            other => panic!("Updateメッセージを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_単一ファイルモードは再読み込みしたupdateを返す() {
+        let (_dir, _file_path, state) = create_single_file_state_with_fixture("test.md", "# title");
+
+        let msg = lagged_recovery_message(&state).await;
+        match msg {
+            BroadcastMessage::Update(update) => {
+                assert!(update.content().as_str().contains("title"));
+            }
+            other => panic!("Updateを期待したが {:?} を受信", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_ディレクトリモードはrefreshを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# title").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let msg = lagged_recovery_message(&state).await;
+        assert!(matches!(msg, BroadcastMessage::Refresh));
+    }
+
+    #[tokio::test]
+    async fn test_lagged_recovery_message_単一ファイル読み込み失敗時はerrorを返す() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("missing.md", "# title");
+
+        std::fs::remove_file(&file_path).unwrap();
+        let msg = lagged_recovery_message(&state).await;
+        match msg {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル検証エラー"));
+            }
+            other => panic!("Errorを期待したが {:?} を受信", other),
+        }
+    }
+
+    fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(name);
+        std::fs::write(&file_path, content).unwrap();
+        (dir, file_path)
+    }
+
+    fn create_single_file_state(file_path: &Path) -> AppState {
+        let (tx, _rx) = broadcast::channel(16);
+        AppState::new(
+            AppMode::new_single_file(file_path).unwrap(),
+            false,
+            None,
+            tx,
+        )
+    }
+
+    fn create_directory_state(dir_path: &Path) -> AppState {
+        let (tx, _rx) = broadcast::channel(16);
+        AppState::new(AppMode::new_directory(dir_path).unwrap(), false, None, tx)
+    }
+
+    fn create_single_file_state_with_fixture(
+        name: &str,
+        content: &str,
+    ) -> (tempfile::TempDir, PathBuf, AppState) {
+        let (dir, file_path) = create_markdown_fixture(name, content);
+        let state = create_single_file_state(&file_path);
+        (dir, file_path, state)
+    }
 }
