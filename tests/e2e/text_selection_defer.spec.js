@@ -128,6 +128,9 @@ test('選択解除されなくても30秒フォールバックで保留更新を
       content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
+    // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
+    // 偽メッセージ送信後にonmessageを無効化する
+    window.__lastWs.onmessage = function() {};
   });
 
   await expect(page.locator('#content')).toContainText('Fallback applied');
