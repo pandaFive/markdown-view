@@ -25,6 +25,7 @@ const MAX_FILE_LIST: usize = 1000;
 const MAX_DIR_DEPTH: usize = 32;
 
 #[derive(Debug, Clone)]
+/// ファイル解決結果。ターゲットファイルのパス、ファイル一覧、相対パス、表示用ラベルを保持する。
 pub(super) struct ResolvedTarget {
     file_path: PathBuf,
     file_list: Option<Vec<String>>,
@@ -72,6 +73,7 @@ impl ResolvedTarget {
 }
 
 #[derive(Debug, Clone)]
+/// WebSocket初期化時のエラー。closeフレームのコードと理由を保持する。
 pub(super) struct SocketInitError {
     close_code: u16,
     reason: String,
@@ -121,7 +123,6 @@ pub(super) fn resolve_target_file_or_error(
         state,
         file_path,
         file_list,
-        false,
         "ターゲットファイルの相対パス算出失敗",
     ))
 }
@@ -145,6 +146,10 @@ pub(super) async fn read_rendered_update_or_error(
         })
 }
 
+/// WebSocket接続時の初期コンテンツを取得する。
+///
+/// 単一ファイルモード: ファイルを読み込みSome(UpdateMessage)を返す。
+/// ディレクトリモード: Noneを返す（初期コンテンツなし）。
 pub(super) async fn initial_socket_update(
     state: &AppState,
 ) -> Result<Option<UpdateMessage>, SocketInitError> {
@@ -154,13 +159,12 @@ pub(super) async fn initial_socket_update(
 
     let validated_path = revalidate_single_file_target(file_path).map_err(|e| {
         tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", e);
-        SocketInitError::new(1008, "ファイル検証に失敗しました")
+        SocketInitError::new(1008, format!("ファイル検証に失敗しました: {}", e))
     })?;
     let target = build_resolved_target(
         state,
         validated_path,
         None,
-        false,
         "WebSocket初期ターゲットの相対パス算出失敗",
     );
     let update = read_and_render_file(target.file_path())
@@ -172,6 +176,10 @@ pub(super) async fn initial_socket_update(
     Ok(Some(target.update(update)))
 }
 
+/// WebSocketクライアント遅延時の回復メッセージを生成する。
+///
+/// 単一ファイルモード: ファイルを再読み込みしてUpdateを返す。
+/// ディレクトリモード: Refreshを返す（クライアント側で再取得させる）。
 pub(super) async fn lagged_recovery_broadcast_message(state: &AppState) -> BroadcastMessage {
     let Some(file_path) = state.mode().single_file() else {
         return BroadcastMessage::Refresh;
@@ -188,7 +196,6 @@ pub(super) async fn lagged_recovery_broadcast_message(state: &AppState) -> Broad
         state,
         validated_path,
         None,
-        false,
         "WebSocket再送信ターゲットの相対パス算出失敗",
     );
     match read_and_render_file(target.file_path()).await {
@@ -208,16 +215,20 @@ pub(super) async fn lagged_recovery_broadcast_message(state: &AppState) -> Broad
     }
 }
 
+/// ファイル変更イベントからブロードキャスト用メッセージを生成する。
+///
+/// Noneを返した場合、ブロードキャストをスキップすべきことを示す
+/// （ディレクトリモードで相対パスが算出できない場合）。
 pub(super) async fn update_broadcast_message(
     state: &AppState,
     changed_file: &Path,
 ) -> Option<BroadcastMessage> {
     let target = if let Some(expected) = state.mode().single_file() {
         if let Err(e) = revalidate_single_file_target(expected) {
-            let file_label = changed_file
+            let file_label = expected
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| changed_file.display().to_string());
+                .unwrap_or_else(|| expected.display().to_string());
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
                 file_label,
@@ -232,7 +243,6 @@ pub(super) async fn update_broadcast_message(
             state,
             changed_file.to_path_buf(),
             None,
-            false,
             "更新対象の相対パス算出失敗",
         )
     } else {
@@ -326,7 +336,6 @@ fn build_resolved_target(
     state: &AppState,
     file_path: PathBuf,
     file_list: Option<Vec<String>>,
-    _require_relative_path: bool,
     warn_label: &'static str,
 ) -> ResolvedTarget {
     let relative_path = state.mode().relative_path_of(&file_path);
@@ -337,6 +346,11 @@ fn build_resolved_target(
             file_path.display(),
             state.mode().base_dir().display()
         );
+        // これは意図的な graceful degradation であり、relative_path が None でもページ描画自体は継続できる。
+        // HTTP経路(resolve_target_file_or_error経由)ではサイドバーのファイルハイライトだけが効かなくなり、
+        // コンテンツ表示そのものには影響しない。
+        // 一方で WebSocket経路(build_update_target経由)では relative_path が None の場合に None を返し、
+        // 当該更新のブロードキャストをスキップする対策を既に入れている。
     }
     ResolvedTarget::new(file_path, file_list, relative_path)
 }
@@ -346,7 +360,6 @@ fn build_update_target(state: &AppState, changed_file: &Path) -> Option<Resolved
         state,
         changed_file.to_path_buf(),
         None,
-        true,
         "相対パス算出失敗のためブロードキャストをスキップ",
     );
     if state.mode().is_directory() && target.relative_path.is_none() {
