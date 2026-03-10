@@ -8,11 +8,15 @@ use axum::Json;
 use tokio::io::AsyncReadExt;
 
 use super::guards::json_error;
-use super::messages::{file_size_limit_error_message, ApiError, MAX_FILE_SIZE};
+use super::messages::ApiError;
 use super::state::AppState;
 use crate::renderer::render_markdown;
 use crate::template::{error_message_json, UpdateMessage};
 use crate::toc::generate_toc;
+
+/// ファイルサイズ上限: OOM防止
+pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+const FILE_SIZE_LIMIT_MB: u64 = MAX_FILE_SIZE / 1024 / 1024;
 
 /// ファイル一覧の最大件数
 const MAX_FILE_LIST: usize = 1000;
@@ -20,26 +24,12 @@ const MAX_FILE_LIST: usize = 1000;
 /// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
 const MAX_DIR_DEPTH: usize = 32;
 
-#[derive(Debug, Copy, Clone)]
-pub(super) enum TargetResolveContext {
-    Index,
-    ApiContent,
-}
-
-impl TargetResolveContext {
-    fn not_found_message(self) -> &'static str {
-        match self {
-            Self::Index => "表示可能なMarkdownファイルが見つかりません",
-            Self::ApiContent => "指定したファイルが見つかりません",
-        }
-    }
-
-    fn read_error_log_label(self) -> &'static str {
-        match self {
-            Self::Index => "index",
-            Self::ApiContent => "api/content",
-        }
-    }
+/// ファイルサイズ超過時のユーザー向けエラーメッセージを返す。
+fn file_size_limit_error_message() -> String {
+    format!(
+        "ファイルサイズが上限（{}MB）を超えています",
+        FILE_SIZE_LIMIT_MB
+    )
 }
 
 /// 対象ファイル解決エラーをエンドポイント文脈に応じたAPIエラーへ変換する。
@@ -47,16 +37,16 @@ pub(super) fn resolve_target_file_or_error(
     state: &AppState,
     query_file: Option<&str>,
     include_file_list: bool,
-    context: TargetResolveContext,
+    not_found_message: &'static str,
 ) -> Result<(PathBuf, Option<Vec<String>>), ApiError> {
     resolve_target_file(state, query_file, include_file_list).map_err(|status| {
         let msg = match status {
-            StatusCode::NOT_FOUND => context.not_found_message(),
+            StatusCode::NOT_FOUND => not_found_message,
             StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
             other => {
                 tracing::warn!(
-                    "[markdown-view] 予期しないファイル解決ステータスを検出: context={:?}, status={}",
-                    context,
+                    "[markdown-view] 予期しないファイル解決ステータスを検出: not_found_message={}, status={}",
+                    not_found_message,
                     other
                 );
                 "ファイル解決に失敗しました"
@@ -69,12 +59,12 @@ pub(super) fn resolve_target_file_or_error(
 /// Markdownの読み込みと描画を行い、失敗時はAPI応答用のエラーへ変換する。
 pub(super) async fn read_rendered_update_or_error(
     file_path: &Path,
-    context: TargetResolveContext,
+    read_error_log_label: &'static str,
 ) -> Result<UpdateMessage, ApiError> {
     read_and_render_file(file_path).await.map_err(|e| {
         tracing::warn!(
             "[markdown-view] {}読み込みエラー: {}",
-            context.read_error_log_label(),
+            read_error_log_label,
             e
         );
         json_error(e.status_code(), e.user_message())

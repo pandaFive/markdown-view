@@ -4,10 +4,7 @@
 
 ### Low Priority
 
-- [ ] `TargetResolveContext`の抽象度評価
-  - ファイル: `src/server/files.rs` L24-44
-  - 内容: 現状2メソッド×2バリアントで薄い抽象化。将来エンドポイント固有の処理が増えなければ`&'static str`パラメータに簡素化を検討
-  - 理由: 過剰設計にならないよう定期的に評価
+- [x] `TargetResolveContext`の抽象度評価 → `&'static str`パラメータに簡素化済み
 
 ## PRレビュー: server/templateモジュール分割 (レビュー日: 2026-03-10)
 
@@ -22,10 +19,12 @@
 
 ### Low Priority
 
-- [ ] `MAX_FILE_SIZE`と`file_size_limit_error_message()`を`files.rs`に移動
-  - ファイル: `src/server/messages.rs` → `src/server/files.rs`
-  - 内容: ファイル読み込みの関心事を`files.rs`に集約し、ファサードから再エクスポート
-  - 理由: `messages.rs`はメッセージ型の責務に集中すべき
+- [x] `MAX_FILE_SIZE`と`file_size_limit_error_message()`を`files.rs`に移動済み
+
+- [ ] `file_size_limit_error_message()`を`&'static str`定数に変換
+  - ファイル: `src/server/files.rs` L27-33
+  - 内容: `FILE_SIZE_LIMIT_MB`はコンパイル時定数のため、毎回`format!`で`String`を生成する代わりに定数化してヒープ割り当てを削減
+  - 理由: 不要なヒープ割り当ての排除
 
 - [ ] `CanonicalPath`を`pub(super)`に降格
   - ファイル: `src/server/state.rs` L12

@@ -11,7 +11,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{
     list_markdown_files, read_rendered_update_or_error, resolve_target_file_or_error,
-    TargetResolveContext,
 };
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
@@ -89,10 +88,10 @@ async fn index_handler(
         &state,
         query.file.as_deref(),
         true,
-        TargetResolveContext::Index,
+        "表示可能なMarkdownファイルが見つかりません",
     )?;
 
-    let update = read_rendered_update_or_error(&file_path, TargetResolveContext::Index).await?;
+    let update = read_rendered_update_or_error(&file_path, "index").await?;
 
     let title = file_path
         .file_name()
@@ -129,11 +128,10 @@ async fn api_content_handler(
         &state,
         query.file.as_deref(),
         false,
-        TargetResolveContext::ApiContent,
+        "指定したファイルが見つかりません",
     )?;
 
-    let update =
-        read_rendered_update_or_error(&file_path, TargetResolveContext::ApiContent).await?;
+    let update = read_rendered_update_or_error(&file_path, "api/content").await?;
 
     Ok(Json(
         update.with_file(relative_path_or_warn(&state, &file_path)),
