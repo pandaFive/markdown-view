@@ -1,0 +1,145 @@
+/* メインコンテンツ */
+.content {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 2.25rem clamp(1.2rem, 4vw, 3.5rem) 3rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 28px;
+  background: var(--content-bg);
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(18px);
+}
+
+.content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  line-height: 1.25;
+  scroll-margin-top: 7rem;
+}
+
+.content h1, .content h2 {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Yu Mincho", serif;
+}
+
+.content .heading-anchor {
+  margin-left: 0.5rem;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid var(--table-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  vertical-align: middle;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.content h1:hover .heading-anchor,
+.content h2:hover .heading-anchor,
+.content h3:hover .heading-anchor,
+.content h4:hover .heading-anchor,
+.content h5:hover .heading-anchor,
+.content h6:hover .heading-anchor,
+.content .heading-anchor:focus {
+  opacity: 1;
+}
+
+.content .heading-anchor:hover,
+.content .heading-anchor.copied {
+  color: var(--fg);
+  background: var(--accent-soft);
+}
+
+.content h1 { font-size: 2.4em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
+.content h2 { font-size: 1.75em; padding-bottom: 0.3em; border-bottom: 1px solid var(--hr-color); }
+.content h3 { font-size: 1.25em; }
+
+.content p { margin-bottom: 1em; }
+
+.content a { color: var(--link); text-decoration: none; }
+.content a:hover { text-decoration: underline; }
+
+.content code {
+  background: var(--code-bg);
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  font-size: 85%;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.content pre.code-block {
+  position: relative;
+  background: var(--code-bg);
+  padding: 1rem 1.1rem;
+  border-radius: 16px;
+  overflow-x: auto;
+  margin-bottom: 1em;
+  line-height: 1.45;
+  border: 1px solid var(--table-border);
+}
+
+.content .code-copy {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  border: 1px solid var(--table-border);
+  border-radius: 999px;
+  background: var(--code-copy-bg);
+  color: var(--fg);
+  padding: 0.28rem 0.7rem;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.content .code-copy.copied {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.content pre.code-block code {
+  background: none;
+  padding: 0;
+  font-size: 85%;
+}
+
+.content blockquote {
+  border-left: 4px solid var(--blockquote-border);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1em;
+  color: var(--blockquote-fg);
+  background: var(--blockquote-bg);
+  border-radius: 0 14px 14px 0;
+}
+
+.content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1em;
+}
+
+.content th, .content td {
+  border: 1px solid var(--table-border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.content th.align-left, .content td.align-left { text-align: left; }
+.content th.align-center, .content td.align-center { text-align: center; }
+.content th.align-right, .content td.align-right { text-align: right; }
+
+.content th { font-weight: 600; background: var(--table-alt-bg); }
+.content tr:nth-child(even) { background: var(--table-alt-bg); }
+
+.content hr {
+  border: none;
+  height: 1px;
+  background: var(--hr-color);
+  margin: 1.5em 0;
+}
+
+.content img { max-width: 100%; height: auto; border-radius: 4px; }
+
+.content ul, .content ol { padding-left: 2em; margin-bottom: 1em; }
+.content li { margin: 0.25em 0; }
+.content li input[type="checkbox"] { margin-right: 0.5em; }

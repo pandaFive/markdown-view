@@ -1,0 +1,92 @@
+/* ファイル一覧 */
+.file-list {
+  padding: 0;
+}
+
+.file-list ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.file-tree-root {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.file-list a {
+  display: block;
+  padding: 0.42rem 0.55rem;
+  border-radius: 10px;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.8125rem;
+  transition: background 0.15s, transform 0.15s;
+  word-break: break-all;
+}
+
+.file-list a:hover {
+  background: var(--toc-hover-bg);
+  transform: translateX(2px);
+}
+
+.file-tree-file.active a {
+  color: var(--toc-active);
+  font-weight: 600;
+  background: var(--accent-soft);
+}
+
+/* ファイルツリー */
+.file-tree-dir > summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 10px;
+  list-style: none;
+  color: var(--fg);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.file-tree-dir > summary::-webkit-details-marker { display: none; }
+
+.file-tree-dir > summary .tree-icon-chevron {
+  display: inline-flex;
+  width: 0.75rem;
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  transition: transform 0.15s;
+}
+
+.file-tree-dir[open] > summary .tree-icon-chevron { transform: rotate(90deg); }
+.file-tree-dir > summary:hover { background: var(--toc-hover-bg); }
+
+.file-tree-children {
+  list-style: none;
+  padding-left: 0.5rem;
+  margin-left: 0.45rem;
+  border-left: 1px solid var(--sidebar-border);
+}
+
+.file-tree-file {
+  margin: 0;
+  display: flex;
+  align-items: center;
+}
+
+.file-tree-file a {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-left: 0.4rem;
+}
+
+.tree-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 1rem;
+  font-size: 0.8125rem;
+  justify-content: center;
+}
