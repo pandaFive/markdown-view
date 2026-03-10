@@ -159,6 +159,22 @@ impl AppMode {
         }
     }
 
+    /// 単一ファイルモードの正規化パスを返す。ディレクトリモードの場合はNone
+    pub(crate) fn single_file_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile(path) => Some(path),
+            AppModeKind::Directory(_) => None,
+        }
+    }
+
+    /// ディレクトリモードの正規化パスを返す。単一ファイルモードの場合はNone
+    pub(crate) fn directory_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile(_) => None,
+            AppModeKind::Directory(path) => Some(path),
+        }
+    }
+
     /// ディレクトリモードかどうか
     pub fn is_directory(&self) -> bool {
         matches!(self.0, AppModeKind::Directory(_))
@@ -241,7 +257,9 @@ mod tests {
 
         assert_eq!(mode.base_dir(), canonical.parent().unwrap());
         assert_eq!(mode.single_file(), Some(canonical.as_path()));
+        assert!(mode.single_file_canonical().is_some());
         assert!(mode.directory().is_none());
+        assert!(mode.directory_canonical().is_none());
     }
 
     #[test]
@@ -253,7 +271,9 @@ mod tests {
 
         assert_eq!(mode.base_dir(), canonical.as_path());
         assert!(mode.single_file().is_none());
+        assert!(mode.single_file_canonical().is_none());
         assert_eq!(mode.directory(), Some(canonical.as_path()));
+        assert!(mode.directory_canonical().is_some());
     }
 
     #[test]

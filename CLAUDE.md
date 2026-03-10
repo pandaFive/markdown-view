@@ -41,9 +41,15 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
   │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
   │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型
   │   └── websocket.rs  WebSocketセッション管理、変更通知ブロードキャスト
-  ├── renderer.rs   Markdown→HTML変換（pulldown-cmark + syntectハイライト）
-  ├── toc.rs        Markdown→目次HTML生成
-  ├── template.rs   HTMLテンプレート（CSS/JS埋め込み、UpdateMessage型）
+  ├── renderer/     Markdown描画モジュール
+  │   ├── mod.rs        Markdown→HTML変換（pulldown-cmark + syntectハイライト）
+  │   └── toc.rs        Markdown→目次HTML生成
+  ├── template/     HTMLテンプレートモジュール
+  │   ├── mod.rs        公開API再エクスポート
+  │   ├── page.rs       ページレンダリング
+  │   ├── message.rs    UpdateMessage型、エラーJSON生成
+  │   ├── tree.rs       ファイルツリーHTML生成
+  │   └── assets.rs     CSS/JSバンドル、CSPハッシュ生成
   └── watcher.rs    ファイル監視（notify + debouncer → tokio bridge）
 ```
 
