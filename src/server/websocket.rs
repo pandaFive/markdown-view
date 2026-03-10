@@ -7,7 +7,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use tokio::sync::{broadcast, mpsc};
 
 use super::files::{
-    initial_socket_update, lagged_recovery_broadcast_message, update_broadcast_message,
+    build_change_broadcast_message, build_lagged_recovery_message, load_initial_socket_update,
 };
 use super::messages::BroadcastMessage;
 use super::state::AppState;
@@ -25,13 +25,13 @@ async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool
 }
 
 pub(super) async fn lagged_recovery_message(state: &AppState) -> BroadcastMessage {
-    lagged_recovery_broadcast_message(state).await
+    build_lagged_recovery_message(state).await
 }
 
 pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx().subscribe();
 
-    if let Some(update) = match initial_socket_update(state.as_ref()).await {
+    if let Some(update) = match load_initial_socket_update(state.as_ref()).await {
         Ok(update) => update,
         Err(error) => {
             let _ = send_close_frame(&mut socket, error.close_code(), error.reason()).await;
@@ -164,7 +164,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         return;
     }
 
-    if let Some(msg) = update_broadcast_message(state, changed_file).await {
+    if let Some(msg) = build_change_broadcast_message(state, changed_file).await {
         let _ = state.tx().send(msg);
     }
 }

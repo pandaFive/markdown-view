@@ -10,7 +10,7 @@ use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{
-    list_markdown_files, read_rendered_update_or_error, resolve_target_file_or_error,
+    list_markdown_files, load_route_update, resolve_route_target, RouteTargetRequest,
 };
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
@@ -72,14 +72,9 @@ async fn index_handler(
 ) -> Result<Html<String>, ApiError> {
     ensure_allowed_request_host(&headers)?;
 
-    let target = resolve_target_file_or_error(
-        &state,
-        query.file.as_deref(),
-        true,
-        "表示可能なMarkdownファイルが見つかりません",
-    )?;
-
-    let update = read_rendered_update_or_error(&target, "index").await?;
+    let request = RouteTargetRequest::page(query.file.as_deref());
+    let target = resolve_route_target(&state, request)?;
+    let update = load_route_update(&target, request).await?;
 
     let title = target
         .file_path()
@@ -111,14 +106,9 @@ async fn api_content_handler(
 ) -> Result<Json<UpdateMessage>, ApiError> {
     ensure_allowed_request_host(&headers)?;
 
-    let target = resolve_target_file_or_error(
-        &state,
-        query.file.as_deref(),
-        false,
-        "指定したファイルが見つかりません",
-    )?;
-
-    let update = read_rendered_update_or_error(&target, "api/content").await?;
+    let request = RouteTargetRequest::api_content(query.file.as_deref());
+    let target = resolve_route_target(&state, request)?;
+    let update = load_route_update(&target, request).await?;
 
     Ok(Json(update))
 }
