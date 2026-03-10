@@ -1,3 +1,5 @@
+//! Host/Origin 検証とHTTPエラー応答を管理する。
+
 use std::net::IpAddr;
 
 use axum::http::header::{HOST, ORIGIN};
@@ -5,7 +7,7 @@ use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::Json;
 
-use super::ApiError;
+use super::messages::ApiError;
 use crate::template::{csp_hash_sources, error_message_json};
 
 pub(super) fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {
@@ -141,5 +143,125 @@ pub(super) fn normalize_authority(authority: &str) -> String {
             authority
         );
         authority.trim().trim_end_matches('.').to_ascii_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header::{HOST, ORIGIN};
+    use axum::http::HeaderMap;
+
+    use super::*;
+
+    #[test]
+    fn test_trusted_host_localhost() {
+        assert!(is_trusted_host("localhost"));
+        assert!(is_trusted_host("LOCALHOST"));
+        assert!(is_trusted_host("localhost."));
+    }
+
+    #[test]
+    fn test_trusted_host_loopback_ipv4() {
+        assert!(is_trusted_host("127.0.0.1"));
+        assert!(is_trusted_host("127.0.0.2"));
+        assert!(!is_trusted_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_trusted_host_loopback_ipv6() {
+        assert!(is_trusted_host("[::1]"));
+    }
+
+    #[test]
+    fn test_trusted_host_rejects_external() {
+        assert!(!is_trusted_host("evil.example"));
+        assert!(!is_trusted_host("example.com"));
+        assert!(!is_trusted_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_allowed_request_host_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_request_host_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert!(is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_request_host_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_different_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:4000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_ftp_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "ftp://localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_rejects_different_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://evil.example:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_missing_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_missing_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
+
+    #[test]
+    fn test_normalize_authority_末尾ドットと大文字小文字を正規化する() {
+        assert_eq!(
+            normalize_authority("LOCALHOST.:3000"),
+            normalize_authority("localhost:3000")
+        );
+        assert_eq!(
+            normalize_authority("Example.COM."),
+            normalize_authority("example.com")
+        );
+    }
+
+    #[test]
+    fn test_allowed_ws_origin_trailing_dotとmixed_caseを許可する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "LOCALHOST.:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(is_allowed_ws_origin(&headers));
     }
 }

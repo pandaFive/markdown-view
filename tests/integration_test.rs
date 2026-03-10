@@ -1063,9 +1063,7 @@ async fn next_ws_message(read: &mut WsReadHalf) -> tokio_tungstenite::tungstenit
 }
 
 async fn consume_initial_ws_message(read: &mut WsReadHalf) {
-    let _ = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト");
+    let _initial = next_ws_message(read).await;
 }
 
 async fn assert_close_frame_message(
