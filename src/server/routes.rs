@@ -64,18 +64,6 @@ struct FileQuery {
     file: Option<String>,
 }
 
-fn relative_path_or_warn(state: &AppState, file_path: &std::path::Path) -> Option<String> {
-    let relative_path = state.mode().relative_path_of(file_path);
-    if state.mode().is_directory() && relative_path.is_none() {
-        tracing::warn!(
-            "[markdown-view] 相対パス算出失敗: {} はベース {} の配下ではありません",
-            file_path.display(),
-            state.mode().base_dir().display()
-        );
-    }
-    relative_path
-}
-
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
@@ -84,21 +72,20 @@ async fn index_handler(
 ) -> Result<Html<String>, ApiError> {
     ensure_allowed_request_host(&headers)?;
 
-    let (file_path, file_list) = resolve_target_file_or_error(
+    let target = resolve_target_file_or_error(
         &state,
         query.file.as_deref(),
         true,
         "表示可能なMarkdownファイルが見つかりません",
     )?;
 
-    let update = read_rendered_update_or_error(&file_path, "index").await?;
+    let update = read_rendered_update_or_error(&target, "index").await?;
 
-    let title = file_path
+    let title = target
+        .file_path()
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("markdown-view");
-
-    let current_file = relative_path_or_warn(&state, &file_path);
 
     Ok(Html(render_page(RenderPageParams {
         title,
@@ -106,10 +93,10 @@ async fn index_handler(
         toc: update.toc(),
         dark_mode: state.dark_mode(),
         syntax_css: state.syntax_css(),
-        sidebar: match file_list.as_deref() {
+        sidebar: match target.file_list() {
             Some(files) => SidebarParams::Directory {
                 file_list: files,
-                current_file: current_file.as_deref(),
+                current_file: target.relative_path(),
             },
             None => SidebarParams::SingleFile,
         },
@@ -124,18 +111,16 @@ async fn api_content_handler(
 ) -> Result<Json<UpdateMessage>, ApiError> {
     ensure_allowed_request_host(&headers)?;
 
-    let (file_path, _) = resolve_target_file_or_error(
+    let target = resolve_target_file_or_error(
         &state,
         query.file.as_deref(),
         false,
         "指定したファイルが見つかりません",
     )?;
 
-    let update = read_rendered_update_or_error(&file_path, "api/content").await?;
+    let update = read_rendered_update_or_error(&target, "api/content").await?;
 
-    Ok(Json(
-        update.with_file(relative_path_or_warn(&state, &file_path)),
-    ))
+    Ok(Json(update))
 }
 
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
