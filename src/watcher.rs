@@ -28,20 +28,6 @@ enum WatchStrategy {
     Directory { base_dir: PathBuf },
 }
 
-#[derive(Clone)]
-struct WatchConfig {
-    watch_dir: PathBuf,
-    recursive_mode: RecursiveMode,
-    thread_name: &'static str,
-    unexpected_exit: &'static str,
-    start_error_prefix: &'static str,
-    watch_error_prefix: &'static str,
-    panic_message: &'static str,
-    change_label: &'static str,
-    error_label: &'static str,
-    strategy: WatchStrategy,
-}
-
 fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &str) {
     match tx.try_send(event) {
         Ok(()) => {}
@@ -111,13 +97,15 @@ impl WatchRuntime {
 impl Watcher {
     /// 監視を開始し、監視イベント受信用チャネルを返す
     pub async fn spawn(mode: AppMode) -> Result<(Self, mpsc::Receiver<WatchEvent>)> {
-        let config = WatchConfig::from_mode(&mode)?;
+        let strategy = WatchStrategy::from_mode(&mode)?;
         let (tx, rx) = mpsc::channel::<WatchEvent>(WATCHER_MESSAGE_BUFFER);
         let (init_tx, init_rx) = oneshot::channel::<InitResult>();
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_shutdown_flag = shutdown_flag.clone();
-        let unexpected_exit = config.unexpected_exit;
-        let watcher_thread = spawn_watcher_thread(config, tx, init_tx, thread_shutdown_flag)?;
+        let unexpected_exit = strategy.unexpected_exit_message();
+        let watch_dir = strategy.watch_dir()?;
+        let watcher_thread =
+            spawn_watcher_thread(strategy, watch_dir, tx, init_tx, thread_shutdown_flag)?;
 
         await_watcher_init(init_rx, unexpected_exit).await?;
         Ok((Self::new(shutdown_flag, watcher_thread), rx))
@@ -148,80 +136,126 @@ impl Drop for Watcher {
     }
 }
 
-impl WatchConfig {
+impl WatchStrategy {
     fn from_mode(mode: &AppMode) -> Result<Self> {
         if let Some(file_path) = mode.single_file() {
-            let watch_dir = file_path
-                .parent()
-                .context("親ディレクトリが取得できません")?
-                .to_path_buf();
-            Ok(Self {
-                watch_dir,
-                recursive_mode: RecursiveMode::NonRecursive,
-                thread_name: "markdown-view-watcher-file",
-                unexpected_exit: "ファイル監視スレッドが予期せず終了しました",
-                start_error_prefix: "ファイル監視の開始に失敗",
-                watch_error_prefix: "ファイル監視エラー",
-                panic_message: "単一ファイル監視スレッドがパニックで停止しました",
-                change_label: "単一ファイル更新",
-                error_label: "単一ファイル監視エラー",
-                strategy: WatchStrategy::SingleFile {
-                    target_path: file_path.to_path_buf(),
-                },
+            Ok(Self::SingleFile {
+                target_path: file_path.to_path_buf(),
             })
         } else if let Some(dir_path) = mode.directory() {
-            Ok(Self {
-                watch_dir: dir_path.to_path_buf(),
-                recursive_mode: RecursiveMode::Recursive,
-                thread_name: "markdown-view-watcher-dir",
-                unexpected_exit: "ディレクトリ監視スレッドが予期せず終了しました",
-                start_error_prefix: "ディレクトリ監視の開始に失敗",
-                watch_error_prefix: "ディレクトリ監視エラー",
-                panic_message: "ディレクトリ監視スレッドがパニックで停止しました",
-                change_label: "ディレクトリ更新",
-                error_label: "ディレクトリ監視エラー",
-                strategy: WatchStrategy::Directory {
-                    base_dir: dir_path.to_path_buf(),
-                },
+            Ok(Self::Directory {
+                base_dir: dir_path.to_path_buf(),
             })
         } else {
             anyhow::bail!("未知のAppModeです")
         }
     }
+
+    fn watch_dir(&self) -> Result<PathBuf> {
+        match self {
+            Self::SingleFile { target_path } => target_path
+                .parent()
+                .map(Path::to_path_buf)
+                .context("親ディレクトリが取得できません"),
+            Self::Directory { base_dir } => Ok(base_dir.clone()),
+        }
+    }
+
+    fn recursive_mode(&self) -> RecursiveMode {
+        match self {
+            Self::SingleFile { .. } => RecursiveMode::NonRecursive,
+            Self::Directory { .. } => RecursiveMode::Recursive,
+        }
+    }
+
+    fn thread_name(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "markdown-view-watcher-file",
+            Self::Directory { .. } => "markdown-view-watcher-dir",
+        }
+    }
+
+    fn unexpected_exit_message(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "ファイル監視スレッドが予期せず終了しました",
+            Self::Directory { .. } => "ディレクトリ監視スレッドが予期せず終了しました",
+        }
+    }
+
+    fn start_error_prefix(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "ファイル監視の開始に失敗",
+            Self::Directory { .. } => "ディレクトリ監視の開始に失敗",
+        }
+    }
+
+    fn watch_error_prefix(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "ファイル監視エラー",
+            Self::Directory { .. } => "ディレクトリ監視エラー",
+        }
+    }
+
+    fn panic_message(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "単一ファイル監視スレッドがパニックで停止しました",
+            Self::Directory { .. } => "ディレクトリ監視スレッドがパニックで停止しました",
+        }
+    }
+
+    fn change_label(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "単一ファイル更新",
+            Self::Directory { .. } => "ディレクトリ更新",
+        }
+    }
+
+    fn error_label(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "単一ファイル監視エラー",
+            Self::Directory { .. } => "ディレクトリ監視エラー",
+        }
+    }
 }
 
 fn spawn_watcher_thread(
-    config: WatchConfig,
+    strategy: WatchStrategy,
+    watch_dir: PathBuf,
     tx: mpsc::Sender<WatchEvent>,
     init_tx: oneshot::Sender<InitResult>,
     thread_shutdown_flag: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>> {
-    let thread_name = config.thread_name.to_string();
-    let spawn_context = format!("監視スレッド {} の起動に失敗", config.thread_name);
+    let thread_name = strategy.thread_name().to_string();
+    let spawn_context = format!("監視スレッド {} の起動に失敗", strategy.thread_name());
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
             let rt_tx = tx;
             let panic_tx = rt_tx.clone();
-            let watch_dir = config.watch_dir;
-            let recursive_mode = config.recursive_mode;
-            let start_error_prefix = config.start_error_prefix;
-            let watch_error_prefix = config.watch_error_prefix;
-            let panic_message = config.panic_message;
-            let change_label = config.change_label;
-            let error_label = config.error_label;
-            let strategy = config.strategy;
             let mut init_tx = Some(init_tx);
+            let callback_strategy = strategy.clone();
+            let recursive_mode = strategy.recursive_mode();
+            let start_error_prefix = strategy.start_error_prefix();
+            let panic_message = strategy.panic_message();
+            let error_label = strategy.error_label();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
                     move |res: std::result::Result<Vec<DebouncedEvent>, notify::Error>| match res {
                         Ok(events) => {
-                            handle_debounced_events(&strategy, events, &rt_tx, change_label);
+                            handle_debounced_events(&callback_strategy, events, &rt_tx);
                         }
                         Err(e) => {
-                            tracing::warn!("[markdown-view] {}: {}", watch_error_prefix, e);
-                            send_watch_event(&rt_tx, WatchEvent::Error(e.to_string()), error_label);
+                            tracing::warn!(
+                                "[markdown-view] {}: {}",
+                                callback_strategy.watch_error_prefix(),
+                                e
+                            );
+                            send_watch_event(
+                                &rt_tx,
+                                WatchEvent::Error(e.to_string()),
+                                callback_strategy.error_label(),
+                            );
                         }
                     },
                 );
@@ -303,54 +337,70 @@ fn handle_debounced_events(
     strategy: &WatchStrategy,
     events: Vec<DebouncedEvent>,
     tx: &mpsc::Sender<WatchEvent>,
-    change_label: &str,
 ) {
     match strategy {
         WatchStrategy::SingleFile { target_path } => {
-            for event in events {
-                if is_content_change_event(&event.kind) && is_target_file(&event.path, target_path)
-                {
-                    send_watch_event(
-                        tx,
-                        WatchEvent::FileChanged(event.path.clone()),
-                        change_label,
-                    );
-                    break;
-                }
-            }
+            handle_single_file_events(target_path, &events, tx, strategy.change_label());
         }
         WatchStrategy::Directory { base_dir } => {
-            let mut notified = HashSet::new();
-            for event in events {
-                if !is_content_change_event(&event.kind) {
-                    continue;
-                }
-                let is_md = event
-                    .path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-                if !is_md {
-                    continue;
-                }
-                if !is_within_base_dir(&event.path, base_dir) {
-                    tracing::warn!(
-                        "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                        event.path.display()
-                    );
-                    continue;
-                }
-                if is_hidden_relative(&event.path, base_dir) {
-                    continue;
-                }
-                let normalized_event_path = normalize_lexical_path(&event.path);
-                if notified.insert(normalized_event_path.clone()) {
-                    send_watch_event(
-                        tx,
-                        WatchEvent::FileChanged(normalized_event_path),
-                        change_label,
-                    );
-                }
-            }
+            handle_directory_events(base_dir, &events, tx, strategy.change_label());
+        }
+    }
+}
+
+fn handle_single_file_events(
+    target_path: &Path,
+    events: &[DebouncedEvent],
+    tx: &mpsc::Sender<WatchEvent>,
+    change_label: &str,
+) {
+    for event in events {
+        if is_content_change_event(&event.kind) && is_target_file(&event.path, target_path) {
+            send_watch_event(
+                tx,
+                WatchEvent::FileChanged(event.path.clone()),
+                change_label,
+            );
+            break;
+        }
+    }
+}
+
+fn handle_directory_events(
+    base_dir: &Path,
+    events: &[DebouncedEvent],
+    tx: &mpsc::Sender<WatchEvent>,
+    change_label: &str,
+) {
+    let mut notified = HashSet::new();
+    for event in events {
+        if !is_content_change_event(&event.kind) {
+            continue;
+        }
+        let is_md = event
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+        if !is_md {
+            continue;
+        }
+        if !is_within_base_dir(&event.path, base_dir) {
+            tracing::warn!(
+                "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
+                event.path.display()
+            );
+            continue;
+        }
+        if is_hidden_relative(&event.path, base_dir) {
+            continue;
+        }
+        let normalized_event_path = normalize_lexical_path(&event.path);
+        if notified.insert(normalized_event_path.clone()) {
+            send_watch_event(
+                tx,
+                WatchEvent::FileChanged(normalized_event_path),
+                change_label,
+            );
         }
     }
 }
@@ -483,6 +533,10 @@ mod tests {
     use super::*;
     use crate::server::AppMode;
 
+    fn debounced_event(path: impl Into<PathBuf>, kind: DebouncedEventKind) -> DebouncedEvent {
+        DebouncedEvent::new(path.into(), kind)
+    }
+
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join(name);
@@ -556,6 +610,118 @@ mod tests {
             rx.try_recv().is_err(),
             "満杯時のメッセージは破棄されているはず"
         );
+    }
+
+    #[test]
+    fn test_handle_debounced_events_単一ファイル対象のみ通知する() {
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
+        let sibling = target.parent().unwrap().join("other.md");
+        std::fs::write(&sibling, "# other").unwrap();
+        let strategy = WatchStrategy::SingleFile {
+            target_path: target.canonicalize().unwrap(),
+        };
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+
+        handle_debounced_events(
+            &strategy,
+            vec![
+                debounced_event(sibling.clone(), DebouncedEventKind::Any),
+                debounced_event(target.clone(), DebouncedEventKind::Any),
+            ],
+            &tx,
+        );
+
+        assert_eq!(rx.try_recv().unwrap(), WatchEvent::FileChanged(target),);
+        assert!(rx.try_recv().is_err(), "通知は1件のみのはず");
+    }
+
+    #[test]
+    fn test_handle_debounced_events_ディレクトリモードで非mdを無視する() {
+        let dir = tempfile::tempdir().unwrap();
+        let text_file = dir.path().join("notes.txt");
+        std::fs::write(&text_file, "memo").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: dir.path().to_path_buf(),
+        };
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+
+        handle_debounced_events(
+            &strategy,
+            vec![debounced_event(text_file, DebouncedEventKind::Any)],
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err(), "非mdファイルは通知されないはず");
+    }
+
+    #[test]
+    fn test_handle_debounced_events_ディレクトリモードで隠しパスを無視する() {
+        let dir = tempfile::tempdir().unwrap();
+        let hidden_dir = dir.path().join(".draft");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        let hidden_file = hidden_dir.join("note.md");
+        std::fs::write(&hidden_file, "# hidden").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: dir.path().to_path_buf(),
+        };
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+
+        handle_debounced_events(
+            &strategy,
+            vec![debounced_event(hidden_file, DebouncedEventKind::Any)],
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err(), "隠しパスは通知されないはず");
+    }
+
+    #[test]
+    fn test_handle_debounced_events_ディレクトリモードで重複通知を排除する() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: dir.path().to_path_buf(),
+        };
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+
+        handle_debounced_events(
+            &strategy,
+            vec![
+                debounced_event(file_path.clone(), DebouncedEventKind::Any),
+                debounced_event(
+                    dir.path().join("./guide.md"),
+                    DebouncedEventKind::AnyContinuous,
+                ),
+            ],
+            &tx,
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            WatchEvent::FileChanged(file_path.clone()),
+        );
+        assert!(rx.try_recv().is_err(), "同一ファイル通知は集約されるはず");
+    }
+
+    #[test]
+    fn test_handle_debounced_events_ディレクトリモードでベース外を無視する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("outside.md");
+        std::fs::write(&outside_file, "# outside").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: base_dir.path().to_path_buf(),
+        };
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+
+        handle_debounced_events(
+            &strategy,
+            vec![debounced_event(outside_file, DebouncedEventKind::Any)],
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err(), "ベース外パスは通知されないはず");
     }
 
     #[test]
@@ -677,6 +843,25 @@ mod tests {
                 panic!("FileChangedを期待したが Error({}) を受信", message)
             }
         }
+
+        watcher.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_watcher_spawn_ディレクトリモードでイベント受信できる() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("watch.md");
+        tokio::fs::write(&file_path, "# before").await.unwrap();
+        let mode = AppMode::new_directory(dir.path()).unwrap();
+        let (watcher, mut rx) = Watcher::spawn(mode).await.unwrap();
+
+        tokio::fs::write(&file_path, "# after").await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, WatchEvent::FileChanged(file_path.clone()));
 
         watcher.shutdown();
     }
