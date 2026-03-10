@@ -262,6 +262,12 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
 }
 
 /// 監視イベントをWebSocketブロードキャストへ転送する
+///
+/// ファイルシステムの監視イベントを受け取り、以下のように処理する：
+/// - `WatchEvent::FileChanged` → `notify_update` により変更内容を再描画してブロードキャスト
+/// - `WatchEvent::Error` → `broadcast_error` によりエラーメッセージをブロードキャスト
+///
+/// mpscチャネル `rx` が閉じられるとループを終了し、タスクは完了する。
 pub fn spawn_watch_event_forwarder(
     state: Arc<AppState>,
     mut rx: mpsc::Receiver<WatchEvent>,
@@ -281,6 +287,11 @@ pub fn spawn_watch_event_forwarder(
     })
 }
 
+/// ファイル監視エラーをブロードキャストする
+///
+/// `notify_update` では受信者がゼロの場合に早期リターンするが、エラー通知は
+/// 受信者の有無に関わらず送信する。受信者がゼロの場合、`send` の戻り値エラーは
+/// 意図的に無視する。
 fn broadcast_error(state: &AppState, error: &WatchError) {
     let _ = state.tx().send(BroadcastMessage::Error(format!(
         "ファイル監視エラー: {}",

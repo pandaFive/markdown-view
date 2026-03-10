@@ -54,22 +54,6 @@ impl WatchError {
         }
     }
 
-    /// キュー満杯による破棄エラーを生成する
-    pub fn channel_backpressure_dropped(detail: impl Into<String>) -> Self {
-        Self {
-            kind: WatchErrorKind::ChannelBackpressureDropped,
-            detail: detail.into(),
-        }
-    }
-
-    /// 通知先クローズによる破棄エラーを生成する
-    pub fn channel_closed(detail: impl Into<String>) -> Self {
-        Self {
-            kind: WatchErrorKind::ChannelClosed,
-            detail: detail.into(),
-        }
-    }
-
     /// エラー種別を返す
     pub fn kind(&self) -> WatchErrorKind {
         self.kind
@@ -90,24 +74,7 @@ impl WatchError {
             WatchErrorKind::ThreadPanic => {
                 format!("監視スレッドがパニックで停止しました: {}", self.detail)
             }
-            WatchErrorKind::ChannelBackpressureDropped => {
-                format!(
-                    "監視イベントが多すぎるため通知を破棄しました: {}",
-                    self.detail
-                )
-            }
-            WatchErrorKind::ChannelClosed => {
-                format!(
-                    "通知チャネルが閉じているため監視イベントを破棄しました: {}",
-                    self.detail
-                )
-            }
         }
-    }
-
-    /// ログ向けメッセージを返す
-    pub fn log_message(&self) -> String {
-        format!("{:?}: {}", self.kind, self.detail)
     }
 }
 
@@ -128,10 +95,6 @@ pub enum WatchErrorKind {
     Notify,
     /// 監視スレッド内のpanic
     ThreadPanic,
-    /// 送信キュー満杯により通知を破棄
-    ChannelBackpressureDropped,
-    /// 通知先チャネル終了により通知を破棄
-    ChannelClosed,
 }
 
 #[derive(Debug, Clone)]
@@ -140,16 +103,22 @@ enum WatchStrategy {
     Directory { base_dir: CanonicalPath },
 }
 
+/// notifyコールバックからtokioチャネルへイベントを転送する（non-blocking）。
+/// チャネル満杯時・クローズ時はイベントを破棄しwarnログを出力する。
 fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &str) {
     match tx.try_send(event) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
-            let error = WatchError::channel_backpressure_dropped(label);
-            tracing::warn!("[markdown-view] {}", error.user_message());
+            tracing::warn!(
+                "[markdown-view] 監視イベントが多すぎるため通知を破棄しました: {}",
+                label
+            );
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
-            let error = WatchError::channel_closed(label);
-            tracing::warn!("[markdown-view] {}", error.user_message());
+            tracing::warn!(
+                "[markdown-view] 通知チャネルが閉じているため監視イベントを破棄しました: {}",
+                label
+            );
         }
     }
 }
@@ -165,8 +134,8 @@ type InitResult = std::result::Result<(), WatchError>;
 
 /// 監視実行中ランタイム
 ///
-/// `shutdown()` は監視スレッドを停止する。
-/// `Drop` は待機せず同じ停止処理を行う。
+/// `shutdown()` および `Drop` は同じ停止処理（タイムアウト付き待機）を行う。
+/// `shutdown()` は `self` を消費するため二重停止を防止する。
 pub struct Watcher {
     runtime: Option<WatchRuntime>,
 }
@@ -191,7 +160,10 @@ impl WatchRuntime {
         let start = std::time::Instant::now();
         while !self.watcher_thread.is_finished() {
             if start.elapsed() > Duration::from_secs(SHUTDOWN_TIMEOUT_SECS) {
-                tracing::warn!("[markdown-view] 監視スレッドの停止がタイムアウトしました");
+                tracing::warn!(
+                    "[markdown-view] 監視スレッドの停止がタイムアウトしました（{}秒）",
+                    SHUTDOWN_TIMEOUT_SECS
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -622,7 +594,12 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
 fn is_within_base_dir(path: &Path, base: &Path) -> bool {
     match path.canonicalize() {
         Ok(canonical_path) => canonical_path.starts_with(base),
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(
+                "[markdown-view] ベース配下判定: パス正規化失敗（相対化で再試行）: {} ({})",
+                path.display(),
+                e
+            );
             let normalized_path = normalize_lexical_path(path);
             let normalized_base = normalize_lexical_path(base);
             normalized_path.starts_with(&normalized_base)
@@ -697,6 +674,26 @@ mod tests {
         assert_eq!(
             panic.user_message(),
             "監視スレッドがパニックで停止しました: panic詳細"
+        );
+    }
+
+    #[test]
+    fn test_watch_error_initの利用者向けメッセージが生成される() {
+        let init = WatchError::init("初期化詳細");
+
+        assert_eq!(
+            init.user_message(),
+            "監視の初期化に失敗しました: 初期化詳細"
+        );
+    }
+
+    #[test]
+    fn test_watch_error_kindアクセサが正しいwatcherrorkindを返す() {
+        assert_eq!(WatchError::init("detail").kind(), WatchErrorKind::Init);
+        assert_eq!(WatchError::notify("detail").kind(), WatchErrorKind::Notify);
+        assert_eq!(
+            WatchError::thread_panic("detail").kind(),
+            WatchErrorKind::ThreadPanic
         );
     }
 
