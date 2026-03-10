@@ -10,10 +10,7 @@
 
 ### Low Priority
 
-- [ ] `consume_initial_ws_message`のエラー無視を修正
-  - ファイル: `tests/integration_test.rs` L1067付近
-  - 内容: `let _ =` を `next_ws_message` に置き換え、テスト失敗を明示化
-  - 理由: テストでのサイレントエラー防止
+- [x] `consume_initial_ws_message`のエラー無視を修正済み
 
 ## PRレビュー: serverファサード化とサブモジュール分割 (レビュー日: 2026-03-10)
 
@@ -21,10 +18,7 @@
 
 - [x] `MAX_FILE_SIZE`と`file_size_limit_error_message()`を`files.rs`に移動済み
 
-- [ ] `file_size_limit_error_message()`を`&'static str`定数に変換
-  - ファイル: `src/server/files.rs` L27-33
-  - 内容: `FILE_SIZE_LIMIT_MB`はコンパイル時定数のため、毎回`format!`で`String`を生成する代わりに定数化してヒープ割り当てを削減
-  - 理由: 不要なヒープ割り当ての排除
+- [x] `file_size_limit_error_message()`を`&'static str`定数に変換済み
 
 - [ ] `CanonicalPath`を`pub(super)`に降格
   - ファイル: `src/server/state.rs` L12

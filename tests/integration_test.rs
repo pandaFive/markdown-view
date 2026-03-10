@@ -111,7 +111,7 @@ async fn test_websocketブロードキャスト受信() {
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
-    consume_initial_ws_message(&mut read).await;
+    let _initial_message = next_ws_message(&mut read).await;
 
     // broadcastで更新を送信
     state
@@ -194,7 +194,7 @@ async fn test_ファイル変更でwebsocket更新() {
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
-    consume_initial_ws_message(&mut read).await;
+    let _initial_message = next_ws_message(&mut read).await;
 
     // ファイルを変更
     tokio::fs::write(&file_path, "# After Change")
@@ -228,7 +228,7 @@ async fn test_ファイル削除でwebsocketエラー通知() {
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    consume_initial_ws_message(&mut read).await;
+    let _initial_message = next_ws_message(&mut read).await;
 
     tokio::fs::remove_file(&file_path).await.unwrap();
 
@@ -751,7 +751,7 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
     let (_write, mut read) = ws_stream.split();
 
     // 単一ファイルモード: 初期メッセージを消費
-    consume_initial_ws_message(&mut read).await;
+    let _initial_message = next_ws_message(&mut read).await;
 
     // broadcastでエラーJSONを送信（watcher.rsのbroadcast_errorと同じ形式）
     state
@@ -1064,10 +1064,6 @@ async fn next_ws_message(read: &mut WsReadHalf) -> tokio_tungstenite::tungstenit
         .expect("WebSocketメッセージ受信がタイムアウト")
         .expect("WebSocketストリームが予期せず終了")
         .expect("WebSocketメッセージの読み取りに失敗")
-}
-
-async fn consume_initial_ws_message(read: &mut WsReadHalf) {
-    let _initial = next_ws_message(read).await;
 }
 
 async fn assert_close_frame_message(

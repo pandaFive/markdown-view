@@ -16,21 +16,13 @@ use crate::toc::generate_toc;
 
 /// ファイルサイズ上限: OOM防止
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-const FILE_SIZE_LIMIT_MB: u64 = MAX_FILE_SIZE / 1024 / 1024;
+const FILE_SIZE_LIMIT_ERROR_MESSAGE: &str = "ファイルサイズが上限（10MB）を超えています";
 
 /// ファイル一覧の最大件数
 const MAX_FILE_LIST: usize = 1000;
 
 /// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
 const MAX_DIR_DEPTH: usize = 32;
-
-/// ファイルサイズ超過時のユーザー向けエラーメッセージを返す。
-fn file_size_limit_error_message() -> String {
-    format!(
-        "ファイルサイズが上限（{}MB）を超えています",
-        FILE_SIZE_LIMIT_MB
-    )
-}
 
 /// 対象ファイル解決エラーをエンドポイント文脈に応じたAPIエラーへ変換する。
 pub(super) fn resolve_target_file_or_error(
@@ -382,7 +374,7 @@ impl std::fmt::Display for ReadMarkdownError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadMarkdownError::Io(e) => write!(f, "I/Oエラー: {}", e),
-            ReadMarkdownError::TooLarge => write!(f, "{}", file_size_limit_error_message()),
+            ReadMarkdownError::TooLarge => write!(f, "{}", FILE_SIZE_LIMIT_ERROR_MESSAGE),
             ReadMarkdownError::NotUtf8 => write!(f, "ファイルがUTF-8テキストではありません"),
         }
     }
@@ -417,7 +409,7 @@ impl ReadMarkdownError {
     pub(super) fn user_message(&self) -> String {
         match self {
             ReadMarkdownError::Io(_) => "ファイルの読み込みに失敗しました".to_string(),
-            ReadMarkdownError::TooLarge => file_size_limit_error_message(),
+            ReadMarkdownError::TooLarge => FILE_SIZE_LIMIT_ERROR_MESSAGE.to_string(),
             ReadMarkdownError::NotUtf8 => "このファイルはUTF-8テキストではありません".to_string(),
         }
     }
@@ -819,7 +811,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "error": file_size_limit_error_message()
+                "error": FILE_SIZE_LIMIT_ERROR_MESSAGE
             })
         );
     }
