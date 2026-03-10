@@ -6,8 +6,10 @@ use tokio::sync::broadcast;
 
 use markdown_view::cli::Args;
 use markdown_view::renderer::validate_theme;
-use markdown_view::server::{create_router, AppMode, AppState, MAX_FILE_SIZE};
-use markdown_view::watcher::watch_path;
+use markdown_view::server::{
+    create_router, spawn_watch_event_forwarder, AppMode, AppState, MAX_FILE_SIZE,
+};
+use markdown_view::watcher::Watcher;
 
 fn init_logging() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -106,9 +108,10 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
 
     // ファイル/ディレクトリ監視開始
-    let watcher_handle = watch_path(state.clone())
+    let (watcher, watch_events) = Watcher::spawn(mode.clone())
         .await
         .context("監視の開始に失敗")?;
+    let watch_forwarder = spawn_watch_event_forwarder(state.clone(), watch_events);
 
     // HTTPサーバー起動（127.0.0.1のみにバインド）
     let (listener, local_addr, port_fallback) = bind_preview_listener(args.port).await?;
@@ -159,7 +162,13 @@ async fn main() -> Result<()> {
         })
         .await;
 
-    watcher_handle.shutdown().await;
+    watcher.shutdown();
+    if let Err(e) = watch_forwarder.await {
+        tracing::warn!(
+            "[markdown-view] 監視イベント転送タスクの終了待機に失敗: {}",
+            e
+        );
+    }
     server_result?;
 
     Ok(())

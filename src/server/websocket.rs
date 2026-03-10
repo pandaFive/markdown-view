@@ -4,12 +4,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use super::files::{read_and_render_file, revalidate_single_file_target};
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::template::error_message_json;
+use crate::watcher::WatchEvent;
 
 async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool {
     let payload = serde_json::to_string(&error_message_json(message))
@@ -260,11 +261,38 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     let _ = state.tx().send(msg);
 }
 
+/// 監視イベントをWebSocketブロードキャストへ転送する
+pub fn spawn_watch_event_forwarder(
+    state: Arc<AppState>,
+    mut rx: mpsc::Receiver<WatchEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                WatchEvent::FileChanged(changed_path) => {
+                    notify_update(&state, &changed_path).await;
+                }
+                WatchEvent::Error(error_msg) => {
+                    broadcast_error(&state, &error_msg);
+                }
+            }
+        }
+        tracing::info!("[markdown-view] ファイル変更通知タスクが終了しました");
+    })
+}
+
+fn broadcast_error(state: &AppState, error_msg: &str) {
+    let _ = state.tx().send(BroadcastMessage::Error(format!(
+        "ファイル監視エラー: {}",
+        error_msg
+    )));
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc};
 
     use super::*;
     use crate::server::{AppMode, AppState, MAX_FILE_SIZE};
@@ -434,6 +462,31 @@ mod tests {
             }
             other => panic!("Updateメッセージを期待したが {:?} を受信", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_watch_event_forwarder_監視エラーをbroadcastする() {
+        let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
+        let state = Arc::new(state);
+        let mut broadcast_rx = state.tx().subscribe();
+        let (tx, rx) = mpsc::channel(4);
+        let forwarder = spawn_watch_event_forwarder(state.clone(), rx);
+
+        tx.send(WatchEvent::Error("テストエラー".to_string()))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let received = broadcast_rx.recv().await.unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル監視エラー: テストエラー"));
+                assert!(file_path.exists());
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
+
+        forwarder.await.unwrap();
     }
 
     #[tokio::test]
