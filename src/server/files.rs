@@ -42,7 +42,7 @@ pub(super) fn resolve_target_file_or_error(
     include_file_list: bool,
     context: TargetResolveContext,
 ) -> Result<(PathBuf, Option<Vec<String>>), ApiError> {
-    super::resolve_target_file(state, query_file, include_file_list).map_err(|status| {
+    resolve_target_file(state, query_file, include_file_list).map_err(|status| {
         let msg = match status {
             StatusCode::NOT_FOUND => context.not_found_message(),
             StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
@@ -345,6 +345,9 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
 }
 
 /// 単一ファイルモードの対象ファイルを安全に再検証する
+///
+/// 起動時に正規化したパスと現在のパスを比較し、シンボリックリンク差し替え等の
+/// 攻撃を検出する。正規化後のパスが起動時と異なる場合はトラバーサルとして拒否する。
 pub(super) fn revalidate_single_file_target(
     expected_path: &Path,
 ) -> Result<PathBuf, ResolveFileError> {
@@ -433,11 +436,17 @@ impl IntoResponse for ReadMarkdownError {
 
 #[derive(Debug, PartialEq)]
 pub enum ResolveFileError {
+    /// 空パス
     EmptyPath,
+    /// 無効なパス（絶対パス、NULバイト等）
     InvalidPath,
+    /// ファイルが見つからない
     NotFound,
+    /// ディレクトリトラバーサル検出
     Traversal,
+    /// Markdownファイルではない
     NotMarkdown,
+    /// 隠しファイルへのアクセス
     Hidden,
 }
 
@@ -461,11 +470,19 @@ impl std::fmt::Display for ResolveFileError {
 impl std::error::Error for ResolveFileError {}
 
 impl ResolveFileError {
+    /// エラー種別に関わらず404を返す
+    ///
+    /// エラー種別で応答を分けるとファイル存在有無の推測材料になるため、
+    /// すべて404に統一してセキュリティを確保する。
     pub fn status_code(&self) -> StatusCode {
         StatusCode::NOT_FOUND
     }
 }
 
+/// Markdownファイルを読み込む（TOCTOU対策として二段階サイズチェック）
+///
+/// 1. `metadata().len()` で事前チェック（競合状態の大部分を防止）
+/// 2. `AsyncReadExt::take()` で実読み取り量を制限（TOCTOU回避の最終防衛）
 async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdownError> {
     let metadata = tokio::fs::metadata(file_path)
         .await
@@ -503,7 +520,7 @@ pub(super) async fn read_bytes_with_limit(
     Ok(buffer)
 }
 
-/// ファイルを読み込んでレンダリングする
+/// ファイルを読み込み、Markdown→HTML変換とTOC生成を行いUpdateMessageとして返す
 pub(super) async fn read_and_render_file(
     file_path: &Path,
 ) -> Result<UpdateMessage, ReadMarkdownError> {

@@ -199,6 +199,11 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 }
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
+///
+/// ディレクトリモードでは変更ファイルの相対パスを`file`フィールドに含め、
+/// クライアント側でアクティブタブの更新判定に使用する。
+/// ファイル検証や読み込みに失敗した場合はエラーメッセージをbroadcastする。
+/// 受信者がゼロの場合は早期リターンする。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx().receiver_count() == 0 {
         return;

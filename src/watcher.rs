@@ -543,7 +543,7 @@ fn is_within_base_dir(path: &Path, base: &Path) -> bool {
 
 /// 監視エラーをbroadcastチャネル経由でWebSocketクライアントに通知する
 ///
-/// `server.rs:notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
+/// `notify_update`のエラーJSON送信パターンに合わせた形式で送信する。
 /// 受信者がいない場合は正常（クライアント未接続時）。
 fn broadcast_error(state: &AppState, error_msg: &str) {
     let _ = state.tx().send(BroadcastMessage::Error(format!(

@@ -25,8 +25,7 @@ use self::files::{
 };
 pub use self::files::{list_markdown_files, resolve_file, ResolveFileError};
 use self::files::{
-    read_rendered_update_or_error, resolve_target_file, resolve_target_file_or_error,
-    TargetResolveContext,
+    read_rendered_update_or_error, resolve_target_file_or_error, TargetResolveContext,
 };
 use self::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
