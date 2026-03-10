@@ -10,7 +10,7 @@ use super::files::{read_and_render_file, revalidate_single_file_target};
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::template::error_message_json;
-use crate::watcher::WatchEvent;
+use crate::watcher::{WatchError, WatchEvent};
 
 async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool {
     let payload = serde_json::to_string(&error_message_json(message))
@@ -272,8 +272,8 @@ pub fn spawn_watch_event_forwarder(
                 WatchEvent::FileChanged(changed_path) => {
                     notify_update(&state, &changed_path).await;
                 }
-                WatchEvent::Error(error_msg) => {
-                    broadcast_error(&state, &error_msg);
+                WatchEvent::Error(error) => {
+                    broadcast_error(&state, &error);
                 }
             }
         }
@@ -281,10 +281,10 @@ pub fn spawn_watch_event_forwarder(
     })
 }
 
-fn broadcast_error(state: &AppState, error_msg: &str) {
+fn broadcast_error(state: &AppState, error: &WatchError) {
     let _ = state.tx().send(BroadcastMessage::Error(format!(
         "ファイル監視エラー: {}",
-        error_msg
+        error.user_message()
     )));
 }
 
@@ -472,7 +472,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         let forwarder = spawn_watch_event_forwarder(state.clone(), rx);
 
-        tx.send(WatchEvent::Error("テストエラー".to_string()))
+        tx.send(WatchEvent::Error(WatchError::notify("テストエラー")))
             .await
             .unwrap();
         drop(tx);
@@ -480,7 +480,9 @@ mod tests {
         let received = broadcast_rx.recv().await.unwrap();
         match received {
             BroadcastMessage::Error(message) => {
-                assert!(message.contains("ファイル監視エラー: テストエラー"));
+                assert!(message.contains(
+                    "ファイル監視エラー: 通知ライブラリエラーが発生しました: テストエラー"
+                ));
                 assert!(file_path.exists());
             }
             other => panic!("Errorメッセージを期待したが {:?} を受信", other),

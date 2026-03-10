@@ -159,6 +159,20 @@ impl AppMode {
         }
     }
 
+    pub(crate) fn single_file_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile(path) => Some(path),
+            AppModeKind::Directory(_) => None,
+        }
+    }
+
+    pub(crate) fn directory_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile(_) => None,
+            AppModeKind::Directory(path) => Some(path),
+        }
+    }
+
     /// ディレクトリモードかどうか
     pub fn is_directory(&self) -> bool {
         matches!(self.0, AppModeKind::Directory(_))
