@@ -17,11 +17,10 @@ use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
     json_error,
 };
+use super::messages::ApiError;
 use super::state::AppState;
 use super::websocket::handle_socket;
 use crate::template::{render_page, RenderPageParams, SidebarParams, UpdateMessage};
-
-pub(super) type ApiError = (StatusCode, Json<serde_json::Value>);
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {

@@ -7,7 +7,7 @@ use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::Json;
 
-use super::routes::ApiError;
+use super::messages::ApiError;
 use crate::template::{csp_hash_sources, error_message_json};
 
 pub(super) fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {

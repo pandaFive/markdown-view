@@ -1,6 +1,12 @@
-//! WebSocket/HTTP応答で共有するサーバーメッセージを管理する。
+//! WebSocket/HTTP応答で共有するサーバーメッセージ型とAPIエラー型を管理する。
+
+use axum::http::StatusCode;
+use axum::response::Json;
 
 use crate::template::{error_message_json, UpdateMessage};
+
+/// HTTP APIエラー応答の共通型
+pub(super) type ApiError = (StatusCode, Json<serde_json::Value>);
 
 /// ファイルサイズ上限: OOM防止
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
