@@ -114,9 +114,21 @@ var tocRoot = document.getElementById('toc');
 function setActiveTocLink(activeId) {
   if (!currentTocTracking) return;
   if (currentActiveTocId === activeId) return;
+  var nextLink = activeId ? currentTocTracking.links.get(activeId) : null;
+  var currentLink = currentActiveTocId ? currentTocTracking.links.get(currentActiveTocId) : null;
+
+  if (nextLink) {
+    nextLink.classList.add('active');
+  }
+  if (currentLink && currentLink !== nextLink) {
+    currentLink.classList.remove('active');
+  }
+
   currentActiveTocId = activeId;
   currentTocTracking.links.forEach(function(link, id) {
-    link.classList.toggle('active', id === activeId);
+    if (link !== nextLink && link !== currentLink) {
+      link.classList.toggle('active', id === activeId);
+    }
   });
 }
 
