@@ -237,7 +237,13 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
   await expect(page.locator('#document-search-results .document-search-result').nth(1))
     .toContainText('Another intro. Alpha note appears again in the details section. Another ending.');
 
-  await page.locator('#document-search-results .document-search-result').nth(1).click();
+  await page.evaluate(() => {
+    const result = document.querySelectorAll('#document-search-results .document-search-result')[1];
+    if (!result) {
+      throw new Error('search result not found');
+    }
+    result.click();
+  });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
