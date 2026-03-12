@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use markdown_view::renderer::render_markdown;
-use markdown_view::server::{AppMode, AppState, BroadcastMessage};
+use markdown_view::server::{AppMode, AppState, BroadcastMessage, WatchService};
 use markdown_view::template::UpdateMessage;
 use markdown_view::toc::generate_toc;
 
@@ -182,11 +182,7 @@ async fn test_ファイル変更でwebsocket更新() {
     let (state, addr) = setup_single_file_server_from_path(&file_path).await;
 
     // ファイル監視開始
-    let (_watcher, watch_events) = markdown_view::watcher::Watcher::spawn(state.mode().clone())
-        .await
-        .unwrap();
-    let _watch_forwarder =
-        markdown_view::server::spawn_watch_event_forwarder(state.clone(), watch_events);
+    let watch_service = WatchService::start(state.clone()).await.unwrap();
 
     // WebSocket接続
     let url = format!("ws://{}/ws", addr);
@@ -207,6 +203,7 @@ async fn test_ファイル変更でwebsocket更新() {
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(json["content"].as_str().unwrap().contains("After Change"));
+    watch_service.shutdown().await;
     drop(tmp_dir);
 }
 
@@ -218,11 +215,7 @@ async fn test_ファイル削除でwebsocketエラー通知() {
 
     let (state, addr) = setup_single_file_server_from_path(&file_path).await;
 
-    let (_watcher, watch_events) = markdown_view::watcher::Watcher::spawn(state.mode().clone())
-        .await
-        .unwrap();
-    let _watch_forwarder =
-        markdown_view::server::spawn_watch_event_forwarder(state.clone(), watch_events);
+    let watch_service = WatchService::start(state.clone()).await.unwrap();
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -239,6 +232,7 @@ async fn test_ファイル削除でwebsocketエラー通知() {
     let error = json["error"].as_str().expect("errorフィールドが存在する");
     assert!(error.contains("ファイル検証エラー"));
     assert!(error.contains("watch_delete.md"));
+    watch_service.shutdown().await;
 }
 
 #[tokio::test]

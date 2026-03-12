@@ -1,20 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 
 use markdown_view::cli::Args;
 use markdown_view::renderer::validate_theme;
-use markdown_view::server::{
-    create_router, spawn_watch_event_forwarder, AppMode, AppState, MAX_FILE_SIZE,
-};
-use markdown_view::watcher::Watcher;
-
-/// 監視イベント転送タスクの停止待機秒数
-const WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+use markdown_view::server::{create_router, AppMode, AppState, WatchService, MAX_FILE_SIZE};
 
 fn init_logging() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,39 +53,6 @@ async fn bind_preview_listener(
         "ポート {} 以上で利用可能なポートが見つかりませんでした",
         preferred_port
     )
-}
-
-async fn shutdown_watch_forwarder(mut watch_forwarder: JoinHandle<()>) {
-    match tokio::time::timeout(
-        Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS),
-        &mut watch_forwarder,
-    )
-    .await
-    {
-        Ok(join_result) => {
-            if let Err(e) = join_result {
-                tracing::warn!(
-                    "[markdown-view] 監視イベント転送タスクの終了待機に失敗: {}",
-                    e
-                );
-            }
-        }
-        Err(_) => {
-            tracing::warn!(
-                "[markdown-view] 監視イベント転送タスク停止がタイムアウトしたためabortします"
-            );
-            watch_forwarder.abort();
-            if let Err(e) = watch_forwarder.await {
-                if e.is_cancelled() {
-                    return;
-                }
-                tracing::warn!(
-                    "[markdown-view] 監視イベント転送タスクの終了待機に失敗: {}",
-                    e
-                );
-            }
-        }
-    }
 }
 
 #[tokio::main]
@@ -146,10 +105,9 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
 
     // ファイル/ディレクトリ監視開始
-    let (watcher, watch_events) = Watcher::spawn(mode.clone())
+    let watch_service = WatchService::start(state.clone())
         .await
         .context("監視の開始に失敗")?;
-    let watch_forwarder = spawn_watch_event_forwarder(state.clone(), watch_events);
 
     // HTTPサーバー起動（127.0.0.1のみにバインド）
     let (listener, local_addr, port_fallback) = bind_preview_listener(args.port).await?;
@@ -200,8 +158,7 @@ async fn main() -> Result<()> {
         })
         .await;
 
-    watcher.shutdown();
-    shutdown_watch_forwarder(watch_forwarder).await;
+    watch_service.shutdown().await;
     server_result?;
 
     Ok(())
@@ -209,7 +166,12 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::broadcast;
+
     use super::*;
+    use markdown_view::server::WatchService;
 
     #[tokio::test]
     async fn test_bind_preview_listener_空きポートなら指定ポートを使う() {
@@ -240,22 +202,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shutdown_watch_forwarder_タイムアウト後にabortする() {
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let watch_forwarder = tokio::spawn(async move {
-            let _ = started_tx.send(());
-            std::future::pending::<()>().await;
-        });
-        started_rx.await.expect("転送タスク起動");
+    async fn test_watch_service_開始と停止ができる() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let file_path = dir.path().join("watch.md");
+        std::fs::write(&file_path, "# watch").expect("Markdown作成");
+        let mode = AppMode::new_single_file(&file_path).expect("単一ファイルモード");
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(mode, false, None, tx));
 
-        let start = std::time::Instant::now();
-        shutdown_watch_forwarder(watch_forwarder).await;
-        assert!(start.elapsed() >= Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS));
-    }
-
-    #[tokio::test]
-    async fn test_shutdown_watch_forwarder_即時終了タスクを正常終了させる() {
-        let watch_forwarder = tokio::spawn(async {});
-        shutdown_watch_forwarder(watch_forwarder).await;
+        let service = WatchService::start(state).await.expect("監視開始");
+        service.shutdown().await;
     }
 }

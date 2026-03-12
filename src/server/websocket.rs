@@ -176,7 +176,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
 /// - `WatchEvent::Error` → `broadcast_error` によりエラーメッセージをブロードキャスト
 ///
 /// mpscチャネル `rx` が閉じられるとループを終了し、タスクは完了する。
-pub fn spawn_watch_event_forwarder(
+pub(super) fn spawn_watch_event_forwarder(
     state: Arc<AppState>,
     mut rx: mpsc::Receiver<WatchEvent>,
 ) -> tokio::task::JoinHandle<()> {
