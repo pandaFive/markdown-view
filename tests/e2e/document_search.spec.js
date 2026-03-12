@@ -64,6 +64,10 @@ async function setDocumentSearchQuery(page, query) {
       throw new Error('document search input not found');
     }
     input.value = value;
+    if (typeof applyDocumentSearchQuery === 'function') {
+      applyDocumentSearchQuery(value);
+      return;
+    }
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }, query);
 }
