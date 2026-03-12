@@ -286,6 +286,7 @@ function suppressTocTrackingFor(ms) {
 }
 
 function setupTocTracking() {
+  var previousActiveTocId = currentActiveTocId;
   if (tocTrackingFrame !== null) {
     window.cancelAnimationFrame(tocTrackingFrame);
     tocTrackingFrame = null;
@@ -322,6 +323,10 @@ function setupTocTracking() {
     links: tocLinksById,
     activationOffset: getTocActivationOffset(trackedHeadings)
   };
+
+  if (previousActiveTocId && tocLinksById.has(previousActiveTocId)) {
+    setActiveTocLink(previousActiveTocId);
+  }
 }
 
 var sidebarToggle = document.getElementById('sidebar-toggle');
