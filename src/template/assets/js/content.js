@@ -446,6 +446,9 @@ function updateContent(data) {
   if (typeof setupTocTracking === 'function') {
     setupTocTracking();
   }
+  if (typeof restoreActiveTocHeading === 'function') {
+    restoreActiveTocHeading(preservedActiveTocId);
+  }
   if (typeof suppressTocTrackingFor === 'function') {
     suppressTocTrackingFor(120);
   }
