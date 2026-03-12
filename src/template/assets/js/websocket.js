@@ -41,7 +41,9 @@ function flushBufferedLiveUpdate() {
   // テキスト選択中はDOM更新を延期して選択破壊を防止
   // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
   if (isTextSelected()) {
-    pendingUpdate = data;
+    if (!pendingUpdate || !pendingUpdate.refresh) {
+      pendingUpdate = data;
+    }
     hideWsServerErrorBanner();
     hideFileFetchErrorBanner();
     ensurePendingUpdateTimer();
@@ -97,6 +99,7 @@ function connectWS() {
     }
     if (data.refresh && isDirMode && currentFile) {
       if (isTextSelected()) {
+        discardBufferedLiveUpdate();
         pendingUpdate = { refresh: true, file: currentFile };
         ensurePendingUpdateTimer();
         return;

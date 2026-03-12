@@ -41,6 +41,11 @@ async function activeTocLabel(page) {
   return page.locator('#toc a.active').innerText();
 }
 
+async function activeTocLabelOrEmpty(page) {
+  const activeLink = page.locator('#toc a.active');
+  return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
+}
+
 async function stabilizeWebSocketHarness(page) {
   await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
   await page.evaluate(() => {
@@ -175,6 +180,26 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await expect(page.locator('#content')).toContainText('Refreshed from server');
 });
 
+test('選択中はrefreshが古いバッファ更新より優先される', async ({ page }) => {
+  await selectParagraphText(page, 'Initial README content');
+  await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
+
+  await page.evaluate(() => {
+    window.__dispatchWsMessage({
+      content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>',
+      file: 'README.md'
+    });
+    window.__dispatchWsMessage({ refresh: true });
+  });
+
+  await expect(page.locator('#content')).toContainText('Initial README content');
+
+  await clearSelection(page);
+  await expect(page.locator('#content')).toContainText('Refresh wins after selection');
+  await expect(page.locator('#content')).not.toContainText('Stale buffered update');
+});
+
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
@@ -216,6 +241,16 @@ test('近接した見出し境界でも目次activeが前後に揺れない', as
     await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), betaActiveScrollTop + delta);
     await expect.poll(() => activeTocLabel(page)).toBe('Beta');
   }
+});
+
+test('最初の見出しに到達するまでは目次activeを付けない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => activeTocLabelOrEmpty(page)).toBe('');
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 });
 
 test('WebSocket更新後も同じ見出しを見ている間は目次activeを維持する', async ({ page }) => {

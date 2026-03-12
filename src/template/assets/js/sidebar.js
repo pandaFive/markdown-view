@@ -131,7 +131,7 @@ function updateActiveTocHeading() {
 
 function getViewportActiveTocId() {
   if (!currentTocTracking) return '';
-  var activeHeading = currentTocTracking.headings[0];
+  var activeHeading = null;
   var activationOffset = currentTocTracking.activationOffset;
 
   currentTocTracking.headings.forEach(function(heading) {
@@ -140,7 +140,7 @@ function getViewportActiveTocId() {
     }
   });
 
-  return activeHeading.id;
+  return activeHeading ? activeHeading.id : '';
 }
 
 function hasTrackedHeading(id) {
