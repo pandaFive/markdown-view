@@ -890,4 +890,25 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn test_line_lookup_line_for_offsetは改行境界を正しく返す() {
+        let lookup = LineLookup::new("alpha\nbeta\ncharlie");
+
+        assert_eq!(lookup.line_for_offset(0), 1);
+        assert_eq!(lookup.line_for_offset(5), 1);
+        assert_eq!(lookup.line_for_offset(6), 2);
+        assert_eq!(lookup.line_for_offset(10), 2);
+        assert_eq!(lookup.line_for_offset(11), 3);
+    }
+
+    #[test]
+    fn test_line_lookup_line_rangeは複数行範囲を正しく返す() {
+        let lookup = LineLookup::new("alpha\nbeta\ncharlie");
+
+        assert_eq!(lookup.line_range(&(0..5)), (1, 1));
+        assert_eq!(lookup.line_range(&(0..10)), (1, 2));
+        assert_eq!(lookup.line_range(&(6..18)), (2, 3));
+        assert_eq!(lookup.line_range(&(6..6)), (2, 2));
+    }
 }

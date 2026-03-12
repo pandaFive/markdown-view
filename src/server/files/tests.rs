@@ -358,6 +358,36 @@ fn test_resolve_route_target_api_contentはfile_listを含まない() {
     assert!(target.file_list().is_none());
 }
 
+#[test]
+fn test_resolve_route_target_page_queryなしではreadmeを優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();
+    std::fs::write(dir.path().join("README.md"), "# readme").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+
+    assert_eq!(target.relative_path(), Some("README.md"));
+    assert!(target.file_path().ends_with("README.md"));
+    assert_eq!(
+        target.file_list().unwrap(),
+        &["README.md".to_string(), "z-last.md".to_string()]
+    );
+}
+
+#[test]
+fn test_resolve_route_target_page_queryなしではreadme不在時に先頭ファイルを選ぶ() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();
+    std::fs::write(dir.path().join("a-first.md"), "# a").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+
+    assert_eq!(target.relative_path(), Some("a-first.md"));
+    assert!(target.file_path().ends_with("a-first.md"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_save_route_memo_メモルートがシンボリックリンクなら拒否する() {
@@ -423,6 +453,70 @@ async fn test_load_initial_socket_update_単一ファイルモードでupdateを
 
     let update = load_initial_socket_update(&state).await.unwrap().unwrap();
     assert!(update.content().as_str().contains("title"));
+}
+
+#[tokio::test]
+async fn test_load_route_update_ioエラーを500へ変換する() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    std::fs::remove_file(&file_path).unwrap();
+
+    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
+        .await
+        .expect_err("missing file should map to api error");
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "ファイルの読み込みに失敗しました");
+}
+
+#[tokio::test]
+async fn test_load_route_update_サイズ超過を413へ変換する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large.md");
+    tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+        .await
+        .unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+
+    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
+        .await
+        .expect_err("oversized file should map to api error");
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "ファイルサイズが上限（10MB）を超えています");
+}
+
+#[tokio::test]
+async fn test_load_route_update_非utf8を422へ変換する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("binary.md");
+    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+
+    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
+        .await
+        .expect_err("invalid utf8 should map to api error");
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "このファイルはUTF-8テキストではありません");
+}
+
+#[tokio::test]
+async fn test_build_lagged_recovery_message_ディレクトリモードではrefreshを返す() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+
+    let message = build_lagged_recovery_message(&state).await;
+
+    assert!(matches!(message, BroadcastMessage::Refresh));
 }
 
 #[tokio::test]
