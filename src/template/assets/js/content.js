@@ -173,20 +173,80 @@ function clearDocumentSearchHighlights() {
   updateDocumentSearchSummary();
 }
 
+var DOCUMENT_SEARCH_BLOCK_SELECTOR = 'p, li, blockquote, th, td, h1, h2, h3, h4, h5, h6';
+
 function shouldSkipDocumentSearchNode(node) {
   var parent = node.parentElement;
   if (!parent) return true;
   return Boolean(parent.closest(
-    'button, input, textarea, script, style, a, pre, code, mark.document-search-match'
+    'button, input, textarea, script, style, pre.code-block, mark.document-search-match'
   ));
 }
 
-function createDocumentSearchMark(text) {
+function createDocumentSearchMark(text, matchId) {
   var mark = document.createElement('mark');
   mark.className = 'document-search-match';
+  mark.dataset.matchId = String(matchId);
   mark.textContent = text;
-  documentSearchMatches.push(mark);
   return mark;
+}
+
+function getDocumentSearchBlocks() {
+  if (!contentRoot) return [];
+  return Array.prototype.filter.call(
+    contentRoot.querySelectorAll(DOCUMENT_SEARCH_BLOCK_SELECTOR),
+    function(block) {
+      return !block.parentElement || !block.parentElement.closest(DOCUMENT_SEARCH_BLOCK_SELECTOR);
+    }
+  );
+}
+
+function collectDocumentSearchTextNodes(block) {
+  var walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+  var textNodes = [];
+  var node;
+  var offset = 0;
+
+  while ((node = walker.nextNode())) {
+    if (!node.nodeValue || !node.nodeValue.trim()) continue;
+    if (shouldSkipDocumentSearchNode(node)) continue;
+    textNodes.push({
+      node: node,
+      start: offset,
+      end: offset + node.nodeValue.length
+    });
+    offset += node.nodeValue.length;
+  }
+
+  return {
+    text: textNodes.map(function(entry) { return entry.node.nodeValue; }).join(''),
+    nodes: textNodes
+  };
+}
+
+function wrapDocumentSearchSegment(textNode, start, end, matchId) {
+  var tail = end < textNode.nodeValue.length ? textNode.splitText(end) : null;
+  var matchNode = start > 0 ? textNode.splitText(start) : textNode;
+  var mark = createDocumentSearchMark(matchNode.nodeValue, matchId);
+  matchNode.parentNode.replaceChild(mark, matchNode);
+  return { mark: mark, tail: tail };
+}
+
+function wrapDocumentSearchMatch(nodes, matchStart, matchEnd, matchId) {
+  var marks = [];
+  var i;
+
+  for (i = nodes.length - 1; i >= 0; i--) {
+    var entry = nodes[i];
+    var localStart = Math.max(0, matchStart - entry.start);
+    var localEnd = Math.min(entry.end - entry.start, matchEnd - entry.start);
+    if (localStart >= localEnd) continue;
+    marks.unshift(wrapDocumentSearchSegment(entry.node, localStart, localEnd, matchId).mark);
+  }
+
+  if (marks.length) {
+    documentSearchMatches.push({ marks: marks });
+  }
 }
 
 function applyDocumentSearchHighlights(query) {
@@ -195,38 +255,25 @@ function applyDocumentSearchHighlights(query) {
   if (!query) return;
 
   var normalizedQuery = query.toLowerCase();
-  var walker = document.createTreeWalker(contentRoot, NodeFilter.SHOW_TEXT, null);
-  var textNodes = [];
-  var node;
 
-  while ((node = walker.nextNode())) {
-    if (!node.nodeValue || !node.nodeValue.trim()) continue;
-    if (shouldSkipDocumentSearchNode(node)) continue;
-    textNodes.push(node);
-  }
+  getDocumentSearchBlocks().forEach(function(block) {
+    var blockText = collectDocumentSearchTextNodes(block);
+    var matchIndex;
+    var searchIndex = 0;
 
-  textNodes.forEach(function(textNode) {
-    var text = textNode.nodeValue;
-    var lowerText = text.toLowerCase();
-    var startIndex = 0;
-    var matchIndex = lowerText.indexOf(normalizedQuery, startIndex);
-    var fragment;
+    if (!blockText.text) return;
 
-    if (matchIndex === -1) return;
-
-    fragment = document.createDocumentFragment();
+    matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
     while (matchIndex !== -1) {
-      if (matchIndex > startIndex) {
-        fragment.appendChild(document.createTextNode(text.slice(startIndex, matchIndex)));
-      }
-      fragment.appendChild(createDocumentSearchMark(text.slice(matchIndex, matchIndex + query.length)));
-      startIndex = matchIndex + query.length;
-      matchIndex = lowerText.indexOf(normalizedQuery, startIndex);
+      wrapDocumentSearchMatch(
+        blockText.nodes,
+        matchIndex,
+        matchIndex + normalizedQuery.length,
+        documentSearchMatches.length
+      );
+      searchIndex = matchIndex + normalizedQuery.length;
+      matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
     }
-    if (startIndex < text.length) {
-      fragment.appendChild(document.createTextNode(text.slice(startIndex)));
-    }
-    textNode.parentNode.replaceChild(fragment, textNode);
   });
 
   if (documentSearchMatches.length) {
@@ -243,12 +290,16 @@ function setCurrentDocumentSearchMatch(index, scrollIntoView) {
     return;
   }
   if (currentDocumentSearchIndex >= 0 && documentSearchMatches[currentDocumentSearchIndex]) {
-    documentSearchMatches[currentDocumentSearchIndex].classList.remove('current');
+    documentSearchMatches[currentDocumentSearchIndex].marks.forEach(function(mark) {
+      mark.classList.remove('current');
+    });
   }
   currentDocumentSearchIndex = (index + documentSearchMatches.length) % documentSearchMatches.length;
-  documentSearchMatches[currentDocumentSearchIndex].classList.add('current');
+  documentSearchMatches[currentDocumentSearchIndex].marks.forEach(function(mark) {
+    mark.classList.add('current');
+  });
   if (scrollIntoView !== false) {
-    documentSearchMatches[currentDocumentSearchIndex].scrollIntoView({
+    documentSearchMatches[currentDocumentSearchIndex].marks[0].scrollIntoView({
       block: 'center',
       behavior: 'smooth'
     });

@@ -34,7 +34,19 @@ async function loadSearchFixture(page) {
 }
 
 async function visibleMatchCount(page) {
-  return page.locator('#content mark.document-search-match').count();
+  return page.evaluate(() => {
+    return new Set(
+      Array.from(document.querySelectorAll('#content mark.document-search-match')).map((mark) => mark.dataset.matchId)
+    ).size;
+  });
+}
+
+async function currentMatchText(page) {
+  return page.evaluate(() => {
+    return Array.from(document.querySelectorAll('#content mark.document-search-match.current'))
+      .map((mark) => mark.textContent || '')
+      .join('');
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -52,14 +64,14 @@ test('検索語を入力するとヒット件数を表示して本文を強調�
   await page.locator('#document-search-input').fill('alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(3);
-  await expect(page.locator('#content mark.document-search-match.current')).toContainText('Alpha note');
+  await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
 
 test('見出しテキストも文書内検索の対象に含める', async ({ page }) => {
   await page.locator('#document-search-input').fill('deep dive');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(1);
-  await expect(page.locator('#content mark.document-search-match.current')).toContainText('Deep dive');
+  await expect.poll(() => currentMatchText(page)).toContain('Deep dive');
 });
 
 test('リンクやコードブロック内の一致は検索ハイライト対象にしない', async ({ page }) => {
@@ -75,12 +87,51 @@ test('リンクやコードブロック内の一致は検索ハイライト対�
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('alpha note');
+  await page.locator('#document-search-input').fill('alpha note link');
 
-  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
-  await expect.poll(() => visibleMatchCount(page)).toBe(1);
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(0);
   await expect(page.locator('#content a mark.document-search-match')).toHaveCount(0);
   await expect(page.locator('#content pre mark.document-search-match')).toHaveCount(0);
+
+  await page.locator('#document-search-input').fill('alpha note code');
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(0);
+  await expect(page.locator('#content pre mark.document-search-match')).toHaveCount(0);
+});
+
+test('inline code内の一致も検索対象に含める', async ({ page }) => {
+  await page.evaluate(() => {
+    updateContent({
+      content:
+        '<h1 id="readme">README</h1>' +
+        '<p>Run <code>cargo test</code> after editing.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await page.locator('#document-search-input').fill('cargo test');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(1);
+  await expect.poll(() => currentMatchText(page)).toContain('cargo test');
+});
+
+test('装飾をまたぐ語句も検索できる', async ({ page }) => {
+  await page.evaluate(() => {
+    updateContent({
+      content:
+        '<h1 id="readme">README</h1>' +
+        '<p>Alpha <strong>note</strong> appears across formatting.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await page.locator('#document-search-input').fill('alpha note');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(1);
+  await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
 
 test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page }) => {
@@ -157,5 +208,5 @@ test('live update後も検索結果を再適用する', async ({ page }) => {
 
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 4 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(4);
-  await expect(page.locator('#content mark.document-search-match.current')).toContainText('Alpha note');
+  await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
