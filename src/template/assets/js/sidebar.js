@@ -105,6 +105,10 @@ var currentActiveTocId = '';
 var suppressTocTrackingUntil = 0;
 var suppressTocTrackingTimer = null;
 var pendingSuppressedTocTrackingUpdate = false;
+var TOC_NAVIGATION_GRACE_MS = 400;
+var TOC_NAVIGATION_SLACK_PX = 24;
+var pendingTocNavigationId = '';
+var pendingTocNavigationUntil = 0;
 
 function setActiveTocLink(activeId) {
   if (!currentTocTracking) return;
@@ -129,10 +133,60 @@ function updateActiveTocHeading() {
   setActiveTocLink(getViewportActiveTocId());
 }
 
+function clearPendingTocNavigation() {
+  pendingTocNavigationId = '';
+  pendingTocNavigationUntil = 0;
+}
+
+function findTrackedHeading(id) {
+  if (!currentTocTracking || !id) return null;
+  for (var i = 0; i < currentTocTracking.headings.length; i++) {
+    if (currentTocTracking.headings[i].id === id) {
+      return currentTocTracking.headings[i];
+    }
+  }
+  return null;
+}
+
+function markPendingTocNavigation(id) {
+  if (!findTrackedHeading(id)) return;
+  pendingTocNavigationId = id;
+  pendingTocNavigationUntil = Date.now() + TOC_NAVIGATION_GRACE_MS;
+  setActiveTocLink(id);
+}
+
+function getPendingTocNavigationId(activationOffset) {
+  if (!pendingTocNavigationId) return '';
+  var heading = findTrackedHeading(pendingTocNavigationId);
+  var navigationTop;
+  if (!heading) {
+    clearPendingTocNavigation();
+    return '';
+  }
+  if (Date.now() > pendingTocNavigationUntil) {
+    clearPendingTocNavigation();
+    return '';
+  }
+  navigationTop = heading.getBoundingClientRect().top;
+  if (
+    navigationTop <= activationOffset + TOC_NAVIGATION_SLACK_PX &&
+    navigationTop >= activationOffset - TOC_NAVIGATION_SLACK_PX
+  ) {
+    return heading.id;
+  }
+  clearPendingTocNavigation();
+  return '';
+}
+
 function getViewportActiveTocId() {
   if (!currentTocTracking) return '';
-  var activeHeading = null;
   var activationOffset = currentTocTracking.activationOffset;
+  var pendingActiveId = getPendingTocNavigationId(activationOffset);
+  var activeHeading = null;
+
+  if (pendingActiveId) {
+    return pendingActiveId;
+  }
 
   currentTocTracking.headings.forEach(function(heading) {
     if (heading.getBoundingClientRect().top <= activationOffset) {
@@ -140,6 +194,9 @@ function getViewportActiveTocId() {
     }
   });
 
+  if (activeHeading && activeHeading.id !== pendingTocNavigationId) {
+    clearPendingTocNavigation();
+  }
   return activeHeading ? activeHeading.id : '';
 }
 
@@ -234,6 +291,12 @@ function setupTocTracking() {
     links: tocLinksById,
     activationOffset: getTocActivationOffset(trackedHeadings)
   };
+
+  currentTocTracking.links.forEach(function(link, id) {
+    link.addEventListener('click', function() {
+      markPendingTocNavigation(id);
+    });
+  });
 }
 
 var sidebarToggle = document.getElementById('sidebar-toggle');

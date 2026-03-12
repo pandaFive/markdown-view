@@ -46,6 +46,16 @@ async function activeTocLabelOrEmpty(page) {
   return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
 }
 
+async function clickTocLink(page, id) {
+  await page.evaluate((targetId) => {
+    const link = document.querySelector(`#toc a[href="#${targetId}"]`);
+    if (!link) {
+      throw new Error(`toc link not found: ${targetId}`);
+    }
+    link.click();
+  }, id);
+}
+
 async function stabilizeWebSocketHarness(page) {
   await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
   await page.evaluate(() => {
@@ -250,6 +260,47 @@ test('最初の見出しに到達するまでは目次activeを付けない', as
   await expect.poll(() => activeTocLabelOrEmpty(page)).toBe('');
 
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後はクリックした見出しをactiveにする', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('目次クリック後は猶予時間経過後に通常スクロール判定へ戻る', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後でも逆方向へスクロールしたら通常判定へ戻る', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 });
 
