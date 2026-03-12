@@ -9,6 +9,7 @@ pub enum SidebarParams<'a> {
     SingleFile,
     /// ディレクトリモード（ファイル一覧 + 目次）
     Directory {
+        directory_name: &'a str,
         file_list: &'a [String],
         current_file: Option<&'a str>,
     },
@@ -111,6 +112,7 @@ fn render_sidebar(
     let document_search = render_document_search();
     match sidebar {
         SidebarParams::Directory {
+            directory_name,
             file_list,
             current_file,
         } => {
@@ -123,8 +125,7 @@ fn render_sidebar(
             let sidebar_inner = format!(
                 r##"  <div class="sidebar-brand">
     <p class="sidebar-kicker">Workspace</p>
-    <h2>Documents</h2>
-    <p class="sidebar-caption">ディレクトリ内のMarkdownを切り替えて閲覧できます。</p>
+    <h2>{directory_name}</h2>
   </div>
   <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
@@ -158,6 +159,7 @@ fn render_sidebar(
                 document_search = document_search,
                 toc = toc.as_str(),
                 memo_editor = memo_editor,
+                directory_name = html_escape(directory_name),
                 file_count = file_list.len(),
             );
             (
@@ -175,7 +177,6 @@ fn render_sidebar(
                 r##"  <div class="sidebar-brand">
     <p class="sidebar-kicker">Workspace</p>
     <h2>Annotations</h2>
-    <p class="sidebar-caption">目次とメモを横断して読書メモを残せます。</p>
   </div>
   <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="toc">目次</button>
@@ -229,7 +230,6 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
       <div class="memo-toolbar">
         <div>
           <h3>Research Notes</h3>
-          <p class="memo-caption">本文選択から引用を追加できます。出典リンクと行番号を自動付与します。</p>
         </div>
         <span id="memo-save-status" class="memo-save-status" data-state="saved">保存済み</span>
       </div>
