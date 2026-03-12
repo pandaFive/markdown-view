@@ -108,6 +108,7 @@ fn render_sidebar(
     memo: &MemoResponse,
 ) -> (String, String, DocumentMeta) {
     let memo_editor = render_memo_panel(memo);
+    let document_search = render_document_search();
     match sidebar {
         SidebarParams::Directory {
             file_list,
@@ -143,6 +144,7 @@ fn render_sidebar(
 {tree_html}    </div>
   </div>
   <div class="sidebar-panel" id="panel-toc">
+    {document_search}
     <label class="sidebar-search sidebar-search-compact">
       <span>目次検索</span>
       <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
@@ -153,6 +155,7 @@ fn render_sidebar(
 {memo_editor}
   </div>"##,
                 tree_html = tree_html,
+                document_search = document_search,
                 toc = toc.as_str(),
                 memo_editor = memo_editor,
                 file_count = file_list.len(),
@@ -180,6 +183,7 @@ fn render_sidebar(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
   <div class="sidebar-panel active" id="panel-toc">
+    {document_search}
     <label class="sidebar-search sidebar-search-compact">
       <span>目次検索</span>
       <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
@@ -189,6 +193,7 @@ fn render_sidebar(
   <div class="sidebar-panel" id="panel-memo">
 {memo_editor}
   </div>"##,
+                document_search = document_search,
                 toc = toc.as_str(),
                 memo_editor = memo_editor,
             ),
@@ -198,6 +203,23 @@ fn render_sidebar(
             },
         ),
     }
+}
+
+fn render_document_search() -> &'static str {
+    r##"    <section class="document-search-shell" aria-label="文書内検索">
+      <label class="sidebar-search sidebar-search-compact">
+        <span>本文検索</span>
+        <input id="document-search-input" type="search" placeholder="本文を検索" autocomplete="off">
+      </label>
+      <div class="document-search-toolbar">
+        <span id="document-search-summary" class="sidebar-summary">0 件</span>
+        <div class="document-search-actions">
+          <button id="document-search-prev" class="document-search-btn" type="button" aria-label="前の一致へ">↑</button>
+          <button id="document-search-next" class="document-search-btn" type="button" aria-label="次の一致へ">↓</button>
+          <button id="document-search-clear" class="document-search-btn" type="button" aria-label="検索をクリア">×</button>
+        </div>
+      </div>
+    </section>"##
 }
 
 fn render_memo_panel(memo: &MemoResponse) -> String {
