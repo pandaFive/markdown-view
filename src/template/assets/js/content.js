@@ -151,6 +151,197 @@ function setupTocFilter() {
   });
 }
 
+function updateDocumentSearchSummary() {
+  if (!documentSearchSummaryEl) return;
+  if (!documentSearchMatches.length) {
+    documentSearchSummaryEl.textContent = '0 件';
+    return;
+  }
+  documentSearchSummaryEl.textContent = (currentDocumentSearchIndex + 1) + ' / ' + documentSearchMatches.length + ' 件';
+}
+
+function clearDocumentSearchHighlights() {
+  if (!contentRoot) return;
+  contentRoot.querySelectorAll('mark.document-search-match').forEach(function(mark) {
+    var parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
+    parent.normalize();
+  });
+  documentSearchMatches = [];
+  currentDocumentSearchIndex = -1;
+  updateDocumentSearchSummary();
+}
+
+function shouldSkipDocumentSearchNode(node) {
+  var parent = node.parentElement;
+  if (!parent) return true;
+  return Boolean(parent.closest(
+    'button, input, textarea, script, style, a, pre, code, mark.document-search-match'
+  ));
+}
+
+function createDocumentSearchMark(text) {
+  var mark = document.createElement('mark');
+  mark.className = 'document-search-match';
+  mark.textContent = text;
+  documentSearchMatches.push(mark);
+  return mark;
+}
+
+function applyDocumentSearchHighlights(query) {
+  if (!contentRoot) return;
+  clearDocumentSearchHighlights();
+  if (!query) return;
+
+  var normalizedQuery = query.toLowerCase();
+  var walker = document.createTreeWalker(contentRoot, NodeFilter.SHOW_TEXT, null);
+  var textNodes = [];
+  var node;
+
+  while ((node = walker.nextNode())) {
+    if (!node.nodeValue || !node.nodeValue.trim()) continue;
+    if (shouldSkipDocumentSearchNode(node)) continue;
+    textNodes.push(node);
+  }
+
+  textNodes.forEach(function(textNode) {
+    var text = textNode.nodeValue;
+    var lowerText = text.toLowerCase();
+    var startIndex = 0;
+    var matchIndex = lowerText.indexOf(normalizedQuery, startIndex);
+    var fragment;
+
+    if (matchIndex === -1) return;
+
+    fragment = document.createDocumentFragment();
+    while (matchIndex !== -1) {
+      if (matchIndex > startIndex) {
+        fragment.appendChild(document.createTextNode(text.slice(startIndex, matchIndex)));
+      }
+      fragment.appendChild(createDocumentSearchMark(text.slice(matchIndex, matchIndex + query.length)));
+      startIndex = matchIndex + query.length;
+      matchIndex = lowerText.indexOf(normalizedQuery, startIndex);
+    }
+    if (startIndex < text.length) {
+      fragment.appendChild(document.createTextNode(text.slice(startIndex)));
+    }
+    textNode.parentNode.replaceChild(fragment, textNode);
+  });
+
+  if (documentSearchMatches.length) {
+    setCurrentDocumentSearchMatch(0, false);
+  } else {
+    updateDocumentSearchSummary();
+  }
+}
+
+function setCurrentDocumentSearchMatch(index, scrollIntoView) {
+  if (!documentSearchMatches.length) {
+    currentDocumentSearchIndex = -1;
+    updateDocumentSearchSummary();
+    return;
+  }
+  if (currentDocumentSearchIndex >= 0 && documentSearchMatches[currentDocumentSearchIndex]) {
+    documentSearchMatches[currentDocumentSearchIndex].classList.remove('current');
+  }
+  currentDocumentSearchIndex = (index + documentSearchMatches.length) % documentSearchMatches.length;
+  documentSearchMatches[currentDocumentSearchIndex].classList.add('current');
+  if (scrollIntoView !== false) {
+    documentSearchMatches[currentDocumentSearchIndex].scrollIntoView({
+      block: 'center',
+      behavior: 'smooth'
+    });
+  }
+  updateDocumentSearchSummary();
+}
+
+function moveDocumentSearch(step) {
+  if (!documentSearchMatches.length) return;
+  setCurrentDocumentSearchMatch(currentDocumentSearchIndex + step);
+}
+
+function applyDocumentSearchQuery(query) {
+  applyDocumentSearchHighlights((query || '').trim());
+}
+
+function clearDocumentSearchQuery() {
+  if (documentSearchInputEl) {
+    documentSearchInputEl.value = '';
+  }
+  clearDocumentSearchHighlights();
+}
+
+function syncDocumentSearchAfterContentUpdate() {
+  if (!documentSearchInputEl) return;
+  applyDocumentSearchQuery(documentSearchInputEl.value);
+}
+
+function openDocumentSearch() {
+  if (typeof activateSidebarTab === 'function') {
+    activateSidebarTab('toc');
+  }
+  var sidebarEl = document.getElementById('sidebar');
+  if (sidebarEl) {
+    sidebarEl.classList.add('open');
+  }
+  if (documentSearchInputEl) {
+    documentSearchInputEl.focus();
+    documentSearchInputEl.select();
+  }
+}
+
+function setupDocumentSearch() {
+  if (!documentSearchInputEl) return;
+
+  documentSearchInputEl.addEventListener('input', function() {
+    applyDocumentSearchQuery(documentSearchInputEl.value);
+  });
+
+  documentSearchInputEl.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      moveDocumentSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (documentSearchInputEl.value) {
+        clearDocumentSearchQuery();
+      } else {
+        documentSearchInputEl.blur();
+      }
+    }
+  });
+
+  if (documentSearchPrevEl) {
+    documentSearchPrevEl.addEventListener('click', function() {
+      moveDocumentSearch(-1);
+    });
+  }
+  if (documentSearchNextEl) {
+    documentSearchNextEl.addEventListener('click', function() {
+      moveDocumentSearch(1);
+    });
+  }
+  if (documentSearchClearEl) {
+    documentSearchClearEl.addEventListener('click', function() {
+      clearDocumentSearchQuery();
+      documentSearchInputEl.focus();
+    });
+  }
+
+  document.addEventListener('keydown', function(event) {
+    var key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && key === 'f') {
+      event.preventDefault();
+      openDocumentSearch();
+    }
+  });
+
+  updateDocumentSearchSummary();
+}
+
 function applyPendingUpdate() {
   if (!pendingUpdate) return;
   if (pendingUpdateTimer) {
@@ -219,6 +410,9 @@ function updateContent(data) {
   updateDocumentStats();
   syncDocumentChrome(currentFile);
   enhanceContentInteractions();
+  if (typeof syncDocumentSearchAfterContentUpdate === 'function') {
+    syncDocumentSearchAfterContentUpdate();
+  }
   setupTocFilter();
   if (typeof hideQuoteSelectionAction === 'function') {
     hideQuoteSelectionAction();
@@ -227,3 +421,5 @@ function updateContent(data) {
     rememberAppliedLiveUpdate(data);
   }
 }
+
+setupDocumentSearch();

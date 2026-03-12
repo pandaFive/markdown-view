@@ -61,6 +61,18 @@
 .content a { color: var(--link); text-decoration: none; }
 .content a:hover { text-decoration: underline; }
 
+.content mark.document-search-match {
+  background: rgba(250, 204, 21, 0.22);
+  color: inherit;
+  border-radius: 0.2rem;
+  padding: 0 0.08rem;
+}
+
+.content mark.document-search-match.current {
+  background: rgba(249, 115, 22, 0.32);
+  outline: 1px solid rgba(249, 115, 22, 0.45);
+}
+
 .content code {
   background: var(--code-bg);
   padding: 0.2em 0.4em;

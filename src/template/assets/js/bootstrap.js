@@ -12,6 +12,11 @@ var liveStatusEl = document.getElementById('live-status');
 var readingProgressBar = document.getElementById('reading-progress-bar');
 var backToTop = document.getElementById('back-to-top');
 var contentRoot = document.getElementById('content');
+var documentSearchInputEl = document.getElementById('document-search-input');
+var documentSearchSummaryEl = document.getElementById('document-search-summary');
+var documentSearchPrevEl = document.getElementById('document-search-prev');
+var documentSearchNextEl = document.getElementById('document-search-next');
+var documentSearchClearEl = document.getElementById('document-search-clear');
 var memoEditorEl = document.getElementById('memo-editor');
 var memoPreviewEl = document.getElementById('memo-preview');
 var memoSaveStatusEl = document.getElementById('memo-save-status');
@@ -29,6 +34,8 @@ var memoSaveGeneration = 0;
 var memoSaveTimer = null;
 var memoCaretStart = memoEditorEl ? memoEditorEl.value.length : 0;
 var memoCaretEnd = memoCaretStart;
+var documentSearchMatches = [];
+var currentDocumentSearchIndex = -1;
 var LIVE_STATUS_LABELS = {
   live: 'Live',
   retry: 'Reconnecting',

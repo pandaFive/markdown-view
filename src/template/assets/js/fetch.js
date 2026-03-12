@@ -84,6 +84,9 @@ function selectFile(file, pushHistory) {
   .then(function(data) {
     hideFileFetchErrorBanner();
     if (gen !== fetchGeneration) return;
+    if (previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
+      clearDocumentSearchQuery();
+    }
     updateContent(data);
     if (data.file && data.file !== currentFile) {
       currentFile = data.file;
