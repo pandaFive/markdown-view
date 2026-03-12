@@ -242,6 +242,8 @@ mod tests {
         assert!(html.contains("id=\"panel-toc\""));
         assert!(html.contains("id=\"file-filter\""));
         assert!(html.contains("id=\"file-filter-summary\""));
+        assert!(html.contains("<div class=\"sidebar-panel active\" id=\"panel-files\">"));
+        assert!(html.contains("<div class=\"sidebar-utility\">"));
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-summary\""));
     }
