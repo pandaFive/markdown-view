@@ -100,6 +100,26 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら保存できる() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let raw = "\\".repeat(6 * 1024 * 1024);
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": raw
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 200);
+    let saved: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(saved["raw"].as_str().unwrap().len(), 6 * 1024 * 1024);
+}
+
+#[tokio::test]
 async fn test_indexページ取得_壊れたメモがあっても本文表示は継続する() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");

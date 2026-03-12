@@ -22,6 +22,8 @@ use super::session::handle_socket;
 use super::state::AppState;
 use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
 
+const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
+
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let (csp_header, csp_fallback) = build_csp_header(state.syntax_css());
@@ -38,7 +40,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/memo",
             get(api_memo_handler)
                 .put(api_memo_save_handler)
-                .layer(DefaultBodyLimit::max(MAX_FILE_SIZE as usize + 4096)),
+                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
         )
         .route("/api/files", get(api_files_handler))
         .layer(SetResponseHeaderLayer::overriding(
