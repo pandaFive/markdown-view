@@ -56,6 +56,9 @@ function selectFile(file, pushHistory) {
   if (pushHistory === undefined) pushHistory = true;
   var previousFile = currentFile;
   var gen = ++fetchGeneration;
+  if (typeof flushPendingMemoSave === 'function') {
+    flushPendingMemoSave();
+  }
   currentFile = file;
   if (pushHistory) setFileParam(file);
   updateFileListActive(file);
@@ -80,6 +83,9 @@ function selectFile(file, pushHistory) {
       updateFileListActive(currentFile);
     }
     syncDocumentChrome(currentFile);
+    if (typeof loadMemo === 'function') {
+      loadMemo(currentFile, gen);
+    }
     setLiveStatus('live');
   })
   .catch(function(err) {
@@ -88,6 +94,9 @@ function selectFile(file, pushHistory) {
     currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory);
+    if (typeof loadMemo === 'function') {
+      loadMemo(previousFile, gen);
+    }
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     setLiveStatus('error');
   });

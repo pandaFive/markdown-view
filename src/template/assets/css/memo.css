@@ -1,0 +1,119 @@
+.memo-layout {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.memo-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.9rem;
+}
+
+.memo-toolbar h3 {
+  font-size: 1rem;
+  margin-bottom: 0.2rem;
+}
+
+.memo-caption {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.memo-save-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.8rem;
+  min-height: 2rem;
+  padding: 0.28rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: var(--pill-bg);
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.memo-save-status[data-state="saving"],
+.memo-save-status[data-state="loading"] {
+  color: var(--link);
+}
+
+.memo-save-status[data-state="saved"] {
+  color: var(--accent);
+}
+
+.memo-save-status[data-state="dirty"] {
+  color: #d97706;
+}
+
+.memo-save-status[data-state="error"] {
+  color: #f7768e;
+}
+
+.memo-field {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.memo-field textarea {
+  min-height: 220px;
+  resize: vertical;
+  width: 100%;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 16px;
+  background: var(--search-input-bg);
+  color: var(--fg);
+  padding: 0.95rem 1rem;
+  line-height: 1.65;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.memo-preview-shell {
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: var(--panel-bg);
+  overflow: hidden;
+}
+
+.memo-preview-header {
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--panel-border);
+  color: var(--muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.memo-preview {
+  padding: 1rem;
+}
+
+.memo-preview:empty::before {
+  content: "メモのプレビューがここに表示されます。";
+  color: var(--muted);
+}
+
+.memo-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.quote-selection-action {
+  position: absolute;
+  transform: translate(-50%, 0);
+  z-index: 1100;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--fg);
+  padding: 0.55rem 0.9rem;
+  box-shadow: var(--panel-shadow);
+  backdrop-filter: blur(18px);
+  cursor: pointer;
+}
+
+.quote-selection-action[hidden] {
+  display: none;
+}

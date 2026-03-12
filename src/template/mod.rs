@@ -4,7 +4,7 @@ mod page;
 mod tree;
 
 pub use self::assets::{combined_css, csp_hash_sources};
-pub use self::message::{error_message_json, UpdateMessage};
+pub use self::message::{error_message_json, MemoResponse, UpdateMessage};
 pub use self::page::{render_page, RenderPageParams, SidebarParams};
 pub use self::tree::{build_file_tree, render_file_tree_html, FileTreeNode};
 
@@ -23,6 +23,10 @@ mod tests {
 
     fn test_toc() -> SanitizedHtml {
         generate_toc("# toc")
+    }
+
+    fn test_memo() -> MemoResponse {
+        MemoResponse::new(String::new(), render_markdown(""), None)
     }
 
     #[test]
@@ -215,11 +219,13 @@ mod tests {
         let files = vec!["README.md".to_string(), "docs/guide.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -242,30 +248,35 @@ mod tests {
     fn test_単一ファイルモードでタブが生成されない() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
         });
 
-        assert!(!html.contains("class=\"sidebar-tabs\""));
+        assert!(html.contains("class=\"sidebar-tabs\""));
         assert!(!html.contains("id=\"file-filter\""));
         assert!(html.contains("id=\"toc-filter\""));
+        assert!(html.contains("id=\"panel-memo\""));
     }
 
     #[test]
     fn test_単一ファイルモードのメタラベルが描画される() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
@@ -280,11 +291,13 @@ mod tests {
         let files = vec!["README.md".to_string(), "docs/guide.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -301,11 +314,13 @@ mod tests {
     fn test_読書ワークスペース用uiが描画される() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
@@ -324,11 +339,13 @@ mod tests {
     fn test_sidebar_openがtopbar_btnクラスを共有する() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
@@ -342,11 +359,13 @@ mod tests {
         let files = vec!["README.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -373,11 +392,13 @@ mod tests {
         let files = vec!["README.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -396,11 +417,13 @@ mod tests {
         let files = vec!["README.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -424,11 +447,13 @@ mod tests {
         let files = vec!["README.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -451,11 +476,13 @@ mod tests {
         let files = vec!["README.md".to_string()];
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
@@ -477,11 +504,13 @@ mod tests {
     fn test_copyハンドラが共通化されている() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
@@ -498,11 +527,13 @@ mod tests {
     fn test_live_statusラベルが内部解決される() {
         let content = test_content();
         let toc = test_toc();
+        let memo = test_memo();
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
             content: &content,
             toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::SingleFile,
@@ -511,6 +542,46 @@ mod tests {
         assert!(html.contains("var LIVE_STATUS_LABELS = {"));
         assert!(html.contains("function setLiveStatus(state) {"));
         assert!(!html.contains("function setLiveStatus(state, label) {"));
+    }
+
+    #[test]
+    fn test_メモuiが描画される() {
+        let content = test_content();
+        let toc = test_toc();
+        let memo = MemoResponse::new(
+            "引用メモ".to_string(),
+            render_markdown("> 引用メモ"),
+            Some("README.md".to_string()),
+        );
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(html.contains("id=\"memo-editor\""));
+        assert!(html.contains("id=\"memo-preview\""));
+        assert!(html.contains("id=\"memo-save-status\""));
+        assert!(html.contains("id=\"quote-selection-action\""));
+        assert!(html.contains("data-memo-file=\"README.md\""));
+    }
+
+    #[test]
+    fn test_memo_response_fileフィールドが直列化される() {
+        let memo = MemoResponse::new(
+            "memo".to_string(),
+            render_markdown("memo"),
+            Some("docs/guide.md".to_string()),
+        );
+        let value = serde_json::to_value(memo).unwrap();
+        assert_eq!(value["file"], "docs/guide.md");
+        assert_eq!(value["raw"], "memo");
+        assert!(value.get("html").is_some());
     }
 
     #[test]

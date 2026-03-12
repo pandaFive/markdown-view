@@ -1,4 +1,5 @@
 use super::assets::{combined_css, inline_js};
+use super::message::MemoResponse;
 use super::tree::{build_file_tree, render_file_tree_html};
 use crate::renderer::{html_escape, SanitizedHtml};
 
@@ -18,6 +19,7 @@ pub struct RenderPageParams<'a> {
     pub title: &'a str,
     pub content: &'a SanitizedHtml,
     pub toc: &'a SanitizedHtml,
+    pub memo: &'a MemoResponse,
     pub dark_mode: bool,
     /// syntectクラスベースハイライト用CSS
     pub syntax_css: &'a str,
@@ -35,11 +37,13 @@ struct DocumentMeta {
 /// CSS/JSをすべて埋め込み、外部ファイル不要で動作する
 pub fn render_page(params: RenderPageParams<'_>) -> String {
     let escaped_title = html_escape(params.title);
-    let (dir_mode_attr, sidebar_inner, meta) = render_sidebar(&params.sidebar, params.toc);
+    let (dir_mode_attr, sidebar_inner, meta) =
+        render_sidebar(&params.sidebar, params.toc, params.memo);
+    let memo_file_attr = params.memo.file().unwrap_or_default();
 
     format!(
         r##"<!DOCTYPE html>
-<html lang="ja" data-theme="{theme}"{dir_mode_attr}>
+<html lang="ja" data-theme="{theme}"{dir_mode_attr} data-memo-file="{memo_file}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -81,11 +85,13 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 </div>
 </div>
 <button id="back-to-top" class="back-to-top" aria-label="ページ上部へ戻る">↑</button>
+<button id="quote-selection-action" class="quote-selection-action" type="button" hidden>引用を追加</button>
 <script>{js}</script>
 </body>
 </html>"##,
         theme = if params.dark_mode { "dark" } else { "light" },
         dir_mode_attr = dir_mode_attr,
+        memo_file = html_escape(memo_file_attr),
         title = escaped_title,
         css = combined_css(params.syntax_css),
         sidebar_inner = sidebar_inner,
@@ -99,7 +105,9 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 fn render_sidebar(
     sidebar: &SidebarParams<'_>,
     toc: &SanitizedHtml,
+    memo: &MemoResponse,
 ) -> (String, String, DocumentMeta) {
+    let memo_editor = render_memo_panel(memo);
     match sidebar {
         SidebarParams::Directory {
             file_list,
@@ -127,6 +135,7 @@ fn render_sidebar(
   <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
     <button class="sidebar-tab" data-tab="toc">目次</button>
+    <button class="sidebar-tab" data-tab="memo">メモ</button>
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="閉じる">×</button>
   </div>
   <div class="sidebar-panel active" id="panel-files">
@@ -139,9 +148,13 @@ fn render_sidebar(
       <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
     </label>
     <nav id="toc">{toc}</nav>
+  </div>
+  <div class="sidebar-panel" id="panel-memo">
+{memo_editor}
   </div>"##,
                 tree_html = tree_html,
                 toc = toc.as_str(),
+                memo_editor = memo_editor,
                 file_count = file_list.len(),
             );
             (
@@ -158,19 +171,26 @@ fn render_sidebar(
             format!(
                 r##"  <div class="sidebar-brand">
     <p class="sidebar-kicker">Workspace</p>
-    <h2>Outline</h2>
-    <p class="sidebar-caption">このドキュメントの見出しを追跡します。</p>
+    <h2>Annotations</h2>
+    <p class="sidebar-caption">目次とメモを横断して読書メモを残せます。</p>
   </div>
-  <div class="sidebar-header">
-    <h2>目次</h2>
+  <div class="sidebar-tabs">
+    <button class="sidebar-tab active" data-tab="toc">目次</button>
+    <button class="sidebar-tab" data-tab="memo">メモ</button>
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
-  <label class="sidebar-search sidebar-search-compact">
-    <span>目次検索</span>
-    <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
-  </label>
-  <nav id="toc">{toc}</nav>"##,
+  <div class="sidebar-panel active" id="panel-toc">
+    <label class="sidebar-search sidebar-search-compact">
+      <span>目次検索</span>
+      <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
+    </label>
+    <nav id="toc">{toc}</nav>
+  </div>
+  <div class="sidebar-panel" id="panel-memo">
+{memo_editor}
+  </div>"##,
                 toc = toc.as_str(),
+                memo_editor = memo_editor,
             ),
             DocumentMeta {
                 mode_label: "Single file".to_string(),
@@ -178,4 +198,30 @@ fn render_sidebar(
             },
         ),
     }
+}
+
+fn render_memo_panel(memo: &MemoResponse) -> String {
+    format!(
+        r##"    <div class="memo-layout">
+      <div class="memo-toolbar">
+        <div>
+          <h3>Research Notes</h3>
+          <p class="memo-caption">本文選択から引用を追加できます。出典リンクと行番号を自動付与します。</p>
+        </div>
+        <span id="memo-save-status" class="memo-save-status" data-state="saved">保存済み</span>
+      </div>
+      <label class="memo-field">
+        <span>メモ本文</span>
+        <textarea id="memo-editor" placeholder="気づきや引用メモを残す">{memo_raw}</textarea>
+      </label>
+      <div class="memo-preview-shell">
+        <div class="memo-preview-header">
+          <span>Preview</span>
+        </div>
+        <div id="memo-preview" class="memo-preview">{memo_html}</div>
+      </div>
+    </div>"##,
+        memo_raw = html_escape(memo.raw()),
+        memo_html = memo.html().as_str(),
+    )
 }

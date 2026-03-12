@@ -7,6 +7,8 @@ const TEMPLATE: &str = concat!(
     "\n",
     include_str!("css/content.css"),
     "\n",
+    include_str!("css/memo.css"),
+    "\n",
     include_str!("css/file_tree.css"),
     "\n",
     include_str!("css/overlay.css"),

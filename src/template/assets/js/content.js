@@ -206,4 +206,7 @@ function updateContent(data) {
   syncDocumentChrome(currentFile);
   enhanceContentInteractions();
   setupTocFilter();
+  if (typeof hideQuoteSelectionAction === 'function') {
+    hideQuoteSelectionAction();
+  }
 }
