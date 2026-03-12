@@ -451,7 +451,10 @@ function updateContent(data) {
   }
 
   requestAnimationFrame(function() {
-    window.scrollTo(0, scrollY);
+    var currentScrollY = window.scrollY || window.pageYOffset;
+    if (Math.abs(currentScrollY - scrollY) <= 1) {
+      window.scrollTo(0, scrollY);
+    }
     updateReadingProgress();
     if (typeof restoreActiveTocHeading === 'function') {
       restoreActiveTocHeading(preservedActiveTocId);

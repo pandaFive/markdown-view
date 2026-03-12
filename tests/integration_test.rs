@@ -985,6 +985,22 @@ async fn test_ディレクトリモード_タブuiが表示される() {
         "ファイルパネルが存在するべき"
     );
     assert!(
+        body.contains("<div class=\"sidebar-panel active\" id=\"panel-files\">"),
+        "ファイルタブが初期表示されるべき"
+    );
+    assert!(
+        body.contains("<div class=\"sidebar-utility\">"),
+        "ファイル検索領域が存在するべき"
+    );
+    assert!(
+        body.contains("id=\"file-filter\""),
+        "ファイル検索入力が存在するべき"
+    );
+    assert!(
+        body.contains("id=\"file-filter-summary\""),
+        "ファイル検索サマリーが存在するべき"
+    );
+    assert!(
         body.contains("id=\"panel-toc\""),
         "目次パネルが存在するべき"
     );

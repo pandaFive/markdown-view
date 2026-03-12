@@ -126,13 +126,6 @@ fn render_sidebar(
     <h2>Documents</h2>
     <p class="sidebar-caption">ディレクトリ内のMarkdownを切り替えて閲覧できます。</p>
   </div>
-  <div class="sidebar-utility">
-    <label class="sidebar-search">
-      <span>絞り込み</span>
-      <input id="file-filter" type="search" placeholder="ファイル名で検索" autocomplete="off">
-    </label>
-    <p id="file-filter-summary" class="sidebar-summary">{file_count} files</p>
-  </div>
   <div class="sidebar-tabs">
     <button class="sidebar-tab active" data-tab="files">ファイル</button>
     <button class="sidebar-tab" data-tab="toc">目次</button>
@@ -140,6 +133,13 @@ fn render_sidebar(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="閉じる">×</button>
   </div>
   <div class="sidebar-panel active" id="panel-files">
+    <div class="sidebar-utility">
+      <label class="sidebar-search">
+        <span>絞り込み</span>
+        <input id="file-filter" type="search" placeholder="ファイル名で検索" autocomplete="off">
+      </label>
+      <p id="file-filter-summary" class="sidebar-summary">{file_count} files</p>
+    </div>
     <div class="file-list">
 {tree_html}    </div>
   </div>
