@@ -219,6 +219,7 @@ fn render_document_search() -> &'static str {
           <button id="document-search-clear" class="document-search-btn" type="button" aria-label="検索をクリア">×</button>
         </div>
       </div>
+      <div id="document-search-results" class="document-search-results" aria-live="polite"></div>
     </section>"##
 }
 
