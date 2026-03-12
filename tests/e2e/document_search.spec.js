@@ -49,8 +49,42 @@ async function currentMatchText(page) {
   });
 }
 
+async function stabilizeWebSocketHarness(page) {
+  await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
+  await page.evaluate(() => {
+    window.__realWsOnmessage = window.__lastWs.onmessage;
+    window.__lastWs.onmessage = function() {};
+  });
+}
+
+async function setDocumentSearchQuery(page, query) {
+  await page.evaluate((value) => {
+    const input = document.getElementById('document-search-input');
+    if (!input) {
+      throw new Error('document search input not found');
+    }
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, query);
+}
+
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+
+    class TestWebSocket extends NativeWebSocket {
+      constructor(...args) {
+        super(...args);
+        window.__lastWs = this;
+      }
+    }
+
+    TestWebSocket.prototype = NativeWebSocket.prototype;
+    Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
+    window.WebSocket = TestWebSocket;
+  });
   await page.goto('/');
+  await stabilizeWebSocketHarness(page);
   await loadSearchFixture(page);
 });
 
@@ -61,7 +95,7 @@ test('Ctrl/Cmd+Fで本文検索欄を開いてフォーカスする', async ({ p
 });
 
 test('検索語を入力するとヒット件数を表示して本文を強調する', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(3);
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
@@ -69,7 +103,7 @@ test('検索語を入力するとヒット件数を表示して本文を強調�
 });
 
 test('見出しテキストも文書内検索の対象に含める', async ({ page }) => {
-  await page.locator('#document-search-input').fill('deep dive');
+  await setDocumentSearchQuery(page, 'deep dive');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(1);
   await expect.poll(() => currentMatchText(page)).toContain('Deep dive');
@@ -88,14 +122,14 @@ test('リンクやコードブロック内の一致は検索ハイライト対�
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('alpha note link');
+  await setDocumentSearchQuery(page, 'alpha note link');
 
   await expect(page.locator('#document-search-summary')).toHaveText('0 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(0);
   await expect(page.locator('#content a mark.document-search-match')).toHaveCount(0);
   await expect(page.locator('#content pre mark.document-search-match')).toHaveCount(0);
 
-  await page.locator('#document-search-input').fill('alpha note code');
+  await setDocumentSearchQuery(page, 'alpha note code');
   await expect(page.locator('#document-search-summary')).toHaveText('0 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(0);
   await expect(page.locator('#content pre mark.document-search-match')).toHaveCount(0);
@@ -112,7 +146,7 @@ test('inline code内の一致も検索対象に含める', async ({ page }) => {
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('cargo test');
+  await setDocumentSearchQuery(page, 'cargo test');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(1);
   await expect.poll(() => currentMatchText(page)).toContain('cargo test');
@@ -129,14 +163,14 @@ test('装飾をまたぐ語句も検索できる', async ({ page }) => {
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
   await expect.poll(() => visibleMatchCount(page)).toBe(1);
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
 
 test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.locator('#document-search-input').press('Enter');
@@ -149,7 +183,7 @@ test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page })
 });
 
 test('クリアで検索状態と強調が消える', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha');
+  await setDocumentSearchQuery(page, 'alpha');
   await expect.poll(() => visibleMatchCount(page)).toBe(3);
 
   await page.locator('#document-search-clear').click();
@@ -159,7 +193,7 @@ test('クリアで検索状態と強調が消える', async ({ page }) => {
 });
 
 test('ファイル切り替え時に検索状態をリセットする', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha');
+  await setDocumentSearchQuery(page, 'alpha');
   await expect.poll(() => visibleMatchCount(page)).toBe(3);
 
   await page.evaluate(() => {
@@ -174,7 +208,7 @@ test('ファイル切り替え時に検索状態をリセットする', async ({
 });
 
 test('ファイル切り替え失敗時は元文書の検索状態を維持する', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha');
+  await setDocumentSearchQuery(page, 'alpha');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
@@ -190,7 +224,7 @@ test('ファイル切り替え失敗時は元文書の検索状態を維持す�
 });
 
 test('live update後も検索結果を再適用する', async ({ page }) => {
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
@@ -230,7 +264,7 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
   await expect(page.locator('#document-search-results .document-search-result').nth(0))
     .toContainText('Opening sentence. Alpha note appears here. Closing sentence.');
@@ -259,7 +293,7 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
     activateSidebarTab('toc');
   });
 
-  await page.locator('#document-search-input').fill('alpha note');
+  await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(18);
 
   const beforeScrollTop = await page.evaluate(() => {
