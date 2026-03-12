@@ -375,6 +375,7 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
   });
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
+  await page.waitForTimeout(150);
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
   await clickTocLink(page, 'beta');
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
