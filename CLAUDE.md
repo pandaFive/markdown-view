@@ -40,7 +40,8 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
   │   ├── files.rs      ファイル探索、検証、読み込み、描画、ファイルサイズ定数
   │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
   │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型
-  │   └── websocket.rs  WebSocketセッション管理、変更通知ブロードキャスト
+  │   ├── broadcast.rs  変更通知ブロードキャスト、監視イベント転送
+  │   └── session.rs    WebSocketセッション送受信ループ管理
   ├── renderer/     Markdown描画モジュール
   │   ├── mod.rs        Markdown→HTML変換（pulldown-cmark + syntectハイライト）
   │   └── toc.rs        Markdown→目次HTML生成
@@ -86,7 +87,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - `src/server/state.rs` 内テスト — AppMode構築・バリデーション
 - `src/server/files.rs` 内テスト — ファイル解決、トラバーサル防止、サイズ制限
 - `src/server/messages.rs` 内テスト — BroadcastMessage直列化
-- `src/server/websocket.rs` 内テスト — notify_update、遅延回復
+- `src/server/broadcast.rs` 内テスト — notify_update、遅延回復
 
 テスト名は日本語で記述する。
 
