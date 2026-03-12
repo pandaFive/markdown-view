@@ -15,11 +15,6 @@
   margin-bottom: 0.2rem;
 }
 
-.memo-caption {
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
 .memo-save-status {
   display: inline-flex;
   align-items: center;

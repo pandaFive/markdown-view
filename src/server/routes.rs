@@ -24,6 +24,16 @@ use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams
 
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
+fn sidebar_directory_name(state: &AppState) -> &str {
+    state
+        .mode()
+        .directory()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Documents")
+}
+
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let (csp_header, csp_fallback) = build_csp_header(state.syntax_css());
@@ -118,6 +128,7 @@ async fn index_handler(
         syntax_css: state.syntax_css(),
         sidebar: match target.file_list() {
             Some(files) => SidebarParams::Directory {
+                directory_name: sidebar_directory_name(&state),
                 file_list: files,
                 current_file: target.relative_path(),
             },

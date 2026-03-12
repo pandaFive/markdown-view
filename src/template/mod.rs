@@ -229,12 +229,14 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
         });
 
         assert!(html.contains("data-dir-mode=\"true\""));
+        assert!(html.contains("<h2>workspace</h2>"));
         assert!(html.contains("class=\"sidebar-tabs\""));
         assert!(html.contains("data-tab=\"files\""));
         assert!(html.contains("data-tab=\"toc\""));
@@ -247,6 +249,8 @@ mod tests {
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-summary\""));
         assert!(html.contains("id=\"document-search-results\""));
+        assert!(!html.contains("sidebar-caption"));
+        assert!(!html.contains("ディレクトリ内のMarkdownを切り替えて閲覧できます。"));
     }
 
     #[test]
@@ -271,6 +275,8 @@ mod tests {
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-results\""));
         assert!(html.contains("id=\"panel-memo\""));
+        assert!(!html.contains("sidebar-caption"));
+        assert!(!html.contains("目次とメモを横断して読書メモを残せます。"));
     }
 
     #[test]
@@ -308,6 +314,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -376,6 +383,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -409,6 +417,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -433,6 +442,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -463,6 +473,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -492,6 +503,7 @@ mod tests {
             dark_mode: false,
             syntax_css: &syntax_css,
             sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
                 file_list: &files,
                 current_file: Some("README.md"),
             },
@@ -573,6 +585,11 @@ mod tests {
         assert!(html.contains("id=\"memo-editor\""));
         assert!(html.contains("id=\"memo-preview\""));
         assert!(html.contains("id=\"memo-save-status\""));
+        assert!(html.contains("Research Notes"));
+        assert!(
+            !html.contains("本文選択から引用を追加できます。出典リンクと行番号を自動付与します。")
+        );
+        assert!(!html.contains("memo-caption"));
         assert!(html.contains("id=\"quote-selection-action\""));
         assert!(html.contains("data-memo-file=\"README.md\""));
     }

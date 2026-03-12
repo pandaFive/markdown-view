@@ -25,11 +25,6 @@
   margin-bottom: 0.35rem;
 }
 
-.sidebar-caption {
-  color: var(--muted);
-  font-size: 0.88rem;
-}
-
 .sidebar-utility {
   display: grid;
   gap: 0.6rem;
