@@ -265,11 +265,12 @@ function ensureSuppressedTocTrackingResume() {
 
 function suppressTocTrackingFor(ms) {
   suppressTocTrackingUntil = Date.now() + ms;
-  pendingSuppressedTocTrackingUpdate = false;
+  pendingSuppressedTocTrackingUpdate = true;
   if (suppressTocTrackingTimer !== null) {
     window.clearTimeout(suppressTocTrackingTimer);
     suppressTocTrackingTimer = null;
   }
+  ensureSuppressedTocTrackingResume();
 }
 
 function setupTocTracking() {
