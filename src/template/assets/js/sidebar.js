@@ -105,13 +105,30 @@ var currentActiveTocId = '';
 var suppressTocTrackingUntil = 0;
 var suppressTocTrackingTimer = null;
 var pendingSuppressedTocTrackingUpdate = false;
+var TOC_NAVIGATION_GRACE_MS = 400;
+var TOC_NAVIGATION_SLACK_PX = 24;
+var pendingTocNavigationId = '';
+var pendingTocNavigationUntil = 0;
+var tocRoot = document.getElementById('toc');
 
 function setActiveTocLink(activeId) {
   if (!currentTocTracking) return;
   if (currentActiveTocId === activeId) return;
+  var nextLink = activeId ? currentTocTracking.links.get(activeId) : null;
+  var currentLink = currentActiveTocId ? currentTocTracking.links.get(currentActiveTocId) : null;
+
+  if (nextLink) {
+    nextLink.classList.add('active');
+  }
+  if (currentLink && currentLink !== nextLink) {
+    currentLink.classList.remove('active');
+  }
+
   currentActiveTocId = activeId;
   currentTocTracking.links.forEach(function(link, id) {
-    link.classList.toggle('active', id === activeId);
+    if (link !== nextLink && link !== currentLink) {
+      link.classList.toggle('active', id === activeId);
+    }
   });
 }
 
@@ -129,10 +146,70 @@ function updateActiveTocHeading() {
   setActiveTocLink(getViewportActiveTocId());
 }
 
+function clearPendingTocNavigation() {
+  pendingTocNavigationId = '';
+  pendingTocNavigationUntil = 0;
+}
+
+function findTrackedHeading(id) {
+  if (!currentTocTracking || !id) return null;
+  for (var i = 0; i < currentTocTracking.headings.length; i++) {
+    if (currentTocTracking.headings[i].id === id) {
+      return currentTocTracking.headings[i];
+    }
+  }
+  return null;
+}
+
+function markPendingTocNavigation(id) {
+  if (!findTrackedHeading(id)) return;
+  pendingTocNavigationId = id;
+  pendingTocNavigationUntil = Date.now() + TOC_NAVIGATION_GRACE_MS;
+  setActiveTocLink(id);
+}
+
+function getPendingTocNavigationId(activationOffset) {
+  if (!pendingTocNavigationId) return '';
+  var heading = findTrackedHeading(pendingTocNavigationId);
+  var navigationTop;
+  var maxScrollTop;
+  var currentScrollTop;
+  if (!heading) {
+    clearPendingTocNavigation();
+    return '';
+  }
+  if (Date.now() > pendingTocNavigationUntil) {
+    clearPendingTocNavigation();
+    return '';
+  }
+  navigationTop = heading.getBoundingClientRect().top;
+  currentScrollTop = window.scrollY || window.pageYOffset;
+  maxScrollTop = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
+  if (
+    navigationTop <= activationOffset + TOC_NAVIGATION_SLACK_PX &&
+    navigationTop >= activationOffset - TOC_NAVIGATION_SLACK_PX
+  ) {
+    return heading.id;
+  }
+  if (currentScrollTop >= maxScrollTop - 1 && navigationTop < activationOffset - TOC_NAVIGATION_SLACK_PX) {
+    return heading.id;
+  }
+  clearPendingTocNavigation();
+  return '';
+}
+
 function getViewportActiveTocId() {
   if (!currentTocTracking) return '';
-  var activeHeading = null;
   var activationOffset = currentTocTracking.activationOffset;
+  var pendingActiveId = getPendingTocNavigationId(activationOffset);
+  var activeHeading = null;
+  var currentScrollTop = window.scrollY || window.pageYOffset;
+  var maxScrollTop = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
+  var i;
+
+  if (pendingActiveId) {
+    return pendingActiveId;
+  }
 
   currentTocTracking.headings.forEach(function(heading) {
     if (heading.getBoundingClientRect().top <= activationOffset) {
@@ -140,6 +217,16 @@ function getViewportActiveTocId() {
     }
   });
 
+  if (activeHeading && activeHeading.id !== pendingTocNavigationId) {
+    clearPendingTocNavigation();
+  }
+  if (maxScrollTop > 0 && currentScrollTop >= maxScrollTop - 1) {
+    for (i = currentTocTracking.headings.length - 1; i >= 0; i--) {
+      if (currentTocTracking.headings[i].getBoundingClientRect().top < window.innerHeight) {
+        return currentTocTracking.headings[i].id;
+      }
+    }
+  }
   return activeHeading ? activeHeading.id : '';
 }
 
@@ -190,11 +277,12 @@ function ensureSuppressedTocTrackingResume() {
 
 function suppressTocTrackingFor(ms) {
   suppressTocTrackingUntil = Date.now() + ms;
-  pendingSuppressedTocTrackingUpdate = false;
+  pendingSuppressedTocTrackingUpdate = true;
   if (suppressTocTrackingTimer !== null) {
     window.clearTimeout(suppressTocTrackingTimer);
     suppressTocTrackingTimer = null;
   }
+  ensureSuppressedTocTrackingResume();
 }
 
 function setupTocTracking() {
@@ -255,6 +343,17 @@ if (sidebarOpen) {
 if (backToTop) {
   backToTop.addEventListener('click', function() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+}
+
+if (tocRoot) {
+  tocRoot.addEventListener('click', function(event) {
+    var link = event.target.closest('a[href^="#"]');
+    var href;
+    if (!link || !tocRoot.contains(link)) return;
+    href = link.getAttribute('href') || '';
+    if (href.length <= 1) return;
+    markPendingTocNavigation(href.slice(1));
   });
 }
 

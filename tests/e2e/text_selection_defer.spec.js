@@ -46,6 +46,16 @@ async function activeTocLabelOrEmpty(page) {
   return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
 }
 
+async function clickTocLink(page, id) {
+  await page.evaluate((targetId) => {
+    const link = document.querySelector(`#toc a[href="#${targetId}"]`);
+    if (!link) {
+      throw new Error(`toc link not found: ${targetId}`);
+    }
+    link.click();
+  }, id);
+}
+
 async function stabilizeWebSocketHarness(page) {
   await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
   await page.evaluate(() => {
@@ -93,6 +103,30 @@ async function loadDenseHeadingFixture(page) {
       activationOffset: offset
     };
   });
+}
+
+async function loadBottomHeadingFixture(page) {
+  await fs.writeFile(
+    readmePath,
+    [
+      '# README',
+      '',
+      'Intro',
+      '',
+      '## Alpha',
+      '',
+      'Alpha body',
+      '',
+      '## Beta',
+      '',
+      'Beta body'
+    ].join('\n')
+  );
+
+  await page.reload();
+  await expect(page.locator('#toc')).toContainText('Alpha');
+  await expect(page.locator('#toc')).toContainText('Beta');
+  await stabilizeWebSocketHarness(page);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -251,6 +285,101 @@ test('最初の見出しに到達するまでは目次activeを付けない', as
 
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後はクリックした見出しをactiveにする', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('下端見出しがactivation位置まで届かなくてもクリック先をactiveにする', async ({ page }) => {
+  await loadBottomHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('短いページの初期表示では末尾見出しをactiveにしない', async ({ page }) => {
+  await loadBottomHeadingFixture(page);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => activeTocLabelOrEmpty(page)).toBe('');
+});
+
+test('目次クリック後は猶予時間経過後に通常スクロール判定へ戻る', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後でも逆方向へスクロールしたら通常判定へ戻る', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate(() => {
+    window.__markPendingCalls = 0;
+    const original = window.markPendingTocNavigation;
+    window.markPendingTocNavigation = function(id) {
+      window.__markPendingCalls += 1;
+      return original.call(this, id);
+    };
+  });
+
+  await page.evaluate(() => {
+    const toc = document.getElementById('toc').innerHTML;
+    const repeated = '<p>Updated paragraph</p>'.repeat(12);
+    const payload = {
+      content:
+        '<h1 id="readme">README</h1>' +
+        repeated +
+        '<h2 id="alpha">Alpha</h2><p>Alpha body updated</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta body updated</p>' +
+        repeated,
+      toc: toc,
+      file: 'README.md'
+    };
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha body updated');
+  await page.waitForTimeout(150);
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await expect.poll(() => page.evaluate(() => window.__markPendingCalls)).toBe(1);
 });
 
 test('WebSocket更新後も同じ見出しを見ている間は目次activeを維持する', async ({ page }) => {
