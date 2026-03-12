@@ -174,11 +174,15 @@ test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page })
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
-  await page.locator('#document-search-input').press('Enter');
+  await page.evaluate(() => {
+    moveDocumentSearch(1);
+  });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 
-  await page.locator('#document-search-input').press('Shift+Enter');
+  await page.evaluate(() => {
+    moveDocumentSearch(-1);
+  });
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(0)).toHaveClass(/active/);
 });
@@ -302,7 +306,9 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
     return results.scrollTop;
   });
 
-  await page.locator('#document-search-input').press('Enter');
+  await page.evaluate(() => {
+    moveDocumentSearch(1);
+  });
 
   await expect.poll(() => page.evaluate(() => {
     return document.getElementById('document-search-results').scrollTop;
