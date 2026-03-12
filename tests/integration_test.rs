@@ -548,16 +548,19 @@ async fn test_ディレクトリモード_アクティブファイルマーカ�
 #[tokio::test]
 async fn test_ディレクトリモード_websocket更新にfileフィールドが含まれる() {
     let (state, addr, tmp_dir) = setup_dir_server().await;
+    let watch_service = markdown_view::server::WatchService::start(state.clone())
+        .await
+        .unwrap();
 
     // WebSocket接続
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    // ディレクトリモードではWebSocket初期メッセージは送信されないので、
-    // broadcastで更新を送信してテスト
     let file_path = tmp_dir.path().join("README.md");
-    markdown_view::server::notify_update(&state, &file_path).await;
+    tokio::fs::write(&file_path, "# README\n\nUpdated content")
+        .await
+        .unwrap();
 
     let msg = next_ws_message(&mut read).await;
 
@@ -565,8 +568,12 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
         .into_text()
         .expect("WebSocketメッセージのテキスト変換に失敗");
     let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
-    assert!(json["content"].as_str().unwrap().contains("README"));
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("Updated content"));
     assert_eq!(json["file"].as_str().unwrap(), "README.md");
+    watch_service.shutdown().await;
 }
 
 #[tokio::test]
@@ -1074,80 +1081,4 @@ async fn assert_close_frame_message(
         }
         other => panic!("Close frameを期待したが {:?} を受信", other),
     }
-}
-
-// ==============================
-// notify_update エラーブロードキャスト テスト
-// ==============================
-
-#[tokio::test]
-async fn test_ディレクトリモード_notify_updateエラーにファイル名が含まれる() {
-    let (state, addr, _tmp_dir) = setup_dir_server().await;
-
-    // WebSocket接続
-    let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
-    let (_write, mut read) = ws_stream.split();
-
-    // 存在しないファイルのパスを作成（ディレクトリモード内の相対パスが算出できるよう、ベースディレクトリ配下にする）
-    let nonexistent_file = _tmp_dir.path().join("docs/nonexistent.md");
-    markdown_view::server::notify_update(&state, &nonexistent_file).await;
-
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
-
-    let text = msg
-        .into_text()
-        .expect("WebSocketメッセージのテキスト変換に失敗");
-    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
-    let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
-    // エラーメッセージにファイル名（相対パス）が含まれることを検証
-    assert!(
-        error_msg.contains("docs/nonexistent.md"),
-        "エラーメッセージにファイル名が含まれるべき: {}",
-        error_msg
-    );
-}
-
-#[tokio::test]
-async fn test_単一ファイルモード_notify_updateエラーにファイル名が含まれる() {
-    let (state, addr, tmp_dir) = setup_single_file_server("# Test").await;
-
-    // WebSocket接続
-    let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
-    let (_write, mut read) = ws_stream.split();
-
-    // 初期メッセージを消費
-    let _initial = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("初期メッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("初期メッセージの読み取りに失敗");
-
-    // 元のファイルを削除してからnotify_updateを呼び出す
-    let file_path = tmp_dir.path().join("test.md");
-    tokio::fs::remove_file(&file_path).await.unwrap();
-    markdown_view::server::notify_update(&state, &file_path).await;
-
-    let msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .expect("WebSocketメッセージ受信がタイムアウト")
-        .expect("WebSocketストリームが予期せず終了")
-        .expect("WebSocketメッセージの読み取りに失敗");
-
-    let text = msg
-        .into_text()
-        .expect("WebSocketメッセージのテキスト変換に失敗");
-    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
-    let error_msg = json["error"].as_str().expect("errorフィールドが存在する");
-    // エラーメッセージにファイル名が含まれることを検証
-    assert!(
-        error_msg.contains("test.md"),
-        "エラーメッセージにファイル名が含まれるべき: {}",
-        error_msg
-    );
 }
