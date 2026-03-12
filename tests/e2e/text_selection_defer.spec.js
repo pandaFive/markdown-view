@@ -37,6 +37,64 @@ async function clearSelection(page) {
   });
 }
 
+async function activeTocLabel(page) {
+  return page.locator('#toc a.active').innerText();
+}
+
+async function activeTocLabelOrEmpty(page) {
+  const activeLink = page.locator('#toc a.active');
+  return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
+}
+
+async function stabilizeWebSocketHarness(page) {
+  await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
+  await page.evaluate(() => {
+    window.__realWsOnmessage = window.__lastWs.onmessage;
+    window.__lastWs.onmessage = function() {};
+    window.__dispatchWsMessage = (payload) => {
+      window.__realWsOnmessage({ data: JSON.stringify(payload) });
+    };
+  });
+}
+
+async function loadDenseHeadingFixture(page) {
+  const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
+  await fs.writeFile(
+    readmePath,
+    [
+      '# README',
+      '',
+      repeated,
+      '',
+      '## Alpha',
+      '',
+      'Alpha body',
+      '',
+      '## Beta',
+      '',
+      'Beta body',
+      '',
+      repeated
+    ].join('\n')
+  );
+
+  await page.reload();
+  await expect(page.locator('#toc')).toContainText('Alpha');
+  await expect(page.locator('#toc')).toContainText('Beta');
+  await stabilizeWebSocketHarness(page);
+
+  return page.evaluate(() => {
+    const alpha = document.getElementById('alpha');
+    const beta = document.getElementById('beta');
+    const offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    return {
+      alphaTop: alpha.getBoundingClientRect().top + window.scrollY,
+      betaTop: beta.getBoundingClientRect().top + window.scrollY,
+      activationOffset: offset
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await resetFixtures();
   await page.addInitScript(() => {
@@ -57,15 +115,14 @@ test.beforeEach(async ({ page }) => {
       const effectiveDelay = delay === 30000 ? 50 : delay;
       return nativeSetTimeout(fn, effectiveDelay, ...args);
     };
-    window.__dispatchWsMessage = (payload) => {
-      if (!window.__lastWs || typeof window.__lastWs.onmessage !== 'function') {
-        throw new Error('WebSocket is not ready');
-      }
-      window.__lastWs.onmessage({ data: JSON.stringify(payload) });
-    };
   });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
+  await stabilizeWebSocketHarness(page);
+});
+
+test.afterEach(async () => {
+  await resetFixtures();
 });
 
 test('ドラッグ選択中はWebSocket更新を延期し、選択解除後に適用する', async ({ page }) => {
@@ -74,7 +131,8 @@ test('ドラッグ選択中はWebSocket更新を延期し、選択解除後に�
   await page.evaluate(() => {
     window.__dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Deferred update</p>',
-      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+      toc: '<ul><li><a href="#readme">README</a></li></ul>',
+      file: 'README.md'
     });
   });
 
@@ -96,7 +154,9 @@ test('ファイル遷移時は保留更新をクリアし、新しいファイ�
     });
   });
 
-  await page.locator('[data-file="notes.md"]').click();
+  await page.evaluate(() => {
+    selectFile('notes.md');
+  });
   await expect(page.locator('#content')).toContainText('Notes body');
 
   await clearSelection(page);
@@ -120,13 +180,34 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await expect(page.locator('#content')).toContainText('Refreshed from server');
 });
 
+test('選択中はrefreshが古いバッファ更新より優先される', async ({ page }) => {
+  await selectParagraphText(page, 'Initial README content');
+  await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
+
+  await page.evaluate(() => {
+    window.__dispatchWsMessage({
+      content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>',
+      file: 'README.md'
+    });
+    window.__dispatchWsMessage({ refresh: true });
+  });
+
+  await expect(page.locator('#content')).toContainText('Initial README content');
+
+  await clearSelection(page);
+  await expect(page.locator('#content')).toContainText('Refresh wins after selection');
+  await expect(page.locator('#content')).not.toContainText('Stale buffered update');
+});
+
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
   await page.evaluate(() => {
     window.__dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
-      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+      toc: '<ul><li><a href="#readme">README</a></li></ul>',
+      file: 'README.md'
     });
     // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
     // 偽メッセージ送信後にonmessageを無効化する
@@ -134,4 +215,190 @@ test('選択解除されなくても30秒フォールバックで保留更新を
   });
 
   await expect(page.locator('#content')).toContainText('Fallback applied');
+});
+
+test('近接した見出し境界でも目次activeが前後に揺れない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  for (const delta of [2, -2, 1, -1]) {
+    await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8 + delta);
+    await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+  }
+
+  await page.evaluate(() => {
+    window.scrollTo(0, document.getElementById('beta').getBoundingClientRect().top + window.scrollY);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  const betaActiveScrollTop = await page.evaluate(() => window.scrollY);
+
+  for (const delta of [2, -2, 1, -1]) {
+    await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), betaActiveScrollTop + delta);
+    await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  }
+});
+
+test('最初の見出しに到達するまでは目次activeを付けない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => activeTocLabelOrEmpty(page)).toBe('');
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('WebSocket更新後も同じ見出しを見ている間は目次activeを維持する', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate(() => {
+    const repeated = '<p>Updated paragraph</p>'.repeat(12);
+    window.__dispatchWsMessage({
+      content:
+        '<h1 id="readme">README</h1>' +
+        repeated +
+        '<h2 id="alpha">Alpha</h2><p>Alpha body updated</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta body updated</p>' +
+        repeated,
+      toc:
+        '<ul>' +
+        '<li><a href="#readme">README</a></li>' +
+        '<li><a href="#alpha">Alpha</a></li>' +
+        '<li><a href="#beta">Beta</a></li>' +
+        '</ul>',
+      file: 'README.md'
+    });
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha body updated');
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+  await page.waitForTimeout(100);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('更新で見出し位置が変わったら現在位置に合う目次activeへ再計算する', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate(() => {
+    const inserted = '<p>Inserted before alpha</p>'.repeat(40);
+    window.__dispatchWsMessage({
+      content:
+        '<h1 id="readme">README</h1>' +
+        '<p>Paragraph 1</p>'.repeat(12) +
+        inserted +
+        '<h2 id="alpha">Alpha</h2><p>Alpha moved down</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta body</p>' +
+        '<p>Tail</p>'.repeat(12),
+      toc:
+        '<ul>' +
+        '<li><a href="#readme">README</a></li>' +
+        '<li><a href="#alpha">Alpha</a></li>' +
+        '<li><a href="#beta">Beta</a></li>' +
+        '</ul>',
+      file: 'README.md'
+    });
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha moved down');
+  await expect.poll(() => activeTocLabel(page)).toBe('README');
+});
+
+test('抑止中のスクロールも抑止明けに目次activeへ反映される', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate(() => {
+    const repeated = '<p>Updated paragraph</p>'.repeat(12);
+    window.__dispatchWsMessage({
+      content:
+        '<h1 id="readme">README</h1>' +
+        repeated +
+        '<h2 id="alpha">Alpha</h2><p>Alpha body updated</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta body updated</p>' +
+        repeated,
+      toc:
+        '<ul>' +
+        '<li><a href="#readme">README</a></li>' +
+        '<li><a href="#alpha">Alpha</a></li>' +
+        '<li><a href="#beta">Beta</a></li>' +
+        '</ul>',
+      file: 'README.md'
+    });
+    window.scrollTo(0, document.getElementById('beta').getBoundingClientRect().top + window.scrollY);
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha body updated');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('同一見出しのburst更新でも目次activeが点滅しない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate(() => {
+    const toc = document.getElementById('toc');
+    window.__tocActiveChanges = [];
+    let lastLabel = '';
+    const recordActive = () => {
+      const active = toc.querySelector('a.active');
+      const label = active ? active.textContent : '';
+      if (label !== lastLabel) {
+        window.__tocActiveChanges.push(label);
+        lastLabel = label;
+      }
+    };
+    recordActive();
+    const observer = new MutationObserver(recordActive);
+    observer.observe(toc, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class']
+    });
+    window.__stopTocObserver = () => observer.disconnect();
+  });
+
+  await page.evaluate(() => {
+    const repeated = '<p>Burst paragraph</p>'.repeat(12);
+    const currentToc = document.getElementById('toc').innerHTML;
+    const payload = {
+      content:
+        '<h1 id="readme">README</h1>' +
+        repeated +
+        '<h2 id="alpha">Alpha</h2><p>Alpha burst</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta burst</p>' +
+        repeated,
+      toc: currentToc,
+      file: 'README.md'
+    };
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha burst');
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+  await page.waitForTimeout(250);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  const activeChanges = await page.evaluate(() => {
+    window.__stopTocObserver();
+    return window.__tocActiveChanges.slice();
+  });
+  expect(activeChanges).toEqual(['Alpha']);
 });

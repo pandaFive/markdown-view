@@ -1,8 +1,75 @@
 var WS_RECONNECT_BASE = 1000;
 var WS_RECONNECT_MAX_DELAY = 30000;
 var WS_RECONNECT_MAX_ATTEMPTS = 20;
+var WS_UPDATE_COALESCE_MS = 120;
 var ws = null;
 var reconnectAttempts = 0;
+var pendingWsUpdate = null;
+var pendingWsUpdateSignature = '';
+var pendingWsUpdateTimer = null;
+var lastAppliedUpdateSignature = '';
+
+function discardBufferedLiveUpdate() {
+  if (pendingWsUpdateTimer) {
+    window.clearTimeout(pendingWsUpdateTimer);
+    pendingWsUpdateTimer = null;
+  }
+  pendingWsUpdate = null;
+  pendingWsUpdateSignature = '';
+}
+
+function buildUpdateSignature(data) {
+  return JSON.stringify({
+    content: data.content !== undefined ? data.content : null,
+    toc: data.toc !== undefined ? data.toc : null,
+    file: data.file || '',
+    refresh: Boolean(data.refresh)
+  });
+}
+
+function rememberAppliedLiveUpdate(data) {
+  lastAppliedUpdateSignature = buildUpdateSignature(data);
+}
+
+function flushBufferedLiveUpdate() {
+  pendingWsUpdateTimer = null;
+  var data = pendingWsUpdate;
+  pendingWsUpdate = null;
+  pendingWsUpdateSignature = '';
+  if (!data) return;
+
+  // テキスト選択中はDOM更新を延期して選択破壊を防止
+  // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
+  if (isTextSelected()) {
+    if (!pendingUpdate || !pendingUpdate.refresh) {
+      pendingUpdate = data;
+    }
+    hideWsServerErrorBanner();
+    hideFileFetchErrorBanner();
+    ensurePendingUpdateTimer();
+    return;
+  }
+
+  updateContent(data);
+  hideWsServerErrorBanner();
+  hideFileFetchErrorBanner();
+  setLiveStatus('live');
+}
+
+function scheduleBufferedLiveUpdate(data) {
+  var signature = buildUpdateSignature(data);
+  if (signature === lastAppliedUpdateSignature || signature === pendingWsUpdateSignature) {
+    return;
+  }
+
+  pendingWsUpdate = data;
+  pendingWsUpdateSignature = signature;
+
+  if (pendingWsUpdateTimer) return;
+  pendingWsUpdateTimer = window.setTimeout(function() {
+    flushBufferedLiveUpdate();
+  }, WS_UPDATE_COALESCE_MS);
+}
 
 function connectWS() {
   var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -32,6 +99,7 @@ function connectWS() {
     }
     if (data.refresh && isDirMode && currentFile) {
       if (isTextSelected()) {
+        discardBufferedLiveUpdate();
         pendingUpdate = { refresh: true, file: currentFile };
         ensurePendingUpdateTimer();
         return;
@@ -42,23 +110,7 @@ function connectWS() {
     if (isDirMode && data.file) {
       if (data.file !== currentFile) return;
     }
-    // テキスト選択中はDOM更新を延期して選択破壊を防止
-    // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
-    if (isTextSelected()) {
-      pendingUpdate = data;
-      // 有効な更新を受信した時点でエラーバナーをクリア（DOM反映は延期）
-      hideWsServerErrorBanner();
-      hideFileFetchErrorBanner();
-      // 30秒以上選択が維持される場合のフォールバックタイマー
-      // mouseup後にWS受信した場合にもタイマーが確実に起動する
-      ensurePendingUpdateTimer();
-      return;
-    }
-    updateContent(data);
-    // WebSocket経由の成功更新で各種エラーバナーをクリア
-    hideWsServerErrorBanner();
-    hideFileFetchErrorBanner();
-    setLiveStatus('live');
+    scheduleBufferedLiveUpdate(data);
   };
 
   ws.onclose = function() {

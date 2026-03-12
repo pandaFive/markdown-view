@@ -407,7 +407,6 @@ mod tests {
             },
         });
 
-        assert!(html.contains("WebSocket経由の成功更新で各種エラーバナーをクリア"));
         assert!(html.contains("hideWsServerErrorBanner();"));
         assert!(html.contains("hideFileFetchErrorBanner();"));
     }
