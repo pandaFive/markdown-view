@@ -68,6 +68,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - **CSS/JS完全埋め込み**: 外部ファイル不要、単一HTMLで完結
 - **notifyはstd::thread**: notifyがsync APIのため、mpscチャネルでtokioにブリッジ
 - **見出しパースが2回実行される**: `slugify`/`generate_unique_id`/`extract_headings`は共有済みだが、`render_markdown`と`generate_toc`で別々にpulldown-cmarkパースが走る（既知のトレードオフ）
+- 個人使用前提でも、外部公開 API の互換性破壊は `major change` 扱いにしろ。性能向上のために互換性を壊す場合も、通常変更として紛れ込ませず明示的に扱え
 
 ## セキュリティレイヤー
 
