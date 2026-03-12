@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::task::JoinHandle;
 
+use super::broadcast::spawn_watch_event_forwarder;
 use super::state::AppState;
-use super::websocket::spawn_watch_event_forwarder;
 use crate::watcher::Watcher;
 
 /// 監視スレッドと転送タスクを束ねるサービス

@@ -17,8 +17,8 @@ use super::guards::{
     json_error,
 };
 use super::messages::ApiError;
+use super::session::handle_socket;
 use super::state::AppState;
-use super::websocket::handle_socket;
 use crate::template::{render_page, RenderPageParams, SidebarParams, UpdateMessage};
 
 /// axumルーターを構築する
