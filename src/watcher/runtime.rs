@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use notify_debouncer_mini::new_debouncer;
 use tokio::sync::{mpsc, oneshot};
 
-use super::strategy::{handle_debounced_events, WatchStrategy};
+use super::strategy::{WatchStrategy, WatchThreadConfig};
 use super::{WatchError, WatchEvent};
 use crate::server::AppMode;
 
@@ -67,14 +67,14 @@ impl Watcher {
     /// 監視を開始し、監視イベント受信用チャネルを返す
     pub async fn spawn(mode: AppMode) -> Result<(Self, mpsc::Receiver<WatchEvent>)> {
         let strategy = WatchStrategy::from_mode(&mode)?;
+        let config = strategy.runtime_config()?;
         let (tx, rx) = mpsc::channel::<WatchEvent>(WATCHER_MESSAGE_BUFFER);
         let (init_tx, init_rx) = oneshot::channel::<InitResult>();
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_shutdown_flag = shutdown_flag.clone();
-        let unexpected_exit = strategy.unexpected_exit_message();
-        let watch_dir = strategy.watch_dir()?;
+        let unexpected_exit = config.unexpected_exit_message;
         let watcher_thread =
-            spawn_watcher_thread(strategy, watch_dir, tx, init_tx, thread_shutdown_flag)?;
+            spawn_watcher_thread(strategy, config, tx, init_tx, thread_shutdown_flag)?;
 
         await_watcher_init(init_rx, unexpected_exit).await?;
         Ok((Self::new(shutdown_flag, watcher_thread), rx))
@@ -127,13 +127,13 @@ fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &st
 
 fn spawn_watcher_thread(
     strategy: WatchStrategy,
-    watch_dir: std::path::PathBuf,
+    config: WatchThreadConfig,
     tx: mpsc::Sender<WatchEvent>,
     init_tx: oneshot::Sender<InitResult>,
     thread_shutdown_flag: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>> {
-    let thread_name = strategy.thread_name().to_string();
-    let spawn_context = format!("監視スレッド {} の起動に失敗", strategy.thread_name());
+    let thread_name = config.thread_name.to_string();
+    let spawn_context = format!("監視スレッド {} の起動に失敗", config.thread_name);
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
@@ -141,10 +141,12 @@ fn spawn_watcher_thread(
             let panic_tx = rt_tx.clone();
             let mut init_tx = Some(init_tx);
             let callback_strategy = strategy.clone();
-            let recursive_mode = strategy.recursive_mode();
-            let start_error_prefix = strategy.start_error_prefix();
-            let panic_message = strategy.panic_message();
-            let error_label = strategy.error_label();
+            let callback_config = config.clone();
+            let recursive_mode = config.recursive_mode;
+            let start_error_prefix = config.start_error_prefix;
+            let panic_message = config.panic_message;
+            let error_label = config.error_label;
+            let watch_dir = config.watch_dir.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
@@ -153,12 +155,11 @@ fn spawn_watcher_thread(
                         notify::Error,
                     >| match res {
                         Ok(events) => {
-                            for changed_path in handle_debounced_events(&callback_strategy, events)
-                            {
+                            for changed_path in callback_strategy.collect_changed_paths(&events) {
                                 send_watch_event(
                                     &rt_tx,
                                     WatchEvent::FileChanged(changed_path),
-                                    callback_strategy.change_label(),
+                                    callback_config.change_label,
                                 );
                             }
                         }
@@ -166,13 +167,13 @@ fn spawn_watcher_thread(
                             let watch_error = WatchError::notify(e.to_string());
                             tracing::warn!(
                                 "[markdown-view] {}: {}",
-                                callback_strategy.watch_error_prefix(),
+                                callback_config.watch_error_prefix,
                                 watch_error.detail()
                             );
                             send_watch_event(
                                 &rt_tx,
                                 WatchEvent::Error(watch_error),
-                                callback_strategy.error_label(),
+                                callback_config.error_label,
                             );
                         }
                     },
