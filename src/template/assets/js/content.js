@@ -177,6 +177,10 @@ function applyPendingUpdate() {
   setLiveStatus('live');
 }
 
+function normalizeTocHtml(html) {
+  return (html || '').replace(/>\s+</g, '><').trim();
+}
+
 // サーバーサイドでサニタイズ済みのHTMLを反映する
 // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
 function updateContent(data) {
@@ -186,27 +190,40 @@ function updateContent(data) {
   }
   pendingUpdate = null;
   var scrollY = window.scrollY;
+  var preservedActiveTocId = typeof getCurrentActiveTocId === 'function' ? getCurrentActiveTocId() : '';
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
-  if (data.content !== undefined) {
+  if (data.content !== undefined && contentEl.innerHTML !== data.content) {
     contentEl.innerHTML = data.content;
   }
-  if (data.toc !== undefined) {
+  if (data.toc !== undefined && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(data.toc)) {
     tocEl.innerHTML = data.toc;
+  }
+
+  if (typeof setupTocTracking === 'function') {
+    setupTocTracking();
+  }
+  if (typeof suppressTocTrackingFor === 'function') {
+    suppressTocTrackingFor(120);
   }
 
   requestAnimationFrame(function() {
     window.scrollTo(0, scrollY);
     updateReadingProgress();
+    if (typeof restoreActiveTocHeading === 'function') {
+      restoreActiveTocHeading(preservedActiveTocId);
+    }
   });
 
-  setupTocTracking();
   updateDocumentStats();
   syncDocumentChrome(currentFile);
   enhanceContentInteractions();
   setupTocFilter();
   if (typeof hideQuoteSelectionAction === 'function') {
     hideQuoteSelectionAction();
+  }
+  if (typeof rememberAppliedLiveUpdate === 'function') {
+    rememberAppliedLiveUpdate(data);
   }
 }

@@ -56,6 +56,14 @@ function selectFile(file, pushHistory) {
   if (pushHistory === undefined) pushHistory = true;
   var previousFile = currentFile;
   var gen = ++fetchGeneration;
+  if (typeof discardBufferedLiveUpdate === 'function') {
+    discardBufferedLiveUpdate();
+  }
+  pendingUpdate = null;
+  if (pendingUpdateTimer) {
+    clearTimeout(pendingUpdateTimer);
+    pendingUpdateTimer = null;
+  }
   if (typeof flushPendingMemoSave === 'function') {
     flushPendingMemoSave();
   }

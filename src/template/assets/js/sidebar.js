@@ -99,33 +99,141 @@ if (isDirMode) {
   });
 }
 
-var currentObserver = null;
+var currentTocTracking = null;
+var tocTrackingFrame = null;
+var currentActiveTocId = '';
+var suppressTocTrackingUntil = 0;
+var suppressTocTrackingTimer = null;
+var pendingSuppressedTocTrackingUpdate = false;
+
+function setActiveTocLink(activeId) {
+  if (!currentTocTracking) return;
+  if (currentActiveTocId === activeId) return;
+  currentActiveTocId = activeId;
+  currentTocTracking.links.forEach(function(link, id) {
+    link.classList.toggle('active', id === activeId);
+  });
+}
+
+function getTocActivationOffset(headings) {
+  if (!headings.length) return 112;
+  var scrollMarginTop = parseFloat(window.getComputedStyle(headings[0]).scrollMarginTop);
+  if (!Number.isFinite(scrollMarginTop) || scrollMarginTop < 0) {
+    return 112;
+  }
+  return scrollMarginTop;
+}
+
+function updateActiveTocHeading() {
+  if (!currentTocTracking) return;
+  setActiveTocLink(getViewportActiveTocId());
+}
+
+function getViewportActiveTocId() {
+  if (!currentTocTracking) return '';
+  var activeHeading = currentTocTracking.headings[0];
+  var activationOffset = currentTocTracking.activationOffset;
+
+  currentTocTracking.headings.forEach(function(heading) {
+    if (heading.getBoundingClientRect().top <= activationOffset) {
+      activeHeading = heading;
+    }
+  });
+
+  return activeHeading.id;
+}
+
+function hasTrackedHeading(id) {
+  if (!currentTocTracking || !id) return false;
+  return currentTocTracking.headings.some(function(heading) {
+    return heading.id === id;
+  });
+}
+
+function getCurrentActiveTocId() {
+  return currentActiveTocId;
+}
+
+function restoreActiveTocHeading(preferredId) {
+  if (!currentTocTracking) return;
+  var viewportActiveId = getViewportActiveTocId();
+  if (hasTrackedHeading(preferredId) && preferredId === viewportActiveId) {
+    setActiveTocLink(preferredId);
+    return;
+  }
+  setActiveTocLink(viewportActiveId);
+}
+
+function scheduleTocTrackingUpdate() {
+  if (!currentTocTracking || tocTrackingFrame !== null) return;
+  if (Date.now() < suppressTocTrackingUntil) {
+    pendingSuppressedTocTrackingUpdate = true;
+    ensureSuppressedTocTrackingResume();
+    return;
+  }
+  tocTrackingFrame = window.requestAnimationFrame(function() {
+    tocTrackingFrame = null;
+    updateActiveTocHeading();
+  });
+}
+
+function ensureSuppressedTocTrackingResume() {
+  if (suppressTocTrackingTimer !== null) return;
+  var delay = Math.max(suppressTocTrackingUntil - Date.now(), 0);
+  suppressTocTrackingTimer = window.setTimeout(function() {
+    suppressTocTrackingTimer = null;
+    if (!pendingSuppressedTocTrackingUpdate) return;
+    pendingSuppressedTocTrackingUpdate = false;
+    scheduleTocTrackingUpdate();
+  }, delay);
+}
+
+function suppressTocTrackingFor(ms) {
+  suppressTocTrackingUntil = Date.now() + ms;
+  pendingSuppressedTocTrackingUpdate = false;
+  if (suppressTocTrackingTimer !== null) {
+    window.clearTimeout(suppressTocTrackingTimer);
+    suppressTocTrackingTimer = null;
+  }
+}
 
 function setupTocTracking() {
-  if (currentObserver) {
-    currentObserver.disconnect();
-    currentObserver = null;
+  if (tocTrackingFrame !== null) {
+    window.cancelAnimationFrame(tocTrackingFrame);
+    tocTrackingFrame = null;
   }
+  if (suppressTocTrackingTimer !== null) {
+    window.clearTimeout(suppressTocTrackingTimer);
+    suppressTocTrackingTimer = null;
+  }
+  currentTocTracking = null;
+  currentActiveTocId = '';
+  pendingSuppressedTocTrackingUpdate = false;
 
   var headings = document.querySelectorAll('#content h1, #content h2, #content h3, #content h4, #content h5, #content h6');
   var tocLinks = document.querySelectorAll('#toc a');
 
   if (headings.length === 0 || tocLinks.length === 0) return;
 
-  currentObserver = new IntersectionObserver(function(entries) {
-    entries.forEach(function(entry) {
-      if (entry.isIntersecting) {
-        var id = entry.target.getAttribute('id');
-        tocLinks.forEach(function(link) {
-          link.classList.toggle('active', link.getAttribute('href') === '#' + id);
-        });
-      }
-    });
-  }, { rootMargin: '-10% 0% -80% 0%' });
-
-  headings.forEach(function(heading) {
-    if (heading.id) currentObserver.observe(heading);
+  var tocLinksById = new Map();
+  tocLinks.forEach(function(link) {
+    var href = link.getAttribute('href') || '';
+    if (href.startsWith('#') && href.length > 1) {
+      tocLinksById.set(href.slice(1), link);
+    }
   });
+
+  var trackedHeadings = Array.prototype.filter.call(headings, function(heading) {
+    return heading.id && tocLinksById.has(heading.id);
+  });
+
+  if (trackedHeadings.length === 0) return;
+
+  currentTocTracking = {
+    headings: trackedHeadings,
+    links: tocLinksById,
+    activationOffset: getTocActivationOffset(trackedHeadings)
+  };
 }
 
 var sidebarToggle = document.getElementById('sidebar-toggle');
@@ -181,13 +289,16 @@ if (themeToggle) {
 
 connectWS();
 setupTocTracking();
+restoreActiveTocHeading('');
 updateDocumentStats();
 updateReadingProgress();
 syncDocumentChrome(currentFile);
 enhanceContentInteractions();
 setupTocFilter();
 window.addEventListener('scroll', updateReadingProgress, { passive: true });
+window.addEventListener('scroll', scheduleTocTrackingUpdate, { passive: true });
 window.addEventListener('resize', updateReadingProgress);
+window.addEventListener('resize', scheduleTocTrackingUpdate);
 setupTabs();
 if (isDirMode) {
   setupFileList();
