@@ -88,12 +88,18 @@ async fn index_handler(
     let request = RouteTargetRequest::page(query.file.as_deref());
     let target = resolve_route_target(&state, request)?;
     let update = load_route_update(&target, request).await?;
-    let memo = load_route_memo(
-        &state,
-        &target,
-        RouteTargetRequest::api_memo(query.file.as_deref()),
-    )
-    .await?;
+    let memo_request = RouteTargetRequest::api_memo(query.file.as_deref());
+    let memo = match load_route_memo(&state, &target, memo_request).await {
+        Ok(memo) => memo,
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
+                target.file_path().display(),
+                error
+            );
+            MemoResponse::empty(target.relative_path().map(ToOwned::to_owned))
+        }
+    };
 
     let title = target
         .file_path()

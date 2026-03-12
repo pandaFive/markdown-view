@@ -100,6 +100,25 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_indexページ取得_壊れたメモがあっても本文表示は継続する() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    tokio::fs::create_dir_all(memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&memo_path, [0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Body"));
+    assert!(body.contains("id=\"memo-editor\""));
+}
+
+#[tokio::test]
 async fn test_httpは許可されないhostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Check").await;
     let client = reqwest::Client::new();

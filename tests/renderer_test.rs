@@ -92,6 +92,15 @@ fn test_コードブロック_ハイライト() {
 }
 
 #[test]
+fn test_コードブロックにソース行番号属性が付与される() {
+    let md = "```rust\nfn main() {}\n```";
+    let html = render_markdown(md);
+    assert!(html.as_str().contains(
+        r#"<pre class="code-block" data-source-start-line="1" data-source-end-line="3">"#
+    ));
+}
+
+#[test]
 fn test_コードハイライトはクラスベースでインラインstyleを出力しない() {
     let md = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
     let html = render_markdown(md);

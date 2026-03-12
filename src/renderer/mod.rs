@@ -85,7 +85,16 @@ impl RenderState {
         self.code_block_content.clear();
     }
 
-    fn finish_code_block(&mut self, ss: &SyntaxSet) {
+    fn finish_code_block(&mut self, ss: &SyntaxSet, range: Range<usize>, line_lookup: &LineLookup) {
+        let line_attrs = self
+            .code_block_range
+            .as_ref()
+            .map(|start_range| Range {
+                start: start_range.start,
+                end: range.end,
+            })
+            .map(|full_range| source_line_attrs(line_lookup, &full_range))
+            .unwrap_or_default();
         if let Some(ref lang) = self.code_block_lang {
             let highlighted = ss
                 .find_syntax_by_token(lang)
@@ -111,20 +120,23 @@ impl RenderState {
 
             if let Some(highlighted) = highlighted {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    line_attrs,
                     html_escape(lang),
                     highlighted
                 ));
             } else {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    line_attrs,
                     html_escape(lang),
                     html_escape(&self.code_block_content)
                 ));
             }
         } else {
             self.push_html(&format!(
-                "<pre class=\"code-block\"><code class=\"syn-code\">{}</code></pre>\n",
+                "<pre class=\"code-block\"{}><code class=\"syn-code\">{}</code></pre>\n",
+                line_attrs,
                 html_escape(&self.code_block_content)
             ));
         }
@@ -195,7 +207,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 state.start_code_block(kind, range);
             }
             Event::End(TagEnd::CodeBlock) => {
-                state.finish_code_block(ss);
+                state.finish_code_block(ss, range, &line_lookup);
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 heading_level = Some(level as u8);
