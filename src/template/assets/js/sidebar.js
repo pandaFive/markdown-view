@@ -208,7 +208,7 @@ function getViewportActiveTocId() {
   if (activeHeading && activeHeading.id !== pendingTocNavigationId) {
     clearPendingTocNavigation();
   }
-  if (currentScrollTop >= maxScrollTop - 1) {
+  if (maxScrollTop > 0 && currentScrollTop >= maxScrollTop - 1) {
     for (i = currentTocTracking.headings.length - 1; i >= 0; i--) {
       if (currentTocTracking.headings[i].getBoundingClientRect().top < window.innerHeight) {
         return currentTocTracking.headings[i].id;

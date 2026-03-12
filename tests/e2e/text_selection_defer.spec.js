@@ -308,6 +308,13 @@ test('下端見出しがactivation位置まで届かなくてもクリック先�
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 });
 
+test('短いページの初期表示では末尾見出しをactiveにしない', async ({ page }) => {
+  await loadBottomHeadingFixture(page);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => activeTocLabelOrEmpty(page)).toBe('');
+});
+
 test('目次クリック後は猶予時間経過後に通常スクロール判定へ戻る', async ({ page }) => {
   await loadDenseHeadingFixture(page);
 
