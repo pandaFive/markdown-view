@@ -242,3 +242,29 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 });
+
+test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
+  await page.evaluate(() => {
+    const paragraphs = Array.from({ length: 18 }, (_, index) => `<p>Entry ${index + 1}. Alpha note appears in result ${index + 1}. Tail ${index + 1}.</p>`).join('');
+    updateContent({
+      content: '<h1 id="readme">README</h1>' + paragraphs,
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await page.locator('#document-search-input').fill('alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(18);
+
+  const beforeScrollTop = await page.evaluate(() => {
+    const results = document.getElementById('document-search-results');
+    results.scrollTop = results.scrollHeight;
+    return results.scrollTop;
+  });
+
+  await page.locator('#document-search-input').press('Enter');
+
+  await expect.poll(() => page.evaluate(() => {
+    return document.getElementById('document-search-results').scrollTop;
+  })).toBe(beforeScrollTop);
+});

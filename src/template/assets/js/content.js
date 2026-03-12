@@ -365,6 +365,7 @@ function renderDocumentSearchResultContext(container, text, query, variant) {
 
 function renderDocumentSearchResults() {
   if (!documentSearchResultsEl) return;
+  var preservedScrollTop = documentSearchResultsEl.scrollTop;
   documentSearchResultsEl.innerHTML = '';
 
   if (!currentDocumentSearchQuery) return;
@@ -403,6 +404,8 @@ function renderDocumentSearchResults() {
     button.appendChild(body);
     documentSearchResultsEl.appendChild(button);
   });
+
+  documentSearchResultsEl.scrollTop = preservedScrollTop;
 }
 
 function applyDocumentSearchHighlights(query) {
