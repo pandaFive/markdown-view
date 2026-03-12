@@ -180,7 +180,7 @@ function shouldSkipDocumentSearchNode(node) {
   var parent = node.parentElement;
   if (!parent) return true;
   return Boolean(parent.closest(
-    'button, input, textarea, script, style, pre.code-block, mark.document-search-match'
+    'a, button, input, textarea, script, style, pre.code-block, mark.document-search-match'
   ));
 }
 
