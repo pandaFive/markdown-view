@@ -171,6 +171,7 @@ function clearDocumentSearchHighlights() {
   documentSearchMatches = [];
   currentDocumentSearchIndex = -1;
   updateDocumentSearchSummary();
+  renderDocumentSearchResults();
 }
 
 var DOCUMENT_SEARCH_BLOCK_SELECTOR = 'p, li, blockquote, th, td, h1, h2, h3, h4, h5, h6';
@@ -189,6 +190,96 @@ function createDocumentSearchMark(text, matchId) {
   mark.dataset.matchId = String(matchId);
   mark.textContent = text;
   return mark;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function trimSentenceRange(text, start, end) {
+  var nextStart = start;
+  var nextEnd = end;
+  while (nextStart < nextEnd && /\s/.test(text.charAt(nextStart))) {
+    nextStart += 1;
+  }
+  while (nextEnd > nextStart && /\s/.test(text.charAt(nextEnd - 1))) {
+    nextEnd -= 1;
+  }
+  return { start: nextStart, end: nextEnd };
+}
+
+function splitTextIntoSentenceRanges(text) {
+  var ranges = [];
+  var sentenceStart = 0;
+  var i;
+
+  for (i = 0; i < text.length; i++) {
+    var char = text.charAt(i);
+    if (char !== '\n' && !/[.!?。！？]/.test(char)) continue;
+    var trimmed = trimSentenceRange(text, sentenceStart, i + 1);
+    if (trimmed.end > trimmed.start) {
+      ranges.push(trimmed);
+    }
+    sentenceStart = i + 1;
+  }
+
+  if (sentenceStart < text.length) {
+    var tail = trimSentenceRange(text, sentenceStart, text.length);
+    if (tail.end > tail.start) {
+      ranges.push(tail);
+    }
+  }
+
+  if (!ranges.length) {
+    var whole = trimSentenceRange(text, 0, text.length);
+    if (whole.end > whole.start) {
+      ranges.push(whole);
+    }
+  }
+
+  return ranges;
+}
+
+function getSentenceForMatch(sentenceRanges, matchStart, matchEnd) {
+  var i;
+  for (i = 0; i < sentenceRanges.length; i++) {
+    if (matchStart < sentenceRanges[i].end && matchEnd > sentenceRanges[i].start) {
+      return i;
+    }
+  }
+  return sentenceRanges.length ? 0 : -1;
+}
+
+function getAdjacentSentence(blockEntries, blockIndex, sentenceIndex, direction) {
+  var targetBlockIndex = blockIndex;
+  var targetSentenceIndex = sentenceIndex + direction;
+
+  while (targetBlockIndex >= 0 && targetBlockIndex < blockEntries.length) {
+    var entry = blockEntries[targetBlockIndex];
+    if (targetSentenceIndex >= 0 && targetSentenceIndex < entry.sentences.length) {
+      return entry.text.slice(entry.sentences[targetSentenceIndex].start, entry.sentences[targetSentenceIndex].end);
+    }
+    targetBlockIndex += direction;
+    if (targetBlockIndex < 0 || targetBlockIndex >= blockEntries.length) break;
+    targetSentenceIndex = direction > 0 ? 0 : blockEntries[targetBlockIndex].sentences.length - 1;
+  }
+
+  return '';
+}
+
+function buildDocumentSearchContext(blockEntries, blockIndex, matchStart, matchEnd) {
+  var entry = blockEntries[blockIndex];
+  var sentenceIndex = getSentenceForMatch(entry.sentences, matchStart, matchEnd);
+  var currentSentenceRange = sentenceIndex >= 0 ? entry.sentences[sentenceIndex] : null;
+  var currentSentence = currentSentenceRange
+    ? entry.text.slice(currentSentenceRange.start, currentSentenceRange.end)
+    : entry.text.trim();
+
+  return {
+    before: getAdjacentSentence(blockEntries, blockIndex, sentenceIndex, -1),
+    current: currentSentence,
+    after: getAdjacentSentence(blockEntries, blockIndex, sentenceIndex, 1)
+  };
 }
 
 function getDocumentSearchBlocks() {
@@ -244,9 +335,77 @@ function wrapDocumentSearchMatch(nodes, matchStart, matchEnd, matchId) {
     marks.unshift(wrapDocumentSearchSegment(entry.node, localStart, localEnd, matchId).mark);
   }
 
-  if (marks.length) {
-    documentSearchMatches.push({ marks: marks });
+  return marks;
+}
+
+function renderDocumentSearchResultContext(container, text, query, variant) {
+  if (!text) return;
+  var span = document.createElement('span');
+  var normalizedText = text.replace(/\s+/g, ' ').trim();
+  var escapedQuery = escapeRegExp(query);
+  var parts = escapedQuery ? normalizedText.split(new RegExp('(' + escapedQuery + ')', 'ig')) : [normalizedText];
+
+  span.className = 'document-search-result-context document-search-result-context-' + variant;
+  if (container.childNodes.length > 0) {
+    container.appendChild(document.createTextNode(' '));
   }
+  parts.forEach(function(part) {
+    if (!part) return;
+    if (escapedQuery && new RegExp('^' + escapedQuery + '$', 'i').test(part)) {
+      var mark = document.createElement('mark');
+      mark.className = 'document-search-result-mark';
+      mark.textContent = part;
+      span.appendChild(mark);
+      return;
+    }
+    span.appendChild(document.createTextNode(part));
+  });
+  container.appendChild(span);
+}
+
+function renderDocumentSearchResults() {
+  if (!documentSearchResultsEl) return;
+  var preservedScrollTop = documentSearchResultsEl.scrollTop;
+  documentSearchResultsEl.innerHTML = '';
+
+  if (!currentDocumentSearchQuery) return;
+
+  if (!documentSearchMatches.length) {
+    var empty = document.createElement('p');
+    empty.className = 'document-search-empty';
+    empty.textContent = '一致する文が見つかりません。';
+    documentSearchResultsEl.appendChild(empty);
+    return;
+  }
+
+  documentSearchMatches.forEach(function(match, index) {
+    var button = document.createElement('button');
+    var indexBadge = document.createElement('span');
+    var body = document.createElement('span');
+
+    button.type = 'button';
+    button.className = 'document-search-result';
+    button.dataset.matchIndex = String(index);
+    button.classList.toggle('active', index === currentDocumentSearchIndex);
+    button.setAttribute('aria-current', index === currentDocumentSearchIndex ? 'true' : 'false');
+    button.addEventListener('click', function() {
+      setCurrentDocumentSearchMatch(index);
+    });
+
+    indexBadge.className = 'document-search-result-index';
+    indexBadge.textContent = String(index + 1).padStart(2, '0');
+
+    body.className = 'document-search-result-body';
+    renderDocumentSearchResultContext(body, match.context.before, currentDocumentSearchQuery, 'before');
+    renderDocumentSearchResultContext(body, match.context.current, currentDocumentSearchQuery, 'current');
+    renderDocumentSearchResultContext(body, match.context.after, currentDocumentSearchQuery, 'after');
+
+    button.appendChild(indexBadge);
+    button.appendChild(body);
+    documentSearchResultsEl.appendChild(button);
+  });
+
+  documentSearchResultsEl.scrollTop = preservedScrollTop;
 }
 
 function applyDocumentSearchHighlights(query) {
@@ -255,9 +414,16 @@ function applyDocumentSearchHighlights(query) {
   if (!query) return;
 
   var normalizedQuery = query.toLowerCase();
-
-  getDocumentSearchBlocks().forEach(function(block) {
+  var blockEntries = getDocumentSearchBlocks().map(function(block) {
     var blockText = collectDocumentSearchTextNodes(block);
+    return {
+      text: blockText.text,
+      nodes: blockText.nodes,
+      sentences: splitTextIntoSentenceRanges(blockText.text)
+    };
+  });
+
+  blockEntries.forEach(function(blockText, blockIndex) {
     var matchIndex;
     var searchIndex = 0;
 
@@ -265,12 +431,23 @@ function applyDocumentSearchHighlights(query) {
 
     matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
     while (matchIndex !== -1) {
-      wrapDocumentSearchMatch(
+      var marks = wrapDocumentSearchMatch(
         blockText.nodes,
         matchIndex,
         matchIndex + normalizedQuery.length,
         documentSearchMatches.length
       );
+      if (marks.length) {
+        documentSearchMatches.push({
+          marks: marks,
+          context: buildDocumentSearchContext(
+            blockEntries,
+            blockIndex,
+            matchIndex,
+            matchIndex + normalizedQuery.length
+          )
+        });
+      }
       searchIndex = matchIndex + normalizedQuery.length;
       matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
     }
@@ -280,6 +457,7 @@ function applyDocumentSearchHighlights(query) {
     setCurrentDocumentSearchMatch(0, false);
   } else {
     updateDocumentSearchSummary();
+    renderDocumentSearchResults();
   }
 }
 
@@ -305,6 +483,7 @@ function setCurrentDocumentSearchMatch(index, scrollIntoView) {
     });
   }
   updateDocumentSearchSummary();
+  renderDocumentSearchResults();
 }
 
 function moveDocumentSearch(step) {
@@ -313,13 +492,15 @@ function moveDocumentSearch(step) {
 }
 
 function applyDocumentSearchQuery(query) {
-  applyDocumentSearchHighlights((query || '').trim());
+  currentDocumentSearchQuery = (query || '').trim();
+  applyDocumentSearchHighlights(currentDocumentSearchQuery);
 }
 
 function clearDocumentSearchQuery() {
   if (documentSearchInputEl) {
     documentSearchInputEl.value = '';
   }
+  currentDocumentSearchQuery = '';
   clearDocumentSearchHighlights();
 }
 

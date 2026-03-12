@@ -97,6 +97,95 @@
   background: var(--toc-hover-bg);
 }
 
+.document-search-results {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.document-search-empty {
+  margin: 0;
+  padding: 0.8rem 0.9rem;
+  border: 1px dashed var(--sidebar-border);
+  border-radius: 14px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  background: color-mix(in srgb, var(--search-input-bg) 70%, transparent);
+}
+
+.document-search-result {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.7rem;
+  width: 100%;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--search-input-bg) 82%, transparent);
+  color: var(--fg);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.document-search-result:hover {
+  transform: translateY(-1px);
+  border-color: var(--toc-active);
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--search-input-bg));
+}
+
+.document-search-result.active {
+  border-color: var(--toc-active);
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--search-input-bg));
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+}
+
+.document-search-result-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.15rem;
+  height: 2.15rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--toc-active) 18%, transparent);
+  color: var(--toc-active);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.document-search-result-body {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.document-search-result-context {
+  display: block;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.document-search-result-context-before,
+.document-search-result-context-after {
+  color: var(--muted);
+}
+
+.document-search-result-context-current {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.document-search-result-mark {
+  background: rgba(249, 115, 22, 0.18);
+  color: inherit;
+  border-radius: 0.3rem;
+  padding: 0 0.12rem;
+}
+
 .sidebar-header {
   display: flex;
   justify-content: space-between;

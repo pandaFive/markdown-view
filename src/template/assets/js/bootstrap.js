@@ -14,6 +14,7 @@ var backToTop = document.getElementById('back-to-top');
 var contentRoot = document.getElementById('content');
 var documentSearchInputEl = document.getElementById('document-search-input');
 var documentSearchSummaryEl = document.getElementById('document-search-summary');
+var documentSearchResultsEl = document.getElementById('document-search-results');
 var documentSearchPrevEl = document.getElementById('document-search-prev');
 var documentSearchNextEl = document.getElementById('document-search-next');
 var documentSearchClearEl = document.getElementById('document-search-clear');
@@ -36,6 +37,7 @@ var memoCaretStart = memoEditorEl ? memoEditorEl.value.length : 0;
 var memoCaretEnd = memoCaretStart;
 var documentSearchMatches = [];
 var currentDocumentSearchIndex = -1;
+var currentDocumentSearchQuery = '';
 var LIVE_STATUS_LABELS = {
   live: 'Live',
   retry: 'Reconnecting',

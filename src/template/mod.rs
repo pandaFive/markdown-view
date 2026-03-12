@@ -246,6 +246,7 @@ mod tests {
         assert!(html.contains("<div class=\"sidebar-utility\">"));
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-summary\""));
+        assert!(html.contains("id=\"document-search-results\""));
     }
 
     #[test]
@@ -268,6 +269,7 @@ mod tests {
         assert!(!html.contains("id=\"file-filter\""));
         assert!(html.contains("id=\"toc-filter\""));
         assert!(html.contains("id=\"document-search-input\""));
+        assert!(html.contains("id=\"document-search-results\""));
         assert!(html.contains("id=\"panel-memo\""));
     }
 
