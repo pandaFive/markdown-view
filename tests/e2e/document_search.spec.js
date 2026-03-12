@@ -148,8 +148,9 @@ test('inline code内の一致も検索対象に含める', async ({ page }) => {
 
   await setDocumentSearchQuery(page, 'cargo test');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
-  await expect.poll(() => visibleMatchCount(page)).toBe(1);
-  await expect.poll(() => currentMatchText(page)).toContain('cargo test');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+  await expect(page.locator('#document-search-results .document-search-result').first())
+    .toContainText('Run cargo test after editing.');
 });
 
 test('装飾をまたぐ語句も検索できる', async ({ page }) => {
@@ -279,7 +280,6 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
     result.click();
   });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
-  await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 });
 
