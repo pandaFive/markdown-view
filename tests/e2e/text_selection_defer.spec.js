@@ -105,6 +105,30 @@ async function loadDenseHeadingFixture(page) {
   });
 }
 
+async function loadBottomHeadingFixture(page) {
+  await fs.writeFile(
+    readmePath,
+    [
+      '# README',
+      '',
+      'Intro',
+      '',
+      '## Alpha',
+      '',
+      'Alpha body',
+      '',
+      '## Beta',
+      '',
+      'Beta body'
+    ].join('\n')
+  );
+
+  await page.reload();
+  await expect(page.locator('#toc')).toContainText('Alpha');
+  await expect(page.locator('#toc')).toContainText('Beta');
+  await stabilizeWebSocketHarness(page);
+}
+
 test.beforeEach(async ({ page }) => {
   await resetFixtures();
   await page.addInitScript(() => {
@@ -275,6 +299,15 @@ test('目次クリック直後はクリックした見出しをactiveにする',
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 });
 
+test('下端見出しがactivation位置まで届かなくてもクリック先をactiveにする', async ({ page }) => {
+  await loadBottomHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await page.waitForTimeout(450);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
 test('目次クリック後は猶予時間経過後に通常スクロール判定へ戻る', async ({ page }) => {
   await loadDenseHeadingFixture(page);
 
@@ -302,6 +335,43 @@ test('目次クリック直後でも逆方向へスクロールしたら通常�
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate(() => {
+    window.__markPendingCalls = 0;
+    const original = window.markPendingTocNavigation;
+    window.markPendingTocNavigation = function(id) {
+      window.__markPendingCalls += 1;
+      return original.call(this, id);
+    };
+  });
+
+  await page.evaluate(() => {
+    const toc = document.getElementById('toc').innerHTML;
+    const repeated = '<p>Updated paragraph</p>'.repeat(12);
+    const payload = {
+      content:
+        '<h1 id="readme">README</h1>' +
+        repeated +
+        '<h2 id="alpha">Alpha</h2><p>Alpha body updated</p>' +
+        '<h2 id="beta">Beta</h2><p>Beta body updated</p>' +
+        repeated,
+      toc: toc,
+      file: 'README.md'
+    };
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+    window.__dispatchWsMessage(payload);
+  });
+
+  await expect(page.locator('#content')).toContainText('Alpha body updated');
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await expect.poll(() => page.evaluate(() => window.__markPendingCalls)).toBe(1);
 });
 
 test('WebSocket更新後も同じ見出しを見ている間は目次activeを維持する', async ({ page }) => {

@@ -109,6 +109,7 @@ var TOC_NAVIGATION_GRACE_MS = 400;
 var TOC_NAVIGATION_SLACK_PX = 24;
 var pendingTocNavigationId = '';
 var pendingTocNavigationUntil = 0;
+var tocRoot = document.getElementById('toc');
 
 function setActiveTocLink(activeId) {
   if (!currentTocTracking) return;
@@ -159,6 +160,8 @@ function getPendingTocNavigationId(activationOffset) {
   if (!pendingTocNavigationId) return '';
   var heading = findTrackedHeading(pendingTocNavigationId);
   var navigationTop;
+  var maxScrollTop;
+  var currentScrollTop;
   if (!heading) {
     clearPendingTocNavigation();
     return '';
@@ -168,10 +171,15 @@ function getPendingTocNavigationId(activationOffset) {
     return '';
   }
   navigationTop = heading.getBoundingClientRect().top;
+  currentScrollTop = window.scrollY || window.pageYOffset;
+  maxScrollTop = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
   if (
     navigationTop <= activationOffset + TOC_NAVIGATION_SLACK_PX &&
     navigationTop >= activationOffset - TOC_NAVIGATION_SLACK_PX
   ) {
+    return heading.id;
+  }
+  if (currentScrollTop >= maxScrollTop - 1 && navigationTop < activationOffset - TOC_NAVIGATION_SLACK_PX) {
     return heading.id;
   }
   clearPendingTocNavigation();
@@ -183,6 +191,9 @@ function getViewportActiveTocId() {
   var activationOffset = currentTocTracking.activationOffset;
   var pendingActiveId = getPendingTocNavigationId(activationOffset);
   var activeHeading = null;
+  var currentScrollTop = window.scrollY || window.pageYOffset;
+  var maxScrollTop = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
+  var i;
 
   if (pendingActiveId) {
     return pendingActiveId;
@@ -196,6 +207,13 @@ function getViewportActiveTocId() {
 
   if (activeHeading && activeHeading.id !== pendingTocNavigationId) {
     clearPendingTocNavigation();
+  }
+  if (currentScrollTop >= maxScrollTop - 1) {
+    for (i = currentTocTracking.headings.length - 1; i >= 0; i--) {
+      if (currentTocTracking.headings[i].getBoundingClientRect().top < window.innerHeight) {
+        return currentTocTracking.headings[i].id;
+      }
+    }
   }
   return activeHeading ? activeHeading.id : '';
 }
@@ -291,12 +309,6 @@ function setupTocTracking() {
     links: tocLinksById,
     activationOffset: getTocActivationOffset(trackedHeadings)
   };
-
-  currentTocTracking.links.forEach(function(link, id) {
-    link.addEventListener('click', function() {
-      markPendingTocNavigation(id);
-    });
-  });
 }
 
 var sidebarToggle = document.getElementById('sidebar-toggle');
@@ -318,6 +330,17 @@ if (sidebarOpen) {
 if (backToTop) {
   backToTop.addEventListener('click', function() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+}
+
+if (tocRoot) {
+  tocRoot.addEventListener('click', function(event) {
+    var link = event.target.closest('a[href^="#"]');
+    var href;
+    if (!link || !tocRoot.contains(link)) return;
+    href = link.getAttribute('href') || '';
+    if (href.length <= 1) return;
+    markPendingTocNavigation(href.slice(1));
   });
 }
 
