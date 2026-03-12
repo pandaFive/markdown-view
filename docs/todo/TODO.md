@@ -20,7 +20,7 @@
 
 - [x] `file_size_limit_error_message()`を`&'static str`定数に変換済み
 
-- [x] `CanonicalPath`の公開範囲を縮小済み（`pub(crate)`）
+- [ ] `CanonicalPath`を`pub(super)`に降格
   - ファイル: `src/server/state.rs` L12
   - 内容: re-exportされず公開APIにも不使用のため可視性を縮小
   - 理由: 可視性の一貫性向上

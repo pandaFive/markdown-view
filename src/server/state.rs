@@ -9,11 +9,11 @@ use crate::renderer::syntax_theme_css;
 
 /// canonicalize済みの絶対パス
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct CanonicalPath(PathBuf);
+pub struct CanonicalPath(PathBuf);
 
 impl CanonicalPath {
     /// パスをcanonicalizeして`CanonicalPath`を生成する
-    pub(crate) fn try_from_path(path: impl AsRef<Path>) -> Result<Self, CanonicalPathError> {
+    pub fn try_from_path(path: impl AsRef<Path>) -> Result<Self, CanonicalPathError> {
         let canonical = path
             .as_ref()
             .canonicalize()
@@ -22,7 +22,7 @@ impl CanonicalPath {
     }
 
     /// `Path`として参照する
-    pub(crate) fn as_path(&self) -> &Path {
+    pub fn as_path(&self) -> &Path {
         &self.0
     }
 }
