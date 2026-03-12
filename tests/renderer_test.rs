@@ -31,6 +31,28 @@ fn normalize_source_markup(html: &str) -> String {
     normalized.replace("</span>", "")
 }
 
+fn source_line_attrs(html: &str, tag_name: &str) -> Option<(usize, usize)> {
+    let needle = format!("<{tag_name}");
+    let start = html.find(&needle)?;
+    let end = html[start..].find('>').map(|offset| start + offset)?;
+    let tag = &html[start..=end];
+
+    let start_line = extract_attr_value(tag, "data-source-start-line")?
+        .parse()
+        .ok()?;
+    let end_line = extract_attr_value(tag, "data-source-end-line")?
+        .parse()
+        .ok()?;
+    Some((start_line, end_line))
+}
+
+fn extract_attr_value<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let needle = format!(r#"{attr}=""#);
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"').map(|offset| start + offset)?;
+    Some(&tag[start..end])
+}
+
 #[test]
 fn test_基本パラグラフ() {
     let html = normalize_source_markup(render_markdown("Hello, world!").as_str());
@@ -98,6 +120,21 @@ fn test_コードブロックにソース行番号属性が付与される() {
     assert!(html.as_str().contains(
         r#"<pre class="code-block" data-source-start-line="1" data-source-end-line="3">"#
     ));
+}
+
+#[test]
+fn test_ソース行番号属性の値が複数行入力でも正確() {
+    let md = "# Heading\n\nLine one\nLine two\n\n```rust\nfn main() {}\nprintln!(\"x\");\n```";
+    let html = render_markdown(md);
+
+    assert_eq!(source_line_attrs(html.as_str(), "h1"), Some((1, 1)));
+    assert!(html
+        .as_str()
+        .contains(r#"<span data-source-start-line="3" data-source-end-line="3">Line one</span>"#));
+    assert!(html
+        .as_str()
+        .contains(r#"<span data-source-start-line="4" data-source-end-line="4">Line two</span>"#));
+    assert_eq!(source_line_attrs(html.as_str(), "pre"), Some((6, 9)));
 }
 
 #[test]

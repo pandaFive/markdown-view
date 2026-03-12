@@ -100,6 +100,48 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_apiメモ_空白のみ保存で既存メモが削除される() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "keep me"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 200);
+    assert!(tokio::fs::try_exists(&memo_path).await.unwrap());
+
+    let delete = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "  \n  "
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), 200);
+    let deleted: serde_json::Value = delete.json().await.unwrap();
+    assert_eq!(deleted["raw"], "");
+    assert_eq!(deleted["html"], "");
+    assert!(!tokio::fs::try_exists(&memo_path).await.unwrap());
+
+    let get = client
+        .get(format!("http://{}/api/memo", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let fetched: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(fetched["raw"], "");
+    assert_eq!(fetched["html"], "");
+}
+
+#[tokio::test]
 async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら保存できる() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
@@ -117,6 +159,26 @@ async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら�
     assert_eq!(save.status(), 200);
     let saved: serde_json::Value = save.json().await.unwrap();
     assert_eq!(saved["raw"].as_str().unwrap().len(), 6 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn test_apiメモ_10mb超過は413で拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let raw = "a".repeat((10 * 1024 * 1024) + 1);
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": raw
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(json["error"], "メモサイズが上限（10MB）を超えています");
 }
 
 #[tokio::test]
@@ -565,6 +627,30 @@ async fn test_ディレクトリモード_トラバーサル攻撃拒否() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_メモapiのパストラバーサルを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "file": "../../etc/passwd",
+            "raw": "attack"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let get = client
+        .get(format!("http://{}/api/memo?file=../../etc/passwd", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

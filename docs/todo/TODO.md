@@ -20,22 +20,22 @@
 
 - [x] `file_size_limit_error_message()`を`&'static str`定数に変換済み
 
-- [ ] `CanonicalPath`を`pub(super)`に降格
+- [x] `CanonicalPath`の公開範囲を縮小済み（`pub(crate)`）
   - ファイル: `src/server/state.rs` L12
   - 内容: re-exportされず公開APIにも不使用のため可視性を縮小
   - 理由: 可視性の一貫性向上
 
-- [ ] `relative_path_of`内の`tracing::warn!`を呼び出し側に移動
+- [x] `relative_path_of`内の`tracing::warn!`を呼び出し側に移動済み
   - ファイル: `src/server/state.rs` L172-187
   - 内容: データ型メソッドから副作用（ログ出力）を分離し、呼び出し側で処理
   - 理由: データ型と副作用の分離
 
-- [ ] `state.rs`の未使用テストヘルパー`create_single_file_state`を削除
+- [x] `state.rs`の未使用テストヘルパー`create_single_file_state`は既に削除済み
   - ファイル: `src/server/state.rs` L333
   - 内容: `#[allow(dead_code)]`付きの未使用ヘルパーを削除
   - 理由: デッドコードの除去
 
-- [ ] `AppState`に`#[derive(Debug)]`を追加
+- [x] `AppState`に`#[derive(Debug)]`を追加済み
   - ファイル: `src/server/state.rs` L191
   - 内容: 診断性向上のためDebug traitを導出
   - 理由: サーバー状態のログ出力・デバッグ支援
@@ -113,17 +113,17 @@
   - 内容: `pub(in crate::server)`だが`mod.rs`で再エクスポートされず実質`pub(super)`相当。再エクスポート追加か可視性縮小
   - 理由: 現状動作に問題なし。将来の保守性向上
 
-- [ ] `build_lagged_recovery_message`ディレクトリモードのテスト追加
+- [x] `build_lagged_recovery_message`ディレクトリモードのテスト追加済み
   - ファイル: `src/server/files/content.rs` L92
   - 内容: ディレクトリモードで`BroadcastMessage::Refresh`を返すパスのテスト
   - 理由: リファクタ前から存在する既存ギャップ
 
-- [ ] `load_route_update`エラーマッピングのテスト追加
+- [x] `load_route_update`エラーマッピングのテスト追加済み
   - ファイル: `src/server/files/content.rs` L47
   - 内容: `ReadMarkdownError` → `ApiError`変換のユニットテスト
   - 理由: リファクタ前から存在する既存ギャップ
 
-- [ ] `resolve_request_target`デフォルトファイル選択のテスト追加
+- [x] `resolve_request_target`デフォルトファイル選択のテスト追加済み
   - ファイル: `src/server/files/resolve.rs` L167
   - 内容: `query_file`なし時のREADME優先選択ロジックのテスト
   - 理由: リファクタ前から存在する既存ギャップ
@@ -137,22 +137,22 @@
 
 ### Medium Priority（テストカバレッジ）
 
-- [ ] 空/whitespaceメモ保存でファイル削除される動作の統合テスト追加
+- [x] 空/whitespaceメモ保存でファイル削除される動作の統合テスト追加済み
   - ファイル: `tests/integration_test.rs`
   - 内容: PUT `/api/memo` に `{"raw": "  \n  "}` を送り、既存メモが削除され後続GETが空を返すことを検証
   - 理由: 削除は破壊的操作であり回帰テストが必要
 
-- [ ] 10MB超メモの413拒否テスト追加
+- [x] 10MB超メモの413拒否テスト追加済み
   - ファイル: `tests/integration_test.rs`
   - 内容: PUT `/api/memo` に10MB超のbodyを送り413が返ることを検証
   - 理由: サイズ制限の回帰防止
 
-- [ ] メモAPIへのパストラバーサルテスト追加
+- [x] メモAPIへのパストラバーサルテスト追加済み
   - ファイル: `tests/integration_test.rs`
   - 内容: PUT `/api/memo?file=../../etc/passwd` が404/400で拒否されることを検証
   - 理由: セキュリティ境界の明示的テスト
 
-- [ ] `data-source-start-line`/`data-source-end-line`の値の正確性テスト追加
+- [x] `data-source-start-line`/`data-source-end-line`の値の正確性テスト追加済み
   - ファイル: `tests/renderer_test.rs`
   - 内容: `LineLookup::line_for_offset`と`line_range`のユニットテスト、複数行入力での行番号正確性を検証
   - 理由: 既存テストは属性の存在のみ確認し値を検証していない
