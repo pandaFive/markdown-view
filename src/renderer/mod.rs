@@ -5,6 +5,7 @@
 
 pub mod toc;
 
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
@@ -43,6 +44,7 @@ struct RenderState {
     in_code_block: bool,
     code_block_lang: Option<String>,
     code_block_content: String,
+    code_block_range: Option<Range<usize>>,
     image_src: Option<String>,
     image_title: Option<String>,
     image_alt: String,
@@ -55,6 +57,7 @@ impl RenderState {
             in_code_block: false,
             code_block_lang: None,
             code_block_content: String::new(),
+            code_block_range: None,
             image_src: None,
             image_title: None,
             image_alt: String::new(),
@@ -65,8 +68,9 @@ impl RenderState {
         self.html_output.push_str(html);
     }
 
-    fn start_code_block(&mut self, kind: pulldown_cmark::CodeBlockKind<'_>) {
+    fn start_code_block(&mut self, kind: pulldown_cmark::CodeBlockKind<'_>, range: Range<usize>) {
         self.in_code_block = true;
+        self.code_block_range = Some(range);
         self.code_block_lang = match kind {
             pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                 let lang_str = lang.to_string();
@@ -81,7 +85,16 @@ impl RenderState {
         self.code_block_content.clear();
     }
 
-    fn finish_code_block(&mut self, ss: &SyntaxSet) {
+    fn finish_code_block(&mut self, ss: &SyntaxSet, range: Range<usize>, line_lookup: &LineLookup) {
+        let line_attrs = self
+            .code_block_range
+            .as_ref()
+            .map(|start_range| Range {
+                start: start_range.start,
+                end: range.end,
+            })
+            .map(|full_range| source_line_attrs(line_lookup, &full_range))
+            .unwrap_or_default();
         if let Some(ref lang) = self.code_block_lang {
             let highlighted = ss
                 .find_syntax_by_token(lang)
@@ -107,20 +120,23 @@ impl RenderState {
 
             if let Some(highlighted) = highlighted {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    line_attrs,
                     html_escape(lang),
                     highlighted
                 ));
             } else {
                 self.push_html(&format!(
-                    "<pre class=\"code-block\"><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                    line_attrs,
                     html_escape(lang),
                     html_escape(&self.code_block_content)
                 ));
             }
         } else {
             self.push_html(&format!(
-                "<pre class=\"code-block\"><code class=\"syn-code\">{}</code></pre>\n",
+                "<pre class=\"code-block\"{}><code class=\"syn-code\">{}</code></pre>\n",
+                line_attrs,
                 html_escape(&self.code_block_content)
             ));
         }
@@ -128,6 +144,7 @@ impl RenderState {
         self.in_code_block = false;
         self.code_block_lang = None;
         self.code_block_content.clear();
+        self.code_block_range = None;
     }
 
     fn start_image(&mut self, dest_url: &str, title: &str) {
@@ -170,10 +187,12 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
     }
 
     let ss = syntax_set();
-    let parser = Parser::new_ext(input, markdown_options());
+    let parser = Parser::new_ext(input, markdown_options()).into_offset_iter();
+    let line_lookup = LineLookup::new(input);
 
     let mut state = RenderState::new();
     let mut heading_level: Option<u8> = None;
+    let mut heading_range: Option<Range<usize>> = None;
     let mut heading_plain_text = String::new();
     let mut heading_html = String::new();
     let mut in_table_head = false;
@@ -181,16 +200,18 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
     let mut table_cell_index = 0usize;
     let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-    for event in parser {
+    for (event, range) in parser {
+        let line_attrs = source_line_attrs(&line_lookup, &range);
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
-                state.start_code_block(kind);
+                state.start_code_block(kind, range);
             }
             Event::End(TagEnd::CodeBlock) => {
-                state.finish_code_block(ss);
+                state.finish_code_block(ss, range, &line_lookup);
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 heading_level = Some(level as u8);
+                heading_range = Some(range);
                 heading_plain_text.clear();
                 heading_html.clear();
             }
@@ -198,16 +219,22 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 if let Some(level) = heading_level {
                     let slug = slugify(&heading_plain_text);
                     let id = generate_unique_id(&slug, &mut id_counts);
+                    let heading_attrs = heading_range
+                        .as_ref()
+                        .map(|heading_range| source_line_attrs(&line_lookup, heading_range))
+                        .unwrap_or_default();
 
                     state.push_html(&format!(
-                        "<h{} id=\"{}\">{}</h{}>\n",
+                        "<h{} id=\"{}\"{}>{}</h{}>\n",
                         level,
                         html_escape(&id),
+                        heading_attrs,
                         heading_html,
                         level
                     ));
                 }
                 heading_level = None;
+                heading_range = None;
             }
             Event::Start(Tag::Image {
                 dest_url, title, ..
@@ -236,9 +263,17 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
 
                 if heading_level.is_some() {
                     heading_plain_text.push_str(&text);
-                    heading_html.push_str(&html_escape(&text));
+                    heading_html.push_str(&format!(
+                        "<span{}>{}</span>",
+                        line_attrs,
+                        html_escape(&text)
+                    ));
                 } else {
-                    state.push_html(&html_escape(&text));
+                    state.push_html(&format!(
+                        "<span{}>{}</span>",
+                        line_attrs,
+                        html_escape(&text)
+                    ));
                 }
             }
             Event::Code(text) => {
@@ -249,9 +284,17 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
 
                 if heading_level.is_some() {
                     heading_plain_text.push_str(&text);
-                    heading_html.push_str(&format!("<code>{}</code>", html_escape(&text)));
+                    heading_html.push_str(&format!(
+                        "<code{}>{}</code>",
+                        line_attrs,
+                        html_escape(&text)
+                    ));
                 } else {
-                    state.push_html(&format!("<code>{}</code>", html_escape(&text)));
+                    state.push_html(&format!(
+                        "<code{}>{}</code>",
+                        line_attrs,
+                        html_escape(&text)
+                    ));
                 }
             }
             Event::Html(_) | Event::InlineHtml(_) => {
@@ -284,9 +327,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::Rule => {
                 state.push_html("<hr />\n");
             }
-            Event::Start(Tag::Paragraph) => {
-                state.push_html("<p>");
-            }
+            Event::Start(Tag::Paragraph) => state.push_html("<p>"),
             Event::End(TagEnd::Paragraph) => {
                 state.push_html("</p>\n");
             }
@@ -381,27 +422,21 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     state.push_html("</a>");
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => {
-                state.push_html("<blockquote>\n");
-            }
+            Event::Start(Tag::BlockQuote(_)) => state.push_html("<blockquote>\n"),
             Event::End(TagEnd::BlockQuote(_)) => {
                 state.push_html("</blockquote>\n");
             }
             Event::Start(Tag::List(Some(start))) => {
                 state.push_html(&format!("<ol start=\"{}\">\n", start));
             }
-            Event::Start(Tag::List(None)) => {
-                state.push_html("<ul>\n");
-            }
+            Event::Start(Tag::List(None)) => state.push_html("<ul>\n"),
             Event::End(TagEnd::List(true)) => {
                 state.push_html("</ol>\n");
             }
             Event::End(TagEnd::List(false)) => {
                 state.push_html("</ul>\n");
             }
-            Event::Start(Tag::Item) => {
-                state.push_html("<li>");
-            }
+            Event::Start(Tag::Item) => state.push_html("<li>"),
             Event::End(TagEnd::Item) => {
                 state.push_html("</li>\n");
             }
@@ -468,6 +503,47 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
     }
 
     SanitizedHtml::from_sanitized_html(state.html_output)
+}
+
+struct LineLookup {
+    line_starts: Vec<usize>,
+}
+
+impl LineLookup {
+    fn new(input: &str) -> Self {
+        let mut line_starts = vec![0];
+        for (idx, byte) in input.bytes().enumerate() {
+            if byte == b'\n' {
+                line_starts.push(idx + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    fn line_for_offset(&self, offset: usize) -> usize {
+        match self.line_starts.binary_search(&offset) {
+            Ok(index) => index + 1,
+            Err(index) => index,
+        }
+    }
+
+    fn line_range(&self, range: &Range<usize>) -> (usize, usize) {
+        if range.is_empty() {
+            let line = self.line_for_offset(range.start);
+            return (line, line);
+        }
+        let start_line = self.line_for_offset(range.start);
+        let end_line = self.line_for_offset(range.end.saturating_sub(1));
+        (start_line, end_line)
+    }
+}
+
+fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
+    let (start_line, end_line) = line_lookup.line_range(range);
+    format!(
+        " data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
+        start_line, end_line
+    )
 }
 
 fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {

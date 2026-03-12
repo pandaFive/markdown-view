@@ -65,6 +65,7 @@ impl ResolvedTarget {
 pub(in crate::server) enum RouteTargetRequest<'a> {
     Page { query_file: Option<&'a str> },
     ApiContent { query_file: Option<&'a str> },
+    ApiMemo { query_file: Option<&'a str> },
 }
 
 impl<'a> RouteTargetRequest<'a> {
@@ -76,9 +77,15 @@ impl<'a> RouteTargetRequest<'a> {
         Self::ApiContent { query_file }
     }
 
+    pub(in crate::server) fn api_memo(query_file: Option<&'a str>) -> Self {
+        Self::ApiMemo { query_file }
+    }
+
     fn query_file(self) -> Option<&'a str> {
         match self {
-            Self::Page { query_file } | Self::ApiContent { query_file } => query_file,
+            Self::Page { query_file }
+            | Self::ApiContent { query_file }
+            | Self::ApiMemo { query_file } => query_file,
         }
     }
 
@@ -89,7 +96,7 @@ impl<'a> RouteTargetRequest<'a> {
     fn not_found_message(self) -> &'static str {
         match self {
             Self::Page { .. } => "表示可能なMarkdownファイルが見つかりません",
-            Self::ApiContent { .. } => "指定したファイルが見つかりません",
+            Self::ApiContent { .. } | Self::ApiMemo { .. } => "指定したファイルが見つかりません",
         }
     }
 
@@ -97,6 +104,7 @@ impl<'a> RouteTargetRequest<'a> {
         match self {
             Self::Page { .. } => "index",
             Self::ApiContent { .. } => "api/content",
+            Self::ApiMemo { .. } => "api/memo",
         }
     }
 }

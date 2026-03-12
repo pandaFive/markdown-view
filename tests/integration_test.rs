@@ -46,8 +46,96 @@ async fn test_apiコンテンツ取得() {
 
     let json: serde_json::Value = resp.json().await.unwrap();
     let content = json["content"].as_str().unwrap();
-    assert!(content.contains("<strong>bold</strong>"));
+    assert!(content.contains("<strong>"));
+    assert!(content.contains("bold"));
     assert!(json.get("file").is_none());
+}
+
+#[tokio::test]
+async fn test_apiメモ_未作成時は空を返す() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+
+    let resp = reqwest::get(format!("http://{}/api/memo", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["raw"], "");
+    assert_eq!(json["html"], "");
+    assert!(json.get("file").is_none());
+}
+
+#[tokio::test]
+async fn test_apiメモ_保存と再取得ができる() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "> quote\n\n出典: [test.md](#memo) L1-L2"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 200);
+    let saved: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(saved["raw"], "> quote\n\n出典: [test.md](#memo) L1-L2");
+    assert!(saved["html"].as_str().unwrap().contains("<blockquote"));
+    assert!(
+        tokio::fs::try_exists(tmp_dir.path().join(".markdown-view/memos/test.md"))
+            .await
+            .unwrap()
+    );
+
+    let get = client
+        .get(format!("http://{}/api/memo", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let fetched: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(fetched["raw"], "> quote\n\n出典: [test.md](#memo) L1-L2");
+}
+
+#[tokio::test]
+async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら保存できる() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let raw = "\\".repeat(6 * 1024 * 1024);
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": raw
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 200);
+    let saved: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(saved["raw"].as_str().unwrap().len(), 6 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn test_indexページ取得_壊れたメモがあっても本文表示は継続する() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    tokio::fs::create_dir_all(memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&memo_path, [0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Body"));
+    assert!(body.contains("id=\"memo-editor\""));
 }
 
 #[tokio::test]
@@ -814,6 +902,10 @@ async fn test_ディレクトリモード_タブuiが表示される() {
         body.contains("id=\"panel-toc\""),
         "目次パネルが存在するべき"
     );
+    assert!(
+        body.contains("id=\"panel-memo\""),
+        "メモパネルが存在するべき"
+    );
 }
 
 #[tokio::test]
@@ -824,15 +916,33 @@ async fn test_単一ファイルモード_タブが表示されない() {
     assert_eq!(resp.status(), 200);
 
     let body = resp.text().await.unwrap();
-    // HTML構造にタブ要素が含まれない（CSSクラス定義ではなくHTML構造を検証）
+    // 単一ファイルモードでも目次/メモタブは表示される
     assert!(
         !body.contains("data-tab=\"files\""),
-        "単一ファイルモードではタブは不要"
+        "単一ファイルモードではファイルタブは不要"
     );
     assert!(
         !body.contains("id=\"panel-files\""),
         "単一ファイルモードではファイルパネルは不要"
     );
+    assert!(body.contains("data-tab=\"toc\""));
+    assert!(body.contains("data-tab=\"memo\""));
+    assert!(body.contains("id=\"panel-memo\""));
+}
+
+#[tokio::test]
+async fn test_本文htmlにソース行番号属性と引用ボタンが含まれる() {
+    let (_state, addr, _tmp_dir) =
+        setup_single_file_server("# Heading\n\nLine one\n\nLine two").await;
+
+    let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("data-source-start-line=\"1\""));
+    assert!(body.contains("data-source-end-line=\"1\""));
+    assert!(body.contains("id=\"quote-selection-action\""));
+    assert!(body.contains("function buildQuoteMarkdownFromSelection()"));
 }
 
 // ==============================

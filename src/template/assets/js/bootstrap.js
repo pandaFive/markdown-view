@@ -12,6 +12,10 @@ var liveStatusEl = document.getElementById('live-status');
 var readingProgressBar = document.getElementById('reading-progress-bar');
 var backToTop = document.getElementById('back-to-top');
 var contentRoot = document.getElementById('content');
+var memoEditorEl = document.getElementById('memo-editor');
+var memoPreviewEl = document.getElementById('memo-preview');
+var memoSaveStatusEl = document.getElementById('memo-save-status');
+var quoteSelectionActionEl = document.getElementById('quote-selection-action');
 
 // テキスト選択中のDOM更新延期機構
 // マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
@@ -20,6 +24,11 @@ var contentRoot = document.getElementById('content');
 var pendingUpdate = null;
 var pendingUpdateTimer = null;
 var isMouseSelecting = false;
+var memoLoadGeneration = 0;
+var memoSaveGeneration = 0;
+var memoSaveTimer = null;
+var memoCaretStart = memoEditorEl ? memoEditorEl.value.length : 0;
+var memoCaretEnd = memoCaretStart;
 var LIVE_STATUS_LABELS = {
   live: 'Live',
   retry: 'Reconnecting',

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
@@ -10,7 +10,8 @@ use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{
-    list_markdown_files, load_route_update, resolve_route_target, RouteTargetRequest,
+    list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
+    RouteTargetRequest, MAX_FILE_SIZE,
 };
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
@@ -19,7 +20,9 @@ use super::guards::{
 use super::messages::ApiError;
 use super::session::handle_socket;
 use super::state::AppState;
-use crate::template::{render_page, RenderPageParams, SidebarParams, UpdateMessage};
+use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
+
+const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -33,6 +36,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
         .route("/api/content", get(api_content_handler))
+        .route(
+            "/api/memo",
+            get(api_memo_handler)
+                .put(api_memo_save_handler)
+                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
+        )
         .route("/api/files", get(api_files_handler))
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
@@ -64,6 +73,12 @@ struct FileQuery {
     file: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct MemoSaveRequest {
+    file: Option<String>,
+    raw: String,
+}
+
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
@@ -75,6 +90,18 @@ async fn index_handler(
     let request = RouteTargetRequest::page(query.file.as_deref());
     let target = resolve_route_target(&state, request)?;
     let update = load_route_update(&target, request).await?;
+    let memo_request = RouteTargetRequest::api_memo(query.file.as_deref());
+    let memo = match load_route_memo(&state, &target, memo_request).await {
+        Ok(memo) => memo,
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
+                target.file_path().display(),
+                error
+            );
+            MemoResponse::empty(target.relative_path().map(ToOwned::to_owned))
+        }
+    };
 
     let title = target
         .file_path()
@@ -86,6 +113,7 @@ async fn index_handler(
         title,
         content: update.content(),
         toc: update.toc(),
+        memo: &memo,
         dark_mode: state.dark_mode(),
         syntax_css: state.syntax_css(),
         sidebar: match target.file_list() {
@@ -111,6 +139,36 @@ async fn api_content_handler(
     let update = load_route_update(&target, request).await?;
 
     Ok(Json(update))
+}
+
+/// GET /api/memo : 現在のメモをJSON形式で返す
+async fn api_memo_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<FileQuery>,
+) -> Result<Json<MemoResponse>, ApiError> {
+    ensure_allowed_request_host(&headers)?;
+
+    let request = RouteTargetRequest::api_memo(query.file.as_deref());
+    let target = resolve_route_target(&state, request)?;
+    let memo = load_route_memo(&state, &target, request).await?;
+
+    Ok(Json(memo))
+}
+
+/// PUT /api/memo : メモを保存してJSON形式で返す
+async fn api_memo_save_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<MemoSaveRequest>,
+) -> Result<Json<MemoResponse>, ApiError> {
+    ensure_allowed_request_host(&headers)?;
+
+    let request = RouteTargetRequest::api_memo(payload.file.as_deref());
+    let target = resolve_route_target(&state, request)?;
+    let memo = save_route_memo(&state, &target, payload.raw, request).await?;
+
+    Ok(Json(memo))
 }
 
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す

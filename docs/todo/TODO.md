@@ -132,3 +132,90 @@
   - ファイル: `src/server/files/resolve.rs` L240
   - 内容: `build_resolved_target`のgraceful degradationコメントにWebSocketパスの安全性文脈を復元
   - 理由: 旧5行→新1行に簡略化され保守者向け情報が減少
+
+## PRレビュー: メモ機能 (レビュー日: 2026-03-12)
+
+### Medium Priority（テストカバレッジ）
+
+- [ ] 空/whitespaceメモ保存でファイル削除される動作の統合テスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 内容: PUT `/api/memo` に `{"raw": "  \n  "}` を送り、既存メモが削除され後続GETが空を返すことを検証
+  - 理由: 削除は破壊的操作であり回帰テストが必要
+
+- [ ] 10MB超メモの413拒否テスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 内容: PUT `/api/memo` に10MB超のbodyを送り413が返ることを検証
+  - 理由: サイズ制限の回帰防止
+
+- [ ] メモAPIへのパストラバーサルテスト追加
+  - ファイル: `tests/integration_test.rs`
+  - 内容: PUT `/api/memo?file=../../etc/passwd` が404/400で拒否されることを検証
+  - 理由: セキュリティ境界の明示的テスト
+
+- [ ] `data-source-start-line`/`data-source-end-line`の値の正確性テスト追加
+  - ファイル: `tests/renderer_test.rs`
+  - 内容: `LineLookup::line_for_offset`と`line_range`のユニットテスト、複数行入力での行番号正確性を検証
+  - 理由: 既存テストは属性の存在のみ確認し値を検証していない
+
+### Low Priority
+
+- [ ] `MemoResponse::new`を`from_raw`に変更してraw/html不整合リスクを排除
+  - ファイル: `src/template/message.rs`
+  - 内容: `new(raw, html, file)`を`from_raw(raw, file)`に変更し、内部で`render_markdown`を呼ぶ
+  - 理由: 呼び出し側でraw/htmlの整合性を保証する責務がなくなる
+
+- [ ] `RouteTargetRequest`をstruct+enum kindパターンに変更
+  - ファイル: `src/server/files/resolve.rs`
+  - 内容: 全バリアント同一の`query_file`フィールドをstructに集約
+  - 理由: コードの簡素化（バリアント追加時の重複排除）
+
+- [ ] `render_markdown("")`の結果をOnceLockでキャッシュ
+  - ファイル: `src/template/message.rs`
+  - 内容: `MemoResponse::empty`が毎回呼ぶ`render_markdown("")`の結果を静的キャッシュ
+  - 理由: メモ未作成ファイルが多い場合のマイクロ最適化
+
+## メモ機能実装の残課題 (記録日: 2026-03-12)
+
+### Medium Priority
+
+- [ ] メモ更新用のWebSocketメッセージ仕様を追加
+  - ファイル: `src/server/messages.rs`, `src/server/session.rs`, `src/server/files/memo.rs`
+  - 内容: メモ保存時に配信できる専用メッセージ型を定義し、既存本文更新メッセージと衝突しない形で直列化する
+  - 理由: リアルタイム同期を段階導入するために、まずサーバー側の通知面を独立させる必要がある
+
+- [ ] メモ保存時に他クライアントへ更新通知を送る
+  - ファイル: `src/server/routes.rs`, `src/server/files/memo.rs`, `src/server/broadcast.rs`
+  - 内容: `PUT /api/memo` 成功時に、保存した対象ファイルのメモ更新を broadcast する
+  - 理由: 現状は保存したタブしか最新化されず、複数タブ・複数クライアントで内容がずれる
+
+- [ ] クライアント側でメモ更新通知を受信して現在表示中のメモへ反映する
+  - ファイル: `src/template/assets/js/websocket.js`, `src/template/assets/js/memo.js`
+  - 内容: 本文更新と同様に、現在開いているファイルのメモだけを安全に反映し、編集中は上書きを避ける
+  - 理由: 通知だけ先に入れても、フロント側に競合回避付き反映処理がないと実運用で壊れる
+
+- [ ] メモのリアルタイム同期競合を検証する E2E テストを追加
+  - ファイル: `tests/e2e/`
+  - 内容: 複数タブまたは複数ページで同一メモを開き、片方の保存がもう片方へ反映されることを検証する
+  - 理由: 同期機能は race condition を起こしやすく、ユニットテストだけでは不足する
+
+### Low Priority
+
+- [ ] レンダラー出力に行範囲ジャンプ用の安定ターゲットを追加
+  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content.js`
+  - 内容: `Lx-Ly` から本文内の対応ブロックを引けるよう、行範囲単位のターゲット属性またはアンカー生成規約を追加する
+  - 理由: 現状の `data-source-*` は参照用で、ジャンプ先として直接使うには粒度が粗い
+
+- [ ] メモプレビュー内の出典クリックで本文へスクロールする処理を追加
+  - ファイル: `src/template/assets/js/memo.js`, `src/template/assets/js/sidebar.js`
+  - 内容: 出典リンク選択時にメモタブから本文へ戻し、対応ブロックへスクロールする
+  - 理由: 行番号が表示されても、実際に本文へ戻れないと参照導線として弱い
+
+- [ ] 本文ジャンプ時の一時ハイライト表示を追加
+  - ファイル: `src/template/assets/js/content.js`, `src/template/assets/css/memo.css`
+  - 内容: スクロール後に対象箇所を数秒ハイライトし、どこへ移動したか分かるようにする
+  - 理由: 長文ドキュメントではスクロールだけだと着地点が視認しづらい
+
+- [ ] 出典ジャンプ導線の E2E テストを追加
+  - ファイル: `tests/e2e/`
+  - 内容: メモプレビューの出典クリックで、対応見出しや行範囲付近へ遷移・ハイライトされることを検証する
+  - 理由: UI の回帰が起きやすく、DOM 属性変更時の破壊を検知したい

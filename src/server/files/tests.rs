@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::{fs, os::unix::fs::symlink};
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -354,6 +356,64 @@ fn test_resolve_route_target_api_contentはfile_listを含まない() {
 
     assert_eq!(target.relative_path(), Some("docs/api.md"));
     assert!(target.file_list().is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_メモルートがシンボリックリンクなら拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("README.md");
+    fs::write(&file_path, "# README").unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("symlinked memo root should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_メモ配下のシンボリックリンクも拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view")).unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view/memos")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("symlinked memo leaf should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
 }
 
 #[tokio::test]

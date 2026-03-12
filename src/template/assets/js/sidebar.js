@@ -71,20 +71,22 @@ function setupFileFilter() {
 
 function setupTabs() {
   var tabs = document.querySelectorAll('.sidebar-tab');
+  if (!tabs.length) return;
   tabs.forEach(function(tab) {
     tab.addEventListener('click', function() {
-      var target = tab.getAttribute('data-tab');
-      tabs.forEach(function(t) { t.classList.remove('active'); });
-      tab.classList.add('active');
-      var panels = document.querySelectorAll('.sidebar-panel');
-      panels.forEach(function(panel) {
-        if (panel.id === 'panel-' + target) {
-          panel.classList.add('active');
-        } else {
-          panel.classList.remove('active');
-        }
-      });
+      activateSidebarTab(tab.getAttribute('data-tab'));
     });
+  });
+}
+
+function activateSidebarTab(target) {
+  var tabs = document.querySelectorAll('.sidebar-tab');
+  tabs.forEach(function(tab) {
+    tab.classList.toggle('active', tab.getAttribute('data-tab') === target);
+  });
+  var panels = document.querySelectorAll('.sidebar-panel');
+  panels.forEach(function(panel) {
+    panel.classList.toggle('active', panel.id === 'panel-' + target);
   });
 }
 
@@ -186,8 +188,8 @@ enhanceContentInteractions();
 setupTocFilter();
 window.addEventListener('scroll', updateReadingProgress, { passive: true });
 window.addEventListener('resize', updateReadingProgress);
+setupTabs();
 if (isDirMode) {
   setupFileList();
-  setupTabs();
   setupFileFilter();
 }
