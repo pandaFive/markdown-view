@@ -17,4 +17,6 @@ pub(in crate::server) use self::content::{
     load_route_update,
 };
 pub(in crate::server) use self::memo::{load_route_memo, save_route_memo};
-pub(in crate::server) use self::resolve::{resolve_route_target, RouteTargetRequest};
+pub(in crate::server) use self::resolve::{
+    resolve_route_target, ResolvedTarget, RouteTargetRequest,
+};
