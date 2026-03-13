@@ -81,7 +81,7 @@ impl<'a> RouteTargetRequest<'a> {
         Self::ApiMemo { query_file }
     }
 
-    fn query_file(self) -> Option<&'a str> {
+    pub(in crate::server) fn query_file(self) -> Option<&'a str> {
         match self {
             Self::Page { query_file }
             | Self::ApiContent { query_file }

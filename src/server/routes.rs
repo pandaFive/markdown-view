@@ -11,7 +11,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{
     list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
-    RouteTargetRequest, MAX_FILE_SIZE,
+    ResolvedTarget, RouteTargetRequest, MAX_FILE_SIZE,
 };
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
@@ -89,51 +89,104 @@ struct MemoSaveRequest {
     raw: String,
 }
 
+#[derive(Debug)]
+struct RouteContext<'a> {
+    state: &'a Arc<AppState>,
+    target: ResolvedTarget,
+    request: RouteTargetRequest<'a>,
+}
+
+impl<'a> RouteContext<'a> {
+    fn ensure_allowed(headers: &HeaderMap) -> Result<(), ApiError> {
+        ensure_allowed_request_host(headers)
+    }
+
+    fn resolve(
+        state: &'a Arc<AppState>,
+        headers: &HeaderMap,
+        request: RouteTargetRequest<'a>,
+    ) -> Result<Self, ApiError> {
+        Self::ensure_allowed(headers)?;
+        let target = resolve_route_target(state, request)?;
+        Ok(Self {
+            state,
+            target,
+            request,
+        })
+    }
+
+    async fn load_update(&self) -> Result<UpdateMessage, ApiError> {
+        load_route_update(&self.target, self.request).await
+    }
+
+    async fn load_memo(&self) -> Result<MemoResponse, ApiError> {
+        load_route_memo(self.state, &self.target, self.memo_request()).await
+    }
+
+    async fn save_memo(&self, raw: String) -> Result<MemoResponse, ApiError> {
+        save_route_memo(self.state, &self.target, raw, self.memo_request()).await
+    }
+
+    fn memo_request(&self) -> RouteTargetRequest<'a> {
+        RouteTargetRequest::api_memo(self.request.query_file())
+    }
+
+    fn title(&self) -> &str {
+        self.target
+            .file_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("markdown-view")
+    }
+
+    fn sidebar(&self) -> SidebarParams<'_> {
+        match self.target.file_list() {
+            Some(files) => SidebarParams::Directory {
+                directory_name: sidebar_directory_name(self.state),
+                file_list: files,
+                current_file: self.target.relative_path(),
+            },
+            None => SidebarParams::SingleFile,
+        }
+    }
+
+    fn target(&self) -> &ResolvedTarget {
+        &self.target
+    }
+}
+
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
-
-    let request = RouteTargetRequest::page(query.file.as_deref());
-    let target = resolve_route_target(&state, request)?;
-    let update = load_route_update(&target, request).await?;
-    let memo_request = RouteTargetRequest::api_memo(query.file.as_deref());
-    let memo = match load_route_memo(&state, &target, memo_request).await {
+    let context = RouteContext::resolve(
+        &state,
+        &headers,
+        RouteTargetRequest::page(query.file.as_deref()),
+    )?;
+    let update = context.load_update().await?;
+    let memo = match context.load_memo().await {
         Ok(memo) => memo,
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
-                target.file_path().display(),
+                context.target().file_path().display(),
                 error
             );
-            MemoResponse::empty(target.relative_path().map(ToOwned::to_owned))
+            MemoResponse::empty(context.target().relative_path().map(ToOwned::to_owned))
         }
     };
 
-    let title = target
-        .file_path()
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("markdown-view");
-
     Ok(Html(render_page(RenderPageParams {
-        title,
+        title: context.title(),
         content: update.content(),
         toc: update.toc(),
         memo: &memo,
         dark_mode: state.dark_mode(),
         syntax_css: state.syntax_css(),
-        sidebar: match target.file_list() {
-            Some(files) => SidebarParams::Directory {
-                directory_name: sidebar_directory_name(&state),
-                file_list: files,
-                current_file: target.relative_path(),
-            },
-            None => SidebarParams::SingleFile,
-        },
+        sidebar: context.sidebar(),
     })))
 }
 
@@ -143,11 +196,12 @@ async fn api_content_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
-
-    let request = RouteTargetRequest::api_content(query.file.as_deref());
-    let target = resolve_route_target(&state, request)?;
-    let update = load_route_update(&target, request).await?;
+    let context = RouteContext::resolve(
+        &state,
+        &headers,
+        RouteTargetRequest::api_content(query.file.as_deref()),
+    )?;
+    let update = context.load_update().await?;
 
     Ok(Json(update))
 }
@@ -158,11 +212,12 @@ async fn api_memo_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
-
-    let request = RouteTargetRequest::api_memo(query.file.as_deref());
-    let target = resolve_route_target(&state, request)?;
-    let memo = load_route_memo(&state, &target, request).await?;
+    let context = RouteContext::resolve(
+        &state,
+        &headers,
+        RouteTargetRequest::api_memo(query.file.as_deref()),
+    )?;
+    let memo = context.load_memo().await?;
 
     Ok(Json(memo))
 }
@@ -173,11 +228,12 @@ async fn api_memo_save_handler(
     headers: HeaderMap,
     Json(payload): Json<MemoSaveRequest>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
-
-    let request = RouteTargetRequest::api_memo(payload.file.as_deref());
-    let target = resolve_route_target(&state, request)?;
-    let memo = save_route_memo(&state, &target, payload.raw, request).await?;
+    let context = RouteContext::resolve(
+        &state,
+        &headers,
+        RouteTargetRequest::api_memo(payload.file.as_deref()),
+    )?;
+    let memo = context.save_memo(payload.raw).await?;
 
     Ok(Json(memo))
 }
@@ -187,7 +243,7 @@ async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
+    RouteContext::ensure_allowed(&headers)?;
 
     if let Some(base) = state.mode().directory() {
         let files = list_markdown_files(base).map_err(|e| {
@@ -214,4 +270,59 @@ async fn ws_handler(
             .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::broadcast;
+
+    fn create_directory_state(base_dir: &std::path::Path) -> Arc<AppState> {
+        let (tx, _rx) = broadcast::channel(16);
+        Arc::new(AppState::new(
+            super::super::state::AppMode::new_directory(base_dir).unwrap(),
+            false,
+            None,
+            tx,
+        ))
+    }
+
+    #[test]
+    fn test_route_context_pageからmemoリクエストを派生できる() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+        std::fs::write(dir.path().join("docs/guide.md"), "# Guide").unwrap();
+        let state = create_directory_state(dir.path());
+        let mut headers = HeaderMap::new();
+        headers.insert("Host", "127.0.0.1:3000".parse().unwrap());
+
+        let context = RouteContext::resolve(
+            &state,
+            &headers,
+            RouteTargetRequest::page(Some("docs/guide.md")),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            context.memo_request(),
+            RouteTargetRequest::ApiMemo {
+                query_file: Some("docs/guide.md")
+            }
+        ));
+    }
+
+    #[test]
+    fn test_route_context_不正hostを拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
+        let state = create_directory_state(dir.path());
+        let mut headers = HeaderMap::new();
+        headers.insert("Host", "evil.example:3000".parse().unwrap());
+
+        let error = RouteContext::resolve(&state, &headers, RouteTargetRequest::page(None))
+            .expect_err("不正なHostヘッダは拒否されるべき");
+
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
 }
