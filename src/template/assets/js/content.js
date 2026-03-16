@@ -151,8 +151,41 @@ function setupTocFilter() {
   });
 }
 
+function createDocumentSearchEmptyState(message) {
+  var empty = document.createElement('p');
+  empty.className = 'document-search-empty';
+  empty.textContent = message;
+  return empty;
+}
+
+function formatDirectorySearchSummary() {
+  var baseText;
+  if (!currentDocumentSearchQuery) {
+    baseText = '0 件';
+  } else if (currentDirectorySearchLoading) {
+    baseText = '検索中...';
+  } else if (currentDirectorySearchError) {
+    baseText = 'エラー';
+  } else if (!currentDirectorySearchResults.length) {
+    baseText = '0 件';
+  } else if (currentDirectorySearchIndex >= 0) {
+    baseText = (currentDirectorySearchIndex + 1) + ' / ' + currentDirectorySearchResults.length + ' 件';
+  } else {
+    baseText = currentDirectorySearchResults.length + ' 件';
+  }
+
+  if (currentDirectorySearchSkippedFiles > 0) {
+    return baseText + '（' + currentDirectorySearchSkippedFiles + '件スキップ）';
+  }
+  return baseText;
+}
+
 function updateDocumentSearchSummary() {
   if (!documentSearchSummaryEl) return;
+  if (isDirMode) {
+    documentSearchSummaryEl.textContent = formatDirectorySearchSummary();
+    return;
+  }
   if (!documentSearchMatches.length) {
     documentSearchSummaryEl.textContent = '0 件';
     return;
@@ -365,16 +398,17 @@ function renderDocumentSearchResultContext(container, text, query, variant) {
 
 function renderDocumentSearchResults() {
   if (!documentSearchResultsEl) return;
+  if (isDirMode) {
+    renderDirectorySearchResults();
+    return;
+  }
   var preservedScrollTop = documentSearchResultsEl.scrollTop;
   documentSearchResultsEl.innerHTML = '';
 
   if (!currentDocumentSearchQuery) return;
 
   if (!documentSearchMatches.length) {
-    var empty = document.createElement('p');
-    empty.className = 'document-search-empty';
-    empty.textContent = '一致する文が見つかりません。';
-    documentSearchResultsEl.appendChild(empty);
+    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('一致する文が見つかりません。'));
     return;
   }
 
@@ -406,6 +440,155 @@ function renderDocumentSearchResults() {
   });
 
   documentSearchResultsEl.scrollTop = preservedScrollTop;
+}
+
+function renderDirectorySearchResults() {
+  var preservedScrollTop = documentSearchResultsEl.scrollTop;
+  documentSearchResultsEl.innerHTML = '';
+
+  if (!currentDocumentSearchQuery) return;
+
+  if (currentDirectorySearchLoading) {
+    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリを検索しています。'));
+    return;
+  }
+
+  if (currentDirectorySearchError) {
+    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState(currentDirectorySearchError));
+    return;
+  }
+
+  if (!currentDirectorySearchResults.length) {
+    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
+    return;
+  }
+
+  currentDirectorySearchResults.forEach(function(result, index) {
+    var button = document.createElement('button');
+    var indexBadge = document.createElement('span');
+    var body = document.createElement('span');
+    var path = document.createElement('span');
+
+    button.type = 'button';
+    button.className = 'document-search-result';
+    button.dataset.resultIndex = String(index);
+    button.classList.toggle('active', index === currentDirectorySearchIndex);
+    button.setAttribute('aria-current', index === currentDirectorySearchIndex ? 'true' : 'false');
+    button.addEventListener('click', function() {
+      openDirectorySearchResult(index);
+    });
+
+    indexBadge.className = 'document-search-result-index';
+    indexBadge.textContent = String(index + 1).padStart(2, '0');
+
+    body.className = 'document-search-result-body';
+    path.className = 'document-search-result-path';
+    path.textContent = result.file;
+    body.appendChild(path);
+    renderDocumentSearchResultContext(body, result.before, currentDocumentSearchQuery, 'before');
+    renderDocumentSearchResultContext(body, result.current, currentDocumentSearchQuery, 'current');
+    renderDocumentSearchResultContext(body, result.after, currentDocumentSearchQuery, 'after');
+
+    button.appendChild(indexBadge);
+    button.appendChild(body);
+    documentSearchResultsEl.appendChild(button);
+  });
+
+  documentSearchResultsEl.scrollTop = preservedScrollTop;
+}
+
+function renderDirectorySearchUi() {
+  updateDocumentSearchSummary();
+  renderDocumentSearchResults();
+}
+
+function applyPendingDirectorySearchNavigation() {
+  if (!isDirMode || !pendingDirectorySearchNavigation) return;
+  if (pendingDirectorySearchNavigation.file !== currentFile) return;
+  if (pendingDirectorySearchNavigation.query !== currentDocumentSearchQuery) {
+    pendingDirectorySearchNavigation = null;
+    return;
+  }
+  if (documentSearchMatches.length) {
+    setCurrentDocumentSearchMatch(
+      Math.min(pendingDirectorySearchNavigation.fileMatchIndex, documentSearchMatches.length - 1)
+    );
+  }
+  currentDirectorySearchIndex = pendingDirectorySearchNavigation.resultIndex;
+  pendingDirectorySearchNavigation = null;
+}
+
+function scheduleDirectorySearch(query) {
+  if (documentSearchDebounceTimer) {
+    clearTimeout(documentSearchDebounceTimer);
+  }
+  documentSearchDebounceTimer = setTimeout(function() {
+    documentSearchDebounceTimer = null;
+    runDirectorySearch(query);
+  }, 300);
+}
+
+function runDirectorySearch(query) {
+  var generation = ++documentSearchFetchGeneration;
+  currentDirectorySearchLoading = true;
+  currentDirectorySearchError = '';
+  currentDirectorySearchResults = [];
+  currentDirectorySearchIndex = -1;
+  currentDirectorySearchSkippedFiles = 0;
+  renderDirectorySearchUi();
+
+  fetch('/api/search?q=' + encodeURIComponent(query), {
+    headers: { 'Accept': 'application/json' }
+  })
+  .then(function(resp) {
+    if (!resp.ok) throw createHttpError(resp.status);
+    return resp.json().catch(function(err) {
+      err.type = 'parse';
+      throw err;
+    });
+  })
+  .then(function(data) {
+    if (generation !== documentSearchFetchGeneration) return;
+    if ((data.query || '') !== currentDocumentSearchQuery) return;
+    currentDirectorySearchLoading = false;
+    currentDirectorySearchError = '';
+    currentDirectorySearchResults = Array.isArray(data.results) ? data.results : [];
+    currentDirectorySearchSkippedFiles = Number(data.skipped_files || 0);
+    currentDirectorySearchIndex = currentDirectorySearchResults.length ? 0 : -1;
+    renderDirectorySearchUi();
+  })
+  .catch(function(err) {
+    if (generation !== documentSearchFetchGeneration) return;
+    currentDirectorySearchLoading = false;
+    currentDirectorySearchResults = [];
+    currentDirectorySearchIndex = -1;
+    currentDirectorySearchSkippedFiles = 0;
+    currentDirectorySearchError = getFileFetchErrorMessage(err);
+    console.error('[markdown-view] ディレクトリ検索エラー:', err);
+    renderDirectorySearchUi();
+  });
+}
+
+function openDirectorySearchResult(index) {
+  if (!currentDirectorySearchResults.length) return;
+  var normalizedIndex = (index + currentDirectorySearchResults.length) % currentDirectorySearchResults.length;
+  var result = currentDirectorySearchResults[normalizedIndex];
+  currentDirectorySearchIndex = normalizedIndex;
+  pendingDirectorySearchNavigation = {
+    file: result.file,
+    query: currentDocumentSearchQuery,
+    fileMatchIndex: result.file_match_index,
+    resultIndex: normalizedIndex
+  };
+  renderDirectorySearchUi();
+
+  if (result.file === currentFile) {
+    applyPendingDirectorySearchNavigation();
+    renderDirectorySearchUi();
+    return;
+  }
+
+  selectFile(result.file, false);
 }
 
 function applyDocumentSearchHighlights(query) {
@@ -487,12 +670,43 @@ function setCurrentDocumentSearchMatch(index, scrollIntoView) {
 }
 
 function moveDocumentSearch(step) {
+  if (isDirMode) {
+    if (!currentDirectorySearchResults.length) return;
+    openDirectorySearchResult(currentDirectorySearchIndex + step);
+    return;
+  }
   if (!documentSearchMatches.length) return;
   setCurrentDocumentSearchMatch(currentDocumentSearchIndex + step);
 }
 
 function applyDocumentSearchQuery(query) {
   currentDocumentSearchQuery = (query || '').trim();
+  if (isDirMode) {
+    applyDocumentSearchHighlights(currentDocumentSearchQuery);
+    pendingDirectorySearchNavigation = null;
+    if (!currentDocumentSearchQuery) {
+      if (documentSearchDebounceTimer) {
+        clearTimeout(documentSearchDebounceTimer);
+        documentSearchDebounceTimer = null;
+      }
+      documentSearchFetchGeneration += 1;
+      currentDirectorySearchResults = [];
+      currentDirectorySearchIndex = -1;
+      currentDirectorySearchSkippedFiles = 0;
+      currentDirectorySearchLoading = false;
+      currentDirectorySearchError = '';
+      renderDirectorySearchUi();
+      return;
+    }
+    currentDirectorySearchResults = [];
+    currentDirectorySearchIndex = -1;
+    currentDirectorySearchSkippedFiles = 0;
+    currentDirectorySearchLoading = true;
+    currentDirectorySearchError = '';
+    scheduleDirectorySearch(currentDocumentSearchQuery);
+    renderDirectorySearchUi();
+    return;
+  }
   applyDocumentSearchHighlights(currentDocumentSearchQuery);
 }
 
@@ -500,12 +714,36 @@ function clearDocumentSearchQuery() {
   if (documentSearchInputEl) {
     documentSearchInputEl.value = '';
   }
+  if (documentSearchDebounceTimer) {
+    clearTimeout(documentSearchDebounceTimer);
+    documentSearchDebounceTimer = null;
+  }
+  documentSearchFetchGeneration += 1;
   currentDocumentSearchQuery = '';
+  pendingDirectorySearchNavigation = null;
+  currentDirectorySearchResults = [];
+  currentDirectorySearchIndex = -1;
+  currentDirectorySearchSkippedFiles = 0;
+  currentDirectorySearchLoading = false;
+  currentDirectorySearchError = '';
   clearDocumentSearchHighlights();
+  if (isDirMode) {
+    renderDirectorySearchUi();
+  }
 }
 
 function syncDocumentSearchAfterContentUpdate() {
   if (!documentSearchInputEl) return;
+  if (isDirMode) {
+    currentDocumentSearchQuery = (documentSearchInputEl.value || '').trim();
+    applyDocumentSearchHighlights(currentDocumentSearchQuery);
+    applyPendingDirectorySearchNavigation();
+    if (currentDocumentSearchQuery) {
+      scheduleDirectorySearch(currentDocumentSearchQuery);
+    }
+    renderDirectorySearchUi();
+    return;
+  }
   applyDocumentSearchQuery(documentSearchInputEl.value);
 }
 

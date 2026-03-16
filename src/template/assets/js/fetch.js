@@ -84,10 +84,13 @@ function selectFile(file, pushHistory) {
   .then(function(data) {
     hideFileFetchErrorBanner();
     if (gen !== fetchGeneration) return;
-    if (previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
+    if (!isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
       clearDocumentSearchQuery();
     }
     updateContent(data);
+    if (isDirMode && !pushHistory) {
+      setFileParam(currentFile, true);
+    }
     if (data.file && data.file !== currentFile) {
       currentFile = data.file;
       setFileParam(currentFile, true);
@@ -102,6 +105,16 @@ function selectFile(file, pushHistory) {
   .catch(function(err) {
     console.error('[markdown-view] ファイル取得エラー:', err);
     if (gen !== fetchGeneration) return;
+    if (
+      isDirMode &&
+      pendingDirectorySearchNavigation &&
+      pendingDirectorySearchNavigation.file === file
+    ) {
+      pendingDirectorySearchNavigation = null;
+      if (typeof renderDirectorySearchUi === 'function') {
+        renderDirectorySearchUi();
+      }
+    }
     currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory);

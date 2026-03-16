@@ -11,7 +11,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{
     list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
-    ResolvedTarget, RouteTargetRequest, MAX_FILE_SIZE,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_SIZE,
 };
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
@@ -46,6 +46,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
         .route("/api/content", get(api_content_handler))
+        .route("/api/search", get(api_search_handler))
         .route(
             "/api/memo",
             get(api_memo_handler)
@@ -81,6 +82,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 #[derive(serde::Deserialize, Default)]
 struct FileQuery {
     file: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SearchQuery {
+    q: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -257,6 +263,35 @@ async fn api_files_handler(
     } else {
         Ok(Json(vec![]))
     }
+}
+
+/// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
+async fn api_search_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    RouteContext::ensure_allowed(&headers)?;
+
+    let query = query.q.unwrap_or_default();
+    let Some(base_dir) = state.mode().directory() else {
+        return Ok(Json(SearchResponse {
+            query: query.trim().to_string(),
+            results: Vec::new(),
+            searched_files: 0,
+            skipped_files: 0,
+        }));
+    };
+
+    let response = search_directory(base_dir, &query).await.map_err(|error| {
+        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ディレクトリ検索に失敗しました",
+        )
+    })?;
+
+    Ok(Json(response))
 }
 
 /// GET /ws : WebSocketアップグレード

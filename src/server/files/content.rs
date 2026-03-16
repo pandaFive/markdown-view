@@ -242,7 +242,9 @@ impl IntoResponse for ReadMarkdownError {
 ///
 /// 1. `metadata().len()` で事前チェック（競合状態の大部分を防止）
 /// 2. `AsyncReadExt::take()` で実読み取り量を制限（TOCTOU回避の最終防衛）
-async fn read_markdown_with_limit(file_path: &Path) -> Result<String, ReadMarkdownError> {
+pub(super) async fn read_markdown_with_limit(
+    file_path: &Path,
+) -> Result<String, ReadMarkdownError> {
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;

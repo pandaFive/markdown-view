@@ -23,6 +23,7 @@ function searchFixtureToc() {
 
 async function loadSearchFixture(page) {
   await page.evaluate(({ content, toc }) => {
+    isDirMode = false;
     updateContent({ content, toc });
     activateSidebarTab('toc');
   }, {
@@ -315,4 +316,173 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
   await expect.poll(() => page.evaluate(() => {
     return document.getElementById('document-search-results').scrollTop;
   })).toBe(beforeScrollTop);
+});
+
+test('ディレクトリモードでは検索API結果を一覧表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'note',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'notes.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Notes body with alpha note.',
+            after: ''
+          }
+        ],
+        searched_files: 2,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'note');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
+  await expect(page.locator('#document-search-results .document-search-result').first())
+    .toContainText('README.md');
+  await expect(page.locator('#document-search-results .document-search-result').nth(1))
+    .toContainText('notes.md');
+});
+
+test('ディレクトリ検索結果をクリックすると対象ファイルを開いて一致箇所へ移動する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'notes body',
+        results: [
+          {
+            file: 'notes.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Notes body appears in this document.',
+            after: ''
+          }
+        ],
+        searched_files: 2,
+        skipped_files: 0
+      })
+    });
+  });
+  await page.route('**/api/content?file=notes.md', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: '<h1 id="notes">Notes</h1><p>Notes body appears in this document.</p>',
+        toc: '<ul><li><a href="#notes">Notes</a></li></ul>',
+        file: 'notes.md'
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Initial README content.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'notes body');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+
+  await page.locator('#document-search-results .document-search-result').first().click();
+
+  await expect(page.locator('#content')).toContainText('Notes body appears in this document.');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+  await expect.poll(() => currentMatchText(page)).toContain('Notes body');
+  await expect(page).toHaveURL(/file=notes\.md/);
+  await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
+});
+
+test('ディレクトリモードではlive update後に検索結果一覧を再取得する', async ({ page }) => {
+  let searchCallCount = 0;
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha note',
+        results: searchCallCount === 1 ? [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          }
+        ] : [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'README.md',
+            file_match_index: 1,
+            before: '',
+            current: 'Alpha note appears after update.',
+            after: ''
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+
+  await page.evaluate(() => {
+    updateContent({
+      content:
+        '<h1 id="readme">README</h1>' +
+        '<p>Alpha note appears here.</p>' +
+        '<p>Alpha note appears after update.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+  });
+
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
 });
