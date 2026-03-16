@@ -367,13 +367,37 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 });
 
 test('ディレクトリ検索結果をクリックすると対象ファイルを開いて一致箇所へ移動する', async ({ page }) => {
+  let searchCallCount = 0;
   await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         query: 'notes body',
-        results: [
+        results: searchCallCount === 1 ? [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'README notes body appears first.',
+            after: ''
+          },
+          {
+            file: 'notes.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Notes body appears in this document.',
+            after: ''
+          }
+        ] : [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'README notes body appears first.',
+            after: ''
+          },
           {
             file: 'notes.md',
             file_match_index: 0,
@@ -410,15 +434,15 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   });
 
   await setDocumentSearchQuery(page, 'notes body');
-  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
 
-  await page.locator('#document-search-results .document-search-result').first().click();
+  await page.locator('#document-search-results .document-search-result').nth(1).click();
 
   await expect(page.locator('#content')).toContainText('Notes body appears in this document.');
-  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+  await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
   await expect.poll(() => currentMatchText(page)).toContain('Notes body');
   await expect(page).toHaveURL(/file=notes\.md/);
-  await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
+  await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 });
 
 test('ディレクトリモードではlive update後に検索結果一覧を再取得する', async ({ page }) => {

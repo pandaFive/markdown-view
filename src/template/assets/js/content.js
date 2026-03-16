@@ -528,8 +528,43 @@ function scheduleDirectorySearch(query) {
   }, 300);
 }
 
+function getPreferredDirectorySearchSelection() {
+  if (pendingDirectorySearchNavigation) {
+    return {
+      file: pendingDirectorySearchNavigation.file,
+      fileMatchIndex: pendingDirectorySearchNavigation.fileMatchIndex
+    };
+  }
+  if (
+    currentDirectorySearchIndex >= 0 &&
+    currentDirectorySearchIndex < currentDirectorySearchResults.length
+  ) {
+    return {
+      file: currentDirectorySearchResults[currentDirectorySearchIndex].file,
+      fileMatchIndex: currentDirectorySearchResults[currentDirectorySearchIndex].file_match_index
+    };
+  }
+  return null;
+}
+
+function resolveDirectorySearchIndex(results, preferredSelection) {
+  var index;
+  if (!results.length) return -1;
+  if (preferredSelection) {
+    index = results.findIndex(function(result) {
+      return (
+        result.file === preferredSelection.file &&
+        result.file_match_index === preferredSelection.fileMatchIndex
+      );
+    });
+    if (index !== -1) return index;
+  }
+  return 0;
+}
+
 function runDirectorySearch(query) {
   var generation = ++documentSearchFetchGeneration;
+  var preferredSelection = getPreferredDirectorySearchSelection();
   currentDirectorySearchLoading = true;
   currentDirectorySearchError = '';
   currentDirectorySearchResults = [];
@@ -554,7 +589,10 @@ function runDirectorySearch(query) {
     currentDirectorySearchError = '';
     currentDirectorySearchResults = Array.isArray(data.results) ? data.results : [];
     currentDirectorySearchSkippedFiles = Number(data.skipped_files || 0);
-    currentDirectorySearchIndex = currentDirectorySearchResults.length ? 0 : -1;
+    currentDirectorySearchIndex = resolveDirectorySearchIndex(
+      currentDirectorySearchResults,
+      preferredSelection
+    );
     renderDirectorySearchUi();
   })
   .catch(function(err) {
