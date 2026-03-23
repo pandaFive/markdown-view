@@ -482,6 +482,73 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
   await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
 });
 
+test('ディレクトリモードでは他ファイルのlive updateでも検索結果一覧を再取得する', async ({ page }) => {
+  let searchCallCount = 0;
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha note',
+        results: searchCallCount === 1 ? [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          }
+        ] : [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'notes.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Notes alpha note appears after update.',
+            after: ''
+          }
+        ],
+        searched_files: 2,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+
+  await page.evaluate(() => {
+    window.__realWsOnmessage({
+      data: JSON.stringify({
+        file: 'notes.md',
+        content: '<h1 id="notes">Notes</h1><p>Notes alpha note appears after update.</p>',
+        toc: '<ul><li><a href="#notes">Notes</a></li></ul>'
+      })
+    });
+  });
+
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
+  await expect(page.locator('#document-search-results .document-search-result').nth(1))
+    .toContainText('notes.md');
+});
+
 test('ディレクトリモードの初回キーボード移動は先頭の検索結果を開く', async ({ page }) => {
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({
@@ -630,6 +697,67 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   await expect(page).toHaveURL(/file=notes\.md/);
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+});
+
+test('ディレクトリ検索結果のオープン失敗時は以前の選択状態を復元する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha note',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'missing.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Missing alpha note.',
+            after: ''
+          }
+        ],
+        searched_files: 2,
+        skipped_files: 0
+      })
+    });
+  });
+  await page.route('**/api/content?file=missing.md', async (route) => {
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'not found' })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
+
+  await page.locator('#document-search-results .document-search-result').first().click();
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+
+  await page.locator('#document-search-results .document-search-result').nth(1).click();
+
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
+  await expect(page).toHaveURL(/file=README\.md/);
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+  await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
+  await expect(page.locator('#document-search-results .document-search-result').nth(1)).not.toHaveClass(/active/);
 });
 
 test('ディレクトリモードではlive update後に検索結果一覧を再取得する', async ({ page }) => {

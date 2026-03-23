@@ -635,12 +635,14 @@ function openDirectorySearchResult(index) {
   if (!currentDirectorySearchResults.length) return;
   var normalizedIndex = (index + currentDirectorySearchResults.length) % currentDirectorySearchResults.length;
   var result = currentDirectorySearchResults[normalizedIndex];
+  var previousResultIndex = currentDirectorySearchIndex;
   currentDirectorySearchIndex = normalizedIndex;
   pendingDirectorySearchNavigation = {
     file: result.file,
     query: currentDocumentSearchQuery,
     fileMatchIndex: result.file_match_index,
-    resultIndex: normalizedIndex
+    resultIndex: normalizedIndex,
+    previousResultIndex: previousResultIndex
   };
   renderDirectorySearchUi();
 

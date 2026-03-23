@@ -115,6 +115,7 @@ function selectFile(file, pushHistory, options) {
       pendingDirectorySearchNavigation &&
       pendingDirectorySearchNavigation.file === file
     ) {
+      currentDirectorySearchIndex = pendingDirectorySearchNavigation.previousResultIndex;
       pendingDirectorySearchNavigation = null;
       if (typeof renderDirectorySearchUi === 'function') {
         renderDirectorySearchUi();
