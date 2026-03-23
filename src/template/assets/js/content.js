@@ -626,7 +626,10 @@ function openDirectorySearchResult(index) {
     return;
   }
 
-  selectFile(result.file, false, { scrollMode: 'none' });
+  selectFile(result.file, false, {
+    scrollMode: 'none',
+    requeryDirectorySearch: false
+  });
 }
 
 function applyDocumentSearchHighlights(query) {
@@ -770,13 +773,14 @@ function clearDocumentSearchQuery() {
   }
 }
 
-function syncDocumentSearchAfterContentUpdate() {
+function syncDocumentSearchAfterContentUpdate(options) {
+  options = options || {};
   if (!documentSearchInputEl) return;
   if (isDirMode) {
     currentDocumentSearchQuery = (documentSearchInputEl.value || '').trim();
     applyDocumentSearchHighlights(currentDocumentSearchQuery);
     applyPendingDirectorySearchNavigation();
-    if (currentDocumentSearchQuery) {
+    if (currentDocumentSearchQuery && options.requeryDirectorySearch !== false) {
       scheduleDirectorySearch(currentDocumentSearchQuery);
     }
     renderDirectorySearchUi();
@@ -926,7 +930,7 @@ function updateContent(data, options) {
   syncDocumentChrome(currentFile);
   enhanceContentInteractions();
   if (typeof syncDocumentSearchAfterContentUpdate === 'function') {
-    syncDocumentSearchAfterContentUpdate();
+    syncDocumentSearchAfterContentUpdate(options);
   }
   setupTocFilter();
   if (typeof hideQuoteSelectionAction === 'function') {

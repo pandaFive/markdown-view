@@ -480,6 +480,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   await expect(page.locator('#content')).toContainText('Notes body appears in this document.');
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
   await expect.poll(() => currentMatchText(page)).toContain('Notes body');
+  await expect.poll(() => searchCallCount).toBe(1);
   await expect(page).toHaveURL(/file=notes\.md/);
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);

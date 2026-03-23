@@ -213,12 +213,8 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
             | Event::InlineHtml(_)
             | Event::TaskListMarker(_)
             | Event::InlineMath(_)
-            | Event::DisplayMath(_) => {}
-            Event::FootnoteReference(text) => {
-                if should_capture_text(block_depth, link_depth, image_depth, code_block_depth) {
-                    current_block.push_str(&text);
-                }
-            }
+            | Event::DisplayMath(_)
+            | Event::FootnoteReference(_) => {}
         }
     }
 
@@ -447,6 +443,17 @@ mod tests {
         assert_eq!(blocks[0].text, "Title");
         assert_eq!(blocks[1].text, "Alpha  visible.");
         assert_eq!(blocks[2].text, "cargo test");
+    }
+
+    #[test]
+    fn test_extract_search_blocks_脚注参照ラベルを検索対象に含めない() {
+        let blocks = extract_search_blocks(
+            "Paragraph with footnote.[^note]\n\n[^note]: hidden footnote body",
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Paragraph with footnote.");
+        assert_eq!(blocks[1].text, "hidden footnote body");
     }
 
     #[test]
