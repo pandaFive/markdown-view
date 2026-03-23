@@ -391,12 +391,75 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 
   await setDocumentSearchQuery(page, 'note');
 
-  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+  await expect(page.locator('#document-search-summary')).toHaveText('0 / 2 件');
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
   await expect(page.locator('#document-search-results .document-search-result').first())
     .toContainText('README.md');
   await expect(page.locator('#document-search-results .document-search-result').nth(1))
     .toContainText('notes.md');
+});
+
+test('ディレクトリモードの初回キーボード移動は先頭の検索結果を開く', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'note',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'notes.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Notes body with alpha note.',
+            after: ''
+          }
+        ],
+        searched_files: 2,
+        skipped_files: 0
+      })
+    });
+  });
+  await page.route('**/api/content?file=README.md', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        file: 'README.md',
+        content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+        toc: '<ul><li><a href=\"#readme\">README</a></li></ul>'
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'initial.md';
+    updateContent({
+      content: '<h1 id="initial">Initial</h1><p>Placeholder body.</p>',
+      toc: '<ul><li><a href="#initial">Initial</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'note');
+  await expect(page.locator('#document-search-summary')).toHaveText('0 / 2 件');
+
+  await page.evaluate(() => {
+    moveDocumentSearch(1);
+  });
+
+  await expect(page).toHaveURL(/file=README\.md/);
+  await expect(page.locator('#content')).toContainText('Alpha note appears here.');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+  await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
 });
 
 test('ディレクトリ検索結果をクリックすると対象ファイルを開いて一致箇所へ移動する', async ({ page }) => {

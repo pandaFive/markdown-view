@@ -171,7 +171,7 @@ function formatDirectorySearchSummary() {
   } else if (currentDirectorySearchIndex >= 0) {
     baseText = (currentDirectorySearchIndex + 1) + ' / ' + currentDirectorySearchResults.length + ' 件';
   } else {
-    baseText = currentDirectorySearchResults.length + ' 件';
+    baseText = '0 / ' + currentDirectorySearchResults.length + ' 件';
   }
 
   if (currentDirectorySearchSkippedFiles > 0) {
@@ -559,7 +559,7 @@ function resolveDirectorySearchIndex(results, preferredSelection) {
     });
     if (index !== -1) return index;
   }
-  return 0;
+  return -1;
 }
 
 function runDirectorySearch(query) {
@@ -714,6 +714,10 @@ function setCurrentDocumentSearchMatch(index, scrollIntoView) {
 function moveDocumentSearch(step) {
   if (isDirMode) {
     if (!currentDirectorySearchResults.length) return;
+    if (currentDirectorySearchIndex < 0) {
+      openDirectorySearchResult(step > 0 ? 0 : currentDirectorySearchResults.length - 1);
+      return;
+    }
     openDirectorySearchResult(currentDirectorySearchIndex + step);
     return;
   }
