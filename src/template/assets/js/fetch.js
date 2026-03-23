@@ -52,8 +52,9 @@ function getFileFetchErrorMessage(err) {
 }
 
 var fetchGeneration = 0;
-function selectFile(file, pushHistory) {
+function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
+  options = options || {};
   var previousFile = currentFile;
   var gen = ++fetchGeneration;
   if (typeof discardBufferedLiveUpdate === 'function') {
@@ -87,7 +88,7 @@ function selectFile(file, pushHistory) {
     if (!isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
       clearDocumentSearchQuery();
     }
-    updateContent(data);
+    updateContent(data, { scrollMode: options.scrollMode || 'reset' });
     if (isDirMode && !pushHistory) {
       setFileParam(currentFile, true);
     }

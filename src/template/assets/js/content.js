@@ -626,7 +626,7 @@ function openDirectorySearchResult(index) {
     return;
   }
 
-  selectFile(result.file, false);
+  selectFile(result.file, false, { scrollMode: 'none' });
 }
 
 function applyDocumentSearchHighlights(query) {
@@ -882,13 +882,15 @@ function normalizeTocHtml(html) {
 
 // サーバーサイドでサニタイズ済みのHTMLを反映する
 // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
-function updateContent(data) {
+function updateContent(data, options) {
+  options = options || {};
   if (pendingUpdateTimer) {
     clearTimeout(pendingUpdateTimer);
     pendingUpdateTimer = null;
   }
   pendingUpdate = null;
   var scrollY = window.scrollY;
+  var scrollMode = options.scrollMode || 'preserve';
   var preservedActiveTocId = typeof getCurrentActiveTocId === 'function' ? getCurrentActiveTocId() : '';
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
@@ -909,8 +911,10 @@ function updateContent(data) {
 
   requestAnimationFrame(function() {
     var currentScrollY = window.scrollY || window.pageYOffset;
-    if (Math.abs(currentScrollY - scrollY) <= 1) {
+    if (scrollMode === 'preserve' && Math.abs(currentScrollY - scrollY) <= 1) {
       window.scrollTo(0, scrollY);
+    } else if (scrollMode === 'reset') {
+      window.scrollTo(0, 0);
     }
     updateReadingProgress();
     if (typeof restoreActiveTocHeading === 'function') {

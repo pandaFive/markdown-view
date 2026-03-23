@@ -217,6 +217,39 @@ test('ファイル切り替え時に検索状態をリセットする', async ({
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
 });
 
+test('ディレクトリモードでファイル切り替え時は本文の表示位置を先頭へ戻す', async ({ page }) => {
+  await page.route('**/api/content?file=notes.md', async (route) => {
+    const paragraphs = Array.from(
+      { length: 80 },
+      (_, index) => `<p>Notes body line ${index + 1}</p>`
+    ).join('');
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        file: 'notes.md',
+        content: '<h1 id="notes">Notes</h1>' + paragraphs,
+        toc: '<ul><li><a href="#notes">Notes</a></li></ul>'
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  });
+
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    selectFile('notes.md');
+  });
+
+  await expect(page.locator('#content')).toContainText('Notes body line 80');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});
+
 test('ファイル切り替え失敗時は元文書の検索状態を維持する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
@@ -368,6 +401,12 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 
 test('ディレクトリ検索結果をクリックすると対象ファイルを開いて一致箇所へ移動する', async ({ page }) => {
   let searchCallCount = 0;
+  const notesParagraphs = Array.from({ length: 40 }, (_, index) => {
+    if (index === 32) {
+      return '<p id="target-match">Notes body appears in this document.</p>';
+    }
+    return `<p>Filler line ${index + 1}</p>`;
+  }).join('');
   await page.route('**/api/search**', async (route) => {
     searchCallCount += 1;
     await route.fulfill({
@@ -416,7 +455,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        content: '<h1 id="notes">Notes</h1><p>Notes body appears in this document.</p>',
+        content: '<h1 id="notes">Notes</h1>' + notesParagraphs,
         toc: '<ul><li><a href="#notes">Notes</a></li></ul>',
         file: 'notes.md'
       })
@@ -443,6 +482,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   await expect.poll(() => currentMatchText(page)).toContain('Notes body');
   await expect(page).toHaveURL(/file=notes\.md/);
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 });
 
 test('ディレクトリモードではlive update後に検索結果一覧を再取得する', async ({ page }) => {
