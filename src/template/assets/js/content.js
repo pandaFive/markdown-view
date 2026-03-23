@@ -544,6 +544,16 @@ function getPreferredDirectorySearchSelection() {
       fileMatchIndex: currentDirectorySearchResults[currentDirectorySearchIndex].file_match_index
     };
   }
+  if (
+    currentFile &&
+    currentDocumentSearchIndex >= 0 &&
+    currentDocumentSearchIndex < documentSearchMatches.length
+  ) {
+    return {
+      file: currentFile,
+      fileMatchIndex: currentDocumentSearchIndex
+    };
+  }
   return null;
 }
 
@@ -555,6 +565,19 @@ function resolveDirectorySearchIndex(results, preferredSelection) {
       return (
         result.file === preferredSelection.file &&
         result.file_match_index === preferredSelection.fileMatchIndex
+      );
+    });
+    if (index !== -1) return index;
+  }
+  if (
+    currentFile &&
+    currentDocumentSearchIndex >= 0 &&
+    currentDocumentSearchIndex < documentSearchMatches.length
+  ) {
+    index = results.findIndex(function(result) {
+      return (
+        result.file === currentFile &&
+        result.file_match_index === currentDocumentSearchIndex
       );
     });
     if (index !== -1) return index;

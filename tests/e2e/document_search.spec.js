@@ -250,6 +250,41 @@ test('ディレクトリモードでファイル切り替え時は本文の表�
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
 
+test('ディレクトリモードで同一ファイルを再読込したときは本文スクロール位置を維持する', async ({ page }) => {
+  await page.route('**/api/content?file=README.md', async (route) => {
+    const paragraphs = Array.from(
+      { length: 80 },
+      (_, index) => `<p>README body line ${index + 1}</p>`
+    ).join('');
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        file: 'README.md',
+        content: '<h1 id="readme">README</h1>' + paragraphs,
+        toc: '<ul><li><a href="#readme">README</a></li></ul>'
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  });
+
+  const beforeScrollY = await page.evaluate(() => window.scrollY);
+  await expect(beforeScrollY).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    selectFile('README.md', false);
+  });
+
+  await expect(page.locator('#content')).toContainText('README body line 80');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(beforeScrollY);
+});
+
 test('ファイル切り替え失敗時は元文書の検索状態を維持する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
@@ -397,6 +432,54 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('README.md');
   await expect(page.locator('#document-search-results .document-search-result').nth(1))
     .toContainText('notes.md');
+});
+
+test('ディレクトリモードでは現在ファイルの本文ヒットを検索結果選択に反映する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha note',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          },
+          {
+            file: 'README.md',
+            file_match_index: 1,
+            before: '',
+            current: 'Alpha note appears again in the details section.',
+            after: ''
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content:
+        '<h1 id="readme">README</h1>' +
+        '<p>Alpha note appears here.</p>' +
+        '<p>Alpha note appears again in the details section.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+  await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
 });
 
 test('ディレクトリモードの初回キーボード移動は先頭の検索結果を開く', async ({ page }) => {

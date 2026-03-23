@@ -88,8 +88,9 @@ function selectFile(file, pushHistory, options) {
     if (!isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
       clearDocumentSearchQuery();
     }
+    var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
     updateContent(data, {
-      scrollMode: options.scrollMode || 'reset',
+      scrollMode: scrollMode,
       requeryDirectorySearch: options.requeryDirectorySearch !== false
     });
     if (isDirMode && !pushHistory) {
