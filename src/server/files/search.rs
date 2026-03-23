@@ -148,6 +148,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     let mut blocks = Vec::new();
     let mut current_block = String::new();
     let mut block_depth = 0usize;
+    let mut item_depth = 0usize;
     let mut link_depth = 0usize;
     let mut image_depth = 0usize;
     let mut code_block_depth = 0usize;
@@ -155,7 +156,17 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     for event in Parser::new_ext(markdown, markdown_options()) {
         match event {
             Event::Start(tag) => {
-                if is_search_block_tag(&tag) {
+                if matches!(tag, Tag::Item) {
+                    if item_depth == 0 {
+                        if block_depth == 0 {
+                            current_block.clear();
+                        } else if !current_block.ends_with('\n') {
+                            current_block.push('\n');
+                        }
+                        block_depth += 1;
+                    }
+                    item_depth += 1;
+                } else if is_search_block_tag(&tag) {
                     if block_depth == 0 {
                         current_block.clear();
                     } else if !current_block.ends_with('\n') {
@@ -172,7 +183,16 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                 }
             }
             Event::End(tag) => {
-                if is_search_block_end_tag(&tag) {
+                if matches!(tag, TagEnd::Item) {
+                    item_depth = item_depth.saturating_sub(1);
+                    if item_depth == 0 {
+                        block_depth = block_depth.saturating_sub(1);
+                        if block_depth == 0 {
+                            finalize_search_block(&mut blocks, &current_block);
+                            current_block.clear();
+                        }
+                    }
+                } else if is_search_block_end_tag(&tag) {
                     block_depth = block_depth.saturating_sub(1);
                     if block_depth == 0 {
                         finalize_search_block(&mut blocks, &current_block);
@@ -188,18 +208,35 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                 }
             }
             Event::Text(text) => {
-                if should_capture_text(block_depth, link_depth, image_depth, code_block_depth) {
+                if should_capture_text(
+                    block_depth,
+                    item_depth,
+                    link_depth,
+                    image_depth,
+                    code_block_depth,
+                ) {
                     current_block.push_str(&text);
                 }
             }
             Event::Code(text) => {
-                if should_capture_text(block_depth, link_depth, image_depth, code_block_depth) {
+                if should_capture_text(
+                    block_depth,
+                    item_depth,
+                    link_depth,
+                    image_depth,
+                    code_block_depth,
+                ) {
                     current_block.push_str(&text);
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                if should_capture_text(block_depth, link_depth, image_depth, code_block_depth)
-                    && !current_block.ends_with('\n')
+                if should_capture_text(
+                    block_depth,
+                    item_depth,
+                    link_depth,
+                    image_depth,
+                    code_block_depth,
+                ) && !current_block.ends_with('\n')
                 {
                     current_block.push('\n');
                 }
@@ -227,11 +264,16 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
 
 fn should_capture_text(
     block_depth: usize,
+    item_depth: usize,
     link_depth: usize,
     image_depth: usize,
     code_block_depth: usize,
 ) -> bool {
-    block_depth > 0 && link_depth == 0 && image_depth == 0 && code_block_depth == 0
+    block_depth > 0
+        && item_depth <= 1
+        && link_depth == 0
+        && image_depth == 0
+        && code_block_depth == 0
 }
 
 fn is_search_block_tag(tag: &Tag<'_>) -> bool {
@@ -491,6 +533,15 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "Paragraph with footnote.");
         assert_eq!(blocks[1].text, "hidden footnote body");
+    }
+
+    #[test]
+    fn test_extract_search_blocks_ネストしたリスト項目は親項目へ混ぜない() {
+        let blocks = extract_search_blocks("- parent\n  - child alpha\n- sibling beta");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "parent");
+        assert_eq!(blocks[1].text, "sibling beta");
     }
 
     #[test]
