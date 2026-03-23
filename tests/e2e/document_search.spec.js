@@ -551,3 +551,67 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
 });
+
+test('ディレクトリモードでは古い検索失敗で新しいクエリのエラー表示に切り替わらない', async ({ page }) => {
+  let firstRequestStarted = false;
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q');
+
+    if (query === 'alpha') {
+      firstRequestStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'stale failure' })
+      });
+      return;
+    }
+
+    if (query === 'beta') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'beta',
+          results: [
+            {
+              file: 'README.md',
+              file_match_index: 0,
+              before: '',
+              current: 'Beta result is visible.',
+              after: ''
+            }
+          ],
+          searched_files: 1,
+          skipped_files: 0
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    isDirMode = true;
+    currentFile = 'README.md';
+    updateContent({
+      content: '<h1 id="readme">README</h1><p>Alpha result is visible.</p><p>Beta result is visible.</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>'
+    });
+    activateSidebarTab('toc');
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstRequestStarted).toBe(true);
+
+  await setDocumentSearchQuery(page, 'beta');
+
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+  await expect(page.locator('#document-search-results .document-search-result').first())
+    .toContainText('Beta result is visible.');
+  await expect(page.locator('#document-search-results')).not.toContainText('サーバー内部エラーが発生しました。');
+});

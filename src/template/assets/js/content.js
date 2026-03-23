@@ -597,6 +597,7 @@ function runDirectorySearch(query) {
   })
   .catch(function(err) {
     if (generation !== documentSearchFetchGeneration) return;
+    if (query !== currentDocumentSearchQuery) return;
     currentDirectorySearchLoading = false;
     currentDirectorySearchResults = [];
     currentDirectorySearchIndex = -1;

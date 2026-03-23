@@ -277,16 +277,19 @@ fn find_matches_for_file(
             continue;
         }
 
-        let normalized_text = block.text.to_lowercase();
+        let normalized = build_case_fold_index(&block.text);
         let mut search_start = 0usize;
 
-        while search_start <= normalized_text.len() {
-            let Some(relative_index) = normalized_text[search_start..].find(&normalized_query)
+        while search_start <= normalized.normalized_text.len() {
+            let Some(relative_index) =
+                normalized.normalized_text[search_start..].find(&normalized_query)
             else {
                 break;
             };
-            let match_start = search_start + relative_index;
-            let match_end = match_start + normalized_query.len();
+            let normalized_match_start = search_start + relative_index;
+            let normalized_match_end = normalized_match_start + normalized_query.len();
+            let match_start = normalized.original_offset(normalized_match_start);
+            let match_end = normalized.original_offset(normalized_match_end);
             let context = build_search_context(blocks, block_index, match_start, match_end);
             results.push(SearchResultItem::new(
                 file.to_string(),
@@ -296,11 +299,45 @@ fn find_matches_for_file(
                 context.after,
             ));
             file_match_index += 1;
-            search_start = match_end;
+            search_start = normalized_match_end;
         }
     }
 
     results
+}
+
+#[derive(Debug, Clone)]
+struct CaseFoldIndex {
+    normalized_text: String,
+    original_offsets: Vec<usize>,
+}
+
+impl CaseFoldIndex {
+    fn original_offset(&self, normalized_offset: usize) -> usize {
+        self.original_offsets
+            .get(normalized_offset)
+            .copied()
+            .unwrap_or_else(|| self.original_offsets.last().copied().unwrap_or(0))
+    }
+}
+
+fn build_case_fold_index(text: &str) -> CaseFoldIndex {
+    let mut normalized_text = String::new();
+    let mut original_offsets = vec![0];
+
+    for (char_index, ch) in text.char_indices() {
+        let char_end = char_index + ch.len_utf8();
+        let folded = ch.to_lowercase().collect::<String>();
+        normalized_text.push_str(&folded);
+        for _ in 0..folded.len() {
+            original_offsets.push(char_end);
+        }
+    }
+
+    CaseFoldIndex {
+        normalized_text,
+        original_offsets,
+    }
 }
 
 fn build_search_context(
@@ -474,5 +511,20 @@ mod tests {
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
         assert_eq!(results[2].file_match_index, 2);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_unicode小文字化でバイト長が変わっても安全に一致する() {
+        let text = "İstanbul is here. Another line.";
+        let blocks = vec![SearchBlockEntry {
+            text: text.to_string(),
+            sentences: split_text_into_sentence_ranges(text),
+        }];
+
+        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_match_index, 0);
+        assert_eq!(results[0].current, "İstanbul is here.");
     }
 }
