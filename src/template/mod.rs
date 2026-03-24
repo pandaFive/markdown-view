@@ -249,6 +249,8 @@ mod tests {
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-summary\""));
         assert!(html.contains("id=\"document-search-results\""));
+        assert!(html.contains("ディレクトリ検索"));
+        assert!(html.contains("placeholder=\"ディレクトリ全体を検索\""));
         assert!(!html.contains("sidebar-caption"));
         assert!(!html.contains("ディレクトリ内のMarkdownを切り替えて閲覧できます。"));
     }
@@ -274,6 +276,8 @@ mod tests {
         assert!(html.contains("id=\"toc-filter\""));
         assert!(html.contains("id=\"document-search-input\""));
         assert!(html.contains("id=\"document-search-results\""));
+        assert!(html.contains("本文検索"));
+        assert!(html.contains("placeholder=\"本文を検索\""));
         assert!(html.contains("id=\"panel-memo\""));
         assert!(!html.contains("sidebar-caption"));
         assert!(!html.contains("目次とメモを横断して読書メモを残せます。"));

@@ -108,7 +108,12 @@ function connectWS() {
       return;
     }
     if (isDirMode && data.file) {
-      if (data.file !== currentFile) return;
+      if (data.file !== currentFile) {
+        if (currentDocumentSearchQuery && typeof scheduleDirectorySearch === 'function') {
+          scheduleDirectorySearch(currentDocumentSearchQuery);
+        }
+        return;
+      }
     }
     scheduleBufferedLiveUpdate(data);
   };

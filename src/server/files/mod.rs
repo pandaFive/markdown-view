@@ -4,6 +4,7 @@ mod catalog;
 mod content;
 mod memo;
 mod resolve;
+mod search;
 
 #[cfg(test)]
 mod tests;
@@ -20,3 +21,4 @@ pub(in crate::server) use self::memo::{load_route_memo, save_route_memo};
 pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
+pub(in crate::server) use self::search::{search_directory, SearchResponse};

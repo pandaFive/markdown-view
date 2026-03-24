@@ -157,6 +157,15 @@
   min-width: 0;
 }
 
+.document-search-result-path {
+  display: block;
+  color: var(--toc-active);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+}
+
 .document-search-result-context {
   display: block;
   font-size: 0.8rem;

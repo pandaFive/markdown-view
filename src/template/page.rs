@@ -109,13 +109,13 @@ fn render_sidebar(
     memo: &MemoResponse,
 ) -> (String, String, DocumentMeta) {
     let memo_editor = render_memo_panel(memo);
-    let document_search = render_document_search();
     match sidebar {
         SidebarParams::Directory {
             directory_name,
             file_list,
             current_file,
         } => {
+            let document_search = render_document_search(true);
             let tree = build_file_tree(file_list);
             let tree_html = render_file_tree_html(&tree, *current_file);
             let dir_mode_attr = format!(
@@ -171,10 +171,12 @@ fn render_sidebar(
                 },
             )
         }
-        SidebarParams::SingleFile => (
-            String::new(),
-            format!(
-                r##"  <div class="sidebar-brand">
+        SidebarParams::SingleFile => {
+            let document_search = render_document_search(false);
+            (
+                String::new(),
+                format!(
+                    r##"  <div class="sidebar-brand">
     <p class="sidebar-kicker">Workspace</p>
     <h2>Annotations</h2>
   </div>
@@ -194,23 +196,35 @@ fn render_sidebar(
   <div class="sidebar-panel" id="panel-memo">
 {memo_editor}
   </div>"##,
-                document_search = document_search,
-                toc = toc.as_str(),
-                memo_editor = memo_editor,
-            ),
-            DocumentMeta {
-                mode_label: "Single file".to_string(),
-                file_count_label: "1 file".to_string(),
-            },
-        ),
+                    document_search = document_search,
+                    toc = toc.as_str(),
+                    memo_editor = memo_editor,
+                ),
+                DocumentMeta {
+                    mode_label: "Single file".to_string(),
+                    file_count_label: "1 file".to_string(),
+                },
+            )
+        }
     }
 }
 
-fn render_document_search() -> &'static str {
-    r##"    <section class="document-search-shell" aria-label="文書内検索">
+fn render_document_search(is_directory_mode: bool) -> String {
+    let (aria_label, label, placeholder) = if is_directory_mode {
+        (
+            "ディレクトリ検索",
+            "ディレクトリ検索",
+            "ディレクトリ全体を検索",
+        )
+    } else {
+        ("文書内検索", "本文検索", "本文を検索")
+    };
+
+    format!(
+        r##"    <section class="document-search-shell" aria-label="{aria_label}">
       <label class="sidebar-search sidebar-search-compact">
-        <span>本文検索</span>
-        <input id="document-search-input" type="search" placeholder="本文を検索" autocomplete="off">
+        <span>{label}</span>
+        <input id="document-search-input" type="search" placeholder="{placeholder}" autocomplete="off">
       </label>
       <div class="document-search-toolbar">
         <span id="document-search-summary" class="sidebar-summary">0 件</span>
@@ -221,7 +235,11 @@ fn render_document_search() -> &'static str {
         </div>
       </div>
       <div id="document-search-results" class="document-search-results" aria-live="polite"></div>
-    </section>"##
+    </section>"##,
+        aria_label = aria_label,
+        label = label,
+        placeholder = placeholder,
+    )
 }
 
 fn render_memo_panel(memo: &MemoResponse) -> String {

@@ -38,6 +38,14 @@ var memoCaretEnd = memoCaretStart;
 var documentSearchMatches = [];
 var currentDocumentSearchIndex = -1;
 var currentDocumentSearchQuery = '';
+var currentDirectorySearchResults = [];
+var currentDirectorySearchIndex = -1;
+var currentDirectorySearchSkippedFiles = 0;
+var currentDirectorySearchLoading = false;
+var currentDirectorySearchError = '';
+var documentSearchDebounceTimer = null;
+var documentSearchFetchGeneration = 0;
+var pendingDirectorySearchNavigation = null;
 var LIVE_STATUS_LABELS = {
   live: 'Live',
   retry: 'Reconnecting',

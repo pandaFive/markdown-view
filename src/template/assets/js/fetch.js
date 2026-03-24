@@ -52,8 +52,9 @@ function getFileFetchErrorMessage(err) {
 }
 
 var fetchGeneration = 0;
-function selectFile(file, pushHistory) {
+function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
+  options = options || {};
   var previousFile = currentFile;
   var gen = ++fetchGeneration;
   if (typeof discardBufferedLiveUpdate === 'function') {
@@ -84,10 +85,17 @@ function selectFile(file, pushHistory) {
   .then(function(data) {
     hideFileFetchErrorBanner();
     if (gen !== fetchGeneration) return;
-    if (previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
+    if (!isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
       clearDocumentSearchQuery();
     }
-    updateContent(data);
+    var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
+    updateContent(data, {
+      scrollMode: scrollMode,
+      requeryDirectorySearch: options.requeryDirectorySearch !== false
+    });
+    if (isDirMode && !pushHistory) {
+      setFileParam(currentFile, true);
+    }
     if (data.file && data.file !== currentFile) {
       currentFile = data.file;
       setFileParam(currentFile, true);
@@ -102,6 +110,17 @@ function selectFile(file, pushHistory) {
   .catch(function(err) {
     console.error('[markdown-view] ファイル取得エラー:', err);
     if (gen !== fetchGeneration) return;
+    if (
+      isDirMode &&
+      pendingDirectorySearchNavigation &&
+      pendingDirectorySearchNavigation.file === file
+    ) {
+      currentDirectorySearchIndex = pendingDirectorySearchNavigation.previousResultIndex;
+      pendingDirectorySearchNavigation = null;
+      if (typeof renderDirectorySearchUi === 'function') {
+        renderDirectorySearchUi();
+      }
+    }
     currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory);

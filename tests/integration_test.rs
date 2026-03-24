@@ -552,6 +552,22 @@ async fn test_単一ファイルモードの後方互換_api_filesは空配列()
     assert!(json.is_empty());
 }
 
+#[tokio::test]
+async fn test_単一ファイルモードの後方互換_api_searchは空結果() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+
+    let resp = reqwest::get(format!("http://{}/api/search?q=test", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["query"].as_str().unwrap(), "test");
+    assert_eq!(json["results"].as_array().unwrap().len(), 0);
+    assert_eq!(json["searched_files"].as_u64().unwrap(), 0);
+    assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
+}
+
 // ==============================
 // ディレクトリモード テスト
 // ==============================
@@ -588,6 +604,93 @@ async fn test_ディレクトリモード_ファイル一覧api() {
     assert!(!files.iter().any(|f| f.ends_with(".txt")));
     // 隠しファイルは含まれない
     assert!(!files.iter().any(|f| f.starts_with('.')));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_検索apiは複数ファイルから結果を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+    tokio::fs::create_dir_all(tmp_dir.path().join("docs"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("docs/guide.md"),
+        "# Guide\n\nAnother alpha note appears there.",
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+
+    let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["query"].as_str().unwrap(), "alpha note");
+    assert_eq!(json["searched_files"].as_u64().unwrap(), 2);
+    assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
+
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["file"].as_str().unwrap(), "README.md");
+    assert_eq!(results[1]["file"].as_str().unwrap(), "docs/guide.md");
+    assert!(results[0]["current"]
+        .as_str()
+        .unwrap()
+        .contains("Alpha note appears here."));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_検索apiは巨大ファイルをスキップする() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("large.md"),
+        "a".repeat((10 * 1024 * 1024) + 1),
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+
+    let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["searched_files"].as_u64().unwrap(), 1);
+    assert_eq!(json["skipped_files"].as_u64().unwrap(), 1);
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchは不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    let resp = client
+        .get(format!("http://{}/api/search?q=readme", addr))
+        .header("Host", &attack_host)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
