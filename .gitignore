@@ -6,5 +6,7 @@ test-results/
 tests/fixtures/e2e/.markdown-view/
 
 AGENTS.md
+.codex
+.codex/
 .serena/*
 .playwright-mcp/*
