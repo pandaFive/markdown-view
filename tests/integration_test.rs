@@ -253,6 +253,41 @@ async fn test_apiメモ_putは旧保存先から新sidecarへ自動移行する(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削除を優先する() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
+    tokio::fs::write(&sidecar_memo_path, "memo").await.unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    tokio::fs::create_dir_all(outside_dir.path().join("memos"))
+        .await
+        .unwrap();
+    tokio::fs::write(outside_dir.path().join("memos/test.md"), "legacy")
+        .await
+        .unwrap();
+    symlink(outside_dir.path(), tmp_dir.path().join(".markdown-view")).unwrap();
+
+    let delete = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "   \n"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(delete.status(), 200);
+    let deleted: serde_json::Value = delete.json().await.unwrap();
+    assert_eq!(deleted["raw"], "");
+    assert!(!tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
+    assert!(tokio::fs::try_exists(tmp_dir.path().join(".markdown-view"))
+        .await
+        .unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_apiメモ_directory_mode_書込不可サブディレクトリではlegacyへfallbackする() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let docs_dir = tmp_dir.path().join("docs");

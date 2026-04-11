@@ -51,11 +51,8 @@ pub(in crate::server) async fn save_route_memo(
     let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
         ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-        if legacy_memo_exists(&memo_paths.legacy, target, request).await? {
-            ensure_safe_memo_path(&memo_paths.legacy, state, target, request)?;
-        }
         delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
-        delete_memo_file_if_exists(&memo_paths.legacy, target, request).await?;
+        delete_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
@@ -301,6 +298,29 @@ async fn save_memo_to_legacy(
         render_markdown(&raw),
         target.relative_path().map(ToOwned::to_owned),
     ))
+}
+
+async fn delete_legacy_memo_if_safe(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+) -> Result<(), ApiError> {
+    if !legacy_memo_exists(legacy_path, target, request).await? {
+        return Ok(());
+    }
+
+    if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeなlegacyメモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+
+    delete_memo_file_if_exists(legacy_path, target, request).await
 }
 
 fn ensure_safe_memo_path(

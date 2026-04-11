@@ -572,6 +572,35 @@ async fn test_save_route_memo_旧symlinkが残っていても未使用なら新s
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidecar削除を優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::write(dir.path().join(".README.md.memo.md"), "memo").unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outside_dir.path().join("memos")).unwrap();
+    fs::write(outside_dir.path().join("memos/README.md"), "legacy memo").unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("unsafe legacy should not block sidecar delete");
+
+    assert_eq!(memo.raw(), "");
+    assert!(!dir.path().join(".README.md.memo.md").exists());
+    assert!(dir.path().join(".markdown-view").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする() {
     let dir = tempfile::tempdir().unwrap();
     let docs_dir = dir.path().join("docs");

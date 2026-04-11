@@ -10,6 +10,7 @@ async function resetFixtures() {
   await Promise.all(entries
     .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
     .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
+  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
