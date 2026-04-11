@@ -125,10 +125,7 @@ fn collect_directory_changes(base_dir: &Path, events: &[DebouncedEvent]) -> Vec<
 
 /// レンダリング更新が必要なイベント種別か判定する
 fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
-    matches!(
-        kind,
-        DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous
-    )
+    matches!(kind, DebouncedEventKind::Any)
 }
 
 /// ベースディレクトリからの相対パスに隠しコンポーネントが含まれるか判定する
@@ -271,9 +268,9 @@ mod tests {
     }
 
     #[test]
-    fn test_連続更新イベントも更新対象に含まれる() {
+    fn test_保存完了イベントのみ更新対象に含まれる() {
         assert!(is_content_change_event(&DebouncedEventKind::Any));
-        assert!(is_content_change_event(&DebouncedEventKind::AnyContinuous));
+        assert!(!is_content_change_event(&DebouncedEventKind::AnyContinuous));
     }
 
     #[test]
@@ -396,6 +393,26 @@ mod tests {
         ]);
 
         assert_eq!(received, vec![file_path]);
+    }
+
+    #[test]
+    fn test_collect_changed_paths_ディレクトリモードで連続更新イベントのみは通知しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+
+        let received = strategy.collect_changed_paths(&[debounced_event(
+            file_path,
+            DebouncedEventKind::AnyContinuous,
+        )]);
+
+        assert!(
+            received.is_empty(),
+            "連続更新イベントのみでは通知されないはず"
+        );
     }
 
     #[test]
