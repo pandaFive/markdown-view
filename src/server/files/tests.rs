@@ -547,7 +547,7 @@ async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_旧symlinkが残っていても未使用なら新sidecar保存を拒否しない() {
+async fn test_save_route_memo_旧symlinkが残っている場合は保存を拒否する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
 
@@ -563,11 +563,15 @@ async fn test_save_route_memo_旧symlinkが残っていても未使用なら新s
         "memo".to_string(),
         RouteTargetRequest::api_memo(None),
     )
-    .await
-    .expect("stale legacy symlink should not block sidecar save");
+    .await;
 
-    assert_eq!(memo.raw(), "memo");
-    assert!(dir.path().join(".README.md.memo.md").exists());
+    let (status, body) = memo.expect_err("unsafe legacy should be rejected before probing");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
 }
 
 #[cfg(unix)]
@@ -693,6 +697,45 @@ async fn test_save_route_memo_単一ファイルモードではpermission_denied
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードでも既存legacyがあればpermission_denied時にfallbackする(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    fs::write(&file_path, "# test").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/test.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("existing legacy should remain writable fallback");
+    assert_eq!(memo.raw(), "updated memo");
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".markdown-view/memos/test.md")).unwrap(),
+        "updated memo"
+    );
+    assert!(!dir.path().join(".test.md.memo.md").exists());
 }
 
 #[tokio::test]

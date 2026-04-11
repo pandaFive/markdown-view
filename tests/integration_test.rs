@@ -288,6 +288,73 @@ async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削�
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_apiメモ_unsafeなlegacy_symlinkがある場合は保存を拒否する() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    symlink(outside_dir.path(), tmp_dir.path().join(".markdown-view")).unwrap();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新継続できる() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_memo_path, "legacy memo")
+        .await
+        .unwrap();
+
+    let original_mode = fs::metadata(tmp_dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(tmp_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "updated memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    fs::set_permissions(tmp_dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_eq!(save.status(), 200);
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(json["raw"], "updated memo");
+    assert_eq!(
+        tokio::fs::read_to_string(&legacy_memo_path).await.unwrap(),
+        "updated memo"
+    );
+    assert!(
+        !tokio::fs::try_exists(tmp_dir.path().join(".test.md.memo.md"))
+            .await
+            .unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_apiメモ_directory_mode_書込不可サブディレクトリではlegacyへfallbackする() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let docs_dir = tmp_dir.path().join("docs");
