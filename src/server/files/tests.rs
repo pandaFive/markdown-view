@@ -1,4 +1,6 @@
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -692,6 +694,55 @@ async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして
     memo_entries.sort();
     assert_eq!(memo_entries.len(), 1);
     assert!(memo_entries[0].len() <= 255);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    let lower_name = std::ffi::OsStr::from_bytes(b"guide-\xff.md");
+    let upper_name = std::ffi::OsStr::from_bytes(b"guide-\xfe.md");
+    let lower_path = dir.path().join(lower_name);
+    let upper_path = dir.path().join(upper_name);
+    fs::write(&lower_path, "# lower").unwrap();
+    fs::write(&upper_path, "# upper").unwrap();
+
+    let lower_state = create_single_file_state(&lower_path);
+    let upper_state = create_single_file_state(&upper_path);
+    let lower_target =
+        resolve_route_target(&lower_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let upper_target =
+        resolve_route_target(&upper_state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let lower = save_route_memo(
+        &lower_state,
+        &lower_target,
+        "lower memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("lower memo should save");
+    let upper = save_route_memo(
+        &upper_state,
+        &upper_target,
+        "upper memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("upper memo should save");
+
+    assert_eq!(lower.raw(), "lower memo");
+    assert_eq!(upper.raw(), "upper memo");
+
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 2);
+    assert_ne!(memo_entries[0], memo_entries[1]);
 }
 
 #[cfg(unix)]

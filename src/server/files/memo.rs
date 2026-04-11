@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
@@ -148,18 +150,36 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let file_name = match target_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-    {
+    let file_name = match target_path.file_name() {
         Some(name) => build_sidecar_file_name(name),
         None => format!(".{}", MEMO_SUFFIX.trim_start_matches('.')),
     };
     parent.join(file_name)
 }
 
-fn build_sidecar_file_name(file_name: &str) -> String {
+fn build_sidecar_file_name(file_name: &std::ffi::OsStr) -> String {
+    if let Some(name) = file_name.to_str().filter(|name| !name.is_empty()) {
+        return build_sidecar_file_name_from_utf8(name);
+    }
+
+    #[cfg(unix)]
+    {
+        let bytes = file_name.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+        let hash = format!("{:x}", digest);
+        let short_hash = &hash[..SIDECAR_HASH_LEN];
+        format!("._bin.{short_hash}{MEMO_SUFFIX}")
+    }
+
+    #[cfg(not(unix))]
+    {
+        format!(".{}", MEMO_SUFFIX.trim_start_matches('.'))
+    }
+}
+
+fn build_sidecar_file_name_from_utf8(file_name: &str) -> String {
     let full = format!(".{file_name}{MEMO_SUFFIX}");
     if full.len() <= MAX_FILENAME_BYTES {
         return full;
