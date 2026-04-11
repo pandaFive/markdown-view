@@ -362,6 +362,49 @@ async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_apiメモ_保存成功後のlegacy削除失敗は成功扱いにする() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_memo_path, "legacy memo")
+        .await
+        .unwrap();
+
+    let first = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "updated memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let legacy_parent = legacy_memo_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let second = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "updated again"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_eq!(second.status(), 200);
+    let json: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(json["raw"], "updated again");
+}
+
 #[tokio::test]
 async fn test_apiメモ_長いファイル名でもlegacyへfallbackして保存できる() {
     let tmp_dir = tempfile::tempdir().unwrap();

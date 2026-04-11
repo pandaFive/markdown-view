@@ -600,6 +600,44 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
+    fs::write(&legacy_path, "legacy memo").unwrap();
+    let legacy_parent = legacy_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("save should succeed before legacy cleanup");
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated again".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_eq!(memo.raw(), "updated memo");
+    let saved = result.expect("legacy cleanup failure should be non-fatal");
+    assert_eq!(saved.raw(), "updated again");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする() {
     let dir = tempfile::tempdir().unwrap();
     let docs_dir = dir.path().join("docs");

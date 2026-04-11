@@ -396,7 +396,15 @@ async fn delete_legacy_memo_if_safe(
         return Ok(());
     }
 
-    delete_memo_file_if_exists(legacy_path, target, request).await
+    if let Err(error) = delete_memo_file_if_exists(legacy_path, target, request).await {
+        tracing::warn!(
+            "[markdown-view] {}legacyメモcleanup失敗を無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+    }
+    Ok(())
 }
 
 fn sidecar_name_too_long(sidecar_path: &Path) -> bool {
