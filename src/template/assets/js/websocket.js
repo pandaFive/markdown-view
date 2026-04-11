@@ -97,6 +97,14 @@ function connectWS() {
       setLiveStatus('error');
       return;
     }
+    if (isMemoUpdateMessage(data)) {
+      if (applyRemoteMemoUpdate(data)) {
+        hideWsServerErrorBanner();
+        hideFileFetchErrorBanner();
+      }
+      setLiveStatus('live');
+      return;
+    }
     if (data.refresh && isDirMode && currentFile) {
       if (isTextSelected()) {
         discardBufferedLiveUpdate();

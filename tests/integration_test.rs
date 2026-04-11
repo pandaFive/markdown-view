@@ -102,6 +102,60 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_apiメモ_保存成功時にmemo_updateをbroadcastする() {
+    let (state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let mut rx = state.tx().subscribe();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "live memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 200);
+
+    let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("memo update should be broadcast")
+        .expect("broadcast receive should succeed");
+
+    match received {
+        BroadcastMessage::MemoUpdate(update) => {
+            assert_eq!(update.file(), "test.md");
+            assert_eq!(update.raw(), "live memo");
+            assert!(update.html().as_str().contains("live memo"));
+        }
+        other => panic!("MemoUpdateメッセージを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_apiメモ_保存失敗時はmemo_updateをbroadcastしない() {
+    let (state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let mut rx = state.tx().subscribe();
+    let oversized = "a".repeat((markdown_view::server::MAX_FILE_SIZE as usize) + 1);
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": oversized
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn test_apiメモ_空白のみ保存で既存メモが削除される() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();

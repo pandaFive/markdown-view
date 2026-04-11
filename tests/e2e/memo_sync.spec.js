@@ -1,0 +1,130 @@
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { test, expect } = require('@playwright/test');
+
+const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
+const readmePath = path.join(fixtureDir, 'README.md');
+const notesPath = path.join(fixtureDir, 'notes.md');
+
+async function resetFixtures() {
+  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
+    .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
+  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
+  await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
+  await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
+}
+
+async function openMemoTab(page) {
+  await page.locator('.sidebar-tab[data-tab="memo"]').click();
+  await expect(page.locator('#panel-memo.active')).toBeVisible();
+}
+
+async function openFileTab(page) {
+  await page.locator('.sidebar-tab[data-tab="files"]').click();
+  await expect(page.locator('#panel-files.active')).toBeVisible();
+}
+
+async function selectFile(page, file) {
+  await openFileTab(page);
+  await page.locator(`[data-file="${file}"]`).click();
+}
+
+async function saveMemo(page, text) {
+  const editor = page.locator('#memo-editor');
+  await editor.fill(text);
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+}
+
+test.beforeEach(async () => {
+  await resetFixtures();
+});
+
+test.afterEach(async () => {
+  await resetFixtures();
+});
+
+test('同一ファイルを開いている別ページへメモ更新が同期される', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await expect(page.locator('#memo-editor')).toHaveValue('');
+  await expect(peer.locator('#memo-editor')).toHaveValue('');
+
+  await saveMemo(page, 'shared memo');
+
+  await expect(peer.locator('#memo-editor')).toHaveValue('shared memo');
+  await expect(peer.locator('#memo-preview')).toContainText('shared memo');
+});
+
+test('受信側が編集中のときはリモートメモ更新で上書きしない', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await peer.locator('#memo-editor').fill('local draft');
+  await expect(peer.locator('#memo-save-status')).toHaveText('未保存');
+
+  await saveMemo(page, 'remote memo');
+
+  await peer.waitForTimeout(300);
+  await expect(peer.locator('#memo-editor')).toHaveValue('local draft');
+  await expect(peer.locator('#memo-preview')).not.toContainText('remote memo');
+});
+
+test('受信側がフォーカス中でもblur後に保留中のメモ更新が反映される', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await peer.locator('#memo-editor').focus();
+  await expect(peer.locator('#memo-save-status')).toHaveText('保存済み');
+
+  await saveMemo(page, 'deferred remote');
+
+  await peer.waitForTimeout(300);
+  await expect(peer.locator('#memo-editor')).toHaveValue('');
+  await expect(peer.locator('#memo-preview')).not.toContainText('deferred remote');
+
+  await peer.locator('.sidebar-tab[data-tab="files"]').focus();
+  await peer.locator('#memo-editor').blur();
+
+  await expect(peer.locator('#memo-editor')).toHaveValue('deferred remote');
+  await expect(peer.locator('#memo-preview')).toContainText('deferred remote');
+});
+
+test('別ファイルを開いているページにはメモ更新を誤反映しない', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/?file=notes.md');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await expect(peer.locator('#content')).toContainText('Notes body');
+
+  await saveMemo(peer, 'notes local');
+  await expect(peer.locator('#memo-preview')).toContainText('notes local');
+
+  await saveMemo(page, 'readme remote');
+
+  await peer.waitForTimeout(300);
+  await expect(peer.locator('#memo-editor')).toHaveValue('notes local');
+  await expect(peer.locator('#memo-preview')).toContainText('notes local');
+  await expect(peer.locator('#memo-preview')).not.toContainText('readme remote');
+});

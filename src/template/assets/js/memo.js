@@ -68,6 +68,59 @@ function applyMemoData(data, options) {
   updateMemoPreview(data);
 }
 
+function isMemoUpdateMessage(data) {
+  return !!data
+    && data.type === 'memo_update'
+    && typeof data.file === 'string'
+    && data.file.length > 0;
+}
+
+function isMemoRemoteUpdateBlocked() {
+  if (!memoEditorEl) return true;
+  if (memoSaveTimer) return true;
+  if (memoSaveStatusEl) {
+    var state = memoSaveStatusEl.dataset.state;
+    if (state === 'dirty' || state === 'saving' || state === 'loading') return true;
+  }
+  return document.activeElement === memoEditorEl;
+}
+
+function applyResolvedRemoteMemoUpdate(data) {
+  cancelMemoAutosave();
+  // 古いHTTP応答が直後に戻ってきても上書きしないよう世代を進める。
+  memoLoadGeneration++;
+  memoSaveGeneration++;
+  applyMemoData(data);
+  setMemoSaveStatus('saved', '保存済み');
+  return true;
+}
+
+function flushPendingMemoUpdateIfSafe() {
+  if (!pendingMemoUpdate) return false;
+  if (isDirMode && pendingMemoUpdate.file !== currentFile) {
+    pendingMemoUpdate = null;
+    return false;
+  }
+  if (isMemoRemoteUpdateBlocked()) {
+    return false;
+  }
+  var data = pendingMemoUpdate;
+  pendingMemoUpdate = null;
+  return applyResolvedRemoteMemoUpdate(data);
+}
+
+function applyRemoteMemoUpdate(data) {
+  if (!isMemoUpdateMessage(data)) return false;
+  if (isDirMode && data.file !== currentFile) return false;
+  if (isMemoRemoteUpdateBlocked()) {
+    pendingMemoUpdate = data;
+    return false;
+  }
+
+  pendingMemoUpdate = null;
+  return applyResolvedRemoteMemoUpdate(data);
+}
+
 function parseJsonResponse(resp) {
   if (!resp.ok) throw createHttpError(resp.status);
   return resp.json().catch(function(err) {
@@ -112,12 +165,14 @@ function loadMemo(file, ownerGeneration) {
     if (requestGeneration !== memoLoadGeneration) return;
     applyMemoData(data);
     setMemoSaveStatus('saved', '保存済み');
+    flushPendingMemoUpdateIfSafe();
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ取得エラー:', err);
     if (ownerGeneration !== undefined && ownerGeneration !== fetchGeneration) return;
     if (requestGeneration !== memoLoadGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
+    flushPendingMemoUpdateIfSafe();
   });
 }
 
@@ -176,11 +231,13 @@ function saveMemoNow(targetFileOverride, rawOverride) {
       }
     }
     setMemoSaveStatus('saved', '保存済み');
+    flushPendingMemoUpdateIfSafe();
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ保存エラー:', err);
     if (requestGeneration !== memoSaveGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
+    flushPendingMemoUpdateIfSafe();
   });
 }
 
@@ -363,6 +420,9 @@ function refreshQuoteSelectionAction() {
 if (memoEditorEl) {
   ['click', 'keyup', 'select'].forEach(function(eventName) {
     memoEditorEl.addEventListener(eventName, rememberMemoCaret);
+  });
+  memoEditorEl.addEventListener('blur', function() {
+    flushPendingMemoUpdateIfSafe();
   });
   memoEditorEl.addEventListener('input', function() {
     rememberMemoCaret();

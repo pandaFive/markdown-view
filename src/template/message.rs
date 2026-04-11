@@ -75,6 +75,43 @@ impl MemoResponse {
     }
 }
 
+/// WebSocket向けメモ更新JSONメッセージ構造体
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct MemoUpdateMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    raw: String,
+    html: SanitizedHtml,
+    file: String,
+}
+
+impl MemoUpdateMessage {
+    /// メモ更新メッセージを生成する
+    pub fn new(raw: String, html: SanitizedHtml, file: String) -> Self {
+        Self {
+            message_type: "memo_update",
+            raw,
+            html,
+            file,
+        }
+    }
+
+    /// 生のメモ文字列を返す
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// プレビューHTMLを返す
+    pub fn html(&self) -> &SanitizedHtml {
+        &self.html
+    }
+
+    /// 対象ファイル相対パスを返す
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+}
+
 /// エラーJSONを生成する
 pub fn error_message_json(message: impl AsRef<str>) -> serde_json::Value {
     serde_json::json!({ "error": message.as_ref() })

@@ -29,6 +29,7 @@ var quoteSelectionActionEl = document.getElementById('quote-selection-action');
 // 選択が長時間維持される場合は30秒タイムアウトでフォールバック適用する。
 var pendingUpdate = null;
 var pendingUpdateTimer = null;
+var pendingMemoUpdate = null;
 var isMouseSelecting = false;
 var memoLoadGeneration = 0;
 var memoSaveGeneration = 0;
