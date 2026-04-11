@@ -390,23 +390,19 @@ fn test_resolve_route_target_page_queryなしではreadme不在時に先頭フ�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_メモルートがシンボリックリンクなら拒否する() {
+async fn test_load_route_memo_旧メモルートがシンボリックリンクなら拒否する() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("README.md");
     fs::write(&file_path, "# README").unwrap();
 
     let outside_dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outside_dir.path().join("memos")).unwrap();
+    fs::write(outside_dir.path().join("memos/README.md"), "legacy memo").unwrap();
     symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
 
     let state = create_directory_state(dir.path());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
-    let result = save_route_memo(
-        &state,
-        &target,
-        "memo".to_string(),
-        RouteTargetRequest::api_memo(None),
-    )
-    .await;
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
 
     let (status, body) = result.expect_err("symlinked memo root should be rejected");
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -419,13 +415,17 @@ async fn test_save_route_memo_メモルートがシンボリックリンクな�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_メモ配下のシンボリックリンクも拒否する() {
+async fn test_save_route_memo_新メモファイルがシンボリックリンクなら拒否する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
-    fs::create_dir_all(dir.path().join(".markdown-view")).unwrap();
 
     let outside_dir = tempfile::tempdir().unwrap();
-    symlink(outside_dir.path(), dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(outside_dir.path().join("memo.md"), "outside").unwrap();
+    symlink(
+        outside_dir.path().join("memo.md"),
+        dir.path().join(".README.memo.md"),
+    )
+    .unwrap();
 
     let state = create_directory_state(dir.path());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
@@ -444,6 +444,124 @@ async fn test_save_route_memo_メモ配下のシンボリックリンクも拒�
         json["error"],
         "メモ保存先にシンボリックリンクが含まれているため操作できません"
     );
+}
+
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ保存する() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("memo should save");
+
+    assert_eq!(memo.raw(), "memo");
+    assert!(file_path.parent().unwrap().join(".test.memo.md").exists());
+}
+
+#[tokio::test]
+async fn test_load_route_memo_旧パスのみ存在する場合はそのまま読み込む() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("legacy memo should load");
+
+    assert_eq!(memo.raw(), "legacy memo");
+    assert!(!dir.path().join(".README.memo.md").exists());
+    assert!(dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[tokio::test]
+async fn test_load_route_memo_新旧両方ある場合は新sidecarを優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::write(dir.path().join(".README.memo.md"), "new memo").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("new memo should win");
+
+    assert_eq!(memo.raw(), "new memo");
+    assert!(dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ移行して保存する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("legacy memo should migrate on save");
+
+    assert_eq!(memo.raw(), "updated memo");
+    assert!(dir.path().join(".README.memo.md").exists());
+    assert!(!dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_旧symlinkが残っていても未使用なら新sidecar保存を拒否しない() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("stale legacy symlink should not block sidecar save");
+
+    assert_eq!(memo.raw(), "memo");
+    assert!(dir.path().join(".README.memo.md").exists());
 }
 
 #[tokio::test]

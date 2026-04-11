@@ -83,11 +83,9 @@ async fn test_apiメモ_保存と再取得ができる() {
     let saved: serde_json::Value = save.json().await.unwrap();
     assert_eq!(saved["raw"], "> quote\n\n出典: [test.md](#memo) L1-L2");
     assert!(saved["html"].as_str().unwrap().contains("<blockquote"));
-    assert!(
-        tokio::fs::try_exists(tmp_dir.path().join(".markdown-view/memos/test.md"))
-            .await
-            .unwrap()
-    );
+    assert!(tokio::fs::try_exists(tmp_dir.path().join(".test.memo.md"))
+        .await
+        .unwrap());
 
     let get = client
         .get(format!("http://{}/api/memo", addr))
@@ -103,7 +101,7 @@ async fn test_apiメモ_保存と再取得ができる() {
 async fn test_apiメモ_空白のみ保存で既存メモが削除される() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
-    let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    let memo_path = tmp_dir.path().join(".test.memo.md");
 
     let save = client
         .put(format!("http://{}/api/memo", addr))
@@ -184,10 +182,7 @@ async fn test_apiメモ_10mb超過は413で拒否する() {
 #[tokio::test]
 async fn test_indexページ取得_壊れたメモがあっても本文表示は継続する() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
-    let memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
-    tokio::fs::create_dir_all(memo_path.parent().unwrap())
-        .await
-        .unwrap();
+    let memo_path = tmp_dir.path().join(".test.memo.md");
     tokio::fs::write(&memo_path, [0xff, 0xfe, 0xfd])
         .await
         .unwrap();
@@ -198,6 +193,58 @@ async fn test_indexページ取得_壊れたメモがあっても本文表示は
     let body = resp.text().await.unwrap();
     assert!(body.contains("Body"));
     assert!(body.contains("id=\"memo-editor\""));
+}
+
+#[tokio::test]
+async fn test_apiメモ_getは旧保存先をそのまま読み込む() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    let sidecar_memo_path = tmp_dir.path().join(".test.memo.md");
+    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_memo_path, "legacy memo")
+        .await
+        .unwrap();
+
+    let resp = reqwest::get(format!("http://{}/api/memo", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["raw"], "legacy memo");
+    assert!(!tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
+    assert!(tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_apiメモ_putは旧保存先から新sidecarへ自動移行する() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    let sidecar_memo_path = tmp_dir.path().join(".test.memo.md");
+    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_memo_path, "legacy memo")
+        .await
+        .unwrap();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "updated memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status(), 200);
+
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(json["raw"], "updated memo");
+    assert!(tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
+    assert!(!tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
 }
 
 #[tokio::test]

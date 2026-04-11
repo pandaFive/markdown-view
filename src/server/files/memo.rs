@@ -11,8 +11,9 @@ use crate::server::messages::ApiError;
 use crate::server::state::AppState;
 use crate::template::MemoResponse;
 
-const MEMO_DIR_NAME: &str = ".markdown-view";
-const MEMO_SUBDIR_NAME: &str = "memos";
+const LEGACY_MEMO_DIR_NAME: &str = ".markdown-view";
+const LEGACY_MEMO_SUBDIR_NAME: &str = "memos";
+const MEMO_SUFFIX: &str = ".memo.md";
 
 /// メモを読み込み、プレビューHTML付き応答へ変換する。
 pub(in crate::server) async fn load_route_memo(
@@ -20,8 +21,8 @@ pub(in crate::server) async fn load_route_memo(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
-    let memo_path = memo_path_for_target(state, target);
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
+    let memo_paths = memo_paths_for_target(state, target);
+    let memo_path = resolve_active_memo_path(state, target, request, &memo_paths).await?;
     if !tokio::fs::try_exists(&memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
@@ -47,10 +48,14 @@ pub(in crate::server) async fn save_route_memo(
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
     let trimmed = raw.trim();
-    let memo_path = memo_path_for_target(state, target);
+    let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
-        ensure_safe_memo_path(&memo_path, state, target, request)?;
-        delete_memo_file_if_exists(&memo_path, target, request).await?;
+        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+        if legacy_memo_exists(&memo_paths.legacy, target, request).await? {
+            ensure_safe_memo_path(&memo_paths.legacy, state, target, request)?;
+        }
+        delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
+        delete_memo_file_if_exists(&memo_paths.legacy, target, request).await?;
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
@@ -63,13 +68,13 @@ pub(in crate::server) async fn save_route_memo(
         ));
     }
 
+    let memo_path = migrate_legacy_memo_to_sidecar(state, target, request, &memo_paths).await?;
     ensure_safe_memo_path(&memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
     tokio::fs::write(&memo_path, raw.as_bytes())
         .await
         .map_err(|error| io_api_error(target, request, "保存", error))?;
@@ -81,12 +86,27 @@ pub(in crate::server) async fn save_route_memo(
     ))
 }
 
-fn memo_root(base_dir: &Path) -> PathBuf {
-    base_dir.join(MEMO_DIR_NAME).join(MEMO_SUBDIR_NAME)
+#[derive(Debug, Clone)]
+struct MemoPaths {
+    sidecar: PathBuf,
+    legacy: PathBuf,
 }
 
-fn memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
-    let root = memo_root(state.mode().base_dir());
+fn legacy_memo_root(base_dir: &Path) -> PathBuf {
+    base_dir
+        .join(LEGACY_MEMO_DIR_NAME)
+        .join(LEGACY_MEMO_SUBDIR_NAME)
+}
+
+fn memo_paths_for_target(state: &AppState, target: &ResolvedTarget) -> MemoPaths {
+    MemoPaths {
+        sidecar: sidecar_memo_path_for_target(target),
+        legacy: legacy_memo_path_for_target(state, target),
+    }
+}
+
+fn legacy_memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
+    let root = legacy_memo_root(state.mode().base_dir());
     if let Some(relative_path) = target.relative_path() {
         root.join(relative_path)
     } else {
@@ -99,6 +119,86 @@ fn memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
     }
 }
 
+fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
+    let target_path = target.file_path();
+    let parent = target_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let file_stem = target_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty());
+    let file_name = match file_stem {
+        Some(stem) => format!(".{stem}{MEMO_SUFFIX}"),
+        None => format!(".{}", MEMO_SUFFIX.trim_start_matches('.')),
+    };
+    parent.join(file_name)
+}
+
+async fn resolve_active_memo_path(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> Result<PathBuf, ApiError> {
+    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    if tokio::fs::try_exists(&memo_paths.sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    {
+        return Ok(memo_paths.sidecar.clone());
+    }
+
+    if !legacy_memo_exists(&memo_paths.legacy, target, request).await? {
+        return Ok(memo_paths.sidecar.clone());
+    }
+
+    ensure_safe_memo_path(&memo_paths.legacy, state, target, request)?;
+    Ok(memo_paths.legacy.clone())
+}
+
+async fn migrate_legacy_memo_to_sidecar(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> Result<PathBuf, ApiError> {
+    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    if tokio::fs::try_exists(&memo_paths.sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    {
+        return Ok(memo_paths.sidecar.clone());
+    }
+
+    if !legacy_memo_exists(&memo_paths.legacy, target, request).await? {
+        return Ok(memo_paths.sidecar.clone());
+    }
+
+    ensure_safe_memo_path(&memo_paths.legacy, state, target, request)?;
+    if let Some(parent) = memo_paths.sidecar.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+    }
+    tokio::fs::rename(&memo_paths.legacy, &memo_paths.sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "移行", error))?;
+
+    Ok(memo_paths.sidecar.clone())
+}
+
+async fn legacy_memo_exists(
+    legacy_memo_path: &Path,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<bool, ApiError> {
+    tokio::fs::try_exists(legacy_memo_path)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))
+}
+
 fn ensure_safe_memo_path(
     memo_path: &Path,
     state: &AppState,
@@ -106,10 +206,7 @@ fn ensure_safe_memo_path(
     request: RouteTargetRequest<'_>,
 ) -> Result<(), ApiError> {
     let base_dir = state.mode().base_dir();
-    let memo_root = memo_root(base_dir);
-    if let Some(unsafe_component) = first_symlink_component(base_dir, &memo_root)
-        .or_else(|| first_symlink_component(base_dir, memo_path))
-    {
+    if let Some(unsafe_component) = first_symlink_component(base_dir, memo_path) {
         tracing::warn!(
             "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
             request.read_error_log_label(),
