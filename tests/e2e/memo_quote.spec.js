@@ -5,10 +5,12 @@ const { test, expect } = require('@playwright/test');
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
 const notesPath = path.join(fixtureDir, 'notes.md');
-const memoRoot = path.join(fixtureDir, '.markdown-view');
-
 async function resetFixtures() {
-  await fs.rm(memoRoot, { recursive: true, force: true });
+  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
+    .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
+  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }

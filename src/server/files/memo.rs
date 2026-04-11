@@ -1,6 +1,9 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
+use sha2::{Digest, Sha256};
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
 use super::resolve::ResolvedTarget;
@@ -11,8 +14,11 @@ use crate::server::messages::ApiError;
 use crate::server::state::AppState;
 use crate::template::MemoResponse;
 
-const MEMO_DIR_NAME: &str = ".markdown-view";
-const MEMO_SUBDIR_NAME: &str = "memos";
+const LEGACY_MEMO_DIR_NAME: &str = ".markdown-view";
+const LEGACY_MEMO_SUBDIR_NAME: &str = "memos";
+const MEMO_SUFFIX: &str = ".memo.md";
+const MAX_FILENAME_BYTES: usize = 255;
+const SIDECAR_HASH_LEN: usize = 16;
 
 /// メモを読み込み、プレビューHTML付き応答へ変換する。
 pub(in crate::server) async fn load_route_memo(
@@ -20,8 +26,8 @@ pub(in crate::server) async fn load_route_memo(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
-    let memo_path = memo_path_for_target(state, target);
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
+    let memo_paths = memo_paths_for_target(state, target);
+    let memo_path = resolve_active_memo_path(state, target, request, &memo_paths).await?;
     if !tokio::fs::try_exists(&memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
@@ -47,10 +53,13 @@ pub(in crate::server) async fn save_route_memo(
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
     let trimmed = raw.trim();
-    let memo_path = memo_path_for_target(state, target);
+    let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
-        ensure_safe_memo_path(&memo_path, state, target, request)?;
-        delete_memo_file_if_exists(&memo_path, target, request).await?;
+        delete_legacy_memo_if_safe_strict(state, target, request, &memo_paths.legacy).await?;
+        if !sidecar_name_too_long(&memo_paths.sidecar) {
+            ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+            delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
+        }
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
@@ -63,16 +72,34 @@ pub(in crate::server) async fn save_route_memo(
         ));
     }
 
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
+    let save_target = choose_save_target(state, target, request, &memo_paths).await?;
+    let memo_path = match save_target {
+        SaveTarget::Sidecar { .. } => &memo_paths.sidecar,
+        SaveTarget::Legacy => &memo_paths.legacy,
+    };
+    ensure_safe_memo_path(memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            if can_fallback_to_legacy(save_target, &error) {
+                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+            }
+            return Err(io_api_error(target, request, "ディレクトリ作成", error));
+        }
     }
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
-    tokio::fs::write(&memo_path, raw.as_bytes())
-        .await
-        .map_err(|error| io_api_error(target, request, "保存", error))?;
+    if let Err(error) = tokio::fs::write(memo_path, raw.as_bytes()).await {
+        if can_fallback_to_legacy(save_target, &error) {
+            return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+        }
+        return Err(io_api_error(target, request, "保存", error));
+    }
+
+    if let SaveTarget::Sidecar {
+        delete_legacy_after_save: true,
+        ..
+    } = save_target
+    {
+        cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
+    }
 
     Ok(MemoResponse::new(
         raw.clone(),
@@ -81,12 +108,43 @@ pub(in crate::server) async fn save_route_memo(
     ))
 }
 
-fn memo_root(base_dir: &Path) -> PathBuf {
-    base_dir.join(MEMO_DIR_NAME).join(MEMO_SUBDIR_NAME)
+#[derive(Debug, Clone)]
+struct MemoPaths {
+    sidecar: PathBuf,
+    legacy: PathBuf,
 }
 
-fn memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
-    let root = memo_root(state.mode().base_dir());
+#[derive(Debug, Clone, Copy)]
+enum SaveTarget {
+    Sidecar {
+        allow_legacy_fallback: bool,
+        delete_legacy_after_save: bool,
+    },
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyMemoState {
+    SafeExists,
+    SafeMissing,
+    Unsafe,
+}
+
+fn legacy_memo_root(base_dir: &Path) -> PathBuf {
+    base_dir
+        .join(LEGACY_MEMO_DIR_NAME)
+        .join(LEGACY_MEMO_SUBDIR_NAME)
+}
+
+fn memo_paths_for_target(state: &AppState, target: &ResolvedTarget) -> MemoPaths {
+    MemoPaths {
+        sidecar: sidecar_memo_path_for_target(target),
+        legacy: legacy_memo_path_for_target(state, target),
+    }
+}
+
+fn legacy_memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
+    let root = legacy_memo_root(state.mode().base_dir());
     if let Some(relative_path) = target.relative_path() {
         root.join(relative_path)
     } else {
@@ -99,6 +157,285 @@ fn memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> PathBuf {
     }
 }
 
+fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
+    let target_path = target.file_path();
+    let parent = target_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let file_name = match target_path.file_name() {
+        Some(name) => build_sidecar_file_name(name),
+        None => format!(".{}", MEMO_SUFFIX.trim_start_matches('.')),
+    };
+    parent.join(file_name)
+}
+
+fn build_sidecar_file_name(file_name: &std::ffi::OsStr) -> String {
+    if let Some(name) = file_name.to_str().filter(|name| !name.is_empty()) {
+        return build_sidecar_file_name_from_utf8(name);
+    }
+
+    #[cfg(unix)]
+    {
+        let bytes = file_name.as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+        let hash = format!("{:x}", digest);
+        let short_hash = &hash[..SIDECAR_HASH_LEN];
+        format!("._bin.{short_hash}{MEMO_SUFFIX}")
+    }
+
+    #[cfg(not(unix))]
+    {
+        format!(".{}", MEMO_SUFFIX.trim_start_matches('.'))
+    }
+}
+
+fn build_sidecar_file_name_from_utf8(file_name: &str) -> String {
+    let full = format!(".{file_name}{MEMO_SUFFIX}");
+    if full.len() <= MAX_FILENAME_BYTES {
+        return full;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(file_name.as_bytes());
+    let digest = hasher.finalize();
+    let hash = format!("{:x}", digest);
+    let short_hash = &hash[..SIDECAR_HASH_LEN];
+    let reserved = 1 + 1 + SIDECAR_HASH_LEN + MEMO_SUFFIX.len();
+    let prefix_budget = MAX_FILENAME_BYTES.saturating_sub(reserved);
+    let prefix = truncate_to_bytes(file_name, prefix_budget);
+    format!(".{prefix}.{short_hash}{MEMO_SUFFIX}")
+}
+
+fn truncate_to_bytes(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+
+    let mut end = 0;
+    for (idx, ch) in input.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    &input[..end]
+}
+
+async fn resolve_active_memo_path(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> Result<PathBuf, ApiError> {
+    let sidecar_usable = !sidecar_name_too_long(&memo_paths.sidecar);
+    if sidecar_usable {
+        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    }
+    if sidecar_usable
+        && tokio::fs::try_exists(&memo_paths.sidecar)
+            .await
+            .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    {
+        return Ok(memo_paths.sidecar.clone());
+    }
+
+    match inspect_legacy_memo(state, target, request, &memo_paths.legacy).await? {
+        LegacyMemoState::SafeExists => Ok(memo_paths.legacy.clone()),
+        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => {
+            if sidecar_usable {
+                Ok(memo_paths.sidecar.clone())
+            } else {
+                Ok(memo_paths.legacy.clone())
+            }
+        }
+    }
+}
+
+async fn choose_save_target(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> Result<SaveTarget, ApiError> {
+    let sidecar_too_long = sidecar_name_too_long(&memo_paths.sidecar);
+    if !sidecar_too_long {
+        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    }
+    if !sidecar_too_long
+        && tokio::fs::try_exists(&memo_paths.sidecar)
+            .await
+            .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    {
+        return Ok(SaveTarget::Sidecar {
+            allow_legacy_fallback: false,
+            delete_legacy_after_save: false,
+        });
+    }
+
+    let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy).await?;
+    if sidecar_too_long {
+        return Ok(SaveTarget::Legacy);
+    }
+
+    if matches!(
+        legacy_state,
+        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe
+    ) {
+        return Ok(SaveTarget::Sidecar {
+            allow_legacy_fallback: state.mode().is_directory(),
+            delete_legacy_after_save: false,
+        });
+    }
+
+    Ok(SaveTarget::Sidecar {
+        allow_legacy_fallback: true,
+        delete_legacy_after_save: true,
+    })
+}
+
+async fn legacy_memo_exists(
+    legacy_memo_path: &Path,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<bool, ApiError> {
+    tokio::fs::try_exists(legacy_memo_path)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))
+}
+
+async fn inspect_legacy_memo(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_memo_path: &Path,
+) -> Result<LegacyMemoState, ApiError> {
+    if let Err(error) = ensure_safe_memo_path(legacy_memo_path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeなlegacyメモは未使用扱いにします ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(LegacyMemoState::Unsafe);
+    }
+
+    if legacy_memo_exists(legacy_memo_path, target, request).await? {
+        Ok(LegacyMemoState::SafeExists)
+    } else {
+        Ok(LegacyMemoState::SafeMissing)
+    }
+}
+
+fn can_fallback_to_legacy(save_target: SaveTarget, error: &std::io::Error) -> bool {
+    matches!(
+        save_target,
+        SaveTarget::Sidecar {
+            allow_legacy_fallback: true,
+            ..
+        }
+    ) && (error.kind() == std::io::ErrorKind::PermissionDenied || is_name_too_long_error(error))
+}
+
+fn is_name_too_long_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(36)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+async fn save_memo_to_legacy(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+    raw: String,
+) -> Result<MemoResponse, ApiError> {
+    ensure_safe_memo_path(legacy_path, state, target, request)?;
+    if let Some(parent) = legacy_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+    }
+    tokio::fs::write(legacy_path, raw.as_bytes())
+        .await
+        .map_err(|error| io_api_error(target, request, "保存", error))?;
+
+    Ok(MemoResponse::new(
+        raw.clone(),
+        render_markdown(&raw),
+        target.relative_path().map(ToOwned::to_owned),
+    ))
+}
+
+async fn cleanup_legacy_memo_if_safe(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+) -> Result<(), ApiError> {
+    if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeなlegacyメモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+
+    if !legacy_memo_exists(legacy_path, target, request).await? {
+        return Ok(());
+    }
+
+    if let Err(error) = delete_memo_file_if_exists(legacy_path, target, request).await {
+        tracing::warn!(
+            "[markdown-view] {}legacyメモcleanup失敗を無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+    }
+    Ok(())
+}
+
+async fn delete_legacy_memo_if_safe_strict(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+) -> Result<(), ApiError> {
+    if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeなlegacyメモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+
+    if !legacy_memo_exists(legacy_path, target, request).await? {
+        return Ok(());
+    }
+
+    delete_memo_file_if_exists(legacy_path, target, request).await
+}
+
+fn sidecar_name_too_long(sidecar_path: &Path) -> bool {
+    sidecar_path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().len() > MAX_FILENAME_BYTES)
+}
+
 fn ensure_safe_memo_path(
     memo_path: &Path,
     state: &AppState,
@@ -106,10 +443,7 @@ fn ensure_safe_memo_path(
     request: RouteTargetRequest<'_>,
 ) -> Result<(), ApiError> {
     let base_dir = state.mode().base_dir();
-    let memo_root = memo_root(base_dir);
-    if let Some(unsafe_component) = first_symlink_component(base_dir, &memo_root)
-        .or_else(|| first_symlink_component(base_dir, memo_path))
-    {
+    if let Some(unsafe_component) = first_symlink_component(base_dir, memo_path) {
         tracing::warn!(
             "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
             request.read_error_log_label(),

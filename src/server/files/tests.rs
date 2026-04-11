@@ -1,3 +1,7 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
@@ -390,42 +394,39 @@ fn test_resolve_route_target_page_queryなしではreadme不在時に先頭フ�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_メモルートがシンボリックリンクなら拒否する() {
+async fn test_load_route_memo_旧メモルートがシンボリックリンクなら空メモとして扱う() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("README.md");
     fs::write(&file_path, "# README").unwrap();
 
     let outside_dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outside_dir.path().join("memos")).unwrap();
+    fs::write(outside_dir.path().join("memos/README.md"), "legacy memo").unwrap();
     symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
 
     let state = create_directory_state(dir.path());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
-    let result = save_route_memo(
-        &state,
-        &target,
-        "memo".to_string(),
-        RouteTargetRequest::api_memo(None),
-    )
-    .await;
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("unsafe legacy should be ignored when no sidecar exists");
 
-    let (status, body) = result.expect_err("symlinked memo root should be rejected");
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(
-        json["error"],
-        "メモ保存先にシンボリックリンクが含まれているため操作できません"
-    );
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_メモ配下のシンボリックリンクも拒否する() {
+async fn test_save_route_memo_新メモファイルがシンボリックリンクなら拒否する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
-    fs::create_dir_all(dir.path().join(".markdown-view")).unwrap();
 
     let outside_dir = tempfile::tempdir().unwrap();
-    symlink(outside_dir.path(), dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(outside_dir.path().join("memo.md"), "outside").unwrap();
+    symlink(
+        outside_dir.path().join("memo.md"),
+        dir.path().join(".README.md.memo.md"),
+    )
+    .unwrap();
 
     let state = create_directory_state(dir.path());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
@@ -444,6 +445,487 @@ async fn test_save_route_memo_メモ配下のシンボリックリンクも拒�
         json["error"],
         "メモ保存先にシンボリックリンクが含まれているため操作できません"
     );
+}
+
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ保存する() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("memo should save");
+
+    assert_eq!(memo.raw(), "memo");
+    assert!(file_path
+        .parent()
+        .unwrap()
+        .join(".test.md.memo.md")
+        .exists());
+}
+
+#[tokio::test]
+async fn test_load_route_memo_旧パスのみ存在する場合はそのまま読み込む() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("legacy memo should load");
+
+    assert_eq!(memo.raw(), "legacy memo");
+    assert!(!dir.path().join(".README.md.memo.md").exists());
+    assert!(dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[tokio::test]
+async fn test_load_route_memo_新旧両方ある場合は新sidecarを優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::write(dir.path().join(".README.md.memo.md"), "new memo").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("new memo should win");
+
+    assert_eq!(memo.raw(), "new memo");
+    assert!(dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ移行して保存する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("legacy memo should migrate on save");
+
+    assert_eq!(memo.raw(), "updated memo");
+    assert!(dir.path().join(".README.md.memo.md").exists());
+    assert!(!dir.path().join(".markdown-view/memos/README.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_旧symlinkが残っていてもsidecar保存を継続できる() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("unsafe legacy should not block sidecar save");
+
+    assert_eq!(memo.raw(), "memo");
+    assert!(dir.path().join(".README.md.memo.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidecar削除を優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::write(dir.path().join(".README.md.memo.md"), "memo").unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(outside_dir.path().join("memos")).unwrap();
+    fs::write(outside_dir.path().join("memos/README.md"), "legacy memo").unwrap();
+    symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("unsafe legacy should not block sidecar delete");
+
+    assert_eq!(memo.raw(), "");
+    assert!(!dir.path().join(".README.md.memo.md").exists());
+    assert!(dir.path().join(".markdown-view").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラーにする() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    let sidecar_path = dir.path().join(".README.md.memo.md");
+    fs::write(&sidecar_path, "memo").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let legacy_parent = legacy_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (status, body) = result.expect_err("delete should fail when safe legacy cleanup fails");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(sidecar_path.exists());
+    assert!(legacy_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
+    fs::write(&legacy_path, "legacy memo").unwrap();
+    let legacy_parent = legacy_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("save should succeed before legacy cleanup");
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated again".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_eq!(memo.raw(), "updated memo");
+    let saved = result.expect("legacy cleanup failure should be non-fatal");
+    assert_eq!(saved.raw(), "updated again");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs_dir = dir.path().join("docs");
+    fs::create_dir_all(&docs_dir).unwrap();
+    fs::write(docs_dir.join("guide.md"), "# Guide").unwrap();
+    let original_mode = fs::metadata(&docs_dir).unwrap().permissions().mode();
+    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("docs/guide.md"))).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(Some("docs/guide.md")),
+    )
+    .await;
+
+    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("readonly subdir should fall back to legacy");
+    assert_eq!(memo.raw(), "memo");
+    assert!(!docs_dir.join(".guide.md.memo.md").exists());
+    assert!(dir
+        .path()
+        .join(".markdown-view/memos/docs/guide.md")
+        .exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_拡張子の大文字小文字が異なるファイルでもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("guide.md"), "# lower").unwrap();
+    fs::write(dir.path().join("guide.MD"), "# upper").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let lower_target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.md"))).unwrap();
+    let upper_target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.MD"))).unwrap();
+
+    let lower = save_route_memo(
+        &state,
+        &lower_target,
+        "lower memo".to_string(),
+        RouteTargetRequest::api_memo(Some("guide.md")),
+    )
+    .await
+    .expect("lower memo should save");
+    let upper = save_route_memo(
+        &state,
+        &upper_target,
+        "upper memo".to_string(),
+        RouteTargetRequest::api_memo(Some("guide.MD")),
+    )
+    .await
+    .expect("upper memo should save");
+
+    assert_eq!(lower.raw(), "lower memo");
+    assert_eq!(upper.raw(), "upper memo");
+    assert!(dir.path().join(".guide.md.memo.md").exists());
+    assert!(dir.path().join(".guide.MD.memo.md").exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして保存できる() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("long filename should still save");
+
+    assert_eq!(memo.raw(), "memo");
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 1);
+    assert!(memo_entries[0].len() <= 255);
+}
+
+#[tokio::test]
+async fn test_load_route_memo_長いファイル名でlegacy未作成なら空メモを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("overlong sidecar path should not break empty memo read");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_長いファイル名のlegacyメモは空白保存で削除できる() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos").join(&file_name);
+    fs::write(&legacy_path, "memo").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " \n ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("legacy fallback memo should be deletable");
+
+    assert_eq!(memo.raw(), "");
+    assert!(!legacy_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    let lower_name = std::ffi::OsStr::from_bytes(b"guide-\xff.md");
+    let upper_name = std::ffi::OsStr::from_bytes(b"guide-\xfe.md");
+    let lower_path = dir.path().join(lower_name);
+    let upper_path = dir.path().join(upper_name);
+    fs::write(&lower_path, "# lower").unwrap();
+    fs::write(&upper_path, "# upper").unwrap();
+
+    let lower_state = create_single_file_state(&lower_path);
+    let upper_state = create_single_file_state(&upper_path);
+    let lower_target =
+        resolve_route_target(&lower_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let upper_target =
+        resolve_route_target(&upper_state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let lower = save_route_memo(
+        &lower_state,
+        &lower_target,
+        "lower memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("lower memo should save");
+    let upper = save_route_memo(
+        &upper_state,
+        &upper_target,
+        "upper memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("upper memo should save");
+
+    assert_eq!(lower.raw(), "lower memo");
+    assert_eq!(upper.raw(), "upper memo");
+
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 2);
+    assert_ne!(memo_entries[0], memo_entries[1]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードではpermission_deniedでもlegacyへfallbackしない() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    fs::write(&file_path, "# test").unwrap();
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (status, body) = result.expect_err("single file mode should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードでも既存legacyがあればpermission_denied時にfallbackする(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    fs::write(&file_path, "# test").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/test.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("existing legacy should remain writable fallback");
+    assert_eq!(memo.raw(), "updated memo");
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".markdown-view/memos/test.md")).unwrap(),
+        "updated memo"
+    );
+    assert!(!dir.path().join(".test.md.memo.md").exists());
 }
 
 #[tokio::test]
