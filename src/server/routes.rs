@@ -17,10 +17,10 @@ use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
     json_error,
 };
-use super::messages::ApiError;
+use super::messages::{ApiError, BroadcastMessage};
 use super::session::handle_socket;
 use super::state::AppState;
-use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
+use crate::template::{render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage};
 
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
@@ -133,8 +133,34 @@ impl<'a> RouteContext<'a> {
         save_route_memo(self.state, &self.target, raw, self.memo_request()).await
     }
 
+    fn broadcast_saved_memo(&self) {
+        if self.state.tx().receiver_count() == 0 {
+            return;
+        }
+
+        let _ = self
+            .state
+            .tx()
+            .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(
+                self.memo_message_file(),
+            )));
+    }
+
     fn memo_request(&self) -> RouteTargetRequest<'a> {
         RouteTargetRequest::api_memo(self.request.query_file())
+    }
+
+    fn memo_message_file(&self) -> String {
+        self.target
+            .relative_path()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                self.target
+                    .file_path()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| self.target.file_path().display().to_string())
     }
 
     fn title(&self) -> &str {
@@ -240,6 +266,7 @@ async fn api_memo_save_handler(
         RouteTargetRequest::api_memo(payload.file.as_deref()),
     )?;
     let memo = context.save_memo(payload.raw).await?;
+    context.broadcast_saved_memo();
 
     Ok(Json(memo))
 }

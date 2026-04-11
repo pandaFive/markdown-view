@@ -1002,6 +1002,24 @@ async fn test_build_lagged_recovery_message_ディレクトリモードではref
 }
 
 #[tokio::test]
+async fn test_build_lagged_recovery_message_単一ファイルモードではmemo_refresh付きupdateを返す() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+
+    let message = build_lagged_recovery_message(&state).await;
+
+    match message {
+        BroadcastMessage::LaggedRecovery(message) => {
+            let json = serde_json::to_value(message).unwrap();
+            assert!(json["content"].as_str().unwrap().contains("title"));
+            assert_eq!(json["memo_refresh"], true);
+            assert!(json.get("memo_file").is_none());
+        }
+        other => panic!("LaggedRecoveryを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
 async fn test_build_change_broadcast_message_ディレクトリモードでfileを含むupdateを返す() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());

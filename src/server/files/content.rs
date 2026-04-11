@@ -10,7 +10,7 @@ use super::resolve::{
     RouteTargetRequest,
 };
 use crate::renderer::render_markdown;
-use crate::server::messages::{ApiError, BroadcastMessage};
+use crate::server::messages::{ApiError, BroadcastMessage, LaggedRecoveryMessage};
 use crate::server::state::AppState;
 use crate::template::{error_message_json, UpdateMessage};
 use crate::toc::generate_toc;
@@ -87,7 +87,7 @@ pub(in crate::server) async fn load_initial_socket_update(
 
 /// WebSocketクライアント遅延時の回復メッセージを生成する。
 ///
-/// 単一ファイルモード: ファイルを再読み込みしてUpdateを返す。
+/// 単一ファイルモード: ファイルを再読み込みして本文更新とメモ再取得通知を返す。
 /// ディレクトリモード: Refreshを返す（クライアント側で再取得させる）。
 pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -> BroadcastMessage {
     let target =
@@ -105,7 +105,10 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
         };
 
     match read_and_render_file(target.file_path()).await {
-        Ok(update) => BroadcastMessage::Update(target.update(update)),
+        Ok(update) => BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(
+            target.update(update),
+            target.relative_path().map(ToOwned::to_owned),
+        )),
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] WebSocket再送信読み込みエラー ({}): {}",

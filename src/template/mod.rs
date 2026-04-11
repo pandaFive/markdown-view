@@ -4,7 +4,7 @@ mod page;
 mod tree;
 
 pub use self::assets::{combined_css, csp_hash_sources};
-pub use self::message::{error_message_json, MemoResponse, UpdateMessage};
+pub use self::message::{error_message_json, MemoResponse, MemoUpdateMessage, UpdateMessage};
 pub use self::page::{render_page, RenderPageParams, SidebarParams};
 pub use self::tree::{build_file_tree, render_file_tree_html, FileTreeNode};
 
@@ -520,6 +520,67 @@ mod tests {
         assert!(html.contains("ensurePendingUpdateTimer();"));
         assert!(html.contains("if (pendingUpdate.refresh) {"));
         assert!(html.contains("selectFile(refreshFile, false);"));
+    }
+
+    #[test]
+    fn test_websocket_memo_update受信処理が埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let memo = test_memo();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
+        });
+
+        assert!(html.contains("function isMemoUpdateMessage(data)"));
+        assert!(html.contains("function isMemoRefreshMessage(data)"));
+        assert!(html.contains("function applyRemoteMemoUpdate(data)"));
+        assert!(html.contains("function queueRemoteMemoReload(data)"));
+        assert!(html.contains("var pendingMemoReload = null;"));
+        assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
+        assert!(html.contains("if (pendingMemoReload === null) return false;"));
+        assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
+        assert!(html.contains("if (applyRemoteMemoUpdate(data)) {"));
+        assert!(html.contains("if (isMemoRefreshMessage(data)) {"));
+        assert!(html.contains("if (queueRemoteMemoReload(data)) {"));
+        assert!(html.contains("loadMemo(file, fetchGeneration);"));
+    }
+
+    #[test]
+    fn test_websocket_memo_updateは編集中の上書きを回避する() {
+        let files = vec!["README.md".to_string()];
+        let content = test_content();
+        let toc = test_toc();
+        let memo = test_memo();
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
+                file_list: &files,
+                current_file: Some("README.md"),
+            },
+        });
+
+        assert!(html.contains("function getMemoRemoteUpdateBlockReason()"));
+        assert!(html.contains("pendingMemoReload = data.file;"));
+        assert!(html.contains("return flushPendingMemoReloadIfSafe();"));
     }
 
     #[test]

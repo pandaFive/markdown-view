@@ -277,10 +277,12 @@ mod tests {
 
         let msg = lagged_recovery_message(&state).await;
         match msg {
-            BroadcastMessage::Update(update) => {
-                assert!(update.content().as_str().contains("title"));
+            BroadcastMessage::LaggedRecovery(message) => {
+                let json = serde_json::to_value(message).unwrap();
+                assert!(json["content"].as_str().unwrap().contains("title"));
+                assert_eq!(json["memo_refresh"], true);
             }
-            other => panic!("Updateを期待したが {:?} を受信", other),
+            other => panic!("LaggedRecoveryを期待したが {:?} を受信", other),
         }
     }
 
