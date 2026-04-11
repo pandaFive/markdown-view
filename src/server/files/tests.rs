@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
@@ -423,7 +425,7 @@ async fn test_save_route_memo_新メモファイルがシンボリックリン�
     fs::write(outside_dir.path().join("memo.md"), "outside").unwrap();
     symlink(
         outside_dir.path().join("memo.md"),
-        dir.path().join(".README.memo.md"),
+        dir.path().join(".README.md.memo.md"),
     )
     .unwrap();
 
@@ -462,7 +464,11 @@ async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ�
     .expect("memo should save");
 
     assert_eq!(memo.raw(), "memo");
-    assert!(file_path.parent().unwrap().join(".test.memo.md").exists());
+    assert!(file_path
+        .parent()
+        .unwrap()
+        .join(".test.md.memo.md")
+        .exists());
 }
 
 #[tokio::test]
@@ -484,7 +490,7 @@ async fn test_load_route_memo_旧パスのみ存在する場合はそのまま�
         .expect("legacy memo should load");
 
     assert_eq!(memo.raw(), "legacy memo");
-    assert!(!dir.path().join(".README.memo.md").exists());
+    assert!(!dir.path().join(".README.md.memo.md").exists());
     assert!(dir.path().join(".markdown-view/memos/README.md").exists());
 }
 
@@ -492,7 +498,7 @@ async fn test_load_route_memo_旧パスのみ存在する場合はそのまま�
 async fn test_load_route_memo_新旧両方ある場合は新sidecarを優先する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
-    fs::write(dir.path().join(".README.memo.md"), "new memo").unwrap();
+    fs::write(dir.path().join(".README.md.memo.md"), "new memo").unwrap();
     fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
     fs::write(
         dir.path().join(".markdown-view/memos/README.md"),
@@ -535,7 +541,7 @@ async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ�
     .expect("legacy memo should migrate on save");
 
     assert_eq!(memo.raw(), "updated memo");
-    assert!(dir.path().join(".README.memo.md").exists());
+    assert!(dir.path().join(".README.md.memo.md").exists());
     assert!(!dir.path().join(".markdown-view/memos/README.md").exists());
 }
 
@@ -561,7 +567,103 @@ async fn test_save_route_memo_旧symlinkが残っていても未使用なら新s
     .expect("stale legacy symlink should not block sidecar save");
 
     assert_eq!(memo.raw(), "memo");
-    assert!(dir.path().join(".README.memo.md").exists());
+    assert!(dir.path().join(".README.md.memo.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs_dir = dir.path().join("docs");
+    fs::create_dir_all(&docs_dir).unwrap();
+    fs::write(docs_dir.join("guide.md"), "# Guide").unwrap();
+    let original_mode = fs::metadata(&docs_dir).unwrap().permissions().mode();
+    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("docs/guide.md"))).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(Some("docs/guide.md")),
+    )
+    .await;
+
+    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("readonly subdir should fall back to legacy");
+    assert_eq!(memo.raw(), "memo");
+    assert!(!docs_dir.join(".guide.md.memo.md").exists());
+    assert!(dir
+        .path()
+        .join(".markdown-view/memos/docs/guide.md")
+        .exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_拡張子の大文字小文字が異なるファイルでもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("guide.md"), "# lower").unwrap();
+    fs::write(dir.path().join("guide.MD"), "# upper").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let lower_target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.md"))).unwrap();
+    let upper_target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.MD"))).unwrap();
+
+    let lower = save_route_memo(
+        &state,
+        &lower_target,
+        "lower memo".to_string(),
+        RouteTargetRequest::api_memo(Some("guide.md")),
+    )
+    .await
+    .expect("lower memo should save");
+    let upper = save_route_memo(
+        &state,
+        &upper_target,
+        "upper memo".to_string(),
+        RouteTargetRequest::api_memo(Some("guide.MD")),
+    )
+    .await
+    .expect("upper memo should save");
+
+    assert_eq!(lower.raw(), "lower memo");
+    assert_eq!(upper.raw(), "upper memo");
+    assert!(dir.path().join(".guide.md.memo.md").exists());
+    assert!(dir.path().join(".guide.MD.memo.md").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードではpermission_deniedでもlegacyへfallbackしない() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    fs::write(&file_path, "# test").unwrap();
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (status, body) = result.expect_err("single file mode should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
 }
 
 #[tokio::test]

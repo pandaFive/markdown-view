@@ -68,16 +68,26 @@ pub(in crate::server) async fn save_route_memo(
         ));
     }
 
-    let memo_path = migrate_legacy_memo_to_sidecar(state, target, request, &memo_paths).await?;
-    ensure_safe_memo_path(&memo_path, state, target, request)?;
+    let save_target = choose_save_target(state, target, request, &memo_paths).await?;
+    let memo_path = match save_target {
+        SaveTarget::Sidecar { .. } => &memo_paths.sidecar,
+        SaveTarget::Legacy => &memo_paths.legacy,
+    };
+    ensure_safe_memo_path(memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            if can_fallback_to_legacy(state, save_target, &error) {
+                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+            }
+            return Err(io_api_error(target, request, "ディレクトリ作成", error));
+        }
     }
-    tokio::fs::write(&memo_path, raw.as_bytes())
-        .await
-        .map_err(|error| io_api_error(target, request, "保存", error))?;
+    if let Err(error) = tokio::fs::write(memo_path, raw.as_bytes()).await {
+        if can_fallback_to_legacy(state, save_target, &error) {
+            return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+        }
+        return Err(io_api_error(target, request, "保存", error));
+    }
 
     Ok(MemoResponse::new(
         raw.clone(),
@@ -90,6 +100,12 @@ pub(in crate::server) async fn save_route_memo(
 struct MemoPaths {
     sidecar: PathBuf,
     legacy: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SaveTarget {
+    Sidecar { allow_legacy_fallback: bool },
+    Legacy,
 }
 
 fn legacy_memo_root(base_dir: &Path) -> PathBuf {
@@ -125,12 +141,12 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let file_stem = target_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty());
-    let file_name = match file_stem {
-        Some(stem) => format!(".{stem}{MEMO_SUFFIX}"),
+    let file_name = match target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!(".{name}{MEMO_SUFFIX}"),
         None => format!(".{}", MEMO_SUFFIX.trim_start_matches('.')),
     };
     parent.join(file_name)
@@ -158,35 +174,45 @@ async fn resolve_active_memo_path(
     Ok(memo_paths.legacy.clone())
 }
 
-async fn migrate_legacy_memo_to_sidecar(
+async fn choose_save_target(
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
-) -> Result<PathBuf, ApiError> {
+) -> Result<SaveTarget, ApiError> {
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
     if tokio::fs::try_exists(&memo_paths.sidecar)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
-        return Ok(memo_paths.sidecar.clone());
+        return Ok(SaveTarget::Sidecar {
+            allow_legacy_fallback: false,
+        });
     }
 
     if !legacy_memo_exists(&memo_paths.legacy, target, request).await? {
-        return Ok(memo_paths.sidecar.clone());
+        return Ok(SaveTarget::Sidecar {
+            allow_legacy_fallback: state.mode().is_directory(),
+        });
     }
 
     ensure_safe_memo_path(&memo_paths.legacy, state, target, request)?;
-    if let Some(parent) = memo_paths.sidecar.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+    if let Err(error) = move_legacy_memo_to_sidecar(target, request, memo_paths).await {
+        if can_fallback_to_legacy(
+            state,
+            SaveTarget::Sidecar {
+                allow_legacy_fallback: true,
+            },
+            &error,
+        ) {
+            return Ok(SaveTarget::Legacy);
+        }
+        return Err(io_api_error(target, request, "移行", error));
     }
-    tokio::fs::rename(&memo_paths.legacy, &memo_paths.sidecar)
-        .await
-        .map_err(|error| io_api_error(target, request, "移行", error))?;
 
-    Ok(memo_paths.sidecar.clone())
+    Ok(SaveTarget::Sidecar {
+        allow_legacy_fallback: false,
+    })
 }
 
 async fn legacy_memo_exists(
@@ -197,6 +223,84 @@ async fn legacy_memo_exists(
     tokio::fs::try_exists(legacy_memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))
+}
+
+async fn move_legacy_memo_to_sidecar(
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> std::io::Result<()> {
+    if let Some(parent) = memo_paths.sidecar.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    match tokio::fs::rename(&memo_paths.legacy, &memo_paths.sidecar).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => {
+            let bytes = tokio::fs::read(&memo_paths.legacy).await?;
+            tokio::fs::write(&memo_paths.sidecar, bytes).await?;
+            if let Err(remove_error) = tokio::fs::remove_file(&memo_paths.legacy).await {
+                tracing::warn!(
+                    "[markdown-view] {}legacyメモ削除に失敗したため旧ファイルを残します ({}): {}",
+                    request.read_error_log_label(),
+                    target.file_label(),
+                    remove_error
+                );
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(18)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn can_fallback_to_legacy(
+    state: &AppState,
+    save_target: SaveTarget,
+    error: &std::io::Error,
+) -> bool {
+    matches!(
+        save_target,
+        SaveTarget::Sidecar {
+            allow_legacy_fallback: true
+        }
+    ) && state.mode().is_directory()
+        && error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+async fn save_memo_to_legacy(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+    raw: String,
+) -> Result<MemoResponse, ApiError> {
+    ensure_safe_memo_path(legacy_path, state, target, request)?;
+    if let Some(parent) = legacy_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
+    }
+    tokio::fs::write(legacy_path, raw.as_bytes())
+        .await
+        .map_err(|error| io_api_error(target, request, "保存", error))?;
+
+    Ok(MemoResponse::new(
+        raw.clone(),
+        render_markdown(&raw),
+        target.relative_path().map(ToOwned::to_owned),
+    ))
 }
 
 fn ensure_safe_memo_path(
