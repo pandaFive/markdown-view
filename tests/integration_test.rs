@@ -125,8 +125,6 @@ async fn test_apiメモ_保存成功時にmemo_updateをbroadcastする() {
     match received {
         BroadcastMessage::MemoUpdate(update) => {
             assert_eq!(update.file(), "test.md");
-            assert_eq!(update.raw(), "live memo");
-            assert!(update.html().as_str().contains("live memo"));
         }
         other => panic!("MemoUpdateメッセージを期待したが {:?} を受信", other),
     }

@@ -37,7 +37,6 @@ impl BroadcastMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::renderer::render_markdown;
     use crate::template::MemoUpdateMessage;
 
     #[test]
@@ -58,19 +57,15 @@ mod tests {
 
     #[test]
     fn test_broadcast_message_memo_updateのjson直列化() {
-        let json = BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(
-            "memo text".to_string(),
-            render_markdown("memo text"),
-            "docs/guide.md".to_string(),
-        ))
-        .to_json()
-        .unwrap();
+        let json = BroadcastMessage::MemoUpdate(MemoUpdateMessage::new("docs/guide.md".to_string()))
+            .to_json()
+            .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(value["type"], "memo_update");
         assert_eq!(value["file"], "docs/guide.md");
-        assert_eq!(value["raw"], "memo text");
-        assert!(value["html"].is_string());
+        assert!(value.get("raw").is_none());
+        assert!(value.get("html").is_none());
         assert!(value.get("refresh").is_none());
         assert!(value.get("error").is_none());
         assert!(value.get("content").is_none());

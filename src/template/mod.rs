@@ -545,13 +545,11 @@ mod tests {
 
         assert!(html.contains("function isMemoUpdateMessage(data)"));
         assert!(html.contains("function applyRemoteMemoUpdate(data)"));
-        assert!(html.contains("var pendingMemoUpdate = null;"));
         assert!(html.contains("var pendingMemoReload = null;"));
-        assert!(html.contains("function flushPendingMemoUpdateIfSafe()"));
         assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
         assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
         assert!(html.contains("if (applyRemoteMemoUpdate(data)) {"));
-        assert!(html.contains("pendingMemoUpdate = null;"));
+        assert!(html.contains("loadMemo(file, fetchGeneration);"));
     }
 
     #[test]
@@ -576,10 +574,8 @@ mod tests {
         });
 
         assert!(html.contains("function getMemoRemoteUpdateBlockReason()"));
-        assert!(html.contains("if (blockReason === 'focus') {"));
-        assert!(html.contains("pendingMemoUpdate = data;"));
         assert!(html.contains("pendingMemoReload = data.file;"));
-        assert!(html.contains("setMemoSaveStatus('saved', '保存済み');"));
+        assert!(html.contains("return flushPendingMemoReloadIfSafe();"));
     }
 
     #[test]

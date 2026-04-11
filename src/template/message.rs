@@ -80,30 +80,16 @@ impl MemoResponse {
 pub struct MemoUpdateMessage {
     #[serde(rename = "type")]
     message_type: &'static str,
-    raw: String,
-    html: SanitizedHtml,
     file: String,
 }
 
 impl MemoUpdateMessage {
     /// メモ更新メッセージを生成する
-    pub fn new(raw: String, html: SanitizedHtml, file: String) -> Self {
+    pub fn new(file: String) -> Self {
         Self {
             message_type: "memo_update",
-            raw,
-            html,
             file,
         }
-    }
-
-    /// 生のメモ文字列を返す
-    pub fn raw(&self) -> &str {
-        &self.raw
-    }
-
-    /// プレビューHTMLを返す
-    pub fn html(&self) -> &SanitizedHtml {
-        &self.html
     }
 
     /// 対象ファイル相対パスを返す

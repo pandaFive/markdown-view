@@ -90,30 +90,6 @@ function isMemoRemoteUpdateBlocked() {
   return getMemoRemoteUpdateBlockReason() !== 'none';
 }
 
-function applyResolvedRemoteMemoUpdate(data) {
-  cancelMemoAutosave();
-  // 古いHTTP応答が直後に戻ってきても上書きしないよう世代を進める。
-  memoLoadGeneration++;
-  memoSaveGeneration++;
-  applyMemoData(data);
-  setMemoSaveStatus('saved', '保存済み');
-  return true;
-}
-
-function flushPendingMemoUpdateIfSafe() {
-  if (!pendingMemoUpdate) return false;
-  if (isDirMode && pendingMemoUpdate.file !== currentFile) {
-    pendingMemoUpdate = null;
-    return false;
-  }
-  if (getMemoRemoteUpdateBlockReason() !== 'none') {
-    return false;
-  }
-  var data = pendingMemoUpdate;
-  pendingMemoUpdate = null;
-  return applyResolvedRemoteMemoUpdate(data);
-}
-
 function flushPendingMemoReloadIfSafe() {
   if (!pendingMemoReload) return false;
   if (isDirMode && pendingMemoReload !== currentFile) {
@@ -134,20 +110,8 @@ function applyRemoteMemoUpdate(data) {
   if (!isMemoUpdateMessage(data)) return false;
   if (isDirMode && data.file !== currentFile) return false;
 
-  var blockReason = getMemoRemoteUpdateBlockReason();
-  if (blockReason === 'focus') {
-    pendingMemoUpdate = data;
-    return false;
-  }
-  if (blockReason !== 'none') {
-    pendingMemoUpdate = null;
-    pendingMemoReload = data.file;
-    return false;
-  }
-
-  pendingMemoReload = null;
-  pendingMemoUpdate = null;
-  return applyResolvedRemoteMemoUpdate(data);
+  pendingMemoReload = data.file;
+  return flushPendingMemoReloadIfSafe();
 }
 
 function parseJsonResponse(resp) {
@@ -194,7 +158,6 @@ function loadMemo(file, ownerGeneration) {
     if (requestGeneration !== memoLoadGeneration) return;
     applyMemoData(data);
     setMemoSaveStatus('saved', '保存済み');
-    flushPendingMemoUpdateIfSafe();
     flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
@@ -202,7 +165,6 @@ function loadMemo(file, ownerGeneration) {
     if (ownerGeneration !== undefined && ownerGeneration !== fetchGeneration) return;
     if (requestGeneration !== memoLoadGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
-    flushPendingMemoUpdateIfSafe();
     flushPendingMemoReloadIfSafe();
   });
 }
@@ -217,8 +179,6 @@ function cancelMemoAutosave() {
 function scheduleMemoSave(immediate) {
   if (!memoEditorEl) return;
   cancelMemoAutosave();
-  // ローカル編集開始後は、focus中に保留した古いリモート更新を破棄する。
-  pendingMemoUpdate = null;
   setMemoSaveStatus('dirty', '未保存');
   if (immediate) {
     saveMemoNow();
@@ -264,14 +224,12 @@ function saveMemoNow(targetFileOverride, rawOverride) {
       }
     }
     setMemoSaveStatus('saved', '保存済み');
-    flushPendingMemoUpdateIfSafe();
     flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ保存エラー:', err);
     if (requestGeneration !== memoSaveGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
-    flushPendingMemoUpdateIfSafe();
     flushPendingMemoReloadIfSafe();
   });
 }
@@ -457,7 +415,6 @@ if (memoEditorEl) {
     memoEditorEl.addEventListener(eventName, rememberMemoCaret);
   });
   memoEditorEl.addEventListener('blur', function() {
-    flushPendingMemoUpdateIfSafe();
     flushPendingMemoReloadIfSafe();
   });
   memoEditorEl.addEventListener('input', function() {
