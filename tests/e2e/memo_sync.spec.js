@@ -107,6 +107,61 @@ test('受信側がフォーカス中でもblur後に保留中のメモ更新が�
   await expect(peer.locator('#memo-preview')).toContainText('deferred remote');
 });
 
+test('dirty中に届いた古いメモ更新で保存後の内容を巻き戻さない', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await saveMemo(peer, 'A');
+  await expect(page.locator('#memo-editor')).toHaveValue('A');
+
+  await peer.locator('#memo-editor').fill('AB');
+  await expect(peer.locator('#memo-save-status')).toHaveText('未保存');
+
+  await saveMemo(page, 'A');
+  await peer.waitForTimeout(300);
+  await expect(peer.locator('#memo-editor')).toHaveValue('AB');
+
+  await saveMemo(peer, 'AB');
+  await expect(peer.locator('#memo-editor')).toHaveValue('AB');
+  await expect(peer.locator('#memo-preview')).toContainText('AB');
+  await expect(peer.locator('#memo-preview')).not.toContainText(/^A$/);
+});
+
+test('focus中に保留した古い更新はローカル編集開始後に適用しない', async ({ page, context }) => {
+  const peer = await context.newPage();
+
+  await page.goto('/');
+  await peer.goto('/');
+
+  await openMemoTab(page);
+  await openMemoTab(peer);
+
+  await peer.locator('#memo-editor').focus();
+  await saveMemo(page, 'A');
+
+  await peer.waitForTimeout(300);
+  await expect(peer.locator('#memo-editor')).toHaveValue('');
+
+  await peer.locator('#memo-editor').fill('B');
+  await expect(peer.locator('#memo-save-status')).toHaveText('未保存');
+
+  await peer.locator('.sidebar-tab[data-tab="files"]').focus();
+  await peer.locator('#memo-editor').blur();
+  await peer.waitForTimeout(300);
+
+  await expect(peer.locator('#memo-editor')).toHaveValue('B');
+  await expect(peer.locator('#memo-preview')).not.toContainText(/^A$/);
+
+  await saveMemo(peer, 'B');
+  await expect(peer.locator('#memo-editor')).toHaveValue('B');
+  await expect(peer.locator('#memo-preview')).toContainText('B');
+});
+
 test('別ファイルを開いているページにはメモ更新を誤反映しない', async ({ page, context }) => {
   const peer = await context.newPage();
 

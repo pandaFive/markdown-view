@@ -30,6 +30,7 @@ var quoteSelectionActionEl = document.getElementById('quote-selection-action');
 var pendingUpdate = null;
 var pendingUpdateTimer = null;
 var pendingMemoUpdate = null;
+var pendingMemoReload = null;
 var isMouseSelecting = false;
 var memoLoadGeneration = 0;
 var memoSaveGeneration = 0;

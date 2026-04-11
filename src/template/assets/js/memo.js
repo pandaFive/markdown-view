@@ -75,14 +75,19 @@ function isMemoUpdateMessage(data) {
     && data.file.length > 0;
 }
 
-function isMemoRemoteUpdateBlocked() {
-  if (!memoEditorEl) return true;
-  if (memoSaveTimer) return true;
+function getMemoRemoteUpdateBlockReason() {
+  if (!memoEditorEl) return 'none';
+  if (memoSaveTimer) return 'dirty';
   if (memoSaveStatusEl) {
     var state = memoSaveStatusEl.dataset.state;
-    if (state === 'dirty' || state === 'saving' || state === 'loading') return true;
+    if (state === 'dirty' || state === 'saving' || state === 'loading') return state;
   }
-  return document.activeElement === memoEditorEl;
+  if (document.activeElement === memoEditorEl) return 'focus';
+  return 'none';
+}
+
+function isMemoRemoteUpdateBlocked() {
+  return getMemoRemoteUpdateBlockReason() !== 'none';
 }
 
 function applyResolvedRemoteMemoUpdate(data) {
@@ -101,7 +106,7 @@ function flushPendingMemoUpdateIfSafe() {
     pendingMemoUpdate = null;
     return false;
   }
-  if (isMemoRemoteUpdateBlocked()) {
+  if (getMemoRemoteUpdateBlockReason() !== 'none') {
     return false;
   }
   var data = pendingMemoUpdate;
@@ -109,14 +114,38 @@ function flushPendingMemoUpdateIfSafe() {
   return applyResolvedRemoteMemoUpdate(data);
 }
 
-function applyRemoteMemoUpdate(data) {
-  if (!isMemoUpdateMessage(data)) return false;
-  if (isDirMode && data.file !== currentFile) return false;
-  if (isMemoRemoteUpdateBlocked()) {
-    pendingMemoUpdate = data;
+function flushPendingMemoReloadIfSafe() {
+  if (!pendingMemoReload) return false;
+  if (isDirMode && pendingMemoReload !== currentFile) {
+    pendingMemoReload = null;
+    return false;
+  }
+  if (getMemoRemoteUpdateBlockReason() !== 'none') {
     return false;
   }
 
+  var file = pendingMemoReload;
+  pendingMemoReload = null;
+  loadMemo(file, fetchGeneration);
+  return true;
+}
+
+function applyRemoteMemoUpdate(data) {
+  if (!isMemoUpdateMessage(data)) return false;
+  if (isDirMode && data.file !== currentFile) return false;
+
+  var blockReason = getMemoRemoteUpdateBlockReason();
+  if (blockReason === 'focus') {
+    pendingMemoUpdate = data;
+    return false;
+  }
+  if (blockReason !== 'none') {
+    pendingMemoUpdate = null;
+    pendingMemoReload = data.file;
+    return false;
+  }
+
+  pendingMemoReload = null;
   pendingMemoUpdate = null;
   return applyResolvedRemoteMemoUpdate(data);
 }
@@ -166,6 +195,7 @@ function loadMemo(file, ownerGeneration) {
     applyMemoData(data);
     setMemoSaveStatus('saved', '保存済み');
     flushPendingMemoUpdateIfSafe();
+    flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ取得エラー:', err);
@@ -173,6 +203,7 @@ function loadMemo(file, ownerGeneration) {
     if (requestGeneration !== memoLoadGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoUpdateIfSafe();
+    flushPendingMemoReloadIfSafe();
   });
 }
 
@@ -186,6 +217,8 @@ function cancelMemoAutosave() {
 function scheduleMemoSave(immediate) {
   if (!memoEditorEl) return;
   cancelMemoAutosave();
+  // ローカル編集開始後は、focus中に保留した古いリモート更新を破棄する。
+  pendingMemoUpdate = null;
   setMemoSaveStatus('dirty', '未保存');
   if (immediate) {
     saveMemoNow();
@@ -232,12 +265,14 @@ function saveMemoNow(targetFileOverride, rawOverride) {
     }
     setMemoSaveStatus('saved', '保存済み');
     flushPendingMemoUpdateIfSafe();
+    flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ保存エラー:', err);
     if (requestGeneration !== memoSaveGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoUpdateIfSafe();
+    flushPendingMemoReloadIfSafe();
   });
 }
 
@@ -423,6 +458,7 @@ if (memoEditorEl) {
   });
   memoEditorEl.addEventListener('blur', function() {
     flushPendingMemoUpdateIfSafe();
+    flushPendingMemoReloadIfSafe();
   });
   memoEditorEl.addEventListener('input', function() {
     rememberMemoCaret();
