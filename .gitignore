@@ -4,6 +4,7 @@ node_modules/
 playwright-report/
 test-results/
 tests/fixtures/e2e/.markdown-view/
+*.memo.md
 
 AGENTS.md
 .codex

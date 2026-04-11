@@ -600,6 +600,42 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラーにする() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "# README").unwrap();
+    let sidecar_path = dir.path().join(".README.md.memo.md");
+    fs::write(&sidecar_path, "memo").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let legacy_parent = legacy_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let (status, body) = result.expect_err("delete should fail when safe legacy cleanup fails");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(sidecar_path.exists());
+    assert!(legacy_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();

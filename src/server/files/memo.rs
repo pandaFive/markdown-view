@@ -55,11 +55,11 @@ pub(in crate::server) async fn save_route_memo(
     let trimmed = raw.trim();
     let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
+        delete_legacy_memo_if_safe_strict(state, target, request, &memo_paths.legacy).await?;
         if !sidecar_name_too_long(&memo_paths.sidecar) {
             ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
             delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
         }
-        delete_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
@@ -98,7 +98,7 @@ pub(in crate::server) async fn save_route_memo(
         ..
     } = save_target
     {
-        delete_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
+        cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
     }
 
     Ok(MemoResponse::new(
@@ -376,7 +376,7 @@ async fn save_memo_to_legacy(
     ))
 }
 
-async fn delete_legacy_memo_if_safe(
+async fn cleanup_legacy_memo_if_safe(
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
@@ -405,6 +405,29 @@ async fn delete_legacy_memo_if_safe(
         );
     }
     Ok(())
+}
+
+async fn delete_legacy_memo_if_safe_strict(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+) -> Result<(), ApiError> {
+    if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeなlegacyメモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+
+    if !legacy_memo_exists(legacy_path, target, request).await? {
+        return Ok(());
+    }
+
+    delete_memo_file_if_exists(legacy_path, target, request).await
 }
 
 fn sidecar_name_too_long(sidecar_path: &Path) -> bool {

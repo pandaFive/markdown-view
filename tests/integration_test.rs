@@ -295,6 +295,41 @@ async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削�
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_apiメモ_空白保存でsafe_legacy削除失敗ならエラーにする() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
+    tokio::fs::write(&sidecar_memo_path, "memo").await.unwrap();
+    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
+    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_memo_path, "legacy").await.unwrap();
+
+    let legacy_parent = legacy_memo_path.parent().unwrap();
+    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let delete = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "   \n"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+
+    assert_eq!(delete.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let json: serde_json::Value = delete.json().await.unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
+    assert!(tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_apiメモ_unsafeなlegacy_symlinkがあってもsidecar保存を継続できる() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
