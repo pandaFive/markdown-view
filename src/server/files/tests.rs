@@ -696,6 +696,48 @@ async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして
     assert!(memo_entries[0].len() <= 255);
 }
 
+#[tokio::test]
+async fn test_load_route_memo_長いファイル名でlegacy未作成なら空メモを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("overlong sidecar path should not break empty memo read");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_長いファイル名のlegacyメモは空白保存で削除できる() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    let legacy_path = dir.path().join(".markdown-view/memos").join(&file_name);
+    fs::write(&legacy_path, "memo").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " \n ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("legacy fallback memo should be deletable");
+
+    assert_eq!(memo.raw(), "");
+    assert!(!legacy_path.exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しない() {

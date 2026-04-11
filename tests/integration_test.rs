@@ -396,6 +396,53 @@ async fn test_apiメモ_長いファイル名でもlegacyへfallbackして保存
     assert_eq!(memo_count, 1);
 }
 
+#[tokio::test]
+async fn test_apiメモ_長いファイル名で未作成時は空を返す() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = tmp_dir.path().join(&file_name);
+    tokio::fs::write(&file_path, "# Long").await.unwrap();
+    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+
+    let resp = reqwest::get(format!("http://{}/api/memo", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["raw"], "");
+    assert_eq!(json["html"], "");
+}
+
+#[tokio::test]
+async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で削除できる() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = tmp_dir.path().join(&file_name);
+    tokio::fs::write(&file_path, "# Long").await.unwrap();
+    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let client = reqwest::Client::new();
+    let legacy_path = tmp_dir.path().join(".markdown-view/memos").join(&file_name);
+    tokio::fs::create_dir_all(legacy_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&legacy_path, "memo").await.unwrap();
+
+    let delete = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": " \n "
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(delete.status(), 200);
+    let json: serde_json::Value = delete.json().await.unwrap();
+    assert_eq!(json["raw"], "");
+    assert!(!tokio::fs::try_exists(&legacy_path).await.unwrap());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_apiメモ_directory_mode_書込不可サブディレクトリではlegacyへfallbackする() {

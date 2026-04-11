@@ -55,8 +55,10 @@ pub(in crate::server) async fn save_route_memo(
     let trimmed = raw.trim();
     let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
-        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-        delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
+        if !sidecar_name_too_long(&memo_paths.sidecar) {
+            ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+            delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
+        }
         delete_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
@@ -91,6 +93,14 @@ pub(in crate::server) async fn save_route_memo(
         return Err(io_api_error(target, request, "保存", error));
     }
 
+    if let SaveTarget::Sidecar {
+        delete_legacy_after_save: true,
+        ..
+    } = save_target
+    {
+        delete_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
+    }
+
     Ok(MemoResponse::new(
         raw.clone(),
         render_markdown(&raw),
@@ -106,7 +116,10 @@ struct MemoPaths {
 
 #[derive(Debug, Clone, Copy)]
 enum SaveTarget {
-    Sidecar { allow_legacy_fallback: bool },
+    Sidecar {
+        allow_legacy_fallback: bool,
+        delete_legacy_after_save: bool,
+    },
     Legacy,
 }
 
@@ -218,10 +231,11 @@ async fn resolve_active_memo_path(
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
 ) -> Result<PathBuf, ApiError> {
-    if !sidecar_name_too_long(&memo_paths.sidecar) {
+    let sidecar_usable = !sidecar_name_too_long(&memo_paths.sidecar);
+    if sidecar_usable {
         ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
     }
-    if !sidecar_name_too_long(&memo_paths.sidecar)
+    if sidecar_usable
         && tokio::fs::try_exists(&memo_paths.sidecar)
             .await
             .map_err(|error| io_api_error(target, request, "存在確認", error))?
@@ -231,7 +245,13 @@ async fn resolve_active_memo_path(
 
     match inspect_legacy_memo(state, target, request, &memo_paths.legacy).await? {
         LegacyMemoState::SafeExists => Ok(memo_paths.legacy.clone()),
-        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => Ok(memo_paths.sidecar.clone()),
+        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => {
+            if sidecar_usable {
+                Ok(memo_paths.sidecar.clone())
+            } else {
+                Ok(memo_paths.legacy.clone())
+            }
+        }
     }
 }
 
@@ -252,6 +272,7 @@ async fn choose_save_target(
     {
         return Ok(SaveTarget::Sidecar {
             allow_legacy_fallback: false,
+            delete_legacy_after_save: false,
         });
     }
 
@@ -266,23 +287,13 @@ async fn choose_save_target(
     ) {
         return Ok(SaveTarget::Sidecar {
             allow_legacy_fallback: state.mode().is_directory(),
+            delete_legacy_after_save: false,
         });
     }
 
-    if let Err(error) = move_legacy_memo_to_sidecar(target, request, memo_paths).await {
-        if can_fallback_to_legacy(
-            SaveTarget::Sidecar {
-                allow_legacy_fallback: true,
-            },
-            &error,
-        ) {
-            return Ok(SaveTarget::Legacy);
-        }
-        return Err(io_api_error(target, request, "移行", error));
-    }
-
     Ok(SaveTarget::Sidecar {
-        allow_legacy_fallback: false,
+        allow_legacy_fallback: true,
+        delete_legacy_after_save: true,
     })
 }
 
@@ -319,51 +330,12 @@ async fn inspect_legacy_memo(
     }
 }
 
-async fn move_legacy_memo_to_sidecar(
-    target: &ResolvedTarget,
-    request: RouteTargetRequest<'_>,
-    memo_paths: &MemoPaths,
-) -> std::io::Result<()> {
-    if let Some(parent) = memo_paths.sidecar.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    match tokio::fs::rename(&memo_paths.legacy, &memo_paths.sidecar).await {
-        Ok(()) => Ok(()),
-        Err(error) if is_cross_device_error(&error) => {
-            let bytes = tokio::fs::read(&memo_paths.legacy).await?;
-            tokio::fs::write(&memo_paths.sidecar, bytes).await?;
-            if let Err(remove_error) = tokio::fs::remove_file(&memo_paths.legacy).await {
-                tracing::warn!(
-                    "[markdown-view] {}legacyメモ削除に失敗したため旧ファイルを残します ({}): {}",
-                    request.read_error_log_label(),
-                    target.file_label(),
-                    remove_error
-                );
-            }
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn is_cross_device_error(error: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(18)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = error;
-        false
-    }
-}
-
 fn can_fallback_to_legacy(save_target: SaveTarget, error: &std::io::Error) -> bool {
     matches!(
         save_target,
         SaveTarget::Sidecar {
-            allow_legacy_fallback: true
+            allow_legacy_fallback: true,
+            ..
         }
     ) && (error.kind() == std::io::ErrorKind::PermissionDenied || is_name_too_long_error(error))
 }
