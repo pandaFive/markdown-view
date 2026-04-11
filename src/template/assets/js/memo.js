@@ -75,6 +75,10 @@ function isMemoUpdateMessage(data) {
     && data.file.length > 0;
 }
 
+function isMemoRefreshMessage(data) {
+  return !!data && data.memo_refresh === true;
+}
+
 function getMemoRemoteUpdateBlockReason() {
   if (!memoEditorEl) return 'none';
   if (memoSaveTimer) return 'dirty';
@@ -91,7 +95,7 @@ function isMemoRemoteUpdateBlocked() {
 }
 
 function flushPendingMemoReloadIfSafe() {
-  if (!pendingMemoReload) return false;
+  if (pendingMemoReload === null) return false;
   if (isDirMode && pendingMemoReload !== currentFile) {
     pendingMemoReload = null;
     return false;
@@ -111,6 +115,14 @@ function applyRemoteMemoUpdate(data) {
   if (isDirMode && data.file !== currentFile) return false;
 
   pendingMemoReload = data.file;
+  return flushPendingMemoReloadIfSafe();
+}
+
+function queueRemoteMemoReload(data) {
+  if (!memoEditorEl || !isMemoRefreshMessage(data)) return false;
+  var file = data.memo_file || data.file || getMemoTargetFile();
+  if (isDirMode && file !== currentFile) return false;
+  pendingMemoReload = file;
   return flushPendingMemoReloadIfSafe();
 }
 

@@ -544,11 +544,16 @@ mod tests {
         });
 
         assert!(html.contains("function isMemoUpdateMessage(data)"));
+        assert!(html.contains("function isMemoRefreshMessage(data)"));
         assert!(html.contains("function applyRemoteMemoUpdate(data)"));
+        assert!(html.contains("function queueRemoteMemoReload(data)"));
         assert!(html.contains("var pendingMemoReload = null;"));
         assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
+        assert!(html.contains("if (pendingMemoReload === null) return false;"));
         assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
         assert!(html.contains("if (applyRemoteMemoUpdate(data)) {"));
+        assert!(html.contains("if (isMemoRefreshMessage(data)) {"));
+        assert!(html.contains("if (queueRemoteMemoReload(data)) {"));
         assert!(html.contains("loadMemo(file, fetchGeneration);"));
     }
 
