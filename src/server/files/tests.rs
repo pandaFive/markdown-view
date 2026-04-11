@@ -392,7 +392,7 @@ fn test_resolve_route_target_page_queryなしではreadme不在時に先頭フ�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_load_route_memo_旧メモルートがシンボリックリンクなら拒否する() {
+async fn test_load_route_memo_旧メモルートがシンボリックリンクなら空メモとして扱う() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("README.md");
     fs::write(&file_path, "# README").unwrap();
@@ -404,15 +404,12 @@ async fn test_load_route_memo_旧メモルートがシンボリックリンク�
 
     let state = create_directory_state(dir.path());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
-    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("unsafe legacy should be ignored when no sidecar exists");
 
-    let (status, body) = result.expect_err("symlinked memo root should be rejected");
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(
-        json["error"],
-        "メモ保存先にシンボリックリンクが含まれているため操作できません"
-    );
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
 }
 
 #[cfg(unix)]
@@ -547,7 +544,7 @@ async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_旧symlinkが残っている場合は保存を拒否する() {
+async fn test_save_route_memo_旧symlinkが残っていてもsidecar保存を継続できる() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
 
@@ -563,15 +560,11 @@ async fn test_save_route_memo_旧symlinkが残っている場合は保存を拒�
         "memo".to_string(),
         RouteTargetRequest::api_memo(None),
     )
-    .await;
+    .await
+    .expect("unsafe legacy should not block sidecar save");
 
-    let (status, body) = memo.expect_err("unsafe legacy should be rejected before probing");
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(
-        json["error"],
-        "メモ保存先にシンボリックリンクが含まれているため操作できません"
-    );
+    assert_eq!(memo.raw(), "memo");
+    assert!(dir.path().join(".README.md.memo.md").exists());
 }
 
 #[cfg(unix)]
@@ -669,6 +662,36 @@ async fn test_save_route_memo_拡張子の大文字小文字が異なるファ�
     assert_eq!(upper.raw(), "upper memo");
     assert!(dir.path().join(".guide.md.memo.md").exists());
     assert!(dir.path().join(".guide.MD.memo.md").exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして保存できる() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = dir.path().join(&file_name);
+    fs::write(&file_path, "# long").unwrap();
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("long filename should still save");
+
+    assert_eq!(memo.raw(), "memo");
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 1);
+    assert!(memo_entries[0].len() <= 255);
 }
 
 #[cfg(unix)]

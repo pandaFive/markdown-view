@@ -284,11 +284,18 @@ async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削�
     assert!(tokio::fs::try_exists(tmp_dir.path().join(".markdown-view"))
         .await
         .unwrap());
+
+    let get = reqwest::get(format!("http://{}/api/memo", addr))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let fetched: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(fetched["raw"], "");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_apiメモ_unsafeなlegacy_symlinkがある場合は保存を拒否する() {
+async fn test_apiメモ_unsafeなlegacy_symlinkがあってもsidecar保存を継続できる() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
@@ -304,11 +311,13 @@ async fn test_apiメモ_unsafeなlegacy_symlinkがある場合は保存を拒否
         .await
         .unwrap();
 
-    assert_eq!(save.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(save.status(), 200);
     let json: serde_json::Value = save.json().await.unwrap();
-    assert_eq!(
-        json["error"],
-        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    assert_eq!(json["raw"], "memo");
+    assert!(
+        tokio::fs::try_exists(tmp_dir.path().join(".test.md.memo.md"))
+            .await
+            .unwrap()
     );
 }
 
@@ -351,6 +360,40 @@ async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn test_apiメモ_長いファイル名でもlegacyへfallbackして保存できる() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_name = format!("{}.md", "a".repeat(251));
+    let file_path = tmp_dir.path().join(&file_name);
+    tokio::fs::write(&file_path, "# Long").await.unwrap();
+    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 200);
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(json["raw"], "memo");
+    let mut entries = tokio::fs::read_dir(tmp_dir.path()).await.unwrap();
+    let mut memo_count = 0usize;
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".memo.md") {
+            memo_count += 1;
+            assert!(name.len() <= 255);
+        }
+    }
+    assert_eq!(memo_count, 1);
 }
 
 #[cfg(unix)]
