@@ -58,3 +58,71 @@ test('ディレクトリモードでMarkdown相対リンクのフラグメント
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#beta');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 });
+
+test('別ファイルのフラグメント履歴は戻る進むでも見出し位置を復元する', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Beta section](notes.md#beta)\n\nBack target\n'
+  );
+  await fs.writeFile(
+    notesPath,
+    '# Notes\n\n' +
+    Array.from({ length: 40 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n') +
+    '\n\n## Beta\n\nTarget section body\n'
+  );
+
+  await page.reload();
+  await page.locator('#content a[href="notes.md#beta"]').click();
+
+  await expect(page).toHaveURL(/file=notes\.md#beta/);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.goBack();
+  await expect(page).toHaveURL(/file=README\.md$/);
+  await expect(page.locator('#content')).toContainText('Back target');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+
+  await page.goForward();
+  await expect(page).toHaveURL(/file=notes\.md#beta/);
+  await expect(page.locator('#content')).toContainText('Target section body');
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#beta');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+});
+
+test('同一ファイル内フラグメント履歴は戻る進むでも見出し位置を復元する', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Alpha](README.md#alpha)\n\n[Beta](README.md#beta)\n\n' +
+    Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n') +
+    '\n\n## Alpha\n\nAlpha section body\n\n' +
+    Array.from({ length: 20 }, (_, index) => `Tail ${index + 1}`).join('\n\n') +
+    '\n\n## Beta\n\nBeta section body\n'
+  );
+
+  await page.reload();
+  await page.locator('#content a[href="README.md#alpha"]').click();
+  await expect(page).toHaveURL(/file=README\.md#alpha/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#alpha');
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
+
+  await page.locator('#content a[href="README.md#beta"]').click();
+  await expect(page).toHaveURL(/file=README\.md#beta/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#beta');
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Beta');
+
+  await page.goBack();
+  await expect(page).toHaveURL(/file=README\.md#alpha/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#alpha');
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
+
+  await page.goForward();
+  await expect(page).toHaveURL(/file=README\.md#beta/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#beta');
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Beta');
+
+  await page.goBack();
+  await page.goBack();
+  await expect(page).toHaveURL(/file=README\.md$/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});

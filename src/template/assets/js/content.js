@@ -130,6 +130,25 @@ function applyContentAnchorNavigation(hash, replace) {
   return true;
 }
 
+function restoreContentNavigationFromLocation() {
+  var hash = location.hash || '';
+
+  requestAnimationFrame(function() {
+    if (hash) {
+      applyContentAnchorNavigation(hash, true);
+      return;
+    }
+
+    window.scrollTo(0, 0);
+    if (typeof clearPendingTocNavigation === 'function') {
+      clearPendingTocNavigation();
+    }
+    if (typeof restoreActiveTocHeading === 'function') {
+      restoreActiveTocHeading('');
+    }
+  });
+}
+
 function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     return navigator.clipboard.writeText(text);

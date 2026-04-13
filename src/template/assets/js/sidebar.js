@@ -93,8 +93,19 @@ function activateSidebarTab(target) {
 if (isDirMode) {
   window.addEventListener('popstate', function() {
     var file = getFileParam();
+    var hash = location.hash || '';
+
     if (file && file !== currentFile) {
-      selectFile(file, false);
+      selectFile(file, false, {
+        scrollMode: hash ? 'none' : 'reset',
+        anchorHash: hash,
+        historyHash: hash
+      });
+      return;
+    }
+
+    if (typeof restoreContentNavigationFromLocation === 'function') {
+      restoreContentNavigationFromLocation();
     }
   });
 }
