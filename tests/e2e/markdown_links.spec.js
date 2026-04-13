@@ -124,16 +124,44 @@ test('同一ファイル内フラグメント履歴は戻る進むでも見出�
 test('同一ファイルの壊れたフラグメントリンクでもURLと履歴は更新される', async ({ page }) => {
   await fs.writeFile(
     readmePath,
-    '# README\n\n[Missing](README.md#missing)\n\nInitial README content\n'
+    '# README\n\n[Missing](README.md#missing)\n\n' +
+    Array.from({ length: 30 }, (_, index) => `Intro ${index + 1}`).join('\n\n') +
+    '\n\n## Alpha\n\nAlpha body\n'
   );
 
   await page.reload();
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
   await page.locator('#content a[href="README.md#missing"]').click();
 
-  await expect(page).toHaveURL(/README\.md#missing/);
+  await expect(page).toHaveURL(/file=README\.md#missing/);
+  await expect(page.locator('#toc a.active')).toHaveCount(0);
 
   await page.goBack();
   await expect(page).toHaveURL(/file=README\.md$/);
+  await expect(page.locator('#toc a.active')).toHaveCount(0);
+});
+
+test('同一ファイルの自己リンクもSPA内で処理され先頭へ戻る', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Self](README.md)\n\n' +
+    Array.from({ length: 40 }, (_, index) => `README line ${index + 1}`).join('\n\n')
+  );
+
+  await page.reload();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.locator('#content a[href="README.md"]').click();
+
+  await expect(page).toHaveURL(/file=README\.md$/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
 
 test('別ファイルの壊れたフラグメントリンクでは対象文書を先頭から表示する', async ({ page }) => {

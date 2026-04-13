@@ -246,11 +246,16 @@ function setupContentLinkNavigation() {
     if (!target) return;
 
     if (target.file === currentFile) {
+      event.preventDefault();
       if (target.hash) {
         if (applyContentAnchorNavigation(target.hash, false)) {
-          event.preventDefault();
+          return;
         }
+        setFileParam(currentFile, false, target.hash);
+        return;
       }
+      setFileParam(currentFile, false, '');
+      restoreContentNavigationFromLocation();
       return;
     }
 
