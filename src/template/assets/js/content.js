@@ -245,14 +245,16 @@ function setupContentLinkNavigation() {
     target = resolveMarkdownLinkTarget(href);
     if (!target) return;
 
-    event.preventDefault();
-
     if (target.file === currentFile) {
       if (target.hash) {
-        applyContentAnchorNavigation(target.hash, false);
+        if (applyContentAnchorNavigation(target.hash, false)) {
+          event.preventDefault();
+        }
       }
       return;
     }
+
+    event.preventDefault();
 
     selectFile(target.file, true, {
       scrollMode: target.hash ? 'none' : 'reset',
@@ -1089,13 +1091,17 @@ function updateContent(data, options) {
 
   requestAnimationFrame(function() {
     var currentScrollY = window.scrollY || window.pageYOffset;
+    var anchorApplied = false;
     if (scrollMode === 'preserve' && Math.abs(currentScrollY - scrollY) <= 1) {
       window.scrollTo(0, scrollY);
     } else if (scrollMode === 'reset') {
       window.scrollTo(0, 0);
     }
     if (options.anchorHash) {
-      applyContentAnchorNavigation(options.anchorHash, true);
+      anchorApplied = applyContentAnchorNavigation(options.anchorHash, true);
+      if (!anchorApplied) {
+        window.scrollTo(0, 0);
+      }
     }
     updateReadingProgress();
     if (typeof restoreActiveTocHeading === 'function') {

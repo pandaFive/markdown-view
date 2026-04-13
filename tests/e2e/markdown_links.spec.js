@@ -119,10 +119,42 @@ test('同一ファイル内フラグメント履歴は戻る進むでも見出�
   await expect(page).toHaveURL(/file=README\.md#beta/);
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#beta');
   await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Beta');
+});
+
+test('同一ファイルの壊れたフラグメントリンクでもURLと履歴は更新される', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Missing](README.md#missing)\n\nInitial README content\n'
+  );
+
+  await page.reload();
+  await page.locator('#content a[href="README.md#missing"]').click();
+
+  await expect(page).toHaveURL(/README\.md#missing/);
 
   await page.goBack();
-  await page.goBack();
   await expect(page).toHaveURL(/file=README\.md$/);
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+});
+
+test('別ファイルの壊れたフラグメントリンクでは対象文書を先頭から表示する', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Missing notes](notes.md#missing)\n\n' +
+    Array.from({ length: 40 }, (_, index) => `README line ${index + 1}`).join('\n\n')
+  );
+  await fs.writeFile(
+    notesPath,
+    '# Notes\n\n' +
+    Array.from({ length: 60 }, (_, index) => `Notes line ${index + 1}`).join('\n\n')
+  );
+
+  await page.reload();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+  await page.locator('#content a[href="notes.md#missing"]').click();
+
+  await expect(page).toHaveURL(/file=notes\.md#missing/);
+  await expect(page.locator('#content')).toContainText('Notes line 60');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
