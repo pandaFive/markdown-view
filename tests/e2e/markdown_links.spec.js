@@ -271,7 +271,7 @@ test('日本語見出しへのフラグメントリンクでも対象見出し�
   await expect.poll(() => page.evaluate(() => Boolean(document.getElementById('日本語見出し')))).toBe(true);
 });
 
-test('popstateで同一ファイル壊れたフラグメントに戻ってもスクロールとTOCをリセットする', async ({ page }) => {
+test('restoreContentNavigationFromLocationは同一ファイル壊れたフラグメントで先頭スクロールとTOCリセットを行う', async ({ page }) => {
   var warnings = [];
   page.on('console', function(message) {
     if (message.type() === 'warning') {
@@ -308,6 +308,13 @@ test('popstateで同一ファイル壊れたフラグメントに戻ってもス
 });
 
 test('popstateで別ファイル壊れたフラグメントに戻っても履歴エントリのhashは破壊しない', async ({ page }) => {
+  var warnings = [];
+  page.on('console', function(message) {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
   await fs.writeFile(
     readmePath,
     '# README\n\nInitial README content\n'
@@ -330,6 +337,8 @@ test('popstateで別ファイル壊れたフラグメントに戻っても履歴
   await expect(page.locator('#content')).toContainText('Notes line 1');
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(page.locator('#toc a.active')).toHaveCount(0);
+  expect(warnings.some((msg) => msg.indexOf('リンク先の見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('fetch失敗時にhistoryHash指定経路では元hashへ復元する', async ({ page }) => {
