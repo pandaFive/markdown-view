@@ -63,6 +63,8 @@ function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
   options = options || {};
   var previousFile = currentFile;
+  // historyHash指定時のみ失敗時に元hashへ戻す。未指定経路（サイドバークリック等）では
+  // 呼び出し側がhash操作を意図していないため、fetch失敗でcurrent hashを上書きしない。
   var shouldRestoreHash = options.historyHash !== undefined;
   var previousHash = shouldRestoreHash ? location.hash : undefined;
   var gen = ++fetchGeneration;
@@ -101,7 +103,8 @@ function selectFile(file, pushHistory, options) {
     updateContent(data, {
       scrollMode: scrollMode,
       requeryDirectorySearch: options.requeryDirectorySearch !== false,
-      anchorHash: options.anchorHash || ''
+      anchorHash: options.anchorHash || '',
+      clearHashOnMiss: pushHistory
     });
     if (isDirMode && !pushHistory) {
       setFileParam(currentFile, true, options.historyHash);

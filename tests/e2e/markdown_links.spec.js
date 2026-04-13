@@ -270,3 +270,100 @@ test('日本語見出しへのフラグメントリンクでも対象見出し�
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   await expect.poll(() => page.evaluate(() => Boolean(document.getElementById('日本語見出し')))).toBe(true);
 });
+
+test('popstateで同一ファイル壊れたフラグメントに戻ってもスクロールとTOCをリセットする', async ({ page }) => {
+  var warnings = [];
+  page.on('console', function(message) {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n' +
+    Array.from({ length: 30 }, (_, index) => `Intro ${index + 1}`).join('\n\n') +
+    '\n\n## Alpha\n\nAlpha body\n'
+  );
+
+  await page.reload();
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
+
+  await page.evaluate(() => {
+    history.pushState(null, '', '?file=README.md#missing');
+  });
+  await page.evaluate(() => {
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(page.locator('#toc a.active')).toHaveCount(0);
+  expect(warnings.some((msg) => msg.indexOf('履歴復元時に見出しが見つかりません') !== -1)).toBe(true);
+});
+
+test('popstateで別ファイル壊れたフラグメントに戻っても履歴エントリのhashは破壊しない', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\nInitial README content\n'
+  );
+  await fs.writeFile(
+    notesPath,
+    '# Notes\n\n' +
+    Array.from({ length: 30 }, (_, index) => `Notes line ${index + 1}`).join('\n\n')
+  );
+
+  await page.reload();
+
+  await page.evaluate(() => {
+    history.pushState(null, '', '?file=notes.md#missing');
+  });
+  await page.evaluate(() => {
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+
+  await expect(page.locator('#content')).toContainText('Notes line 1');
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});
+
+test('fetch失敗時にhistoryHash指定経路では元hashへ復元する', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[Broken notes](notes.md#beta)\n\n' +
+    Array.from({ length: 30 }, (_, index) => `Intro ${index + 1}`).join('\n\n') +
+    '\n\n## Alpha\n\nAlpha body\n'
+  );
+  await fs.writeFile(
+    notesPath,
+    '# Notes\n\nNotes body\n'
+  );
+
+  await page.route('**/api/content*', (route) => {
+    var url = route.request().url();
+    if (url.indexOf('notes.md') !== -1) {
+      return route.fulfill({ status: 500, contentType: 'text/plain', body: 'err' });
+    }
+    return route.continue();
+  });
+
+  await page.reload();
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+    history.replaceState(null, '', '?file=README.md#alpha');
+  });
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#alpha');
+
+  await page.locator('#content a[href="notes.md#beta"]').click();
+
+  await expect(page.locator('#file-fetch-error-banner')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#alpha');
+  await expect(page).toHaveURL(/file=README\.md#alpha/);
+});

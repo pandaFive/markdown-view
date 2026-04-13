@@ -1109,7 +1109,11 @@ function updateContent(data, options) {
       if (!anchorApplied) {
         console.warn('[markdown-view] リンク先の見出しが見つかりません:', options.anchorHash);
         window.scrollTo(0, 0);
-        setLocationHash('', true);
+        // 新規クリック遷移のみ壊れたhashを除去する。popstate経路でクリアすると
+        // ユーザーが戻る/進むで辿れるはずの履歴エントリURLを破壊してしまう。
+        if (options.clearHashOnMiss) {
+          setLocationHash('', true);
+        }
         if (typeof clearPendingTocNavigation === 'function') {
           clearPendingTocNavigation();
         }
