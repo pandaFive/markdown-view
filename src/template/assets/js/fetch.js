@@ -63,7 +63,8 @@ function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
   options = options || {};
   var previousFile = currentFile;
-  var previousHash = location.hash;
+  var shouldRestoreHash = options.historyHash !== undefined;
+  var previousHash = shouldRestoreHash ? location.hash : undefined;
   var gen = ++fetchGeneration;
   if (typeof discardBufferedLiveUpdate === 'function') {
     discardBufferedLiveUpdate();

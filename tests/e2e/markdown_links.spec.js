@@ -121,7 +121,14 @@ test('同一ファイル内フラグメント履歴は戻る進むでも見出�
   await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Beta');
 });
 
-test('同一ファイルの壊れたフラグメントリンクでもURLと履歴は更新される', async ({ page }) => {
+test('同一ファイルの壊れたフラグメントリンクではURLのhashをクリアし警告を出す', async ({ page }) => {
+  var warnings = [];
+  page.on('console', function(message) {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
   await fs.writeFile(
     readmePath,
     '# README\n\n[Missing](README.md#missing)\n\n' +
@@ -138,12 +145,11 @@ test('同一ファイルの壊れたフラグメントリンクでもURLと履�
   await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
   await page.locator('#content a[href="README.md#missing"]').click();
 
-  await expect(page).toHaveURL(/file=README\.md#missing/);
-  await expect(page.locator('#toc a.active')).toHaveCount(0);
-
-  await page.goBack();
   await expect(page).toHaveURL(/file=README\.md$/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator('#toc a.active')).toHaveCount(0);
+  expect(warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('同一ファイルの自己リンクもSPA内で処理され先頭へ戻る', async ({ page }) => {
@@ -164,7 +170,14 @@ test('同一ファイルの自己リンクもSPA内で処理され先頭へ戻�
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
 
-test('別ファイルの壊れたフラグメントリンクでは対象文書を先頭から表示する', async ({ page }) => {
+test('別ファイルの壊れたフラグメントリンクでは対象文書を先頭から表示しURLのhashを消す', async ({ page }) => {
+  var warnings = [];
+  page.on('console', function(message) {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
   await fs.writeFile(
     readmePath,
     '# README\n\n[Missing notes](notes.md#missing)\n\n' +
@@ -182,7 +195,78 @@ test('別ファイルの壊れたフラグメントリンクでは対象文書�
 
   await page.locator('#content a[href="notes.md#missing"]').click();
 
-  await expect(page).toHaveURL(/file=notes\.md#missing/);
+  await expect(page).toHaveURL(/file=notes\.md$/);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await expect(page.locator('#content')).toContainText('Notes line 60');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  expect(warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
+});
+
+async function installClickObserver(page) {
+  await page.evaluate(() => {
+    window.__clickObservations = {};
+    window.addEventListener('click', function(event) {
+      var link = event.target.closest('a[href]');
+      if (!link) return;
+      window.__clickObservations[link.getAttribute('href')] = {
+        defaultPrevented: event.defaultPrevented
+      };
+      event.preventDefault();
+    });
+  });
+}
+
+test('外部スキームのリンクはSPA内遷移されない', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[external](https://example.com/foo.md)\n\n[mail](mailto:foo@example.com)\n'
+  );
+
+  await page.reload();
+  await installClickObserver(page);
+
+  await page.locator('#content a[href="https://example.com/foo.md"]').click();
+  await page.locator('#content a[href="mailto:foo@example.com"]').click();
+
+  var results = await page.evaluate(() => window.__clickObservations);
+  expect(results['https://example.com/foo.md'].defaultPrevented).toBe(false);
+  expect(results['mailto:foo@example.com'].defaultPrevented).toBe(false);
+  await expect(page).toHaveURL(/file=README\.md$/);
+});
+
+test('非Markdown拡張子の相対リンクはSPA内遷移されない', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[report](report.pdf)\n'
+  );
+
+  await page.reload();
+  await installClickObserver(page);
+
+  await page.locator('#content a[href="report.pdf"]').click();
+
+  var results = await page.evaluate(() => window.__clickObservations);
+  expect(results['report.pdf'].defaultPrevented).toBe(false);
+  await expect(page).toHaveURL(/file=README\.md$/);
+});
+
+test('日本語見出しへのフラグメントリンクでも対象見出しへ遷移する', async ({ page }) => {
+  await fs.writeFile(
+    readmePath,
+    '# README\n\n[見出しへ](notes.md#日本語見出し)\n'
+  );
+  await fs.writeFile(
+    notesPath,
+    '# Notes\n\n' +
+    Array.from({ length: 40 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n') +
+    '\n\n## 日本語見出し\n\n日本語見出しの本文\n'
+  );
+
+  await page.reload();
+  await page.locator('#content a[href$="日本語見出し"]').click();
+
+  await expect(page).toHaveURL(/file=notes\.md/);
+  await expect(page.locator('#content')).toContainText('日本語見出しの本文');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => Boolean(document.getElementById('日本語見出し')))).toBe(true);
 });
