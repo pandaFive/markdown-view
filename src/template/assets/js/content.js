@@ -37,6 +37,99 @@ function syncDocumentChrome(file) {
   document.title = title + ' - markdown-view';
 }
 
+function updateLocationHash(url, hash) {
+  if (hash === undefined) return;
+  if (!hash) {
+    url.hash = '';
+    return;
+  }
+  url.hash = hash.charAt(0) === '#' ? hash : '#' + hash;
+}
+
+function setLocationHash(hash, replace) {
+  var url = new URL(location.href);
+  updateLocationHash(url, hash || '');
+  if (replace) {
+    history.replaceState(null, '', url.toString());
+  } else {
+    history.pushState(null, '', url.toString());
+  }
+}
+
+function isModifiedClick(event) {
+  return event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
+}
+
+function isExternalSchemeHref(href) {
+  return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
+}
+
+function resolveMarkdownLinkTarget(href) {
+  if (!isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
+    return null;
+  }
+  if (href.startsWith('//') || isExternalSchemeHref(href)) {
+    return null;
+  }
+
+  var currentDir = '';
+  var baseUrl;
+  var resolvedUrl;
+  var relativePath;
+
+  if (currentFile && currentFile.indexOf('/') !== -1) {
+    currentDir = currentFile.slice(0, currentFile.lastIndexOf('/') + 1);
+  }
+
+  try {
+    baseUrl = new URL(currentDir, 'https://markdown-view.local/');
+    resolvedUrl = new URL(href, baseUrl);
+  } catch (error) {
+    console.warn('[markdown-view] Markdownリンク解決に失敗:', error);
+    return null;
+  }
+
+  relativePath = resolvedUrl.pathname.replace(/^\/+/, '');
+  try {
+    relativePath = decodeURIComponent(relativePath);
+  } catch (_error) {
+    // 不正なエンコードはブラウザ解決済みのpathをそのまま使う
+  }
+
+  if (!/\.md$/i.test(relativePath)) {
+    return null;
+  }
+
+  return {
+    file: relativePath,
+    hash: resolvedUrl.hash || ''
+  };
+}
+
+function applyContentAnchorNavigation(hash, replace) {
+  if (!hash || hash.charAt(0) !== '#') return false;
+
+  var targetId;
+  var targetEl;
+
+  try {
+    targetId = decodeURIComponent(hash.slice(1));
+  } catch (_error) {
+    targetId = hash.slice(1);
+  }
+
+  if (!targetId) return false;
+  targetEl = document.getElementById(targetId);
+  if (!targetEl) return false;
+
+  if (typeof markPendingTocNavigation === 'function') {
+    markPendingTocNavigation(targetId);
+  }
+  setLocationHash(hash, replace);
+  targetEl.scrollIntoView({ block: 'start', behavior: 'auto' });
+  return true;
+}
+
 function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     return navigator.clipboard.writeText(text);
@@ -115,6 +208,38 @@ function enhanceContentInteractions() {
       handleCopyClick(button, code.innerText || code.textContent || '', 'Copy');
     });
     block.appendChild(button);
+  });
+}
+
+function setupContentLinkNavigation() {
+  if (!contentRoot) return;
+
+  contentRoot.addEventListener('click', function(event) {
+    var link = event.target.closest('a[href]');
+    var href;
+    var target;
+
+    if (!link || !contentRoot.contains(link) || isModifiedClick(event)) return;
+    if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
+
+    href = link.getAttribute('href') || '';
+    target = resolveMarkdownLinkTarget(href);
+    if (!target) return;
+
+    event.preventDefault();
+
+    if (target.file === currentFile) {
+      if (target.hash) {
+        applyContentAnchorNavigation(target.hash, false);
+      }
+      return;
+    }
+
+    selectFile(target.file, true, {
+      scrollMode: target.hash ? 'none' : 'reset',
+      anchorHash: target.hash,
+      historyHash: target.hash || ''
+    });
   });
 }
 
@@ -950,6 +1075,9 @@ function updateContent(data, options) {
     } else if (scrollMode === 'reset') {
       window.scrollTo(0, 0);
     }
+    if (options.anchorHash) {
+      applyContentAnchorNavigation(options.anchorHash, true);
+    }
     updateReadingProgress();
     if (typeof restoreActiveTocHeading === 'function') {
       restoreActiveTocHeading(preservedActiveTocId);
@@ -972,3 +1100,4 @@ function updateContent(data, options) {
 }
 
 setupDocumentSearch();
+setupContentLinkNavigation();

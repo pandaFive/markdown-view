@@ -79,9 +79,10 @@ mod tests {
 
     #[test]
     fn test_broadcast_message_memo_updateのjson直列化() {
-        let json = BroadcastMessage::MemoUpdate(MemoUpdateMessage::new("docs/guide.md".to_string()))
-            .to_json()
-            .unwrap();
+        let json =
+            BroadcastMessage::MemoUpdate(MemoUpdateMessage::new("docs/guide.md".to_string()))
+                .to_json()
+                .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(value["type"], "memo_update");

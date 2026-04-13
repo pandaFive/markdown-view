@@ -20,7 +20,9 @@ use super::guards::{
 use super::messages::{ApiError, BroadcastMessage};
 use super::session::handle_socket;
 use super::state::AppState;
-use crate::template::{render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage};
+use crate::template::{
+    render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage,
+};
 
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
