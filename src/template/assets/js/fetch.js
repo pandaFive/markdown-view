@@ -3,12 +3,19 @@ function getFileParam() {
   return params.get('file') || '';
 }
 
-function setFileParam(file, replace) {
+function setFileParam(file, replace, hash) {
   var url = new URL(location.href);
   if (file) {
     url.searchParams.set('file', file);
   } else {
     url.searchParams.delete('file');
+  }
+  if (hash !== undefined) {
+    if (hash) {
+      url.hash = hash.charAt(0) === '#' ? hash : '#' + hash;
+    } else {
+      url.hash = '';
+    }
   }
   if (replace) {
     history.replaceState(null, '', url.toString());
@@ -56,6 +63,7 @@ function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
   options = options || {};
   var previousFile = currentFile;
+  var previousHash = location.hash;
   var gen = ++fetchGeneration;
   if (typeof discardBufferedLiveUpdate === 'function') {
     discardBufferedLiveUpdate();
@@ -69,7 +77,7 @@ function selectFile(file, pushHistory, options) {
     flushPendingMemoSave();
   }
   currentFile = file;
-  if (pushHistory) setFileParam(file);
+  if (pushHistory) setFileParam(file, false, options.historyHash);
   updateFileListActive(file);
 
   fetch('/api/content?file=' + encodeURIComponent(file), {
@@ -91,14 +99,15 @@ function selectFile(file, pushHistory, options) {
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
     updateContent(data, {
       scrollMode: scrollMode,
-      requeryDirectorySearch: options.requeryDirectorySearch !== false
+      requeryDirectorySearch: options.requeryDirectorySearch !== false,
+      anchorHash: options.anchorHash || ''
     });
     if (isDirMode && !pushHistory) {
-      setFileParam(currentFile, true);
+      setFileParam(currentFile, true, options.historyHash);
     }
     if (data.file && data.file !== currentFile) {
       currentFile = data.file;
-      setFileParam(currentFile, true);
+      setFileParam(currentFile, true, options.historyHash);
       updateFileListActive(currentFile);
     }
     syncDocumentChrome(currentFile);
@@ -123,7 +132,7 @@ function selectFile(file, pushHistory, options) {
     }
     currentFile = previousFile;
     updateFileListActive(previousFile);
-    setFileParam(previousFile, !pushHistory);
+    setFileParam(previousFile, !pushHistory, previousHash);
     if (typeof loadMemo === 'function') {
       loadMemo(previousFile, gen);
     }
