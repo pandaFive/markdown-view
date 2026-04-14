@@ -92,8 +92,8 @@ function resolveMarkdownLinkTarget(href) {
   relativePath = resolvedUrl.pathname.replace(/^\/+/, '');
   try {
     relativePath = decodeURIComponent(relativePath);
-  } catch (_error) {
-    // 不正なエンコードはブラウザ解決済みのpathをそのまま使う
+  } catch (error) {
+    console.warn('[markdown-view] リンクパスのデコードに失敗:', relativePath, error);
   }
 
   if (!/\.md$/i.test(relativePath)) {
@@ -114,7 +114,8 @@ function applyContentAnchorNavigation(hash, replace) {
 
   try {
     targetId = decodeURIComponent(hash.slice(1));
-  } catch (_error) {
+  } catch (error) {
+    console.warn('[markdown-view] フラグメントのデコードに失敗:', hash, error);
     targetId = hash.slice(1);
   }
 
@@ -134,9 +135,11 @@ function restoreContentNavigationFromLocation() {
   var hash = location.hash || '';
 
   requestAnimationFrame(function() {
-    if (hash) {
-      applyContentAnchorNavigation(hash, true);
+    if (hash && applyContentAnchorNavigation(hash, true)) {
       return;
+    }
+    if (hash) {
+      console.warn('[markdown-view] 履歴復元時に見出しが見つかりません:', hash);
     }
 
     window.scrollTo(0, 0);
@@ -251,8 +254,7 @@ function setupContentLinkNavigation() {
         if (applyContentAnchorNavigation(target.hash, false)) {
           return;
         }
-        setFileParam(currentFile, false, target.hash);
-        return;
+        console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
       }
       setFileParam(currentFile, false, '');
       restoreContentNavigationFromLocation();
@@ -1105,7 +1107,16 @@ function updateContent(data, options) {
     if (options.anchorHash) {
       anchorApplied = applyContentAnchorNavigation(options.anchorHash, true);
       if (!anchorApplied) {
+        console.warn('[markdown-view] リンク先の見出しが見つかりません:', options.anchorHash);
         window.scrollTo(0, 0);
+        // 既定はhash除去。popstate経路のみ明示的にfalseを渡して、
+        // ユーザーが戻る/進むで辿れるはずの履歴エントリURLの破壊を避ける。
+        if (options.clearHashOnMiss !== false) {
+          setLocationHash('', true);
+        }
+        if (typeof clearPendingTocNavigation === 'function') {
+          clearPendingTocNavigation();
+        }
       }
     }
     updateReadingProgress();
