@@ -631,10 +631,7 @@ mod tests {
     fn test_メモuiが描画される() {
         let content = test_content();
         let toc = test_toc();
-        let memo = MemoResponse::from_raw(
-            "> 引用メモ".to_string(),
-            Some("README.md".to_string()),
-        );
+        let memo = MemoResponse::from_raw("> 引用メモ".to_string(), Some("README.md".to_string()));
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
