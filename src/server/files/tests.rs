@@ -938,6 +938,44 @@ async fn test_load_initial_socket_update_単一ファイルモードでupdateを
 }
 
 #[tokio::test]
+async fn test_load_initial_socket_update_ディレクトリモードではnoneを返す() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+
+    let result = load_initial_socket_update(&state).await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_load_initial_socket_update_単一ファイル削除時は1008エラーを返す() {
+    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
+    let state = create_single_file_state(&file_path);
+    std::fs::remove_file(&file_path).unwrap();
+
+    let err = load_initial_socket_update(&state)
+        .await
+        .expect_err("削除済みファイルはSocketInitErrorを返すべき");
+
+    assert_eq!(err.close_code(), 1008);
+}
+
+#[tokio::test]
+async fn test_load_initial_socket_update_単一ファイルサイズ超過時は1009エラーを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large.md");
+    tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+        .await
+        .unwrap();
+    let state = create_single_file_state(&file_path);
+
+    let err = load_initial_socket_update(&state)
+        .await
+        .expect_err("サイズ超過ファイルはSocketInitErrorを返すべき");
+
+    assert_eq!(err.close_code(), 1009);
+}
+
+#[tokio::test]
 async fn test_load_route_update_ioエラーを500へ変換する() {
     let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
     let state = create_single_file_state(&file_path);
