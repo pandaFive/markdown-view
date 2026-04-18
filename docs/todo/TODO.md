@@ -37,34 +37,12 @@
 
 ### Low Priority
 
-#### テスト追加
-
-- [ ] `load_initial_socket_update` のエラーパステスト追加
-  - ファイル: `src/server/files/tests.rs`
-  - 内容: ディレクトリモードで `Ok(None)` を返す、単一ファイル削除時に close_code 1008 を返す、サイズ超過時に close_code 1009 を返す、3 パスのテスト
-  - 理由: outcome → `SocketInitError` のワイヤリングが現在未検証。将来の close_code 誤割り当てを回帰テストで検出するため。既存ギャップのため本 PR スコープ外として記録
-
-- [ ] `handle_debounced_events()`のユニットテスト追加
-  - ファイル: `src/watcher.rs` L273-327
-  - 内容: SingleFile/Directoryの両戦略、非`.md`ファイル、隠しファイル、重複排除のテスト
-  - 理由: コアイベント処理ロジックの回帰防止
-
-- [ ] `Watcher::spawn`ディレクトリモードの end-to-end テスト追加
-  - ファイル: `src/watcher.rs` テストモジュール
-  - 内容: `test_watcher_spawn_単一ファイルモードでイベント受信できる`のディレクトリ版
-  - 理由: ディレクトリモード固有のフィルタリングの検証
-
 #### 型・可視性・命名整理
 
 - [ ] `CanonicalPath`を`pub(super)`に降格
   - ファイル: `src/server/state.rs` L12
   - 内容: re-exportされず公開APIにも不使用のため可視性を縮小
   - 理由: 可視性の一貫性向上
-
-- [ ] `WatchStrategy`で`CanonicalPath`型を使用
-  - ファイル: `src/watcher.rs` L26-29
-  - 内容: `PathBuf`の代わりに既存の`CanonicalPath` newtypeを使い、正規化の不変条件を型で保証
-  - 理由: 型安全性の向上
 
 - [ ] `SocketInitError`の可視性整理
   - ファイル: `src/server/files/content.rs` L24
