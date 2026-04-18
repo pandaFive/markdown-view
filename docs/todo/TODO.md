@@ -6,11 +6,6 @@
 
 #### 軽微なリファクタ・保守改善
 
-- [ ] `lagged_recovery_message`が単純な委譲関数。直接呼び出しで除去可能
-  - ファイル: `src/server/websocket.rs` L27-29
-  - 内容: `lagged_recovery_broadcast_message`を直接呼び出しに変更
-  - 理由: websocket.rsとfiles.rsの両方を変更する必要がある
-
 - [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
   - ファイル: `src/server/websocket.rs` L34-40
   - 内容: 中間変数に束縛してから`if let`で分岐
