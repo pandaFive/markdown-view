@@ -62,6 +62,42 @@ pub(in crate::server) async fn load_route_update(
         })
 }
 
+/// ターゲット解決＋読込＋描画の統一結果。
+///
+/// 3関数（初期化・遅延回復・変更通知）でエラーマッピングと成功型だけが異なり、
+/// 制御フローは共通であるため、中間型に畳み込んでラッパー側で分岐する。
+enum ValidateRenderOutcome {
+    /// ディレクトリモード等で対象が決まらない。
+    NoTarget,
+    /// 解決・読込・描画すべてが成功した。`UpdateMessage` は file stamp 済み。
+    Rendered(ResolvedTarget, UpdateMessage),
+    /// 解決時にエラーが発生した（読込は未実行）。
+    ResolveFailed(ResolveFileError),
+    /// 解決は成功したが読込・描画に失敗した。
+    ReadFailed(ResolvedTarget, ReadMarkdownError),
+}
+
+/// 解決済みターゲットを受け取って読込＋描画＋file stamp を行い、統一結果を返す。
+///
+/// validate 部分は呼び出し側の resolver（`resolve_single_file_target` 等）が担い、
+/// ヘルパーは後段の read/render と stamp、outcome 分岐のみを担う。
+async fn validate_and_render(
+    resolve_result: Result<Option<ResolvedTarget>, ResolveFileError>,
+) -> ValidateRenderOutcome {
+    let target = match resolve_result {
+        Ok(Some(target)) => target,
+        Ok(None) => return ValidateRenderOutcome::NoTarget,
+        Err(error) => return ValidateRenderOutcome::ResolveFailed(error),
+    };
+    match read_and_render_file(target.file_path()).await {
+        Ok(update) => {
+            let stamped = target.update(update);
+            ValidateRenderOutcome::Rendered(target, stamped)
+        }
+        Err(error) => ValidateRenderOutcome::ReadFailed(target, error),
+    }
+}
+
 /// WebSocket接続時の初期コンテンツを取得する。
 ///
 /// 単一ファイルモード: ファイルを読み込みSome(UpdateMessage)を返す。
@@ -69,20 +105,20 @@ pub(in crate::server) async fn load_route_update(
 pub(in crate::server) async fn load_initial_socket_update(
     state: &AppState,
 ) -> Result<Option<UpdateMessage>, SocketInitError> {
-    let Some(target) =
-        resolve_single_file_target(state, "WebSocket初期ターゲットの相対パス算出失敗")
-            .map_err(map_socket_validation_error)?
-    else {
-        return Ok(None);
-    };
-
-    let update = read_and_render_file(target.file_path())
-        .await
-        .map_err(|error| {
+    let resolve_result =
+        resolve_single_file_target(state, "WebSocket初期ターゲットの相対パス算出失敗");
+    match validate_and_render(resolve_result).await {
+        ValidateRenderOutcome::NoTarget => Ok(None),
+        ValidateRenderOutcome::Rendered(_, update) => Ok(Some(update)),
+        ValidateRenderOutcome::ResolveFailed(error) => Err(map_socket_validation_error(error)),
+        ValidateRenderOutcome::ReadFailed(_, error) => {
             tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", error);
-            SocketInitError::new(error.close_code(), error.user_message())
-        })?;
-    Ok(Some(target.update(update)))
+            Err(SocketInitError::new(
+                error.close_code(),
+                error.user_message(),
+            ))
+        }
+    }
 }
 
 /// WebSocketクライアント遅延時の回復メッセージを生成する。
@@ -90,26 +126,22 @@ pub(in crate::server) async fn load_initial_socket_update(
 /// 単一ファイルモード: ファイルを再読み込みして本文更新とメモ再取得通知を返す。
 /// ディレクトリモード: Refreshを返す（クライアント側で再取得させる）。
 pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -> BroadcastMessage {
-    let target =
-        match resolve_single_file_target(state, "WebSocket再送信ターゲットの相対パス算出失敗")
-        {
-            Ok(Some(target)) => target,
-            Ok(None) => return BroadcastMessage::Refresh,
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] WebSocket再送信時のファイル検証失敗: {}",
-                    error
-                );
-                return BroadcastMessage::Error(format!("ファイル検証エラー: {}", error));
-            }
-        };
-
-    match read_and_render_file(target.file_path()).await {
-        Ok(update) => BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(
-            target.update(update),
-            target.relative_path().map(ToOwned::to_owned),
-        )),
-        Err(error) => {
+    let resolve_result =
+        resolve_single_file_target(state, "WebSocket再送信ターゲットの相対パス算出失敗");
+    match validate_and_render(resolve_result).await {
+        ValidateRenderOutcome::NoTarget => BroadcastMessage::Refresh,
+        ValidateRenderOutcome::Rendered(target, update) => {
+            let relative = target.relative_path().map(ToOwned::to_owned);
+            BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(update, relative))
+        }
+        ValidateRenderOutcome::ResolveFailed(error) => {
+            tracing::warn!(
+                "[markdown-view] WebSocket再送信時のファイル検証失敗: {}",
+                error
+            );
+            BroadcastMessage::Error(format!("ファイル検証エラー: {}", error))
+        }
+        ValidateRenderOutcome::ReadFailed(target, error) => {
             tracing::warn!(
                 "[markdown-view] WebSocket再送信読み込みエラー ({}): {}",
                 target.file_label(),
@@ -132,10 +164,11 @@ pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
     changed_file: &Path,
 ) -> Option<BroadcastMessage> {
-    let target = match resolve_change_target(state, changed_file) {
-        Ok(Some(target)) => target,
-        Ok(None) => return None,
-        Err(error) => {
+    let resolve_result = resolve_change_target(state, changed_file);
+    match validate_and_render(resolve_result).await {
+        ValidateRenderOutcome::NoTarget => None,
+        ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
+        ValidateRenderOutcome::ResolveFailed(error) => {
             let file_label = state
                 .mode()
                 .single_file()
@@ -146,28 +179,24 @@ pub(in crate::server) async fn build_change_broadcast_message(
                 file_label,
                 error
             );
-            return Some(BroadcastMessage::Error(format!(
+            Some(BroadcastMessage::Error(format!(
                 "ファイル検証エラー ({}): {}",
                 file_label, error
-            )));
+            )))
         }
-    };
-
-    Some(match read_and_render_file(target.file_path()).await {
-        Ok(update) => BroadcastMessage::Update(target.update(update)),
-        Err(error) => {
+        ValidateRenderOutcome::ReadFailed(target, error) => {
             tracing::warn!(
                 "[markdown-view] 更新時読み込みエラー ({}): {}",
                 target.file_label(),
                 error
             );
-            BroadcastMessage::Error(format!(
+            Some(BroadcastMessage::Error(format!(
                 "ファイル読み込みエラー ({}): {}",
                 target.file_label(),
                 error.user_message()
-            ))
+            )))
         }
-    })
+    }
 }
 
 fn map_socket_validation_error(error: ResolveFileError) -> SocketInitError {

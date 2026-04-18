@@ -35,18 +35,14 @@
   - テスト観点: 反映成功、編集中の上書き回避、別ファイル誤反映なし
   - 理由: 同期機能は race condition を起こしやすく、ユニットテストだけでは不足する
 
-#### server files 取得フロー集約
-
-- [ ] validate-build-render パターンの3重重複を共通ヘルパーに抽出
-  - ファイル: `src/server/files.rs` L148-260
-  - 影響範囲: `initial_socket_update`, `lagged_recovery_broadcast_message`, `update_broadcast_message`
-  - 修正方針: 共通の`validate_and_render`ヘルパーを抽出し、各関数をエラーマッピングのみのラッパーにする
-  - 注意点: 3関数のエラーハンドリング戦略が異なるため、先に戻り値と責務境界を整理する
-  - 理由: アーキテクチャ検討が必要な中規模リファクタ
-
 ### Low Priority
 
 #### テスト追加
+
+- [ ] `load_initial_socket_update` のエラーパステスト追加
+  - ファイル: `src/server/files/tests.rs`
+  - 内容: ディレクトリモードで `Ok(None)` を返す、単一ファイル削除時に close_code 1008 を返す、サイズ超過時に close_code 1009 を返す、3 パスのテスト
+  - 理由: outcome → `SocketInitError` のワイヤリングが現在未検証。将来の close_code 誤割り当てを回帰テストで検出するため。既存ギャップのため本 PR スコープ外として記録
 
 - [ ] `handle_debounced_events()`のユニットテスト追加
   - ファイル: `src/watcher.rs` L273-327
