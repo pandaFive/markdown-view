@@ -119,6 +119,8 @@ function parseLineHash(hash) {
   if (!decoded) return empty;
 
   // `heading-id:L5` または `heading-id:L5-L7`
+  // `(.*)` は greedy だが、現状 slugify は `:` を除去するため heading_id に `:` は含まれない。
+  // slugify 仕様が変わる場合はここの分割戦略を見直すこと
   var combined = decoded.match(/^(.*):L(\d+)(?:-L(\d+))?$/);
   if (combined) {
     var start = parseInt(combined[2], 10);
@@ -140,15 +142,16 @@ function parseLineHash(hash) {
   return { headingId: decoded, lineRange: null };
 }
 
-function scrollToLineRange(targetLine) {
-  if (!contentRoot || !targetLine) return false;
+function scrollToLineRange(targetLine, behavior) {
+  // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
+  if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
   var blocks = contentRoot.querySelectorAll('[data-line-block][data-source-start-line]');
   for (var i = 0; i < blocks.length; i++) {
     var block = blocks[i];
     var s = parseInt(block.getAttribute('data-source-start-line'), 10);
     var e = parseInt(block.getAttribute('data-source-end-line'), 10);
     if (!isNaN(s) && !isNaN(e) && s <= targetLine && e >= targetLine) {
-      block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      block.scrollIntoView({ block: 'start', behavior: behavior || 'auto' });
       triggerJumpHighlight(block);
       return true;
     }
@@ -159,23 +162,24 @@ function scrollToLineRange(targetLine) {
 function triggerJumpHighlight(el) {
   if (!el) return;
   el.classList.remove('jump-highlight');
-  // アニメーションを再生させるため一度強制reflowする
+  // CSS animationを再起動するための強制reflow（class再付与前にlayoutをflushする定番技法）
   void el.offsetWidth;
   el.classList.add('jump-highlight');
-  var handleEnd = function() {
+  // { once: true } でリスナー自動除去。連続クリック時の leak を防ぐ
+  el.addEventListener('animationend', function() {
     el.classList.remove('jump-highlight');
-    el.removeEventListener('animationend', handleEnd);
-  };
-  el.addEventListener('animationend', handleEnd);
+  }, { once: true });
 }
 
 function applyContentAnchorNavigation(hash, replace) {
   if (!hash || hash.charAt(0) !== '#') return false;
 
   var parsed = parseLineHash(hash);
+  // ユーザクリック由来 (replace=false) は smooth、履歴復元 (replace=true) は auto で即着地
+  var scrollBehavior = replace ? 'auto' : 'smooth';
 
   // 行範囲があれば優先（より詳細な位置へジャンプ）
-  if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start)) {
+  if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start, scrollBehavior)) {
     if (parsed.headingId && typeof markPendingTocNavigation === 'function') {
       markPendingTocNavigation(parsed.headingId);
     }
@@ -191,7 +195,7 @@ function applyContentAnchorNavigation(hash, replace) {
       markPendingTocNavigation(parsed.headingId);
     }
     setLocationHash(hash, replace);
-    targetEl.scrollIntoView({ block: 'start', behavior: 'auto' });
+    targetEl.scrollIntoView({ block: 'start', behavior: scrollBehavior });
     return true;
   }
 

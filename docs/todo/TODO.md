@@ -4,6 +4,12 @@
 
 ### Low Priority
 
+- [ ] 行範囲ジャンプのエッジケース E2E テスト追加
+  - ファイル: `tests/e2e/memo_jump.spec.js` (または新規 spec)
+  - 内容: ネストしたblockquote内のジャンプ、複数行にまたがる段落、不正な`#L0`/`#L-5`入力、行範囲が見つからない場合のheading fallbackなどのケースを追加
+  - 理由: 現状 happy path 1ケースのみで、UI 変更時の回帰検出が弱い
+  - 出典: PR #73 code-reviewer レビューの Optional 提案
+
 - [ ] 旧形式メモ（リンク外に L5-L7）の行範囲フォールバックパース
   - ファイル: `src/template/assets/js/memo.js`, `src/template/assets/js/content.js`
   - 内容: PR #xx 以前に生成されたメモは `出典: [file > heading](?file=foo.md#heading) L5-L7` 形式（L5-L7 がリンク外）のため、新実装では heading 単位ジャンプに留まる。旧形式でも行範囲を読み取って fine-grained ジャンプできるよう、リンク直後の L5-L7 テキストをパースする互換レイヤーを追加
