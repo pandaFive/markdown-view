@@ -28,6 +28,20 @@ fn normalize_source_markup(html: &str) -> String {
         normalized.replace_range(start..end, "");
     }
 
+    while let Some(start) = normalized.find(" data-line-block-start=\"") {
+        let end_attr = " data-line-block-end=\"";
+        let second_attr_start = normalized[start..]
+            .find(end_attr)
+            .map(|offset| start + offset)
+            .expect("data-line-block-end attribute should exist when -start exists");
+        let value_start = second_attr_start + end_attr.len();
+        let end = normalized[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset + 1)
+            .expect("data-line-block-end attribute should close");
+        normalized.replace_range(start..end, "");
+    }
+
     normalized = normalized.replace(" data-line-block", "");
 
     normalized.replace("</span>", "")
@@ -236,6 +250,73 @@ fn test_インライン要素にはdata_line_blockが付かない() {
         !html_str.contains("<a data-line-block"),
         "<a> にdata-line-blockが付いてはならない: {}",
         html_str
+    );
+}
+
+#[test]
+fn test_blockコンテナにはdata_source_lineが付かない_quote選択範囲広がり防止() {
+    // `<ul>` / `<table>` 等のコンテナ要素に `data-source-start-line`/`end-line` を付けると、
+    // memo.js の getSelectionLineRange() が祖先範囲を拾い、引用 `Lx-Ly` が広がる回帰を起こす。
+    // コンテナは `data-line-block-start`/`end` のみ持ち、`data-source-*` は付与しない。
+    let html = render_markdown("- item1\n- item2");
+    let html_str = html.as_str();
+    assert!(
+        !html_str.contains("<ul data-source-start-line"),
+        "<ul> に data-source-start-line を付けてはならない（quote範囲広がり回帰防止）: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<li data-source-start-line"),
+        "<li> に data-source-start-line を付けてはならない: {}",
+        html_str
+    );
+
+    let table = render_markdown("| a |\n|---|\n| b |");
+    let table_str = table.as_str();
+    assert!(
+        !table_str.contains("<table data-source-start-line"),
+        "<table> に data-source-start-line を付けてはならない: {}",
+        table_str
+    );
+
+    let para = render_markdown("Hello");
+    assert!(
+        !para.as_str().contains("<p data-source-start-line"),
+        "<p> に data-source-start-line を付けてはならない: {}",
+        para.as_str()
+    );
+
+    let bq = render_markdown("> quote");
+    assert!(
+        !bq.as_str().contains("<blockquote data-source-start-line"),
+        "<blockquote> に data-source-start-line を付けてはならない: {}",
+        bq.as_str()
+    );
+}
+
+#[test]
+fn test_blockコンテナはdata_line_block_start_endを持つ() {
+    // ジャンプ先用の範囲属性。quote集計には混入しない独立attribute
+    let html = render_markdown("Hello paragraph");
+    assert!(
+        html.as_str()
+            .contains("<p data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<p> は data-line-block-start/end を持つ: {}",
+        html.as_str()
+    );
+
+    let list = render_markdown("- item");
+    assert!(
+        list.as_str()
+            .contains("<ul data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<ul> は data-line-block-start/end を持つ: {}",
+        list.as_str()
+    );
+    assert!(
+        list.as_str()
+            .contains("<li data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<li> は data-line-block-start/end を持つ: {}",
+        list.as_str()
     );
 }
 

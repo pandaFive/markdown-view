@@ -93,7 +93,7 @@ impl RenderState {
                 start: start_range.start,
                 end: range.end,
             })
-            .map(|full_range| block_line_attrs(line_lookup, &full_range))
+            .map(|full_range| line_block_marker_with(source_line_attrs(line_lookup, &full_range)))
             .unwrap_or_default();
         if let Some(ref lang) = self.code_block_lang {
             let highlighted = ss
@@ -221,7 +221,9 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     let id = generate_unique_id(&slug, &mut id_counts);
                     let heading_attrs = heading_range
                         .as_ref()
-                        .map(|heading_range| block_line_attrs(&line_lookup, heading_range))
+                        .map(|heading_range| {
+                            line_block_marker_with(source_line_attrs(&line_lookup, heading_range))
+                        })
                         .unwrap_or_default();
 
                     state.push_html(&format!(
@@ -560,15 +562,25 @@ fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
     )
 }
 
-/// block-level要素向けの行範囲属性。
-/// `data-line-block` は「行範囲ジャンプのターゲット候補」マーカー。
-/// JS側が `[data-line-block]` セレクタでジャンプ候補を限定できる。
+/// block-level コンテナ（<p>, <ul>, <ol>, <li>, <table>, <blockquote>）向けの行範囲属性。
+///
+/// 設計意図: 新規attribute `data-line-block-start/end` のみを付与し、既存 `data-source-*` は
+/// 付与しない。理由は `getSelectionLineRange()` (memo.js) が `[data-source-start-line]` で
+/// 集計しており、コンテナにも `data-source-*` を付けると、中の `<li>` 単体を選択しても
+/// 祖先 `<ul>` の範囲まで拾って引用 `Lx-Ly` が広がる回帰を起こすため。
+/// heading / code-block は元から `data-source-*` を持つ（その要素の範囲を示すのが正しい）のでそちらは維持。
 fn block_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
     let (start_line, end_line) = line_lookup.line_range(range);
     format!(
-        " data-line-block data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
+        " data-line-block data-line-block-start=\"{}\" data-line-block-end=\"{}\"",
         start_line, end_line
     )
+}
+
+/// heading / code-block 用: 既存の `source_line_attrs` に `data-line-block` マーカーを前置。
+/// これらの要素は元から `data-source-*` を持ち、quote 機能上もその範囲が「その要素の範囲」として正しい。
+fn line_block_marker_with(source_attrs: String) -> String {
+    format!(" data-line-block{}", source_attrs)
 }
 
 fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {

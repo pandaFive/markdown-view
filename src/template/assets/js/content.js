@@ -145,18 +145,35 @@ function parseLineHash(hash) {
 function scrollToLineRange(targetLine, behavior) {
   // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
   if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
-  var blocks = contentRoot.querySelectorAll('[data-line-block][data-source-start-line]');
+  var blocks = contentRoot.querySelectorAll('[data-line-block]');
+  // 候補から「最狭マッチ（最深containment）」を選ぶ。
+  // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、<li> を選ばないと
+  // コンテナ先頭にスクロールしてしまうため (PR #73 codex-bot レビュー指摘)
+  var best = null;
+  var bestSpan = Infinity;
   for (var i = 0; i < blocks.length; i++) {
     var block = blocks[i];
-    var s = parseInt(block.getAttribute('data-source-start-line'), 10);
-    var e = parseInt(block.getAttribute('data-source-end-line'), 10);
-    if (!isNaN(s) && !isNaN(e) && s <= targetLine && e >= targetLine) {
-      block.scrollIntoView({ block: 'start', behavior: behavior || 'auto' });
-      triggerJumpHighlight(block);
-      return true;
+    // block コンテナは data-line-block-start/end、heading/code-block は data-source-* から範囲を読む
+    var startAttr = block.getAttribute('data-line-block-start');
+    if (startAttr === null) startAttr = block.getAttribute('data-source-start-line');
+    var endAttr = block.getAttribute('data-line-block-end');
+    if (endAttr === null) endAttr = block.getAttribute('data-source-end-line');
+    if (startAttr === null || endAttr === null) continue;
+    var s = parseInt(startAttr, 10);
+    var e = parseInt(endAttr, 10);
+    if (isNaN(s) || isNaN(e)) continue;
+    if (s <= targetLine && e >= targetLine) {
+      var span = e - s;
+      if (span < bestSpan) {
+        bestSpan = span;
+        best = block;
+      }
     }
   }
-  return false;
+  if (!best) return false;
+  best.scrollIntoView({ block: 'start', behavior: behavior || 'auto' });
+  triggerJumpHighlight(best);
+  return true;
 }
 
 function triggerJumpHighlight(el) {
