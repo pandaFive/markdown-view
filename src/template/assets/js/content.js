@@ -106,29 +106,96 @@ function resolveMarkdownLinkTarget(href) {
   };
 }
 
+function parseLineHash(hash) {
+  var empty = { headingId: null, lineRange: null };
+  if (!hash || hash.charAt(0) !== '#') return empty;
+  var raw = hash.slice(1);
+  var decoded;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch (error) {
+    decoded = raw;
+  }
+  if (!decoded) return empty;
+
+  // `heading-id:L5` または `heading-id:L5-L7`
+  var combined = decoded.match(/^(.*):L(\d+)(?:-L(\d+))?$/);
+  if (combined) {
+    var start = parseInt(combined[2], 10);
+    var end = combined[3] ? parseInt(combined[3], 10) : start;
+    return {
+      headingId: combined[1] || null,
+      lineRange: { start: start, end: end }
+    };
+  }
+
+  // `L5` または `L5-L7` 単独
+  var lineOnly = decoded.match(/^L(\d+)(?:-L(\d+))?$/);
+  if (lineOnly) {
+    var s = parseInt(lineOnly[1], 10);
+    var e = lineOnly[2] ? parseInt(lineOnly[2], 10) : s;
+    return { headingId: null, lineRange: { start: s, end: e } };
+  }
+
+  return { headingId: decoded, lineRange: null };
+}
+
+function scrollToLineRange(targetLine) {
+  if (!contentRoot || !targetLine) return false;
+  var blocks = contentRoot.querySelectorAll('[data-line-block][data-source-start-line]');
+  for (var i = 0; i < blocks.length; i++) {
+    var block = blocks[i];
+    var s = parseInt(block.getAttribute('data-source-start-line'), 10);
+    var e = parseInt(block.getAttribute('data-source-end-line'), 10);
+    if (!isNaN(s) && !isNaN(e) && s <= targetLine && e >= targetLine) {
+      block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      triggerJumpHighlight(block);
+      return true;
+    }
+  }
+  return false;
+}
+
+function triggerJumpHighlight(el) {
+  if (!el) return;
+  el.classList.remove('jump-highlight');
+  // アニメーションを再生させるため一度強制reflowする
+  void el.offsetWidth;
+  el.classList.add('jump-highlight');
+  var handleEnd = function() {
+    el.classList.remove('jump-highlight');
+    el.removeEventListener('animationend', handleEnd);
+  };
+  el.addEventListener('animationend', handleEnd);
+}
+
 function applyContentAnchorNavigation(hash, replace) {
   if (!hash || hash.charAt(0) !== '#') return false;
 
-  var targetId;
-  var targetEl;
+  var parsed = parseLineHash(hash);
 
-  try {
-    targetId = decodeURIComponent(hash.slice(1));
-  } catch (error) {
-    console.warn('[markdown-view] フラグメントのデコードに失敗:', hash, error);
-    targetId = hash.slice(1);
+  // 行範囲があれば優先（より詳細な位置へジャンプ）
+  if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start)) {
+    if (parsed.headingId && typeof markPendingTocNavigation === 'function') {
+      markPendingTocNavigation(parsed.headingId);
+    }
+    setLocationHash(hash, replace);
+    return true;
   }
 
-  if (!targetId) return false;
-  targetEl = document.getElementById(targetId);
-  if (!targetEl) return false;
-
-  if (typeof markPendingTocNavigation === 'function') {
-    markPendingTocNavigation(targetId);
+  // 見出しIDへのフォールバックジャンプ
+  if (parsed.headingId) {
+    var targetEl = document.getElementById(parsed.headingId);
+    if (!targetEl) return false;
+    if (typeof markPendingTocNavigation === 'function') {
+      markPendingTocNavigation(parsed.headingId);
+    }
+    setLocationHash(hash, replace);
+    targetEl.scrollIntoView({ block: 'start', behavior: 'auto' });
+    return true;
   }
-  setLocationHash(hash, replace);
-  targetEl.scrollIntoView({ block: 'start', behavior: 'auto' });
-  return true;
+
+  return false;
 }
 
 function restoreContentNavigationFromLocation() {
