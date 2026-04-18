@@ -1074,6 +1074,62 @@ async fn test_build_lagged_recovery_message_単一ファイル読み込み失敗
 }
 
 #[tokio::test]
+async fn test_build_lagged_recovery_message_サイズ超過時は読み込みエラーを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large.md");
+    tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+        .await
+        .unwrap();
+    let state = create_single_file_state(&file_path);
+
+    let message = build_lagged_recovery_message(&state).await;
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル読み込みエラー"),
+                "ReadFailed分岐のプレフィックスを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("ファイルサイズが上限（10MB）を超えています"),
+                "TooLargeのuser_messageを期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_build_lagged_recovery_message_非utf8時は読み込みエラーを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("binary.md");
+    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .unwrap();
+    let state = create_single_file_state(&file_path);
+
+    let message = build_lagged_recovery_message(&state).await;
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル読み込みエラー"),
+                "ReadFailed分岐のプレフィックスを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("このファイルはUTF-8テキストではありません"),
+                "NotUtf8のuser_messageを期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
 async fn test_build_change_broadcast_message_ディレクトリモードでfileを含むupdateを返す() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());
