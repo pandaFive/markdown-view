@@ -334,10 +334,18 @@ function buildQuoteSource(range) {
     href += '#' + heading.id;
   }
 
+  var lineLabel = formatLineLabel(lineRange);
+  if (lineLabel) {
+    sourceLabel += ' (' + lineLabel + ')';
+    // コロン区切りで見出しIDと衝突を避けつつfragmentに行範囲を埋め込む。
+    // 見出しなし時は `#L5-L7` 形式。クライアント側 parseLineHash で復元される。
+    href += (heading ? ':' : '#') + lineLabel;
+  }
+
   return {
     label: escapeMarkdownLinkLabel(sourceLabel),
     href: href,
-    lines: formatLineLabel(lineRange)
+    lines: lineLabel
   };
 }
 
@@ -360,10 +368,9 @@ function buildQuoteMarkdownFromSelection() {
 
   var source = buildQuoteSource(range);
   var quote = toBlockQuote(rawText);
+  // 行番号は source.label 内に `(L5-L7)` として埋め込み済み。
+  // hrefにもfragmentとして行範囲が含まれ、クリック時の本文ジャンプに使われる。
   var citation = '出典: [' + source.label + '](' + source.href + ')';
-  if (source.lines) {
-    citation += ' ' + source.lines;
-  }
   return quote + '\n\n' + citation + '\n';
 }
 
