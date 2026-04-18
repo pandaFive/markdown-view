@@ -93,7 +93,7 @@ impl RenderState {
                 start: start_range.start,
                 end: range.end,
             })
-            .map(|full_range| source_line_attrs(line_lookup, &full_range))
+            .map(|full_range| block_line_attrs(line_lookup, &full_range))
             .unwrap_or_default();
         if let Some(ref lang) = self.code_block_lang {
             let highlighted = ss
@@ -221,7 +221,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     let id = generate_unique_id(&slug, &mut id_counts);
                     let heading_attrs = heading_range
                         .as_ref()
-                        .map(|heading_range| source_line_attrs(&line_lookup, heading_range))
+                        .map(|heading_range| block_line_attrs(&line_lookup, heading_range))
                         .unwrap_or_default();
 
                     state.push_html(&format!(
@@ -327,7 +327,10 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::Rule => {
                 state.push_html("<hr />\n");
             }
-            Event::Start(Tag::Paragraph) => state.push_html("<p>"),
+            Event::Start(Tag::Paragraph) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<p{}>", attrs));
+            }
             Event::End(TagEnd::Paragraph) => {
                 state.push_html("</p>\n");
             }
@@ -422,21 +425,31 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     state.push_html("</a>");
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => state.push_html("<blockquote>\n"),
+            Event::Start(Tag::BlockQuote(_)) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<blockquote{}>\n", attrs));
+            }
             Event::End(TagEnd::BlockQuote(_)) => {
                 state.push_html("</blockquote>\n");
             }
             Event::Start(Tag::List(Some(start))) => {
-                state.push_html(&format!("<ol start=\"{}\">\n", start));
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<ol start=\"{}\"{}>\n", start, attrs));
             }
-            Event::Start(Tag::List(None)) => state.push_html("<ul>\n"),
+            Event::Start(Tag::List(None)) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<ul{}>\n", attrs));
+            }
             Event::End(TagEnd::List(true)) => {
                 state.push_html("</ol>\n");
             }
             Event::End(TagEnd::List(false)) => {
                 state.push_html("</ul>\n");
             }
-            Event::Start(Tag::Item) => state.push_html("<li>"),
+            Event::Start(Tag::Item) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<li{}>", attrs));
+            }
             Event::End(TagEnd::Item) => {
                 state.push_html("</li>\n");
             }
@@ -448,7 +461,8 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
             }
             Event::Start(Tag::Table(alignments)) => {
-                state.push_html("<table>\n");
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<table{}>\n", attrs));
                 in_table_head = false;
                 table_alignments = alignments;
                 table_cell_index = 0;
@@ -542,6 +556,17 @@ fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
     let (start_line, end_line) = line_lookup.line_range(range);
     format!(
         " data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
+        start_line, end_line
+    )
+}
+
+/// block-level要素向けの行範囲属性。
+/// `data-line-block` は「行範囲ジャンプのターゲット候補」マーカー。
+/// JS側が `[data-line-block]` セレクタでジャンプ候補を限定できる。
+fn block_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
+    let (start_line, end_line) = line_lookup.line_range(range);
+    format!(
+        " data-line-block data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
         start_line, end_line
     )
 }
