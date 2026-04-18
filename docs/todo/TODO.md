@@ -4,13 +4,6 @@
 
 ### Low Priority
 
-#### 型・可視性・命名整理
-
-- [ ] `RouteTargetRequest`をstruct+enum kindパターンに変更
-  - ファイル: `src/server/files/resolve.rs`
-  - 内容: 全バリアント同一の`query_file`フィールドをstructに集約
-  - 理由: コードの簡素化。バリアント追加時の重複排除
-
 #### 軽微なリファクタ・保守改善
 
 - [ ] `WatchEvent::Error(String)`の構造化エラー化

@@ -22,3 +22,6 @@ pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
 pub(in crate::server) use self::search::{search_directory, SearchResponse};
+
+#[cfg(test)]
+pub(in crate::server) use self::resolve::RouteTargetKind;
