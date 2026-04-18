@@ -6,11 +6,6 @@
 
 #### 軽微なリファクタ・保守改善
 
-- [ ] `file_label`算出ロジックが`ResolvedTarget::new`と`update_broadcast_message`で重複
-  - ファイル: `src/server/files.rs` L217-220
-  - 内容: 共通関数`file_display_name(path: &Path) -> String`を抽出
-  - 理由: 上位のリファクタ後に再評価する
-
 - [ ] `lagged_recovery_message`が単純な委譲関数。直接呼び出しで除去可能
   - ファイル: `src/server/websocket.rs` L27-29
   - 内容: `lagged_recovery_broadcast_message`を直接呼び出しに変更
