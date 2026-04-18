@@ -25,12 +25,7 @@ impl ResolvedTarget {
     ) -> Self {
         let file_label = relative_path
             .clone()
-            .or_else(|| {
-                file_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| file_path.display().to_string());
+            .unwrap_or_else(|| file_display_name(&file_path));
 
         Self {
             file_path,
@@ -409,4 +404,11 @@ impl ResolveFileError {
     pub fn status_code(&self) -> StatusCode {
         StatusCode::NOT_FOUND
     }
+}
+
+/// パスから表示用ラベルを生成する（`file_name` があればそれ、なければ `display()` フォールバック）
+pub(super) fn file_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }

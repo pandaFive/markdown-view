@@ -6,8 +6,8 @@ use axum::Json;
 use tokio::io::AsyncReadExt;
 
 use super::resolve::{
-    resolve_change_target, resolve_single_file_target, ResolveFileError, ResolvedTarget,
-    RouteTargetRequest,
+    file_display_name, resolve_change_target, resolve_single_file_target, ResolveFileError,
+    ResolvedTarget, RouteTargetRequest,
 };
 use crate::renderer::render_markdown;
 use crate::server::messages::{ApiError, BroadcastMessage, LaggedRecoveryMessage};
@@ -172,7 +172,7 @@ pub(in crate::server) async fn build_change_broadcast_message(
             let file_label = state
                 .mode()
                 .single_file()
-                .map(display_name)
+                .map(file_display_name)
                 .unwrap_or_else(|| changed_file.display().to_string());
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
@@ -202,12 +202,6 @@ pub(in crate::server) async fn build_change_broadcast_message(
 fn map_socket_validation_error(error: ResolveFileError) -> SocketInitError {
     tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", error);
     SocketInitError::new(1008, format!("ファイル検証に失敗しました: {}", error))
-}
-
-fn display_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[derive(Debug)]
