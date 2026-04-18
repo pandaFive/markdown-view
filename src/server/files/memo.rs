@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
-use crate::renderer::render_markdown;
 use crate::server::guards::json_error;
 use crate::server::messages::ApiError;
 use crate::server::state::AppState;
@@ -38,9 +37,8 @@ pub(in crate::server) async fn load_route_memo(
     }
 
     let raw = read_memo_file(&memo_path, target, request).await?;
-    Ok(MemoResponse::new(
-        raw.clone(),
-        render_markdown(&raw),
+    Ok(MemoResponse::from_raw(
+        raw,
         target.relative_path().map(ToOwned::to_owned),
     ))
 }
@@ -101,9 +99,8 @@ pub(in crate::server) async fn save_route_memo(
         cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
     }
 
-    Ok(MemoResponse::new(
-        raw.clone(),
-        render_markdown(&raw),
+    Ok(MemoResponse::from_raw(
+        raw,
         target.relative_path().map(ToOwned::to_owned),
     ))
 }
@@ -369,9 +366,8 @@ async fn save_memo_to_legacy(
         .await
         .map_err(|error| io_api_error(target, request, "保存", error))?;
 
-    Ok(MemoResponse::new(
-        raw.clone(),
-        render_markdown(&raw),
+    Ok(MemoResponse::from_raw(
+        raw,
         target.relative_path().map(ToOwned::to_owned),
     ))
 }

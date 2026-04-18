@@ -26,7 +26,7 @@ mod tests {
     }
 
     fn test_memo() -> MemoResponse {
-        MemoResponse::new(String::new(), render_markdown(""), None)
+        MemoResponse::empty(None)
     }
 
     #[test]
@@ -631,9 +631,8 @@ mod tests {
     fn test_メモuiが描画される() {
         let content = test_content();
         let toc = test_toc();
-        let memo = MemoResponse::new(
-            "引用メモ".to_string(),
-            render_markdown("> 引用メモ"),
+        let memo = MemoResponse::from_raw(
+            "> 引用メモ".to_string(),
             Some("README.md".to_string()),
         );
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
@@ -661,11 +660,7 @@ mod tests {
 
     #[test]
     fn test_memo_response_fileフィールドが直列化される() {
-        let memo = MemoResponse::new(
-            "memo".to_string(),
-            render_markdown("memo"),
-            Some("docs/guide.md".to_string()),
-        );
+        let memo = MemoResponse::from_raw("memo".to_string(), Some("docs/guide.md".to_string()));
         let value = serde_json::to_value(memo).unwrap();
         assert_eq!(value["file"], "docs/guide.md");
         assert_eq!(value["raw"], "memo");
