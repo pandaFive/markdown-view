@@ -39,16 +39,6 @@
 
 #### 型・可視性・命名整理
 
-- [ ] `CanonicalPath`を`pub(super)`に降格
-  - ファイル: `src/server/state.rs` L12
-  - 内容: re-exportされず公開APIにも不使用のため可視性を縮小
-  - 理由: 可視性の一貫性向上
-
-- [ ] `SocketInitError`の可視性整理
-  - ファイル: `src/server/files/content.rs` L24
-  - 内容: `pub(in crate::server)`だが`mod.rs`で再エクスポートされず実質`pub(super)`相当。再エクスポート追加か可視性縮小
-  - 理由: 現状動作に問題なし。将来の保守性向上
-
 - [ ] `ResolvedTarget::update`メソッド名を`attach_file_info`等に改名
   - ファイル: `src/server/files.rs` L69
   - 内容: `UpdateMessage`との名前衝突を解消
