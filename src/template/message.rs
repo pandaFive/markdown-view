@@ -103,3 +103,51 @@ impl MemoUpdateMessage {
 pub fn error_message_json(message: impl AsRef<str>) -> serde_json::Value {
     serde_json::json!({ "error": message.as_ref() })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_raw_htmlがrender_markdownと一致する() {
+        let inputs = ["", "# 見出し", "段落\n\n- リスト1\n- リスト2", "> 引用"];
+        for input in inputs {
+            let memo = MemoResponse::from_raw(input.to_string(), None);
+            assert_eq!(
+                memo.html(),
+                &render_markdown(input),
+                "from_raw({:?}).html() must equal render_markdown({:?})",
+                input,
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_raw_rawフィールドは入力を改変せず保持する() {
+        let input = "  raw\nメモ\n\n複数行  ";
+        let memo = MemoResponse::from_raw(input.to_string(), None);
+        assert_eq!(memo.raw(), input);
+    }
+
+    #[test]
+    fn test_from_raw_fileフィールドが保持される() {
+        let memo_some = MemoResponse::from_raw(String::new(), Some("docs/api.md".to_string()));
+        assert_eq!(memo_some.file(), Some("docs/api.md"));
+
+        let memo_none = MemoResponse::from_raw(String::new(), None);
+        assert_eq!(memo_none.file(), None);
+    }
+
+    #[test]
+    fn test_empty_は空文字列をfrom_rawしたものと等価() {
+        let file = Some("note.md".to_string());
+        let by_empty = MemoResponse::empty(file.clone());
+        let by_from_raw = MemoResponse::from_raw(String::new(), file.clone());
+
+        assert_eq!(by_empty.raw(), by_from_raw.raw());
+        assert_eq!(by_empty.html(), by_from_raw.html());
+        assert_eq!(by_empty.file(), by_from_raw.file());
+        assert_eq!(by_empty.raw(), "");
+    }
+}
