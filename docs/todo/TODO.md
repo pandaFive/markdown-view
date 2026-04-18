@@ -4,30 +4,6 @@
 
 ### Low Priority
 
-#### 軽微なリファクタ・保守改善
-
-- [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
-  - ファイル: `src/server/websocket.rs` L34-40
-  - 内容: 中間変数に束縛してから`if let`で分岐
-  - 理由: 可読性改善のみでリスクに見合わない
-
-- [ ] `resolve.rs` L240のコメント詳細化
-  - ファイル: `src/server/files/resolve.rs` L240
-  - 内容: `build_resolved_target`のgraceful degradationコメントにWebSocketパスの安全性文脈を復元
-  - 理由: 旧5行から新1行に簡略化され、保守者向け情報が減少
-
-- [ ] `MemoResponse::new`を`from_raw`に変更してraw/html不整合リスクを排除
-  - ファイル: `src/template/message.rs`
-  - 内容: `new(raw, html, file)`を`from_raw(raw, file)`に変更し、内部で`render_markdown`を呼ぶ
-  - セキュリティ観点: raw と html の責務を一本化し、未整合な HTML 混入経路を減らす
-  - 理由: 呼び出し側でraw/htmlの整合性を保証する責務がなくなる
-
-- [ ] `render_markdown("")`の結果をOnceLockでキャッシュ
-  - ファイル: `src/template/message.rs`
-  - 内容: `MemoResponse::empty`が毎回呼ぶ`render_markdown("")`の結果を静的キャッシュ
-  - 注意点: 計測値なしのため、実施前に効果確認を行う
-  - 理由: メモ未作成ファイルが多い場合のマイクロ最適化候補
-
 #### メモ機能: 参照導線改善
 
 - [ ] レンダラー出力に行範囲ジャンプ用の安定ターゲットを追加
