@@ -56,7 +56,7 @@ impl ResolvedTarget {
         &self.file_label
     }
 
-    pub(super) fn update(&self, update: UpdateMessage) -> UpdateMessage {
+    pub(super) fn attach_file_info(&self, update: UpdateMessage) -> UpdateMessage {
         update.with_file(self.relative_path.clone())
     }
 }

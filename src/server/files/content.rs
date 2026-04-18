@@ -50,7 +50,7 @@ pub(in crate::server) async fn load_route_update(
 ) -> Result<UpdateMessage, ApiError> {
     read_and_render_file(target.file_path())
         .await
-        .map(|update| target.update(update))
+        .map(|update| target.attach_file_info(update))
         .map_err(|error| {
             tracing::warn!(
                 "[markdown-view] {}読み込みエラー ({}): {}",
@@ -91,7 +91,7 @@ async fn validate_and_render(
     };
     match read_and_render_file(target.file_path()).await {
         Ok(update) => {
-            let stamped = target.update(update);
+            let stamped = target.attach_file_info(update);
             ValidateRenderOutcome::Rendered(target, stamped)
         }
         Err(error) => ValidateRenderOutcome::ReadFailed(target, error),
