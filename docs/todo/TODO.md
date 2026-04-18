@@ -35,15 +35,6 @@
   - テスト観点: 反映成功、編集中の上書き回避、別ファイル誤反映なし
   - 理由: 同期機能は race condition を起こしやすく、ユニットテストだけでは不足する
 
-#### server files 取得フロー集約
-
-- [ ] validate-build-render パターンの3重重複を共通ヘルパーに抽出
-  - ファイル: `src/server/files.rs` L148-260
-  - 影響範囲: `initial_socket_update`, `lagged_recovery_broadcast_message`, `update_broadcast_message`
-  - 修正方針: 共通の`validate_and_render`ヘルパーを抽出し、各関数をエラーマッピングのみのラッパーにする
-  - 注意点: 3関数のエラーハンドリング戦略が異なるため、先に戻り値と責務境界を整理する
-  - 理由: アーキテクチャ検討が必要な中規模リファクタ
-
 ### Low Priority
 
 #### テスト追加
