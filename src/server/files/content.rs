@@ -68,29 +68,32 @@ pub(in crate::server) async fn load_route_update(
 /// 制御フローは共通であるため、中間型に畳み込んでラッパー側で分岐する。
 enum ValidateRenderOutcome {
     /// ディレクトリモード等で対象が決まらない。
-    Empty,
-    /// 解決と読込の両方が成功した。
-    Resolved(ResolvedTarget, UpdateMessage),
+    NoTarget,
+    /// 解決・読込・描画すべてが成功した。`UpdateMessage` は file stamp 済み。
+    Rendered(ResolvedTarget, UpdateMessage),
     /// 解決時にエラーが発生した（読込は未実行）。
     ResolveFailed(ResolveFileError),
-    /// 解決は成功したが読込に失敗した。
+    /// 解決は成功したが読込・描画に失敗した。
     ReadFailed(ResolvedTarget, ReadMarkdownError),
 }
 
-/// 既に解決済みの結果を受け取って読込＋描画を実行し、統一結果を返す。
+/// 解決済みターゲットを受け取って読込＋描画＋file stamp を行い、統一結果を返す。
 ///
-/// resolver の選択（`resolve_single_file_target` vs `resolve_change_target`）は
-/// 呼び出し側の責務とし、ヘルパーは後段の read/render と outcome 分岐だけを担う。
+/// validate 部分は呼び出し側の resolver（`resolve_single_file_target` 等）が担い、
+/// ヘルパーは後段の read/render と stamp、outcome 分岐のみを担う。
 async fn validate_and_render(
     resolve_result: Result<Option<ResolvedTarget>, ResolveFileError>,
 ) -> ValidateRenderOutcome {
     let target = match resolve_result {
         Ok(Some(target)) => target,
-        Ok(None) => return ValidateRenderOutcome::Empty,
+        Ok(None) => return ValidateRenderOutcome::NoTarget,
         Err(error) => return ValidateRenderOutcome::ResolveFailed(error),
     };
     match read_and_render_file(target.file_path()).await {
-        Ok(update) => ValidateRenderOutcome::Resolved(target, update),
+        Ok(update) => {
+            let stamped = target.update(update);
+            ValidateRenderOutcome::Rendered(target, stamped)
+        }
         Err(error) => ValidateRenderOutcome::ReadFailed(target, error),
     }
 }
@@ -105,8 +108,8 @@ pub(in crate::server) async fn load_initial_socket_update(
     let resolve_result =
         resolve_single_file_target(state, "WebSocket初期ターゲットの相対パス算出失敗");
     match validate_and_render(resolve_result).await {
-        ValidateRenderOutcome::Empty => Ok(None),
-        ValidateRenderOutcome::Resolved(target, update) => Ok(Some(target.update(update))),
+        ValidateRenderOutcome::NoTarget => Ok(None),
+        ValidateRenderOutcome::Rendered(_, update) => Ok(Some(update)),
         ValidateRenderOutcome::ResolveFailed(error) => Err(map_socket_validation_error(error)),
         ValidateRenderOutcome::ReadFailed(_, error) => {
             tracing::warn!("[markdown-view] WebSocket初期読み込みエラー: {}", error);
@@ -126,13 +129,10 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
     let resolve_result =
         resolve_single_file_target(state, "WebSocket再送信ターゲットの相対パス算出失敗");
     match validate_and_render(resolve_result).await {
-        ValidateRenderOutcome::Empty => BroadcastMessage::Refresh,
-        ValidateRenderOutcome::Resolved(target, update) => {
+        ValidateRenderOutcome::NoTarget => BroadcastMessage::Refresh,
+        ValidateRenderOutcome::Rendered(target, update) => {
             let relative = target.relative_path().map(ToOwned::to_owned);
-            BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(
-                target.update(update),
-                relative,
-            ))
+            BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(update, relative))
         }
         ValidateRenderOutcome::ResolveFailed(error) => {
             tracing::warn!(
@@ -166,10 +166,8 @@ pub(in crate::server) async fn build_change_broadcast_message(
 ) -> Option<BroadcastMessage> {
     let resolve_result = resolve_change_target(state, changed_file);
     match validate_and_render(resolve_result).await {
-        ValidateRenderOutcome::Empty => None,
-        ValidateRenderOutcome::Resolved(target, update) => {
-            Some(BroadcastMessage::Update(target.update(update)))
-        }
+        ValidateRenderOutcome::NoTarget => None,
+        ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
         ValidateRenderOutcome::ResolveFailed(error) => {
             let file_label = state
                 .mode()

@@ -39,6 +39,11 @@
 
 #### テスト追加
 
+- [ ] `load_initial_socket_update` のエラーパステスト追加
+  - ファイル: `src/server/files/tests.rs`
+  - 内容: ディレクトリモードで `Ok(None)` を返す、単一ファイル削除時に close_code 1008 を返す、サイズ超過時に close_code 1009 を返す、3 パスのテスト
+  - 理由: outcome → `SocketInitError` のワイヤリングが現在未検証。将来の close_code 誤割り当てを回帰テストで検出するため。既存ギャップのため本 PR スコープ外として記録
+
 - [ ] `handle_debounced_events()`のユニットテスト追加
   - ファイル: `src/watcher.rs` L273-327
   - 内容: SingleFile/Directoryの両戦略、非`.md`ファイル、隠しファイル、重複排除のテスト
