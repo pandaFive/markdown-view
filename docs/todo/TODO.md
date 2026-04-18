@@ -4,6 +4,14 @@
 
 ### Low Priority
 
+#### テスト追加
+
+- [ ] `build_lagged_recovery_message` の `ReadFailed` 分岐を直接テスト
+  - ファイル: `src/server/files/tests.rs`
+  - 内容: サイズ超過ファイル・非 UTF-8 ファイルに対して `build_lagged_recovery_message` が `BroadcastMessage::Error` を返すことを検証するテストを追加
+  - 理由: 現状は `validate_and_render` 共有ユーティリティを `load_route_update` 経路のテスト（`test_load_route_update_サイズ超過を413へ変換する` 等）で担保しているが、`build_lagged_recovery_message` 側からの直接カバレッジは未整備。共通経路が将来分岐した際のリグレッション検出を強化する
+  - 出典: PR #69 pr-test-analyzer レビューの Suggestion（criticality 4-5、必須ではないが推奨）
+
 #### 軽微なリファクタ・保守改善
 
 - [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
