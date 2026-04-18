@@ -35,14 +35,6 @@
   - テスト観点: 反映成功、編集中の上書き回避、別ファイル誤反映なし
   - 理由: 同期機能は race condition を起こしやすく、ユニットテストだけでは不足する
 
-#### watcher API リファクタリング
-
-- [ ] `WatchConfig`の`&'static str`フィールド6つを`WatchStrategy`メソッドに統合
-  - ファイル: `src/watcher.rs` L32-43, L144-176
-  - 影響範囲: `WatchConfig`, `WatchStrategy`, `spawn_watcher_thread`
-  - 修正方針: `WatchStrategy`にラベル導出メソッドを追加し、`WatchConfig`を`(watch_dir, strategy)`に簡素化する。`recursive_mode`も`strategy`から導出する
-  - 理由: 30行以上の変更が必要。コピペミスリスクの排除とコード簡素化
-
 #### server files 取得フロー集約
 
 - [ ] validate-build-render パターンの3重重複を共通ヘルパーに抽出
