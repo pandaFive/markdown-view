@@ -9,7 +9,7 @@ use crate::renderer::syntax_theme_css;
 
 /// canonicalize済みの絶対パス
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CanonicalPath(PathBuf);
+pub(crate) struct CanonicalPath(PathBuf);
 
 impl CanonicalPath {
     /// パスをcanonicalizeして`CanonicalPath`を生成する
