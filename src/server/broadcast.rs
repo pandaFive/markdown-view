@@ -5,14 +5,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::files::{build_change_broadcast_message, build_lagged_recovery_message};
+use super::files::build_change_broadcast_message;
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::watcher::{WatchError, WatchEvent};
-
-pub(super) async fn lagged_recovery_message(state: &AppState) -> BroadcastMessage {
-    build_lagged_recovery_message(state).await
-}
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
@@ -269,46 +265,6 @@ mod tests {
         }
 
         forwarder.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_lagged_recovery_message_単一ファイルモードは再読み込みしたupdateを返す() {
-        let (_dir, _file_path, state) = create_single_file_state_with_fixture("test.md", "# title");
-
-        let msg = lagged_recovery_message(&state).await;
-        match msg {
-            BroadcastMessage::LaggedRecovery(message) => {
-                let json = serde_json::to_value(message).unwrap();
-                assert!(json["content"].as_str().unwrap().contains("title"));
-                assert_eq!(json["memo_refresh"], true);
-            }
-            other => panic!("LaggedRecoveryを期待したが {:?} を受信", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_lagged_recovery_message_ディレクトリモードはrefreshを返す() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "# title").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let msg = lagged_recovery_message(&state).await;
-        assert!(matches!(msg, BroadcastMessage::Refresh));
-    }
-
-    #[tokio::test]
-    async fn test_lagged_recovery_message_単一ファイル読み込み失敗時はerrorを返す() {
-        let (_dir, file_path, state) =
-            create_single_file_state_with_fixture("missing.md", "# title");
-
-        std::fs::remove_file(&file_path).unwrap();
-        let msg = lagged_recovery_message(&state).await;
-        match msg {
-            BroadcastMessage::Error(message) => {
-                assert!(message.contains("ファイル検証エラー"));
-            }
-            other => panic!("Errorを期待したが {:?} を受信", other),
-        }
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {

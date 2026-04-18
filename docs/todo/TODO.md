@@ -4,12 +4,15 @@
 
 ### Low Priority
 
-#### 軽微なリファクタ・保守改善
+#### テスト追加
 
-- [ ] `lagged_recovery_message`が単純な委譲関数。直接呼び出しで除去可能
-  - ファイル: `src/server/websocket.rs` L27-29
-  - 内容: `lagged_recovery_broadcast_message`を直接呼び出しに変更
-  - 理由: websocket.rsとfiles.rsの両方を変更する必要がある
+- [ ] `build_lagged_recovery_message` の `ReadFailed` 分岐を直接テスト
+  - ファイル: `src/server/files/tests.rs`
+  - 内容: サイズ超過ファイル・非 UTF-8 ファイルに対して `build_lagged_recovery_message` が `BroadcastMessage::Error` を返すことを検証するテストを追加
+  - 理由: 現状は `validate_and_render` 共有ユーティリティを `load_route_update` 経路のテスト（`test_load_route_update_サイズ超過を413へ変換する` 等）で担保しているが、`build_lagged_recovery_message` 側からの直接カバレッジは未整備。共通経路が将来分岐した際のリグレッション検出を強化する
+  - 出典: PR #69 pr-test-analyzer レビューの Suggestion（criticality 4-5、必須ではないが推奨）
+
+#### 軽微なリファクタ・保守改善
 
 - [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
   - ファイル: `src/server/websocket.rs` L34-40

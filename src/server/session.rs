@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use tokio::sync::broadcast;
 
-use super::broadcast::lagged_recovery_message;
+use super::files::build_lagged_recovery_message;
 use super::files::load_initial_socket_update;
 use super::messages::BroadcastMessage;
 use super::state::AppState;
@@ -101,7 +101,7 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             "[markdown-view] WebSocketクライアントが{}メッセージ遅延",
                             n
                         );
-                        let recovery = lagged_recovery_message(state.as_ref()).await;
+                        let recovery = build_lagged_recovery_message(state.as_ref()).await;
                         let payload = match recovery.to_json() {
                             Ok(json) => json,
                             Err(e) => {

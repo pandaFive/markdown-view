@@ -1058,6 +1058,22 @@ async fn test_build_lagged_recovery_message_単一ファイルモードではmem
 }
 
 #[tokio::test]
+async fn test_build_lagged_recovery_message_単一ファイル読み込み失敗時はerrorを返す() {
+    let (_dir, file_path) = create_markdown_fixture("missing.md", "# title");
+    let state = create_single_file_state(&file_path);
+    std::fs::remove_file(&file_path).unwrap();
+
+    let message = build_lagged_recovery_message(&state).await;
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(msg.contains("ファイル検証エラー"));
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
 async fn test_build_change_broadcast_message_ディレクトリモードでfileを含むupdateを返す() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());
