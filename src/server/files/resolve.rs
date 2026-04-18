@@ -258,7 +258,11 @@ fn build_resolved_target(
             file_path.display(),
             state.mode().base_dir().display()
         );
-        // HTTP経路ではサイドバーのハイライト低下に留め、描画継続を優先する。
+        // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
+        // - 本関数は警告ログのみで描画継続を許容する（graceful degradation）
+        // - HTTP経路: サイドバーのハイライトが落ちるだけで本文描画は継続
+        // - WebSocket変更通知経路: build_update_target が relative_path.is_none() を見て
+        //   ブロードキャスト自体をスキップし、不整合な更新が出ないよう抑止する
     }
 
     ResolvedTarget::new(file_path, file_list, relative_path)

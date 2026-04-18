@@ -4,29 +4,19 @@
 
 ### Low Priority
 
-#### 軽微なリファクタ・保守改善
+#### テスト追加
 
-- [ ] `handle_socket`内の`if let Some` + `match`のネストを2ステップに分離
-  - ファイル: `src/server/websocket.rs` L34-40
-  - 内容: 中間変数に束縛してから`if let`で分岐
-  - 理由: 可読性改善のみでリスクに見合わない
-
-- [ ] `resolve.rs` L240のコメント詳細化
-  - ファイル: `src/server/files/resolve.rs` L240
-  - 内容: `build_resolved_target`のgraceful degradationコメントにWebSocketパスの安全性文脈を復元
-  - 理由: 旧5行から新1行に簡略化され、保守者向け情報が減少
-
-- [ ] `MemoResponse::new`を`from_raw`に変更してraw/html不整合リスクを排除
+- [ ] `MemoResponse::from_raw` の契約テストを追加
   - ファイル: `src/template/message.rs`
-  - 内容: `new(raw, html, file)`を`from_raw(raw, file)`に変更し、内部で`render_markdown`を呼ぶ
-  - セキュリティ観点: raw と html の責務を一本化し、未整合な HTML 混入経路を減らす
-  - 理由: 呼び出し側でraw/htmlの整合性を保証する責務がなくなる
+  - 内容: `#[cfg(test)]` モジュールを新設し、`from_raw(s, _).html()` が `render_markdown(s)` と一致すること（任意の入力 `s`、空文字列、見出し付きMarkdown）、および `raw()` が入力を改変せず返すことを直接アサート。`empty(_)` が `from_raw(String::new(), _)` と一致することも検証
+  - 理由: PR #71 で `new(raw, html, file)` を `from_raw(raw, file)` に置換し HTML を内部生成に変更したが、新契約「html ≡ render_markdown(raw)」を直接検証するテストが存在しない。将来 `from_raw` 内処理が変わっても検知不能
+  - 出典: PR #71 pr-test-analyzer レビューの Suggestion（criticality 3/5）
 
-- [ ] `render_markdown("")`の結果をOnceLockでキャッシュ
-  - ファイル: `src/template/message.rs`
-  - 内容: `MemoResponse::empty`が毎回呼ぶ`render_markdown("")`の結果を静的キャッシュ
-  - 注意点: 計測値なしのため、実施前に効果確認を行う
-  - 理由: メモ未作成ファイルが多い場合のマイクロ最適化候補
+- [ ] `test_メモuiが描画される` にメモ本文の挙動アサーションを復活
+  - ファイル: `src/template/mod.rs` L631 付近
+  - 内容: `assert!(html.contains("<blockquote"))` などメモ本文の描画結果を確認するアサーションを追加
+  - 理由: PR #71 で raw/html を `"> 引用メモ"` に統一した結果、メモ本文の描画挙動を検証するアサーションが消滅。現状は DOM 要素の存在確認のみで、メモ→HTML の描画パスがテストされていない
+  - 出典: PR #71 pr-test-analyzer レビューの Suggestion（criticality 2/5、安価で価値あり）
 
 #### メモ機能: 参照導線改善
 

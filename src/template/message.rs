@@ -49,14 +49,15 @@ pub struct MemoResponse {
 }
 
 impl MemoResponse {
-    /// メモ応答を生成する
-    pub fn new(raw: String, html: SanitizedHtml, file: Option<String>) -> Self {
+    /// メモ応答を生成する。HTML は内部で raw から描画され、整合性が保証される。
+    pub fn from_raw(raw: String, file: Option<String>) -> Self {
+        let html = render_markdown(&raw);
         Self { raw, html, file }
     }
 
     /// 空メモ応答を生成する
     pub fn empty(file: Option<String>) -> Self {
-        Self::new(String::new(), render_markdown(""), file)
+        Self::from_raw(String::new(), file)
     }
 
     /// 生のメモ文字列を返す
