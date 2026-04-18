@@ -24,13 +24,14 @@ async fn notify_ws_internal_error(socket: &mut WebSocket, message: &str) -> bool
 pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.tx().subscribe();
 
-    if let Some(update) = match load_initial_socket_update(state.as_ref()).await {
+    let initial = match load_initial_socket_update(state.as_ref()).await {
         Ok(update) => update,
         Err(error) => {
             let _ = send_close_frame(&mut socket, error.close_code(), error.reason()).await;
             return;
         }
-    } {
+    };
+    if let Some(update) = initial {
         let msg = match BroadcastMessage::Update(update).to_json() {
             Ok(json) => json,
             Err(e) => {
