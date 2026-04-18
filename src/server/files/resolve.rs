@@ -62,49 +62,67 @@ impl ResolvedTarget {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::server) enum RouteTargetRequest<'a> {
-    Page { query_file: Option<&'a str> },
-    ApiContent { query_file: Option<&'a str> },
-    ApiMemo { query_file: Option<&'a str> },
+pub(in crate::server) struct RouteTargetRequest<'a> {
+    kind: RouteTargetKind,
+    query_file: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::server) enum RouteTargetKind {
+    Page,
+    ApiContent,
+    ApiMemo,
 }
 
 impl<'a> RouteTargetRequest<'a> {
     pub(in crate::server) fn page(query_file: Option<&'a str>) -> Self {
-        Self::Page { query_file }
-    }
-
-    pub(in crate::server) fn api_content(query_file: Option<&'a str>) -> Self {
-        Self::ApiContent { query_file }
-    }
-
-    pub(in crate::server) fn api_memo(query_file: Option<&'a str>) -> Self {
-        Self::ApiMemo { query_file }
-    }
-
-    pub(in crate::server) fn query_file(self) -> Option<&'a str> {
-        match self {
-            Self::Page { query_file }
-            | Self::ApiContent { query_file }
-            | Self::ApiMemo { query_file } => query_file,
+        Self {
+            kind: RouteTargetKind::Page,
+            query_file,
         }
     }
 
+    pub(in crate::server) fn api_content(query_file: Option<&'a str>) -> Self {
+        Self {
+            kind: RouteTargetKind::ApiContent,
+            query_file,
+        }
+    }
+
+    pub(in crate::server) fn api_memo(query_file: Option<&'a str>) -> Self {
+        Self {
+            kind: RouteTargetKind::ApiMemo,
+            query_file,
+        }
+    }
+
+    pub(in crate::server) fn query_file(self) -> Option<&'a str> {
+        self.query_file
+    }
+
+    #[cfg(test)]
+    pub(in crate::server) fn kind(self) -> RouteTargetKind {
+        self.kind
+    }
+
     fn include_file_list(self) -> bool {
-        matches!(self, Self::Page { .. })
+        matches!(self.kind, RouteTargetKind::Page)
     }
 
     fn not_found_message(self) -> &'static str {
-        match self {
-            Self::Page { .. } => "表示可能なMarkdownファイルが見つかりません",
-            Self::ApiContent { .. } | Self::ApiMemo { .. } => "指定したファイルが見つかりません",
+        match self.kind {
+            RouteTargetKind::Page => "表示可能なMarkdownファイルが見つかりません",
+            RouteTargetKind::ApiContent | RouteTargetKind::ApiMemo => {
+                "指定したファイルが見つかりません"
+            }
         }
     }
 
     pub(in crate::server) fn read_error_log_label(self) -> &'static str {
-        match self {
-            Self::Page { .. } => "index",
-            Self::ApiContent { .. } => "api/content",
-            Self::ApiMemo { .. } => "api/memo",
+        match self.kind {
+            RouteTargetKind::Page => "index",
+            RouteTargetKind::ApiContent => "api/content",
+            RouteTargetKind::ApiMemo => "api/memo",
         }
     }
 }

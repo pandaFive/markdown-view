@@ -341,6 +341,8 @@ mod tests {
     use super::*;
     use tokio::sync::broadcast;
 
+    use super::super::files::RouteTargetKind;
+
     fn create_directory_state(base_dir: &std::path::Path) -> Arc<AppState> {
         let (tx, _rx) = broadcast::channel(16);
         Arc::new(AppState::new(
@@ -368,12 +370,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            context.memo_request(),
-            RouteTargetRequest::ApiMemo {
-                query_file: Some("docs/guide.md")
-            }
-        ));
+        let memo_request = context.memo_request();
+        assert_eq!(memo_request.kind(), RouteTargetKind::ApiMemo);
+        assert_eq!(memo_request.query_file(), Some("docs/guide.md"));
     }
 
     #[test]
