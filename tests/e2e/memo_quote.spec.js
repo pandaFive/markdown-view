@@ -49,10 +49,10 @@ test('本文選択から引用をメモへ追加できる', async ({ page }) => 
   await expect(page.locator('#panel-memo.active')).toBeVisible();
   const memoEditor = page.locator('#memo-editor');
   await expect(memoEditor).toHaveValue(/> Initial README content/);
-  await expect(memoEditor).toHaveValue(/出典: \[README\.md > README\]\(\?file=README\.md#readme\) L3/);
+  await expect(memoEditor).toHaveValue(/出典: \[README\.md > README \(L3\)\]\(\?file=README\.md#readme:L3\)/);
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
   await expect(page.locator('#memo-preview')).toContainText('Initial README content');
-  await expect(page.locator('#memo-preview')).toContainText('README.md > README L3');
+  await expect(page.locator('#memo-preview')).toContainText('README.md > README (L3)');
 });
 
 test('ファイルごとに別メモが読み込まれる', async ({ page }) => {
@@ -70,5 +70,5 @@ test('ファイルごとに別メモが読み込まれる', async ({ page }) => 
   await selectParagraphText(page, 'Notes body');
   await page.locator('#quote-selection-action').click();
   await expect(page.locator('#memo-editor')).toHaveValue(/> Notes body/);
-  await expect(page.locator('#memo-editor')).toHaveValue(/出典: \[notes\.md > Notes\]\(\?file=notes\.md#notes\) L3/);
+  await expect(page.locator('#memo-editor')).toHaveValue(/出典: \[notes\.md > Notes \(L3\)\]\(\?file=notes\.md#notes:L3\)/);
 });
