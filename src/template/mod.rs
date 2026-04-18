@@ -654,8 +654,8 @@ mod tests {
         assert!(html.contains("id=\"quote-selection-action\""));
         assert!(html.contains("data-memo-file=\"README.md\""));
         assert!(
-            html.contains("<blockquote"),
-            "raw=\"> 引用メモ\" から render_markdown 経由で <blockquote> が描画されること"
+            html.contains("<blockquote>"),
+            "raw=\"> 引用メモ\" から render_markdown 経由で <blockquote> 要素が描画されること"
         );
     }
 

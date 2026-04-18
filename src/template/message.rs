@@ -116,7 +116,7 @@ mod tests {
             assert_eq!(
                 memo.html(),
                 &render_markdown(input),
-                "from_raw({:?}).html() must equal render_markdown({:?})",
+                "from_raw({:?}).html() は render_markdown({:?}) と一致する必要がある",
                 input,
                 input
             );
