@@ -6,11 +6,6 @@
 
 #### 軽微なリファクタ・保守改善
 
-- [ ] `WatchEvent::Error(String)`の構造化エラー化
-  - ファイル: `src/watcher.rs` L14-23
-  - 内容: 将来コンシューマが増えた場合に`WatchErrorKind`列挙型への移行を検討
-  - 理由: 現在は単一コンシューマのため優先度低
-
 - [ ] `file_label`算出ロジックが`ResolvedTarget::new`と`update_broadcast_message`で重複
   - ファイル: `src/server/files.rs` L217-220
   - 内容: 共通関数`file_display_name(path: &Path) -> String`を抽出
