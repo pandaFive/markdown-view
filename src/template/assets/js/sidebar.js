@@ -104,11 +104,14 @@ if (isDirMode) {
       return;
     }
 
-    // 目次クリック直後にブラウザが同一documentのhashナビゲーションで発火させる
-    // popstate は、clickハンドラ側で既に markPendingTocNavigation + ブラウザの
-    // アンカースクロールを走らせているため、restore側で再度 scrollIntoView を
-    // 呼ぶとユーザの明示的 scrollTo を上書きし逆方向スクロール判定を壊す。
-    // pending と一致する hash の再処理はスキップする。
+    // 目次クリック直後の猶予期間（TOC_NAVIGATION_GRACE_MS=400ms）内は
+    // pendingTocNavigationId が立ち、ブラウザ既定のアンカースクロールも完了している。
+    // このタイミングで pending と同一 hash の popstate が発火すると、restore 経由の
+    // scrollIntoView がユーザの明示的 scrollTo を上書きし、getPendingTocNavigationId
+    // の帯外判定（同ファイル L208）が働かず逆方向スクロールで pending がクリアされなく
+    // なる。一致 hash の再処理は redundant なのでスキップする。
+    // 行範囲形式（例 '#foo:L5'）は pendingTocNavigationId (='foo') と不一致のため
+    // ここを通過し、restore 側の lineRange 分岐で処理される。
     if (pendingTocNavigationId && hash === '#' + pendingTocNavigationId) {
       return;
     }

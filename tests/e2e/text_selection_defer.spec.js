@@ -353,8 +353,30 @@ test('目次クリック直後の小揺らしではクリック先のactiveが�
   await page.evaluate(() => {
     window.scrollTo(0, (window.scrollY || window.pageYOffset) + 6);
   });
+  // grace (400ms) 内にscroll→scheduleTocTrackingUpdate→raFまで走り切らせる。
+  // 150msはTOC_NAVIGATION_GRACE_MS未満で意図的に小さい値
   await page.waitForTimeout(150);
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('line-range付きhashのpopstateはpending idと不一致のためrestore経路で処理される', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  const betaScrollY = await page.evaluate(() => window.scrollY);
+
+  // pending='beta'の猶予期間内に同id+line-range形式のhashでpopstateを発火。
+  // '#beta:L3'は '#' + 'beta' と文字列不一致のためpopstateガードを通過し、
+  // restore → applyContentAnchorNavigation の lineRange 分岐で line 3 相当の
+  // 位置へジャンプしてscrollYが減少する。もし将来ガード比較が startsWith 等に
+  // 緩められると line-range ジャンプが redundant 扱いでスキップされ scrollY が
+  // beta 位置のまま残る回帰を検出する
+  await page.evaluate(() => {
+    history.pushState(null, '', '?file=README.md#beta:L3');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(betaScrollY);
 });
 
 test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {
