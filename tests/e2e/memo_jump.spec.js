@@ -267,8 +267,8 @@ test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは has
 });
 
 test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合は augment しない', async ({ page }) => {
-  // 正規表現の否定先読み `(?![\w])` の回帰防止。L数字の直後に英数字やアンダースコアが続く
-  // 別トークン（例: `L5abc`, `L5_foo`）を誤って行番号として採用しないことを検証
+  // L 数字の直後に英数字やアンダースコアが続く別トークン（例: `L5abc`, `L5_foo`）を
+  // 誤って行番号として採用しないことを検証
   const result = await page.evaluate(() => {
     const container = document.getElementById('memo-preview');
     const link = document.createElement('a');
@@ -285,8 +285,31 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
       }
     }
   });
-  // lookahead が外れると `#section-b:L5` に augment される。入力 hash のままならガードが効いている
+  // 末尾アンカーが外れると `#section-b:L5` に augment される。入力 hash のままなら regex が効いている
   expect(result).toBe('#section-b');
+});
+
+test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
+  // ユーザー自作メモでリンク直後に行番号から始まる散文（例: `L10 onwards は詳しい`）が続く場合、
+  // legacy citation と区別して augment しないことを検証（Codex review 4136142343 指摘）
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=spec.md#intro';
+    link.textContent = 'spec';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L10 onwards は詳しい説明'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#intro');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  // 末尾アンカー `\s*$` が外れると `#intro:L10` に augment される。入力 hash のままなら OK
+  expect(result).toBe('#intro');
 });
 
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {

@@ -171,21 +171,23 @@ function parseLineHash(hash) {
   return { headingId: decoded, lineRange: null };
 }
 
-/// 旧形式メモ互換: リンク直後のテキストに `L5` / `L5-L7` が並ぶ場合、
+/// 旧形式メモ互換: リンク直後のテキストが `L5` / `L5-L7` **単独**で段落を終えている場合、
 /// その行範囲を既存 hash に `:L5-L7` として合成して返す。
 /// 新形式（href fragment 内に `:L5-L7`）や行範囲情報が無い場合は hash をそのまま返す。
 /// renderer が text をソース行トラッキング用 `<span>` でラップするケースにも対応するため、
 /// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
 /// 本文コンテンツ内の自然文（`[spec](spec.md) L5 onwards...` など）を誤ってジャンプ対象にしないよう、
-/// `#memo-preview` 配下のリンクに限定する。
+/// `#memo-preview` 配下のリンクに限定しつつ、末尾アンカーで散文後続ケースも除外する。
 function augmentHashWithTrailingLineHint(link, hash) {
   if (!link || !link.closest || !link.closest('#memo-preview')) return hash;
   var sibling = link.nextSibling;
   if (!sibling) return hash;
   if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
   if (parseLineHash(hash).lineRange) return hash;
-  // 否定先読みで `L5a` / `L5_` / `L5-L7x` のように英数字/アンダースコアが続く別トークンを弾く
-  var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?(?![\w])/);
+  // 末尾アンカー `\s*$` で「行番号トークン単独 + 空白/改行のみ」で sibling text 全体が占められる
+  // ことを要求し、`L10 onwards...` のようなユーザー自作メモの散文を augment 対象から除外する。
+  // 旧形式メモ（定型）の sibling text は ` L15` / ` L15-L17\n` のように段落末で完結するため合致する
+  var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?\s*$/);
   if (!match) return hash;
   var start = parseInt(match[1], 10);
   var end = match[2] ? parseInt(match[2], 10) : start;
