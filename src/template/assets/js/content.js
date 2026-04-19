@@ -178,6 +178,7 @@ function scrollToLineRange(targetLine, behavior) {
   // 候補から「最狭マッチ（最深containment）」を選ぶ。
   // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、<li> を選ばないと
   // コンテナ先頭にスクロールしてしまうため (PR #73 codex-bot レビュー指摘)
+  // 同値スパン（ネストblockquote内の単独<p>など）では `<=` 比較で DOM 深い側を優先する
   var best = null;
   var bestSpan = Infinity;
   for (var i = 0; i < blocks.length; i++) {
@@ -193,7 +194,7 @@ function scrollToLineRange(targetLine, behavior) {
     if (isNaN(s) || isNaN(e)) continue;
     if (s <= targetLine && e >= targetLine) {
       var span = e - s;
-      if (span < bestSpan) {
+      if (span <= bestSpan) {
         bestSpan = span;
         best = block;
       }
