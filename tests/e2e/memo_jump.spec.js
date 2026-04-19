@@ -356,6 +356,56 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
   expect(result).toBe('#section-b:L17');
 });
 
+test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば sibling の L<n> で上書きしない', async ({ page }) => {
+  // 新形式 hash (`#section-b:L15`) が既に lineRange を含む場合、parseLineHash(hash).lineRange の
+  // 早期 return により sibling `L20` は無視される。本体 PR #75 で行範囲 hash を採用する際の
+  // precedence ルールを明示的に担保する
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b:L15';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L20'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b:L15');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L15');
+});
+
+test('augmentHashWithTrailingLineHint は空 hash に対し #L<n> を合成する（コロン prefix なし）', async ({ page }) => {
+  // hash が '' または '#' のとき、`'#' + suffix` を返す合成経路を検証。
+  // 現行は `':' + suffix` ではなく `'#' + suffix` を採用しており、`#:L42` のような不正な
+  // フラグメント生成（parseLineHash が headingId='' で失敗する）を回帰させないことを担保する
+  const results = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L42'));
+    try {
+      return {
+        empty: augmentHashWithTrailingLineHint(link, ''),
+        hashOnly: augmentHashWithTrailingLineHint(link, '#')
+      };
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(results.empty).toBe('#L42');
+  expect(results.hashOnly).toBe('#L42');
+});
+
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
   // 複数行で1つの<p>になる段落。中間行を指定しても同じ段落がハイライトされる
   await page.goto('/?file=long.md');
