@@ -6,15 +6,6 @@
 
 ### High Priority
 
-- [ ] `text_selection_defer.spec.js:333` 目次クリック直後の逆方向スクロール判定が誤動作
-  - ファイル: `tests/e2e/text_selection_defer.spec.js`
-  - 行番号: L333-L345（テスト本体）、L344 でアサーション失敗
-  - 症状: `expect.poll(() => activeTocLabel(page)).toBe('Alpha')` が `'Beta'` のまま timeout (5000ms)
-  - 再現: `npx playwright test tests/e2e/text_selection_defer.spec.js:333`
-  - 再現性: develop でも再現（stable）
-  - 理由: TOC ナビゲーションの主要動線。クリック直後に逆方向スクロールで通常判定に戻る仕様の回帰
-  - 優先度: High
-
 - [ ] `markdown_links.spec.js:124` 壊れたフラグメントリンクの hash クリア + 警告動作
   - ファイル: `tests/e2e/markdown_links.spec.js`
   - 行番号: L124（テスト開始行）
