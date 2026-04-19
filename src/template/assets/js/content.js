@@ -171,22 +171,23 @@ function parseLineHash(hash) {
   return { headingId: decoded, lineRange: null };
 }
 
-/// 旧形式メモ互換: リンク直後のテキストが `L5` / `L5-L7` **単独**で段落を終えている場合、
+/// 旧形式メモ互換: リンク直後の兄弟テキストノードが `L5` / `L5-L7` と空白のみで構成される場合、
 /// その行範囲を既存 hash に `:L5-L7` として合成して返す。
-/// 新形式（href fragment 内に `:L5-L7`）や行範囲情報が無い場合は hash をそのまま返す。
-/// renderer が text をソース行トラッキング用 `<span>` でラップするケースにも対応するため、
+/// Why: 新形式（href fragment 内 `:L5-L7`）にフォーマット移行する前に生成された旧形式 citation
+/// （`出典: [link](url) L15` の散文配置）を既存資産を書き換えずに救済する。
+/// `#memo-preview` 配下のリンクに限定することで、ユーザーが本文に書いた `[spec](spec.md) L5 ...` の
+/// ような自然文リンクを誤ジャンプ対象にしない。
+/// 新形式（行範囲を既に含む hash）や行範囲情報が無い場合は hash をそのまま返す。
+/// renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応するため、
 /// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
-/// 本文コンテンツ内の自然文（`[spec](spec.md) L5 onwards...` など）を誤ってジャンプ対象にしないよう、
-/// `#memo-preview` 配下のリンクに限定しつつ、末尾アンカーで散文後続ケースも除外する。
 function augmentHashWithTrailingLineHint(link, hash) {
   if (!link || !link.closest || !link.closest('#memo-preview')) return hash;
   var sibling = link.nextSibling;
   if (!sibling) return hash;
   if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
   if (parseLineHash(hash).lineRange) return hash;
-  // 末尾アンカー `\s*$` で「行番号トークン単独 + 空白/改行のみ」で sibling text 全体が占められる
-  // ことを要求し、`L10 onwards...` のようなユーザー自作メモの散文を augment 対象から除外する。
-  // 旧形式メモ（定型）の sibling text は ` L15` / ` L15-L17\n` のように段落末で完結するため合致する
+  // 両端アンカー `^\s*...\s*$` で sibling textContent 全体が行番号トークンのみで構成されることを要求。
+  // これにより `L10 onwards...` の散文や `L5abc` の別トークン連続を augment 対象から除外する
   var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?\s*$/);
   if (!match) return hash;
   var start = parseInt(match[1], 10);

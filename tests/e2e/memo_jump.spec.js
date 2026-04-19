@@ -267,8 +267,8 @@ test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは has
 });
 
 test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合は augment しない', async ({ page }) => {
-  // L 数字の直後に英数字やアンダースコアが続く別トークン（例: `L5abc`, `L5_foo`）を
-  // 誤って行番号として採用しないことを検証
+  // L 数字の直後に英数字/アンダースコアが続く別トークン（例: `L5abc`, `L5_foo`）は行番号として
+  // 採用しないことを検証。両端アンカーが外れると `#section-b:L5` に誤 augment される
   const result = await page.evaluate(() => {
     const container = document.getElementById('memo-preview');
     const link = document.createElement('a');
@@ -285,13 +285,14 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
       }
     }
   });
-  // 末尾アンカーが外れると `#section-b:L5` に augment される。入力 hash のままなら regex が効いている
   expect(result).toBe('#section-b');
 });
 
 test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
-  // ユーザー自作メモでリンク直後に行番号から始まる散文（例: `L10 onwards は詳しい`）が続く場合、
-  // legacy citation と区別して augment しないことを検証（Codex review 4136142343 指摘）
+  // ユーザー自作メモでリンク直後に行番号から始まる散文（`L10 onwards は詳しい` 等）が続く場合、
+  // sibling textContent 全体が行番号トークンのみで占められないため augment しない。
+  // 旧 regex（末尾アンカーなし）は先頭 `L10` を拾って `#intro:L10` に誤書換していた既知の
+  // false positive を回帰させないことを担保（Codex review #4136142343 の再発防止）
   const result = await page.evaluate(() => {
     const container = document.getElementById('memo-preview');
     const link = document.createElement('a');
@@ -308,8 +309,51 @@ test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では
       }
     }
   });
-  // 末尾アンカー `\s*$` が外れると `#intro:L10` に augment される。入力 hash のままなら OK
   expect(result).toBe('#intro');
+});
+
+test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく hash 末尾に合成する', async ({ page }) => {
+  // 範囲形式 positive branch を直接検証。regex の capture group 2 と suffix 生成
+  // (`'L' + start + '-L' + end`) がともに機能することを担保
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L15-L17'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L15-L17');
+});
+
+test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start のみ採用', async ({ page }) => {
+  // end < start（逆転）および end == start（単一行）は start 1 行に縮退する。
+  // 将来 regex や suffix 生成を改変したとき「逆転時は null を返す」等の silent 仕様変更を検出する
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L17-L15'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L17');
 });
 
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
