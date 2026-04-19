@@ -184,12 +184,12 @@ function augmentHashWithTrailingLineHint(link, hash) {
   if (!sibling) return hash;
   if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
   if (parseLineHash(hash).lineRange) return hash;
-  // 否定先読みで `L123abc` のような別トークンへの誤マッチを防ぐ
+  // 否定先読みで `L5a` / `L5_` / `L5-L7x` のように英数字/アンダースコアが続く別トークンを弾く
   var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?(?![\w])/);
   if (!match) return hash;
   var start = parseInt(match[1], 10);
   var end = match[2] ? parseInt(match[2], 10) : start;
-  // 逆転範囲は start のみ採用
+  // end < start（逆転）および end == start（単一行）はどちらも start 1 行として扱う
   var suffix = end > start ? 'L' + start + '-L' + end : 'L' + start;
   if (!hash || hash === '#') return '#' + suffix;
   return hash + ':' + suffix;

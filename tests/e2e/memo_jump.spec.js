@@ -203,7 +203,7 @@ test('ネストしたblockquote内の行へジャンプすると最内段落が�
 });
 
 test('旧形式メモ（リンク外の行番号）の出典クリックでも行範囲ジャンプできる', async ({ page }) => {
-  // PR #73 以前に生成されたメモは `出典: [...](...#heading) L15` のように
+  // 行範囲ジャンプ機能導入以前に生成されたメモは `出典: [...](...#heading) L15` のように
   // 行範囲がリンク外テキストとして並ぶ。このレガシー形式でも fine-grained ジャンプできることを検証する。
   // fixture 編集時の行ズレを避けるため TARGET BLOCK の行番号は lineBlockStartOf で動的取得する
   const range = await lineBlockStartOf(page, 'Paragraph B2 content TARGET BLOCK');
@@ -240,6 +240,53 @@ test('旧形式メモ（リンク外の行番号）の出典クリックでも�
   await expect(highlighted).toContainText('TARGET BLOCK');
 
   await expect(page.locator('#content .jump-highlight')).toHaveCount(0, { timeout: 5000 });
+});
+
+test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは hash を変えない', async ({ page }) => {
+  // スコープガードの回帰防止。本文コンテンツの自然文 `[spec](spec.md) L10 onwards...` などが
+  // 誤ってジャンプ対象にならないことを、関数を直接呼び出して検証する
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('content');
+    const link = document.createElement('a');
+    link.href = 'other.md';
+    link.textContent = 'other';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L10 onwards'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '');
+    } finally {
+      link.remove();
+      // 末尾のテキストノードを除去（container の最後の child を削除）
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  // ガードが外れると `#L10` に augment される。空文字列のままなら正しくスキップされている
+  expect(result).toBe('');
+});
+
+test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合は augment しない', async ({ page }) => {
+  // 正規表現の否定先読み `(?![\w])` の回帰防止。L数字の直後に英数字やアンダースコアが続く
+  // 別トークン（例: `L5abc`, `L5_foo`）を誤って行番号として採用しないことを検証
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L5abc trailing'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  // lookahead が外れると `#section-b:L5` に augment される。入力 hash のままならガードが効いている
+  expect(result).toBe('#section-b');
 });
 
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
