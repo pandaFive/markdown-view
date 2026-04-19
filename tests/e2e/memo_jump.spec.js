@@ -356,6 +356,57 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
   expect(result).toBe('#section-b:L17');
 });
 
+test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば link.nextSibling の L<n> で上書きしない', async ({ page }) => {
+  // リンク href が明示的に行範囲を指定している場合 (`#section-b:L15`)、link.nextSibling の
+  // `L20` は旧形式 citation の推測に過ぎないため、明示指定を上書きしないことを保証する。
+  // parseLineHash(hash).lineRange が truthy のときの早期 return で実現されている
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b:L15';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L20'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b:L15');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L15');
+});
+
+test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n> にはしない）', async ({ page }) => {
+  // 2 つある合成分岐のうち、空 hash 経路では `hash + ':' + suffix` ではなく `'#' + suffix`
+  // を選ぶことを固定。headingId を持たない hash の正準形は `#L42` であり、`#:L42` は
+  // parseLineHash では一応パース可能だが headingId=null の非直感的フラグメントを生成するため
+  // 意図的に避けている。この選択を silent に反転させる退行を検出する
+  const results = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L42'));
+    try {
+      return {
+        empty: augmentHashWithTrailingLineHint(link, ''),
+        hashOnly: augmentHashWithTrailingLineHint(link, '#')
+      };
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(results.empty).toBe('#L42');
+  expect(results.hashOnly).toBe('#L42');
+});
+
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
   // 複数行で1つの<p>になる段落。中間行を指定しても同じ段落がハイライトされる
   await page.goto('/?file=long.md');
