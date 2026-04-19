@@ -93,7 +93,7 @@ impl RenderState {
                 start: start_range.start,
                 end: range.end,
             })
-            .map(|full_range| source_line_attrs(line_lookup, &full_range))
+            .map(|full_range| line_block_marker_with(source_line_attrs(line_lookup, &full_range)))
             .unwrap_or_default();
         if let Some(ref lang) = self.code_block_lang {
             let highlighted = ss
@@ -221,7 +221,9 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     let id = generate_unique_id(&slug, &mut id_counts);
                     let heading_attrs = heading_range
                         .as_ref()
-                        .map(|heading_range| source_line_attrs(&line_lookup, heading_range))
+                        .map(|heading_range| {
+                            line_block_marker_with(source_line_attrs(&line_lookup, heading_range))
+                        })
                         .unwrap_or_default();
 
                     state.push_html(&format!(
@@ -327,7 +329,10 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::Rule => {
                 state.push_html("<hr />\n");
             }
-            Event::Start(Tag::Paragraph) => state.push_html("<p>"),
+            Event::Start(Tag::Paragraph) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<p{}>", attrs));
+            }
             Event::End(TagEnd::Paragraph) => {
                 state.push_html("</p>\n");
             }
@@ -422,21 +427,31 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     state.push_html("</a>");
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => state.push_html("<blockquote>\n"),
+            Event::Start(Tag::BlockQuote(_)) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<blockquote{}>\n", attrs));
+            }
             Event::End(TagEnd::BlockQuote(_)) => {
                 state.push_html("</blockquote>\n");
             }
             Event::Start(Tag::List(Some(start))) => {
-                state.push_html(&format!("<ol start=\"{}\">\n", start));
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<ol start=\"{}\"{}>\n", start, attrs));
             }
-            Event::Start(Tag::List(None)) => state.push_html("<ul>\n"),
+            Event::Start(Tag::List(None)) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<ul{}>\n", attrs));
+            }
             Event::End(TagEnd::List(true)) => {
                 state.push_html("</ol>\n");
             }
             Event::End(TagEnd::List(false)) => {
                 state.push_html("</ul>\n");
             }
-            Event::Start(Tag::Item) => state.push_html("<li>"),
+            Event::Start(Tag::Item) => {
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<li{}>", attrs));
+            }
             Event::End(TagEnd::Item) => {
                 state.push_html("</li>\n");
             }
@@ -448,7 +463,8 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
             }
             Event::Start(Tag::Table(alignments)) => {
-                state.push_html("<table>\n");
+                let attrs = block_line_attrs(&line_lookup, &range);
+                state.push_html(&format!("<table{}>\n", attrs));
                 in_table_head = false;
                 table_alignments = alignments;
                 table_cell_index = 0;
@@ -544,6 +560,27 @@ fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
         " data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
         start_line, end_line
     )
+}
+
+/// block-level コンテナ（<p>, <ul>, <ol>, <li>, <table>, <blockquote>）向けの行範囲属性。
+///
+/// 設計意図: 新規attribute `data-line-block-start/end` のみを付与し、既存 `data-source-*` は
+/// 付与しない。理由は `getSelectionLineRange()` (memo.js) が `[data-source-start-line]` で
+/// 集計しており、コンテナにも `data-source-*` を付けると、中の `<li>` 単体を選択しても
+/// 祖先 `<ul>` の範囲まで拾って引用 `Lx-Ly` が広がる回帰を起こすため。
+/// heading / code-block は元から `data-source-*` を持つ（その要素の範囲を示すのが正しい）のでそちらは維持。
+fn block_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
+    let (start_line, end_line) = line_lookup.line_range(range);
+    format!(
+        " data-line-block data-line-block-start=\"{}\" data-line-block-end=\"{}\"",
+        start_line, end_line
+    )
+}
+
+/// heading / code-block 用: 既存の `source_line_attrs` に `data-line-block` マーカーを前置。
+/// これらの要素は元から `data-source-*` を持ち、quote 機能上もその範囲が「その要素の範囲」として正しい。
+fn line_block_marker_with(source_attrs: String) -> String {
+    format!(" data-line-block{}", source_attrs)
 }
 
 fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {

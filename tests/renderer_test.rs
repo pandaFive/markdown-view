@@ -28,6 +28,22 @@ fn normalize_source_markup(html: &str) -> String {
         normalized.replace_range(start..end, "");
     }
 
+    while let Some(start) = normalized.find(" data-line-block-start=\"") {
+        let end_attr = " data-line-block-end=\"";
+        let second_attr_start = normalized[start..]
+            .find(end_attr)
+            .map(|offset| start + offset)
+            .expect("data-line-block-end attribute should exist when -start exists");
+        let value_start = second_attr_start + end_attr.len();
+        let end = normalized[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset + 1)
+            .expect("data-line-block-end attribute should close");
+        normalized.replace_range(start..end, "");
+    }
+
+    normalized = normalized.replace(" data-line-block", "");
+
     normalized.replace("</span>", "")
 }
 
@@ -118,7 +134,7 @@ fn test_コードブロックにソース行番号属性が付与される() {
     let md = "```rust\nfn main() {}\n```";
     let html = render_markdown(md);
     assert!(html.as_str().contains(
-        r#"<pre class="code-block" data-source-start-line="1" data-source-end-line="3">"#
+        r#"<pre class="code-block" data-line-block data-source-start-line="1" data-source-end-line="3">"#
     ));
 }
 
@@ -135,6 +151,173 @@ fn test_ソース行番号属性の値が複数行入力でも正確() {
         .as_str()
         .contains(r#"<span data-source-start-line="4" data-source-end-line="4">Line two</span>"#));
     assert_eq!(source_line_attrs(html.as_str(), "pre"), Some((6, 9)));
+}
+
+#[test]
+fn test_段落にdata_line_block属性が付与される() {
+    let html = render_markdown("Hello paragraph");
+    assert!(
+        html.as_str().contains("<p data-line-block"),
+        "段落 <p> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+}
+
+#[test]
+fn test_見出しにdata_line_block属性が付与される() {
+    let html = render_markdown("# 見出し");
+    assert!(
+        html.as_str().contains("data-line-block"),
+        "見出し <h1> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+    // <h1 id="..." data-line-block ...> の順序確認（class位置はidの後）
+    assert!(html.as_str().contains("<h1 id="));
+}
+
+#[test]
+fn test_blockquoteにdata_line_block属性が付与される() {
+    let html = render_markdown("> 引用");
+    assert!(
+        html.as_str().contains("<blockquote data-line-block"),
+        "<blockquote> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+}
+
+#[test]
+fn test_ul要素にdata_line_block属性が付与される() {
+    let html = render_markdown("- item1\n- item2");
+    assert!(
+        html.as_str().contains("<ul data-line-block"),
+        "<ul> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+    assert!(
+        html.as_str().contains("<li data-line-block"),
+        "<li> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+}
+
+#[test]
+fn test_ol要素にdata_line_block属性が付与される() {
+    let html = render_markdown("1. first\n2. second");
+    assert!(
+        html.as_str().contains("<ol start=\"1\" data-line-block"),
+        "<ol> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+}
+
+#[test]
+fn test_table要素にdata_line_block属性が付与される() {
+    let html = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |");
+    assert!(
+        html.as_str().contains("<table data-line-block"),
+        "<table> に data-line-block 属性が付くこと: {}",
+        html.as_str()
+    );
+}
+
+#[test]
+fn test_インライン要素にはdata_line_blockが付かない() {
+    // span / code / em / strong / a にはdata-line-blockが付かない
+    let html =
+        render_markdown("通常の**強調**と `コード` と *斜体* と [リンク](http://example.com)");
+    let html_str = html.as_str();
+    assert!(
+        !html_str.contains("<span data-line-block"),
+        "<span> にdata-line-blockが付いてはならない: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<code data-line-block"),
+        "インライン <code> にdata-line-blockが付いてはならない: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<em data-line-block"),
+        "<em> にdata-line-blockが付いてはならない: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<strong data-line-block"),
+        "<strong> にdata-line-blockが付いてはならない: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<a data-line-block"),
+        "<a> にdata-line-blockが付いてはならない: {}",
+        html_str
+    );
+}
+
+#[test]
+fn test_blockコンテナにはdata_source_lineが付かない_quote選択範囲広がり防止() {
+    // `<ul>` / `<table>` 等のコンテナ要素に `data-source-start-line`/`end-line` を付けると、
+    // memo.js の getSelectionLineRange() が祖先範囲を拾い、引用 `Lx-Ly` が広がる回帰を起こす。
+    // コンテナは `data-line-block-start`/`end` のみ持ち、`data-source-*` は付与しない。
+    let html = render_markdown("- item1\n- item2");
+    let html_str = html.as_str();
+    assert!(
+        !html_str.contains("<ul data-source-start-line"),
+        "<ul> に data-source-start-line を付けてはならない（quote範囲広がり回帰防止）: {}",
+        html_str
+    );
+    assert!(
+        !html_str.contains("<li data-source-start-line"),
+        "<li> に data-source-start-line を付けてはならない: {}",
+        html_str
+    );
+
+    let table = render_markdown("| a |\n|---|\n| b |");
+    let table_str = table.as_str();
+    assert!(
+        !table_str.contains("<table data-source-start-line"),
+        "<table> に data-source-start-line を付けてはならない: {}",
+        table_str
+    );
+
+    let para = render_markdown("Hello");
+    assert!(
+        !para.as_str().contains("<p data-source-start-line"),
+        "<p> に data-source-start-line を付けてはならない: {}",
+        para.as_str()
+    );
+
+    let bq = render_markdown("> quote");
+    assert!(
+        !bq.as_str().contains("<blockquote data-source-start-line"),
+        "<blockquote> に data-source-start-line を付けてはならない: {}",
+        bq.as_str()
+    );
+}
+
+#[test]
+fn test_blockコンテナはdata_line_block_start_endを持つ() {
+    // ジャンプ先用の範囲属性。quote集計には混入しない独立attribute
+    let html = render_markdown("Hello paragraph");
+    assert!(
+        html.as_str()
+            .contains("<p data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<p> は data-line-block-start/end を持つ: {}",
+        html.as_str()
+    );
+
+    let list = render_markdown("- item");
+    assert!(
+        list.as_str()
+            .contains("<ul data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<ul> は data-line-block-start/end を持つ: {}",
+        list.as_str()
+    );
+    assert!(
+        list.as_str()
+            .contains("<li data-line-block data-line-block-start=\"1\" data-line-block-end=\"1\""),
+        "<li> は data-line-block-start/end を持つ: {}",
+        list.as_str()
+    );
 }
 
 #[test]

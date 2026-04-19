@@ -64,6 +64,35 @@ function isExternalSchemeHref(href) {
   return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
 }
 
+/// `?file=foo.md#hash` 形式や単一ファイルモードの同一path+hash形式を解決する。
+/// メモプレビュー内の出典リンクは memo.js の buildQuoteSource() がこの形式で生成する。
+/// resolveMarkdownLinkTarget は `?` 開始 href を拒否するため、こちらで補完する。
+function resolveFileQueryHref(href) {
+  if (!href) return null;
+  var url;
+  try {
+    url = new URL(href, location.href);
+  } catch (error) {
+    return null;
+  }
+  if (url.origin !== location.origin) return null;
+  if (url.pathname !== location.pathname) return null;
+  if (!url.hash) return null;
+
+  if (isDirMode) {
+    var fileParam = url.searchParams.get('file');
+    if (fileParam && /\.md$/i.test(fileParam)) {
+      return { file: fileParam, hash: url.hash };
+    }
+    return null;
+  }
+  // 単一ファイルモード: 同一path+hash形式のリンクは現在ファイル内ジャンプとして扱う
+  if (currentFile) {
+    return { file: currentFile, hash: url.hash };
+  }
+  return null;
+}
+
 function resolveMarkdownLinkTarget(href) {
   if (!isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
     return null;
@@ -106,29 +135,117 @@ function resolveMarkdownLinkTarget(href) {
   };
 }
 
+function parseLineHash(hash) {
+  var empty = { headingId: null, lineRange: null };
+  if (!hash || hash.charAt(0) !== '#') return empty;
+  var raw = hash.slice(1);
+  var decoded;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch (error) {
+    decoded = raw;
+  }
+  if (!decoded) return empty;
+
+  // `heading-id:L5` または `heading-id:L5-L7`
+  // `(.*)` は greedy だが、現状 slugify は `:` を除去するため heading_id に `:` は含まれない。
+  // slugify 仕様が変わる場合はここの分割戦略を見直すこと
+  var combined = decoded.match(/^(.*):L(\d+)(?:-L(\d+))?$/);
+  if (combined) {
+    var start = parseInt(combined[2], 10);
+    var end = combined[3] ? parseInt(combined[3], 10) : start;
+    return {
+      headingId: combined[1] || null,
+      lineRange: { start: start, end: end }
+    };
+  }
+
+  // `L5` または `L5-L7` 単独
+  var lineOnly = decoded.match(/^L(\d+)(?:-L(\d+))?$/);
+  if (lineOnly) {
+    var s = parseInt(lineOnly[1], 10);
+    var e = lineOnly[2] ? parseInt(lineOnly[2], 10) : s;
+    return { headingId: null, lineRange: { start: s, end: e } };
+  }
+
+  return { headingId: decoded, lineRange: null };
+}
+
+function scrollToLineRange(targetLine, behavior) {
+  // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
+  if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
+  var blocks = contentRoot.querySelectorAll('[data-line-block]');
+  // 候補から「最狭マッチ（最深containment）」を選ぶ。
+  // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、<li> を選ばないと
+  // コンテナ先頭にスクロールしてしまうため (PR #73 codex-bot レビュー指摘)
+  var best = null;
+  var bestSpan = Infinity;
+  for (var i = 0; i < blocks.length; i++) {
+    var block = blocks[i];
+    // block コンテナは data-line-block-start/end、heading/code-block は data-source-* から範囲を読む
+    var startAttr = block.getAttribute('data-line-block-start');
+    if (startAttr === null) startAttr = block.getAttribute('data-source-start-line');
+    var endAttr = block.getAttribute('data-line-block-end');
+    if (endAttr === null) endAttr = block.getAttribute('data-source-end-line');
+    if (startAttr === null || endAttr === null) continue;
+    var s = parseInt(startAttr, 10);
+    var e = parseInt(endAttr, 10);
+    if (isNaN(s) || isNaN(e)) continue;
+    if (s <= targetLine && e >= targetLine) {
+      var span = e - s;
+      if (span < bestSpan) {
+        bestSpan = span;
+        best = block;
+      }
+    }
+  }
+  if (!best) return false;
+  best.scrollIntoView({ block: 'start', behavior: behavior || 'auto' });
+  triggerJumpHighlight(best);
+  return true;
+}
+
+function triggerJumpHighlight(el) {
+  if (!el) return;
+  el.classList.remove('jump-highlight');
+  // CSS animationを再起動するための強制reflow（class再付与前にlayoutをflushする定番技法）
+  void el.offsetWidth;
+  el.classList.add('jump-highlight');
+  // { once: true } でリスナー自動除去。連続クリック時の leak を防ぐ
+  el.addEventListener('animationend', function() {
+    el.classList.remove('jump-highlight');
+  }, { once: true });
+}
+
 function applyContentAnchorNavigation(hash, replace) {
   if (!hash || hash.charAt(0) !== '#') return false;
 
-  var targetId;
-  var targetEl;
+  var parsed = parseLineHash(hash);
+  // ユーザクリック由来 (replace=false) は smooth、履歴復元 (replace=true) は auto で即着地
+  var scrollBehavior = replace ? 'auto' : 'smooth';
 
-  try {
-    targetId = decodeURIComponent(hash.slice(1));
-  } catch (error) {
-    console.warn('[markdown-view] フラグメントのデコードに失敗:', hash, error);
-    targetId = hash.slice(1);
+  // 行範囲があれば優先（より詳細な位置へジャンプ）
+  if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start, scrollBehavior)) {
+    if (parsed.headingId && typeof markPendingTocNavigation === 'function') {
+      markPendingTocNavigation(parsed.headingId);
+    }
+    setLocationHash(hash, replace);
+    return true;
   }
 
-  if (!targetId) return false;
-  targetEl = document.getElementById(targetId);
-  if (!targetEl) return false;
-
-  if (typeof markPendingTocNavigation === 'function') {
-    markPendingTocNavigation(targetId);
+  // 見出しIDへのフォールバックジャンプ
+  if (parsed.headingId) {
+    var targetEl = document.getElementById(parsed.headingId);
+    if (!targetEl) return false;
+    if (typeof markPendingTocNavigation === 'function') {
+      markPendingTocNavigation(parsed.headingId);
+    }
+    setLocationHash(hash, replace);
+    targetEl.scrollIntoView({ block: 'start', behavior: scrollBehavior });
+    return true;
   }
-  setLocationHash(hash, replace);
-  targetEl.scrollIntoView({ block: 'start', behavior: 'auto' });
-  return true;
+
+  return false;
 }
 
 function restoreContentNavigationFromLocation() {
@@ -233,42 +350,48 @@ function enhanceContentInteractions() {
   });
 }
 
+/// 内部リンク（相対 .md / `?file=foo.md#hash` / 同一path+hash）のクリックを処理する共通ハンドラ。
+/// `#content` と `#memo-preview` の両方からの delegation で使う。
+function handleInternalLinkClick(event) {
+  var link = event.target.closest('a[href]');
+  if (!link || isModifiedClick(event)) return;
+  if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
+
+  var href = link.getAttribute('href') || '';
+  // 既存relative resolverを優先、ヒットしなければ `?file=` / 同一path系で再試行
+  var target = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
+  if (!target) return;
+
+  if (target.file === currentFile) {
+    event.preventDefault();
+    if (target.hash) {
+      if (applyContentAnchorNavigation(target.hash, false)) {
+        return;
+      }
+      console.warn('[markdown-view] 同一ファイル内のジャンプ先が見つかりません:', target.hash);
+    }
+    setFileParam(currentFile, false, '');
+    restoreContentNavigationFromLocation();
+    return;
+  }
+
+  event.preventDefault();
+
+  selectFile(target.file, true, {
+    scrollMode: target.hash ? 'none' : 'reset',
+    anchorHash: target.hash,
+    historyHash: target.hash || ''
+  });
+}
+
 function setupContentLinkNavigation() {
   if (!contentRoot) return;
+  contentRoot.addEventListener('click', handleInternalLinkClick);
+}
 
-  contentRoot.addEventListener('click', function(event) {
-    var link = event.target.closest('a[href]');
-    var href;
-    var target;
-
-    if (!link || !contentRoot.contains(link) || isModifiedClick(event)) return;
-    if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
-
-    href = link.getAttribute('href') || '';
-    target = resolveMarkdownLinkTarget(href);
-    if (!target) return;
-
-    if (target.file === currentFile) {
-      event.preventDefault();
-      if (target.hash) {
-        if (applyContentAnchorNavigation(target.hash, false)) {
-          return;
-        }
-        console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
-      }
-      setFileParam(currentFile, false, '');
-      restoreContentNavigationFromLocation();
-      return;
-    }
-
-    event.preventDefault();
-
-    selectFile(target.file, true, {
-      scrollMode: target.hash ? 'none' : 'reset',
-      anchorHash: target.hash,
-      historyHash: target.hash || ''
-    });
-  });
+function setupMemoLinkNavigation() {
+  if (!memoPreviewEl) return;
+  memoPreviewEl.addEventListener('click', handleInternalLinkClick);
 }
 
 function setupFilterableList(options) {
@@ -1142,3 +1265,4 @@ function updateContent(data, options) {
 
 setupDocumentSearch();
 setupContentLinkNavigation();
+setupMemoLinkNavigation();

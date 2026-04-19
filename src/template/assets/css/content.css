@@ -155,3 +155,14 @@
 .content ul, .content ol { padding-left: 2em; margin-bottom: 1em; }
 .content li { margin: 0.25em 0; }
 .content li input[type="checkbox"] { margin-right: 0.5em; }
+
+/* メモ出典リンクから本文へジャンプした際の一時ハイライト */
+@keyframes jump-highlight-fade {
+  0%   { background-color: rgba(250, 204, 21, 0.45); }
+  20%  { background-color: rgba(250, 204, 21, 0.45); }
+  100% { background-color: transparent; }
+}
+.content .jump-highlight {
+  animation: jump-highlight-fade 2.5s ease-out forwards;
+  border-radius: 6px;
+}
