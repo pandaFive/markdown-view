@@ -176,14 +176,16 @@ function parseLineHash(hash) {
 /// 新形式（href fragment 内に `:L5-L7`）や行範囲情報が無い場合は hash をそのまま返す。
 /// renderer が text をソース行トラッキング用 `<span>` でラップするケースにも対応するため、
 /// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
+/// 本文コンテンツ内の自然文（`[spec](spec.md) L5 onwards...` など）を誤ってジャンプ対象にしないよう、
+/// `#memo-preview` 配下のリンクに限定する。
 function augmentHashWithTrailingLineHint(link, hash) {
-  if (!link) return hash;
+  if (!link || !link.closest || !link.closest('#memo-preview')) return hash;
   var sibling = link.nextSibling;
   if (!sibling) return hash;
   if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
   if (parseLineHash(hash).lineRange) return hash;
   // 否定先読みで `L123abc` のような別トークンへの誤マッチを防ぐ
-  var match = (sibling.textContent || '').match(/^\s*L(\d+)(?:-L(\d+))?(?![\w])/);
+  var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?(?![\w])/);
   if (!match) return hash;
   var start = parseInt(match[1], 10);
   var end = match[2] ? parseInt(match[2], 10) : start;

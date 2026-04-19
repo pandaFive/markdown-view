@@ -202,15 +202,18 @@ test('ネストしたblockquote内の行へジャンプすると最内段落が�
   expect(tagName).toBe('p');
 });
 
-test('旧形式メモ（リンク外L15）の出典クリックでも行範囲ジャンプできる', async ({ page }) => {
+test('旧形式メモ（リンク外の行番号）の出典クリックでも行範囲ジャンプできる', async ({ page }) => {
   // PR #73 以前に生成されたメモは `出典: [...](...#heading) L15` のように
   // 行範囲がリンク外テキストとして並ぶ。このレガシー形式でも fine-grained ジャンプできることを検証する。
-  // long.md L15 は `Paragraph B2 content TARGET BLOCK.` に対応する
+  // fixture 編集時の行ズレを避けるため TARGET BLOCK の行番号は lineBlockStartOf で動的取得する
+  const range = await lineBlockStartOf(page, 'Paragraph B2 content TARGET BLOCK');
+  expect(range.start).toBeGreaterThan(0);
+
   const memoPath = path.join(fixtureDir, '.long.md.memo.md');
   const legacyMemo = [
     '> Paragraph B2 content TARGET BLOCK.',
     '',
-    '出典: [long.md > Section B](?file=long.md#section-b) L15',
+    `出典: [long.md > Section B](?file=long.md#section-b) L${range.start}`,
     ''
   ].join('\n');
   await fs.writeFile(memoPath, legacyMemo);
@@ -222,16 +225,16 @@ test('旧形式メモ（リンク外L15）の出典クリックでも行範囲�
 
   const sourceLink = page.locator('#memo-preview a[href="?file=long.md#section-b"]').first();
   await expect(sourceLink).toBeVisible();
-  // 隣接ノード (text/span) の textContent に `L15` が存在することを確認（旧形式の identifying 条件）
+  // 隣接ノード (text/span) の textContent に `L<n>` が存在することを確認（旧形式の identifying 条件）
   const tail = await sourceLink.evaluate((link) => (link.nextSibling ? link.nextSibling.textContent : ''));
-  expect(tail).toMatch(/^\s*L15\b/);
+  expect(tail).toMatch(new RegExp(`^\\s*L${range.start}\\b`));
 
   await page.evaluate(() => window.scrollTo(0, 0));
   await sourceLink.click();
 
   await expect.poll(() => page.evaluate(() => window.scrollY), { timeout: 3000 }).toBeGreaterThan(0);
 
-  // heading (section-b) ではなく L15 の paragraph に着地
+  // heading (section-b) ではなく 対応 paragraph に着地
   const highlighted = page.locator('#content .jump-highlight');
   await expect(highlighted).toBeVisible();
   await expect(highlighted).toContainText('TARGET BLOCK');
