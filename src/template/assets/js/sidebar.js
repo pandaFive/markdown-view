@@ -104,6 +104,15 @@ if (isDirMode) {
       return;
     }
 
+    // 目次クリック直後にブラウザが同一documentのhashナビゲーションで発火させる
+    // popstate は、clickハンドラ側で既に markPendingTocNavigation + ブラウザの
+    // アンカースクロールを走らせているため、restore側で再度 scrollIntoView を
+    // 呼ぶとユーザの明示的 scrollTo を上書きし逆方向スクロール判定を壊す。
+    // pending と一致する hash の再処理はスキップする。
+    if (pendingTocNavigationId && hash === '#' + pendingTocNavigationId) {
+      return;
+    }
+
     if (typeof restoreContentNavigationFromLocation === 'function') {
       restoreContentNavigationFromLocation();
     }

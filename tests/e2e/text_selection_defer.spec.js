@@ -344,6 +344,19 @@ test('目次クリック直後でも逆方向へスクロールしたら通常�
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 });
 
+test('目次クリック直後の小揺らしではクリック先のactiveが維持される', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(() => {
+    window.scrollTo(0, (window.scrollY || window.pageYOffset) + 6);
+  });
+  await page.waitForTimeout(150);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
 test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {
   const positions = await loadDenseHeadingFixture(page);
 
