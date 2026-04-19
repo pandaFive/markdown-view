@@ -171,6 +171,28 @@ function parseLineHash(hash) {
   return { headingId: decoded, lineRange: null };
 }
 
+/// 旧形式メモ互換: リンク直後のテキストに `L5` / `L5-L7` が並ぶ場合、
+/// その行範囲を既存 hash に `:L5-L7` として合成して返す。
+/// 新形式（href fragment 内に `:L5-L7`）や行範囲情報が無い場合は hash をそのまま返す。
+/// renderer が text をソース行トラッキング用 `<span>` でラップするケースにも対応するため、
+/// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
+function augmentHashWithTrailingLineHint(link, hash) {
+  if (!link) return hash;
+  var sibling = link.nextSibling;
+  if (!sibling) return hash;
+  if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
+  if (parseLineHash(hash).lineRange) return hash;
+  // 否定先読みで `L123abc` のような別トークンへの誤マッチを防ぐ
+  var match = (sibling.textContent || '').match(/^\s*L(\d+)(?:-L(\d+))?(?![\w])/);
+  if (!match) return hash;
+  var start = parseInt(match[1], 10);
+  var end = match[2] ? parseInt(match[2], 10) : start;
+  // 逆転範囲は start のみ採用
+  var suffix = end > start ? 'L' + start + '-L' + end : 'L' + start;
+  if (!hash || hash === '#') return '#' + suffix;
+  return hash + ':' + suffix;
+}
+
 function scrollToLineRange(targetLine, behavior) {
   // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
   if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
@@ -362,6 +384,9 @@ function handleInternalLinkClick(event) {
   // 既存relative resolverを優先、ヒットしなければ `?file=` / 同一path系で再試行
   var target = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
   if (!target) return;
+
+  // 旧形式メモ互換（リンク外 `L5-L7` を hash fragment に取り込む）
+  target.hash = augmentHashWithTrailingLineHint(link, target.hash);
 
   if (target.file === currentFile) {
     event.preventDefault();

@@ -202,6 +202,43 @@ test('ネストしたblockquote内の行へジャンプすると最内段落が�
   expect(tagName).toBe('p');
 });
 
+test('旧形式メモ（リンク外L15）の出典クリックでも行範囲ジャンプできる', async ({ page }) => {
+  // PR #73 以前に生成されたメモは `出典: [...](...#heading) L15` のように
+  // 行範囲がリンク外テキストとして並ぶ。このレガシー形式でも fine-grained ジャンプできることを検証する。
+  // long.md L15 は `Paragraph B2 content TARGET BLOCK.` に対応する
+  const memoPath = path.join(fixtureDir, '.long.md.memo.md');
+  const legacyMemo = [
+    '> Paragraph B2 content TARGET BLOCK.',
+    '',
+    '出典: [long.md > Section B](?file=long.md#section-b) L15',
+    ''
+  ].join('\n');
+  await fs.writeFile(memoPath, legacyMemo);
+
+  // サーバー側で初期描画にメモを反映させるためリロード
+  await page.reload();
+  await page.locator('.sidebar-tab[data-tab="memo"]').click();
+  await expect(page.locator('#panel-memo.active')).toBeVisible();
+
+  const sourceLink = page.locator('#memo-preview a[href="?file=long.md#section-b"]').first();
+  await expect(sourceLink).toBeVisible();
+  // 隣接ノード (text/span) の textContent に `L15` が存在することを確認（旧形式の identifying 条件）
+  const tail = await sourceLink.evaluate((link) => (link.nextSibling ? link.nextSibling.textContent : ''));
+  expect(tail).toMatch(/^\s*L15\b/);
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sourceLink.click();
+
+  await expect.poll(() => page.evaluate(() => window.scrollY), { timeout: 3000 }).toBeGreaterThan(0);
+
+  // heading (section-b) ではなく L15 の paragraph に着地
+  const highlighted = page.locator('#content .jump-highlight');
+  await expect(highlighted).toBeVisible();
+  await expect(highlighted).toContainText('TARGET BLOCK');
+
+  await expect(page.locator('#content .jump-highlight')).toHaveCount(0, { timeout: 5000 });
+});
+
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
   // 複数行で1つの<p>になる段落。中間行を指定しても同じ段落がハイライトされる
   await page.goto('/?file=long.md');
