@@ -1,5 +1,50 @@
 # TODO Issues
 
+## E2E テスト失敗（2026-04-20 発見）
+
+`npx playwright test` 全体実行で 5 件の失敗を確認。develop baseline でも 3 件が再現するため PR #76 の変更起因ではなく pre-existing な不具合または flake。`./verify.sh` には E2E が含まれないため CI で検知されていない。
+
+### High Priority
+
+- [ ] `text_selection_defer.spec.js:333` 目次クリック直後の逆方向スクロール判定が誤動作
+  - ファイル: `tests/e2e/text_selection_defer.spec.js`
+  - 行番号: L333-L345（テスト本体）、L344 でアサーション失敗
+  - 症状: `expect.poll(() => activeTocLabel(page)).toBe('Alpha')` が `'Beta'` のまま timeout (5000ms)
+  - 再現: `npx playwright test tests/e2e/text_selection_defer.spec.js:333`
+  - 再現性: develop でも再現（stable）
+  - 理由: TOC ナビゲーションの主要動線。クリック直後に逆方向スクロールで通常判定に戻る仕様の回帰
+  - 優先度: High
+
+- [ ] `markdown_links.spec.js:124` 壊れたフラグメントリンクの hash クリア + 警告動作
+  - ファイル: `tests/e2e/markdown_links.spec.js`
+  - 行番号: L124（テスト開始行）
+  - 症状: 同一ファイル内の存在しないフラグメントリンクで URL hash クリアと警告が期待通りに動作しない
+  - 再現: `npx playwright test tests/e2e/markdown_links.spec.js:124`
+  - 再現性: develop でも再現（stable）
+  - 理由: markdown 内リンクの基本 UX、壊れたアンカーの fallback 挙動
+  - 優先度: High
+
+- [ ] `document_search.spec.js:389` ディレクトリモード検索 API 結果の一覧表示
+  - ファイル: `tests/e2e/document_search.spec.js`
+  - 行番号: L389（テスト開始行）
+  - 症状: ディレクトリモードで `/api/search` 結果の一覧描画が期待通りにならない
+  - 再現: `npx playwright test tests/e2e/document_search.spec.js:389`
+  - 再現性: develop でも再現（stable）
+  - 理由: 検索機能の E2E 検証、ディレクトリモード固有の描画経路
+  - 優先度: High
+
+### Medium Priority
+
+- [ ] Flaky E2E テスト 2 件の安定化
+  - ファイル:
+    - `tests/e2e/markdown_links.spec.js:41` ディレクトリモード相対リンクフラグメント遷移
+    - `tests/e2e/memo_sync.spec.js:48` 別ページへのメモ更新同期
+  - 症状: 同じコマンドを連続実行すると pass/fail が揺れる
+  - 再現: `npx playwright test tests/e2e/markdown_links.spec.js:41` を複数回実行
+  - 方針: `test.retry(2)` で許容せず、待機条件（selector の安定化 / broadcast 到達確認）を特定して根治
+  - 理由: `./verify.sh` に E2E を組み込む前提で flake は許容しない
+  - 優先度: Medium
+
 ## TODO Issues (レビュー日: 2026-04-20, PR #76 レビュー)
 
 ### Low Priority
