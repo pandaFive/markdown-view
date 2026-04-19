@@ -404,14 +404,35 @@ test('line-range付きhashのpopstateはpending idと不一致のためrestore�
   // pending='beta'の猶予期間内に同id+line-range形式のhashでpopstateを発火。
   // '#beta:L3'は '#' + 'beta' と文字列不一致のためpopstateガードを通過し、
   // restore → applyContentAnchorNavigation の lineRange 分岐で line 3 相当の
-  // 位置へジャンプしてscrollYが減少する。もし将来ガード比較が startsWith 等に
-  // 緩められると line-range ジャンプが redundant 扱いでスキップされ scrollY が
-  // beta 位置のまま残る回帰を検出する
+  // ブロック（1個目の "Paragraph 1"）がviewport上端付近へスクロールする。
+  // ガード比較が startsWith 等に緩められると line-range ジャンプが redundant
+  // 扱いでスキップされ scrollY が beta 位置のまま残る。また restore が hash
+  // missで先頭 fallback (scrollY=0) に落ちるだけでも素通りしないよう、line 3
+  // を含む block の top が viewport 上端付近に着地したことまで検証する
   await page.evaluate(() => {
     history.pushState(null, '', '?file=README.md#beta:L3');
     window.dispatchEvent(new PopStateEvent('popstate'));
   });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(betaScrollY);
+  const line3BlockTop = await page.evaluate(() => {
+    var blocks = document.querySelectorAll('[data-line-block-start]');
+    for (var i = 0; i < blocks.length; i++) {
+      var s = parseInt(blocks[i].getAttribute('data-line-block-start'), 10);
+      var e = parseInt(blocks[i].getAttribute('data-line-block-end'), 10);
+      if (s <= 3 && e >= 3) {
+        return blocks[i].getBoundingClientRect().top;
+      }
+    }
+    return null;
+  });
+  expect(line3BlockTop).not.toBeNull();
+  // block:'start' の scrollIntoView で <p> には scroll-margin-top が無いため
+  // viewport top (0) 近辺に着地する。restore が hash miss で scrollTo(0,0) に
+  // 落ちた場合でも line3Block 自体は body 上端より下にあり top≈0 と区別しづらい
+  // が、上の scrollY<betaScrollY と併せて「beta位置から離れ」かつ「line3が上端」
+  // の両方を要求する
+  expect(line3BlockTop).toBeLessThanOrEqual(20);
+  expect(line3BlockTop).toBeGreaterThanOrEqual(-20);
 });
 
 test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {

@@ -90,6 +90,14 @@ function activateSidebarTab(target) {
   });
 }
 
+// URL エンコード差を吸収して比較するためのヘルパー。location.hash と
+// pendingTocNavigationId を両辺 decode して対称に扱うことで、renderer 側の href
+// 生成が encoded/raw どちらでもガード条件が一貫して成立する
+function tryDecodeHash(value) {
+  if (!value) return value || '';
+  try { return decodeURIComponent(value); } catch (e) { return value; }
+}
+
 if (isDirMode) {
   window.addEventListener('popstate', function() {
     var file = getFileParam();
@@ -108,17 +116,18 @@ if (isDirMode) {
     // pendingTocNavigationId が立ち、ブラウザ既定のアンカースクロールも完了している。
     // このタイミングで pending と同一 hash の popstate が発火すると、restore 経由の
     // scrollIntoView がユーザの明示的 scrollTo を上書きし、getPendingTocNavigationId
-    // の帯外判定（同ファイル L208）が働かず逆方向スクロールで pending がクリアされなく
-    // なる。一致 hash の再処理は redundant なのでスキップする。
-    // location.hash は日本語など非ASCII id で URL エンコード済み、
-    // pendingTocNavigationId は href.slice(1) で raw のため decode してから比較する。
+    // の帯外判定（同関数内の末尾 clear 経路）が働かず逆方向スクロールで pending が
+    // クリアされなくなる。一致 hash の再処理は redundant なのでスキップする。
+    // location.hash は日本語など非ASCII文字で URL エンコード済み、pendingTocNavigationId
+    // は href.slice(1) で取得する。renderer 側の href 生成が encoded/raw どちらでも
+    // 対称に一致判定するため両辺 decode してから比較する。
     // 行範囲形式（例 '#foo:L5'）は pendingTocNavigationId (='foo') と不一致のため
     // ここを通過し、restore 側の lineRange 分岐で処理される。
-    var decodedHash = hash;
-    if (hash) {
-      try { decodedHash = decodeURIComponent(hash); } catch (e) { decodedHash = hash; }
-    }
-    if (pendingTocNavigationId && decodedHash === '#' + pendingTocNavigationId) {
+    // なお clear や scroll 再計算は行わない。pending の解除は grace タイマー失効、
+    // または後続 scroll イベント由来の getPendingTocNavigationId の帯外判定に委ねる
+    var decodedHash = tryDecodeHash(hash);
+    var decodedPendingId = tryDecodeHash(pendingTocNavigationId);
+    if (pendingTocNavigationId && decodedHash === '#' + decodedPendingId) {
       return;
     }
 
