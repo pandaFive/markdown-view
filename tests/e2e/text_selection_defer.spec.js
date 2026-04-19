@@ -344,6 +344,97 @@ test('目次クリック直後でも逆方向へスクロールしたら通常�
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 });
 
+test('目次クリック直後の小揺らしではクリック先のactiveが維持される', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(() => {
+    window.scrollTo(0, (window.scrollY || window.pageYOffset) + 6);
+  });
+  // grace (400ms) 内にscroll→scheduleTocTrackingUpdate→raFまで走り切らせる。
+  // 150msはTOC_NAVIGATION_GRACE_MS未満で意図的に小さい値
+  await page.waitForTimeout(150);
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('日本語id見出しでも目次クリック直後の逆方向スクロールで通常判定へ戻る', async ({ page }) => {
+  // Chromium の location.hash は非ASCII id を URL エンコードして返すため、
+  // pendingTocNavigationId (raw) と文字列一致させるには decode が必要。
+  // 生 hash 比較のままだと日本語 id で popstate ガードが素通りし、
+  // restore→scrollIntoView が明示スクロールを上書きして L333 と同じ症状が
+  // 日本語見出しのみで再発する。Codex レビュー P2 指摘の回帰防止
+  const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
+  await fs.writeFile(
+    readmePath,
+    [
+      '# README', '', repeated, '',
+      '## Alpha', '', 'Alpha body', '',
+      '## 日本語見出し', '', '日本語本文', '',
+      repeated
+    ].join('\n')
+  );
+  await page.reload();
+  await expect(page.locator('#toc')).toContainText('日本語見出し');
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const link = document.querySelector('#toc a[href$="%E6%97%A5%E6%9C%AC%E8%AA%9E%E8%A6%8B%E5%87%BA%E3%81%97"], #toc a[href$="#日本語見出し"]');
+    if (!link) throw new Error('日本語id TOC link not found');
+    link.click();
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('日本語見出し');
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
+test('line-range付きhashのpopstateはpending idと不一致のためrestore経路で処理される', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  const betaScrollY = await page.evaluate(() => window.scrollY);
+
+  // pending='beta'の猶予期間内に同id+line-range形式のhashでpopstateを発火。
+  // '#beta:L3'は '#' + 'beta' と文字列不一致のためpopstateガードを通過し、
+  // restore → applyContentAnchorNavigation の lineRange 分岐で line 3 相当の
+  // ブロック（1個目の "Paragraph 1"）がviewport上端付近へスクロールする。
+  // ガード比較が startsWith 等に緩められると line-range ジャンプが redundant
+  // 扱いでスキップされ scrollY が beta 位置のまま残る。また restore が hash
+  // missで先頭 fallback (scrollY=0) に落ちるだけでも素通りしないよう、line 3
+  // を含む block の top が viewport 上端付近に着地したことまで検証する
+  await page.evaluate(() => {
+    history.pushState(null, '', '?file=README.md#beta:L3');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(betaScrollY);
+  const line3BlockTop = await page.evaluate(() => {
+    var blocks = document.querySelectorAll('[data-line-block-start]');
+    for (var i = 0; i < blocks.length; i++) {
+      var s = parseInt(blocks[i].getAttribute('data-line-block-start'), 10);
+      var e = parseInt(blocks[i].getAttribute('data-line-block-end'), 10);
+      if (s <= 3 && e >= 3) {
+        return blocks[i].getBoundingClientRect().top;
+      }
+    }
+    return null;
+  });
+  expect(line3BlockTop).not.toBeNull();
+  // block:'start' の scrollIntoView で <p> には scroll-margin-top が無いため
+  // viewport top (0) 近辺に着地する。restore が hash miss で scrollTo(0,0) に
+  // 落ちた場合でも line3Block 自体は body 上端より下にあり top≈0 と区別しづらい
+  // が、上の scrollY<betaScrollY と併せて「beta位置から離れ」かつ「line3が上端」
+  // の両方を要求する
+  expect(line3BlockTop).toBeLessThanOrEqual(20);
+  expect(line3BlockTop).toBeGreaterThanOrEqual(-20);
+});
+
 test('同一TOCで再初期化してもクリック処理が重複登録されない', async ({ page }) => {
   const positions = await loadDenseHeadingFixture(page);
 
