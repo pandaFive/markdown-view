@@ -202,6 +202,160 @@ test('ネストしたblockquote内の行へジャンプすると最内段落が�
   expect(tagName).toBe('p');
 });
 
+test('旧形式メモ（リンク外の行番号）の出典クリックでも行範囲ジャンプできる', async ({ page }) => {
+  // 行範囲ジャンプ機能導入以前に生成されたメモは `出典: [...](...#heading) L15` のように
+  // 行範囲がリンク外テキストとして並ぶ。このレガシー形式でも fine-grained ジャンプできることを検証する。
+  // fixture 編集時の行ズレを避けるため TARGET BLOCK の行番号は lineBlockStartOf で動的取得する
+  const range = await lineBlockStartOf(page, 'Paragraph B2 content TARGET BLOCK');
+  expect(range.start).toBeGreaterThan(0);
+
+  const memoPath = path.join(fixtureDir, '.long.md.memo.md');
+  const legacyMemo = [
+    '> Paragraph B2 content TARGET BLOCK.',
+    '',
+    `出典: [long.md > Section B](?file=long.md#section-b) L${range.start}`,
+    ''
+  ].join('\n');
+  await fs.writeFile(memoPath, legacyMemo);
+
+  // サーバー側で初期描画にメモを反映させるためリロード
+  await page.reload();
+  await page.locator('.sidebar-tab[data-tab="memo"]').click();
+  await expect(page.locator('#panel-memo.active')).toBeVisible();
+
+  const sourceLink = page.locator('#memo-preview a[href="?file=long.md#section-b"]').first();
+  await expect(sourceLink).toBeVisible();
+  // 隣接ノード (text/span) の textContent に `L<n>` が存在することを確認（旧形式の identifying 条件）
+  const tail = await sourceLink.evaluate((link) => (link.nextSibling ? link.nextSibling.textContent : ''));
+  expect(tail).toMatch(new RegExp(`^\\s*L${range.start}\\b`));
+
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sourceLink.click();
+
+  await expect.poll(() => page.evaluate(() => window.scrollY), { timeout: 3000 }).toBeGreaterThan(0);
+
+  // heading (section-b) ではなく 対応 paragraph に着地
+  const highlighted = page.locator('#content .jump-highlight');
+  await expect(highlighted).toBeVisible();
+  await expect(highlighted).toContainText('TARGET BLOCK');
+
+  await expect(page.locator('#content .jump-highlight')).toHaveCount(0, { timeout: 5000 });
+});
+
+test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは hash を変えない', async ({ page }) => {
+  // スコープガードの回帰防止。本文コンテンツの自然文 `[spec](spec.md) L10 onwards...` などが
+  // 誤ってジャンプ対象にならないことを、関数を直接呼び出して検証する
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('content');
+    const link = document.createElement('a');
+    link.href = 'other.md';
+    link.textContent = 'other';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L10 onwards'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '');
+    } finally {
+      link.remove();
+      // 末尾のテキストノードを除去（container の最後の child を削除）
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  // ガードが外れると `#L10` に augment される。空文字列のままなら正しくスキップされている
+  expect(result).toBe('');
+});
+
+test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合は augment しない', async ({ page }) => {
+  // L 数字の直後に英数字/アンダースコアが続く別トークン（例: `L5abc`, `L5_foo`）は行番号として
+  // 採用しないことを検証。両端アンカーが外れると `#section-b:L5` に誤 augment される
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L5abc trailing'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b');
+});
+
+test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
+  // ユーザー自作メモでリンク直後に行番号から始まる散文（`L10 onwards は詳しい` 等）が続く場合、
+  // sibling textContent 全体が行番号トークンのみで占められないため augment しない。
+  // 旧 regex（末尾アンカーなし）は先頭 `L10` を拾って `#intro:L10` に誤書換していた既知の
+  // false positive を回帰させないことを担保（Codex review #4136142343 の再発防止）
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=spec.md#intro';
+    link.textContent = 'spec';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L10 onwards は詳しい説明'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#intro');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#intro');
+});
+
+test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく hash 末尾に合成する', async ({ page }) => {
+  // 範囲形式 positive branch を直接検証。regex の capture group 2 と suffix 生成
+  // (`'L' + start + '-L' + end`) がともに機能することを担保
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L15-L17'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L15-L17');
+});
+
+test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start のみ採用', async ({ page }) => {
+  // end < start（逆転）および end == start（単一行）は start 1 行に縮退する。
+  // 将来 regex や suffix 生成を改変したとき「逆転時は null を返す」等の silent 仕様変更を検出する
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview');
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    container.appendChild(link);
+    container.appendChild(document.createTextNode(' L17-L15'));
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
+        container.lastChild.remove();
+      }
+    }
+  });
+  expect(result).toBe('#section-b:L17');
+});
+
 test('複数行にまたがる段落の中間行へのジャンプは段落全体を最狭マッチとして選ぶ', async ({ page }) => {
   // 複数行で1つの<p>になる段落。中間行を指定しても同じ段落がハイライトされる
   await page.goto('/?file=long.md');

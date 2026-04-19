@@ -171,6 +171,33 @@ function parseLineHash(hash) {
   return { headingId: decoded, lineRange: null };
 }
 
+/// 旧形式メモ互換: リンク直後の兄弟テキストノードが `L5` / `L5-L7` と空白のみで構成される場合、
+/// その行範囲を既存 hash に `:L5-L7` として合成して返す。
+/// Why: 新形式（href fragment 内 `:L5-L7`）にフォーマット移行する前に生成された旧形式 citation
+/// （`出典: [link](url) L15` の散文配置）を既存資産を書き換えずに救済する。
+/// `#memo-preview` 配下のリンクに限定することで、ユーザーが本文に書いた `[spec](spec.md) L5 ...` の
+/// ような自然文リンクを誤ジャンプ対象にしない。
+/// 新形式（行範囲を既に含む hash）や行範囲情報が無い場合は hash をそのまま返す。
+/// renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応するため、
+/// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
+function augmentHashWithTrailingLineHint(link, hash) {
+  if (!link || !link.closest || !link.closest('#memo-preview')) return hash;
+  var sibling = link.nextSibling;
+  if (!sibling) return hash;
+  if (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE) return hash;
+  if (parseLineHash(hash).lineRange) return hash;
+  // 両端アンカー `^\s*...\s*$` で sibling textContent 全体が行番号トークンのみで構成されることを要求。
+  // これにより `L10 onwards...` の散文や `L5abc` の別トークン連続を augment 対象から除外する
+  var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?\s*$/);
+  if (!match) return hash;
+  var start = parseInt(match[1], 10);
+  var end = match[2] ? parseInt(match[2], 10) : start;
+  // end < start（逆転）および end == start（単一行）はどちらも start 1 行として扱う
+  var suffix = end > start ? 'L' + start + '-L' + end : 'L' + start;
+  if (!hash || hash === '#') return '#' + suffix;
+  return hash + ':' + suffix;
+}
+
 function scrollToLineRange(targetLine, behavior) {
   // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
   if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
@@ -362,6 +389,9 @@ function handleInternalLinkClick(event) {
   // 既存relative resolverを優先、ヒットしなければ `?file=` / 同一path系で再試行
   var target = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
   if (!target) return;
+
+  // 旧形式メモ互換（リンク外 `L5-L7` を hash fragment に取り込む）
+  target.hash = augmentHashWithTrailingLineHint(link, target.hash);
 
   if (target.file === currentFile) {
     event.preventDefault();
