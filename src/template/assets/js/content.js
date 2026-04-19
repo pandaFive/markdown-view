@@ -64,6 +64,35 @@ function isExternalSchemeHref(href) {
   return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
 }
 
+/// `?file=foo.md#hash` 形式や単一ファイルモードの同一path+hash形式を解決する。
+/// メモプレビュー内の出典リンクは memo.js の buildQuoteSource() がこの形式で生成する。
+/// resolveMarkdownLinkTarget は `?` 開始 href を拒否するため、こちらで補完する。
+function resolveFileQueryHref(href) {
+  if (!href) return null;
+  var url;
+  try {
+    url = new URL(href, location.href);
+  } catch (error) {
+    return null;
+  }
+  if (url.origin !== location.origin) return null;
+  if (url.pathname !== location.pathname) return null;
+  if (!url.hash) return null;
+
+  if (isDirMode) {
+    var fileParam = url.searchParams.get('file');
+    if (fileParam && /\.md$/i.test(fileParam)) {
+      return { file: fileParam, hash: url.hash };
+    }
+    return null;
+  }
+  // 単一ファイルモード: 同一path+hash形式のリンクは現在ファイル内ジャンプとして扱う
+  if (currentFile) {
+    return { file: currentFile, hash: url.hash };
+  }
+  return null;
+}
+
 function resolveMarkdownLinkTarget(href) {
   if (!isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
     return null;
@@ -321,42 +350,48 @@ function enhanceContentInteractions() {
   });
 }
 
+/// 内部リンク（相対 .md / `?file=foo.md#hash` / 同一path+hash）のクリックを処理する共通ハンドラ。
+/// `#content` と `#memo-preview` の両方からの delegation で使う。
+function handleInternalLinkClick(event) {
+  var link = event.target.closest('a[href]');
+  if (!link || isModifiedClick(event)) return;
+  if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
+
+  var href = link.getAttribute('href') || '';
+  // 既存relative resolverを優先、ヒットしなければ `?file=` / 同一path系で再試行
+  var target = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
+  if (!target) return;
+
+  if (target.file === currentFile) {
+    event.preventDefault();
+    if (target.hash) {
+      if (applyContentAnchorNavigation(target.hash, false)) {
+        return;
+      }
+      console.warn('[markdown-view] 同一ファイル内のジャンプ先が見つかりません:', target.hash);
+    }
+    setFileParam(currentFile, false, '');
+    restoreContentNavigationFromLocation();
+    return;
+  }
+
+  event.preventDefault();
+
+  selectFile(target.file, true, {
+    scrollMode: target.hash ? 'none' : 'reset',
+    anchorHash: target.hash,
+    historyHash: target.hash || ''
+  });
+}
+
 function setupContentLinkNavigation() {
   if (!contentRoot) return;
+  contentRoot.addEventListener('click', handleInternalLinkClick);
+}
 
-  contentRoot.addEventListener('click', function(event) {
-    var link = event.target.closest('a[href]');
-    var href;
-    var target;
-
-    if (!link || !contentRoot.contains(link) || isModifiedClick(event)) return;
-    if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
-
-    href = link.getAttribute('href') || '';
-    target = resolveMarkdownLinkTarget(href);
-    if (!target) return;
-
-    if (target.file === currentFile) {
-      event.preventDefault();
-      if (target.hash) {
-        if (applyContentAnchorNavigation(target.hash, false)) {
-          return;
-        }
-        console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
-      }
-      setFileParam(currentFile, false, '');
-      restoreContentNavigationFromLocation();
-      return;
-    }
-
-    event.preventDefault();
-
-    selectFile(target.file, true, {
-      scrollMode: target.hash ? 'none' : 'reset',
-      anchorHash: target.hash,
-      historyHash: target.hash || ''
-    });
-  });
+function setupMemoLinkNavigation() {
+  if (!memoPreviewEl) return;
+  memoPreviewEl.addEventListener('click', handleInternalLinkClick);
 }
 
 function setupFilterableList(options) {
@@ -1230,3 +1265,4 @@ function updateContent(data, options) {
 
 setupDocumentSearch();
 setupContentLinkNavigation();
+setupMemoLinkNavigation();
