@@ -359,6 +359,41 @@ test('目次クリック直後の小揺らしではクリック先のactiveが�
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 });
 
+test('日本語id見出しでも目次クリック直後の逆方向スクロールで通常判定へ戻る', async ({ page }) => {
+  // Chromium の location.hash は非ASCII id を URL エンコードして返すため、
+  // pendingTocNavigationId (raw) と文字列一致させるには decode が必要。
+  // 生 hash 比較のままだと日本語 id で popstate ガードが素通りし、
+  // restore→scrollIntoView が明示スクロールを上書きして L333 と同じ症状が
+  // 日本語見出しのみで再発する。Codex レビュー P2 指摘の回帰防止
+  const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
+  await fs.writeFile(
+    readmePath,
+    [
+      '# README', '', repeated, '',
+      '## Alpha', '', 'Alpha body', '',
+      '## 日本語見出し', '', '日本語本文', '',
+      repeated
+    ].join('\n')
+  );
+  await page.reload();
+  await expect(page.locator('#toc')).toContainText('日本語見出し');
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const link = document.querySelector('#toc a[href$="%E6%97%A5%E6%9C%AC%E8%AA%9E%E8%A6%8B%E5%87%BA%E3%81%97"], #toc a[href$="#日本語見出し"]');
+    if (!link) throw new Error('日本語id TOC link not found');
+    link.click();
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('日本語見出し');
+
+  await page.evaluate(() => {
+    var alpha = document.getElementById('alpha');
+    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
+  });
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+});
+
 test('line-range付きhashのpopstateはpending idと不一致のためrestore経路で処理される', async ({ page }) => {
   await loadDenseHeadingFixture(page);
 

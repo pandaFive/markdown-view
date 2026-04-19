@@ -76,12 +76,6 @@
   - 理由: pending 上書き仕様が壊れた場合（条件付き更新などに書き換え）の回帰検知
   - 優先度: Low（criticality 5。現実のユーザ操作としてまれ）
 
-- [ ] 日本語 id の TOC クリックで popstate ガードが動作する検証
-  - ファイル: `tests/e2e/text_selection_defer.spec.js`
-  - 内容: `markdown_links.spec.js` L253 の日本語見出しテストは cross-file 分岐のみ。同一ファイル内 TOC クリックで `pendingTocNavigationId` と `location.hash` の URL エンコーディングが一致することの直接検証がない
-  - 理由: ブラウザ/Playwright の hash エンコーディング変化や、将来 id encoding 変更時のリグレッション検知
-  - 優先度: Low（criticality 5。Chromium 現行版では encoded 統一）
-
 - [ ] `TOC_NAVIGATION_SLACK_PX` 境界の回帰テスト
   - ファイル: `tests/e2e/text_selection_defer.spec.js` L347-L359 近辺
   - 内容: 現 L347 の小揺らし検証は `+6px` ハードコード。`SLACK - 2 = 22px` で pending 維持、`SLACK + 2 = 26px` で通常判定復帰を 2 ポイントで検証すれば SLACK 定数縮小の回帰を検出できる

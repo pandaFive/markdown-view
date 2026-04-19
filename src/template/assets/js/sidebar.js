@@ -110,9 +110,15 @@ if (isDirMode) {
     // scrollIntoView がユーザの明示的 scrollTo を上書きし、getPendingTocNavigationId
     // の帯外判定（同ファイル L208）が働かず逆方向スクロールで pending がクリアされなく
     // なる。一致 hash の再処理は redundant なのでスキップする。
+    // location.hash は日本語など非ASCII id で URL エンコード済み、
+    // pendingTocNavigationId は href.slice(1) で raw のため decode してから比較する。
     // 行範囲形式（例 '#foo:L5'）は pendingTocNavigationId (='foo') と不一致のため
     // ここを通過し、restore 側の lineRange 分岐で処理される。
-    if (pendingTocNavigationId && hash === '#' + pendingTocNavigationId) {
+    var decodedHash = hash;
+    if (hash) {
+      try { decodedHash = decodeURIComponent(hash); } catch (e) { decodedHash = hash; }
+    }
+    if (pendingTocNavigationId && decodedHash === '#' + pendingTocNavigationId) {
       return;
     }
 
