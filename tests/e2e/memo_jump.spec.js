@@ -356,10 +356,10 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
   expect(result).toBe('#section-b:L17');
 });
 
-test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば sibling の L<n> で上書きしない', async ({ page }) => {
-  // 新形式 hash (`#section-b:L15`) が既に lineRange を含む場合、parseLineHash(hash).lineRange の
-  // 早期 return により sibling `L20` は無視される。本体 PR #75 で行範囲 hash を採用する際の
-  // precedence ルールを明示的に担保する
+test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば link.nextSibling の L<n> で上書きしない', async ({ page }) => {
+  // リンク href が明示的に行範囲を指定している場合 (`#section-b:L15`)、link.nextSibling の
+  // `L20` は旧形式 citation の推測に過ぎないため、明示指定を上書きしないことを保証する。
+  // parseLineHash(hash).lineRange が truthy のときの早期 return で実現されている
   const result = await page.evaluate(() => {
     const container = document.getElementById('memo-preview');
     const link = document.createElement('a');
@@ -379,10 +379,11 @@ test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば si
   expect(result).toBe('#section-b:L15');
 });
 
-test('augmentHashWithTrailingLineHint は空 hash に対し #L<n> を合成する（コロン prefix なし）', async ({ page }) => {
-  // hash が '' または '#' のとき、`'#' + suffix` を返す合成経路を検証。
-  // 現行は `':' + suffix` ではなく `'#' + suffix` を採用しており、`#:L42` のような不正な
-  // フラグメント生成（parseLineHash が headingId='' で失敗する）を回帰させないことを担保する
+test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n> にはしない）', async ({ page }) => {
+  // 2 つある合成分岐のうち、空 hash 経路では `hash + ':' + suffix` ではなく `'#' + suffix`
+  // を選ぶことを固定。headingId を持たない hash の正準形は `#L42` であり、`#:L42` は
+  // parseLineHash では一応パース可能だが headingId=null の非直感的フラグメントを生成するため
+  // 意図的に避けている。この選択を silent に反転させる退行を検出する
   const results = await page.evaluate(() => {
     const container = document.getElementById('memo-preview');
     const link = document.createElement('a');
