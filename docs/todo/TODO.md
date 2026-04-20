@@ -51,3 +51,15 @@
   - 内容: 現在の `expect.poll(...).toBe('Beta')` は「最終的に Beta なら通る」。一瞬 `Alpha` に遷移して戻るケースを見逃す。`MutationObserver` で `#toc a.active` の `class` 遷移を監視し、Beta 以外への切り替わりが 0 回であることを主張するように強化
   - 理由: フラッシュ系の視覚バグは poll で見逃されるため、より厳密な回帰検知を整備する
   - 優先度: Low（criticality 6。現実の視認性には影響するが現状 pass で安定）
+
+## TODO Issues (レビュー日: 2026-04-20, PR `#E2E-flake-fix` レビュー)
+
+### Low Priority
+
+- [ ] `updateContent` の no-op check を `enhanceContentInteractions` 後の innerHTML ズレに対応させる
+  - ファイル: `src/template/assets/js/content.js`
+  - 行番号: L1239 の `if (data.content !== undefined && contentEl.innerHTML !== data.content)`
+  - 内容: `enhanceContentInteractions` (L345) が heading-anchor button / code-copy button を DOM 追記するため、server-side rendered HTML (`data.content`) と `contentEl.innerHTML` が常に mismatch し、遅延 broadcast が必ず `#content` を再描画する。結果として `.jump-highlight` クラスや進行中のスクロール状態が消失する。修正案: (a) 比較前に enhancement 由来の button を strip する、(b) enhancement 要素を別コンテナ化する、(c) DOM tree 比較に切り替える
+  - 影響: 現象として `tests/e2e/memo_jump.spec.js` が `page.waitForTimeout(1000)` で回避中。UI としてもリンククリック直後のハイライトが消える軽微な visual バグ
+  - 理由: 本 PR で test 側に workaround を入れたが product 側の構造的欠陥。将来同様のアニメーション/一時状態を追加した場合に類似バグが再発する
+  - 優先度: Low（実害は test の +~10秒、UI のハイライト一瞬消失のみ）
