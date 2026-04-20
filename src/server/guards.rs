@@ -169,7 +169,10 @@ mod tests {
 
     #[test]
     fn test_trusted_host_loopback_ipv6() {
+        // bracketed（HTTP authority の正規形式）
         assert!(is_trusted_host("[::1]"));
+        // 非 bracketed（is_trusted_host の防御的実装が自前で bracket を trim するケース）
+        assert!(is_trusted_host("::1"));
     }
 
     #[test]
