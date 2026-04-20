@@ -426,7 +426,7 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 
   await setDocumentSearchQuery(page, 'note');
 
-  await expect(page.locator('#document-search-summary')).toHaveText('0 / 2 件');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
   await expect(page.locator('#document-search-results .document-search-result').first())
     .toContainText('README.md');
