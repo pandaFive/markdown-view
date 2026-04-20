@@ -149,7 +149,7 @@ test('同一ファイルの壊れたフラグメントリンクではURLのhash�
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator('#toc a.active')).toHaveCount(0);
-  expect(warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
+  await expect.poll(() => warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('同一ファイルの自己リンクもSPA内で処理され先頭へ戻る', async ({ page }) => {
@@ -199,7 +199,7 @@ test('別ファイルの壊れたフラグメントリンクでは対象文書�
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await expect(page.locator('#content')).toContainText('Notes line 60');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-  expect(warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
+  await expect.poll(() => warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
 });
 
 async function installClickObserver(page) {
@@ -304,7 +304,7 @@ test('restoreContentNavigationFromLocationは同一ファイル壊れたフラ�
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator('#toc a.active')).toHaveCount(0);
-  expect(warnings.some((msg) => msg.indexOf('履歴復元時に見出しが見つかりません') !== -1)).toBe(true);
+  await expect.poll(() => warnings.some((msg) => msg.indexOf('履歴復元時に見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('popstateで別ファイル壊れたフラグメントに戻っても履歴エントリのhashは破壊しない', async ({ page }) => {
@@ -338,7 +338,7 @@ test('popstateで別ファイル壊れたフラグメントに戻っても履歴
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator('#toc a.active')).toHaveCount(0);
-  expect(warnings.some((msg) => msg.indexOf('リンク先の見出しが見つかりません') !== -1)).toBe(true);
+  await expect.poll(() => warnings.some((msg) => msg.indexOf('リンク先の見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('fetch失敗時にhistoryHash指定経路では元hashへ復元する', async ({ page }) => {
