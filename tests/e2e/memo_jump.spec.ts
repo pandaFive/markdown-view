@@ -1,6 +1,14 @@
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const { test, expect } = require('@playwright/test');
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { test, expect, type Page } from '@playwright/test';
+
+declare global {
+  interface Window {
+    updateContent: (data: { content: string; toc?: string }, opts: Record<string, unknown>) => void;
+  }
+  // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
+  function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
+}
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
@@ -65,15 +73,15 @@ async function resetLongFixture() {
   await fs.writeFile(longPath, longContent);
 }
 
-async function selectParagraphText(page, text) {
+async function selectParagraphText(page: Page, text: string) {
   await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content'), NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
     let node = null;
     while ((node = walker.nextNode())) {
       if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection();
+        const selection = window.getSelection()!;
         const range = document.createRange();
-        range.selectNodeContents(node.parentElement);
+        range.selectNodeContents(node.parentElement!);
         selection.removeAllRanges();
         selection.addRange(range);
         return;
@@ -124,9 +132,9 @@ test('メモ出典クリックで本文の対応ブロックへスクロール�
 
 /// 指定したテキストを含む block の data-line-block-start を返す。
 /// 複数行段落・blockquote内paragraph どちらにも対応する。
-async function lineBlockStartOf(page, needle) {
+async function lineBlockStartOf(page: Page, needle: string) {
   return page.evaluate((text) => {
-    const walker = document.createTreeWalker(document.getElementById('content'), NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
       if (!node.textContent || !node.textContent.includes(text)) continue;
@@ -135,8 +143,8 @@ async function lineBlockStartOf(page, needle) {
         el = el.parentElement;
       }
       if (!el) return { start: -1, end: -1 };
-      const start = parseInt(el.getAttribute('data-line-block-start') || el.getAttribute('data-source-start-line'), 10);
-      const end = parseInt(el.getAttribute('data-line-block-end') || el.getAttribute('data-source-end-line'), 10);
+      const start = parseInt(el.getAttribute('data-line-block-start') || el.getAttribute('data-source-start-line') || '', 10);
+      const end = parseInt(el.getAttribute('data-line-block-end') || el.getAttribute('data-source-end-line') || '', 10);
       return { start, end };
     }
     return { start: -1, end: -1 };
@@ -246,7 +254,7 @@ test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは has
   // スコープガードの回帰防止。本文コンテンツの自然文 `[spec](spec.md) L10 onwards...` などが
   // 誤ってジャンプ対象にならないことを、関数を直接呼び出して検証する
   const result = await page.evaluate(() => {
-    const container = document.getElementById('content');
+    const container = document.getElementById('content')!;
     const link = document.createElement('a');
     link.href = 'other.md';
     link.textContent = 'other';
@@ -270,7 +278,7 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
   // L 数字の直後に英数字/アンダースコアが続く別トークン（例: `L5abc`, `L5_foo`）は行番号として
   // 採用しないことを検証。両端アンカーが外れると `#section-b:L5` に誤 augment される
   const result = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
@@ -294,7 +302,7 @@ test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では
   // 旧 regex（末尾アンカーなし）は先頭 `L10` を拾って `#intro:L10` に誤書換していた既知の
   // false positive を回帰させないことを担保（Codex review #4136142343 の再発防止）
   const result = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=spec.md#intro';
     link.textContent = 'spec';
@@ -316,7 +324,7 @@ test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく has
   // 範囲形式 positive branch を直接検証。regex の capture group 2 と suffix 生成
   // (`'L' + start + '-L' + end`) がともに機能することを担保
   const result = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
@@ -338,7 +346,7 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
   // end < start（逆転）および end == start（単一行）は start 1 行に縮退する。
   // 将来 regex や suffix 生成を改変したとき「逆転時は null を返す」等の silent 仕様変更を検出する
   const result = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
@@ -361,7 +369,7 @@ test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば li
   // `L20` は旧形式 citation の推測に過ぎないため、明示指定を上書きしないことを保証する。
   // parseLineHash(hash).lineRange が truthy のときの早期 return で実現されている
   const result = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b:L15';
     link.textContent = 'dummy';
@@ -385,7 +393,7 @@ test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n>
   // parseLineHash では一応パース可能だが headingId=null の非直感的フラグメントを生成するため
   // 意図的に避けている。この選択を silent に反転させる退行を検出する
   const results = await page.evaluate(() => {
-    const container = document.getElementById('memo-preview');
+    const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=long.md';
     link.textContent = 'dummy';
@@ -447,7 +455,7 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
 
   // Step 2: prime 後に .jump-highlight を付与
   await page.evaluate(() => {
-    const h = document.querySelector('#content h2');
+    const h = document.querySelector('#content h2')!;
     h.classList.add('jump-highlight');
   });
 
