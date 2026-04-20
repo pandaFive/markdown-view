@@ -439,26 +439,31 @@ test('複数行にまたがる段落の中間行へのジャンプは段落全�
 });
 
 test('同じdata.contentでの2回目updateContentは.jump-highlightを消さない', async ({ page }) => {
-  // beforeEach で /?file=long.md へ goto 済み。最初の h2 が見えていることを確認する
+  // beforeEach で /?file=long.md へ goto 済み
   await expect(page.locator('#content h2').first()).toBeVisible();
 
-  // セットアップ: #content の最初の h2 に .jump-highlight を付与
-  await page.evaluate(() => {
-    const h = document.querySelector('#content h2');
-    h.classList.add('jump-highlight');
-  });
-
-  // /api/content から現在表示中ファイル (long.md) の data を取得して updateContent を直接呼ぶ。
-  // lastAppliedContent と一致するため再描画が起きないことを期待する。
-  // file クエリを省略すると AppState のデフォルトファイル (README) が返ってしまい
-  // 表示中の long.md と内容が異なるため必ず再描画されてしまうので明示する。
+  // Step 1: 1 回目 updateContent で lastAppliedContent を data.content に prime
+  // 初期値は null のため必ず再描画されるが、これは設計上意図された挙動
   await page.evaluate(async () => {
     const res = await fetch('/api/content?file=long.md');
     const data = await res.json();
     window.updateContent(data, {});
   });
 
-  // 再描画されなかったので .jump-highlight が残っているはず
+  // Step 2: prime 後に .jump-highlight を付与
+  await page.evaluate(() => {
+    const h = document.querySelector('#content h2');
+    h.classList.add('jump-highlight');
+  });
+
+  // Step 3: 2 回目 updateContent (同一 data.content) → cache 一致で no-op
+  // 再描画されないため .jump-highlight が保持されることを検証
+  await page.evaluate(async () => {
+    const res = await fetch('/api/content?file=long.md');
+    const data = await res.json();
+    window.updateContent(data, {});
+  });
+
   const stillHighlighted = await page.evaluate(() => {
     const h = document.querySelector('#content h2');
     return h && h.classList.contains('jump-highlight');
