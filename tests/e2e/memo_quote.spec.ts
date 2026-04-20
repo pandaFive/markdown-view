@@ -1,6 +1,6 @@
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const { test, expect } = require('@playwright/test');
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { test, expect, type Page } from '@playwright/test';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -15,15 +15,15 @@ async function resetFixtures() {
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
 
-async function selectParagraphText(page, text) {
+async function selectParagraphText(page: Page, text: string) {
   await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content'), NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
     let node = null;
     while ((node = walker.nextNode())) {
       if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection();
+        const selection = window.getSelection()!;
         const range = document.createRange();
-        range.selectNodeContents(node.parentElement);
+        range.selectNodeContents(node.parentElement!);
         selection.removeAllRanges();
         selection.addRange(range);
         return;
