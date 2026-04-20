@@ -13,7 +13,7 @@ declare global {
     markPendingTocNavigation: (id: string) => void;
   }
   // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
-  function selectFile(file: string): void;
+  function selectFile(file: string, pushHistory?: boolean, options?: Record<string, unknown>): void;
 }
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');

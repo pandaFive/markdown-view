@@ -12,7 +12,7 @@ declare global {
   function activateSidebarTab(tab: string): void;
   function applyDocumentSearchQuery(value: string): void;
   function moveDocumentSearch(direction: number): void;
-  function selectFile(file: string, resetScroll?: boolean): void;
+  function selectFile(file: string, pushHistory?: boolean, options?: Record<string, unknown>): void;
 }
 
 export {}; // ファイルをモジュールとして扱わせる（declare global の要件）
@@ -101,6 +101,8 @@ test.beforeEach(async ({ page }) => {
       }
     }
 
+    TestWebSocket.prototype = NativeWebSocket.prototype;
+    Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
     window.WebSocket = TestWebSocket;
   });
   await page.goto('/');
