@@ -338,7 +338,7 @@ test('popstateで別ファイル壊れたフラグメントに戻っても履歴
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('#missing');
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.locator('#toc a.active')).toHaveCount(0);
-  expect(warnings.some((msg) => msg.indexOf('リンク先の見出しが見つかりません') !== -1)).toBe(true);
+  await expect.poll(() => warnings.some((msg) => msg.indexOf('リンク先の見出しが見つかりません') !== -1)).toBe(true);
 });
 
 test('fetch失敗時にhistoryHash指定経路では元hashへ復元する', async ({ page }) => {
