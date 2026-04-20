@@ -89,9 +89,12 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('#content')).toContainText('TARGET BLOCK');
   // resetLongFixture の writeFile が watcher 経由 broadcast を発火し、WS 接続後に
   // updateContent が #content を差し替える。直後に .jump-highlight を付与すると
-  // 再描画でクラスが消失し L92 テストの toBeVisible が失敗する。debounce 300ms +
-  // WS 到達 + 処理を吸収するため 500ms 待つ。
-  await page.waitForTimeout(500);
+  // 再描画でクラスが消失し L92 相当テストの toBeVisible / scrollY 検証が失敗する。
+  // enhanceContentInteractions が heading-anchor button を innerHTML に追加するため
+  // content.js:1239 の no-op check (innerHTML === data.content) が常に mismatch し
+  // 遅延 broadcast が必ず #content を再描画するという構造的 race（本 PR では test 側で
+  // 回避）。debounce 300ms + WS 到達 + jitter を余裕で吸収するため 1000ms 待つ。
+  await page.waitForTimeout(1000);
 });
 
 test('メモ出典クリックで本文の対応ブロックへスクロールしハイライトされる', async ({ page }) => {
@@ -226,9 +229,9 @@ test('旧形式メモ（リンク外の行番号）の出典クリックでも�
   // サーバー側で初期描画にメモを反映させるためリロード
   await page.reload();
   // memo writeFile 由来の watcher broadcast が reload 後に到達して #content を
-  // 差し替え、直後の .jump-highlight 検証が空振る race を避ける。debounce 300ms +
-  // WS 到達を吸収する 500ms 待ちを追加（beforeEach の理由と同じ）。
-  await page.waitForTimeout(500);
+  // 差し替え、直後の .jump-highlight 検証が空振る race を避ける。beforeEach と
+  // 同じく debounce 300ms + WS 到達 + jitter を吸収する 1000ms 待ちを入れる。
+  await page.waitForTimeout(1000);
   await page.locator('.sidebar-tab[data-tab="memo"]').click();
   await expect(page.locator('#panel-memo.active')).toBeVisible();
 
