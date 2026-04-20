@@ -10,8 +10,11 @@ Markdownファイルをブラウザでリアルタイムプレビューする軽
 ## ビルド・テスト・検証コマンド
 
 ```bash
-# 一括検証（フォーマット・リント・テスト）
-./verify.sh
+# 初回セットアップ（`./verify.sh` と E2E 実行に必要、node_modules を作る）
+npm ci                                    # Node 20.11+ が前提（package.json engines で宣言）
+
+# 一括検証（フォーマット・リント・テスト・E2E型チェック）
+./verify.sh                               # npm ci 済みが前提。未済なら明示エラーで停止
 
 # 個別コマンド
 cargo fmt --all -- --check       # フォーマットチェック
