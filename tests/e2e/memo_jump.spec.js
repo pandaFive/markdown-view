@@ -448,10 +448,12 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
     h.classList.add('jump-highlight');
   });
 
-  // /api/content から現在の data を取得して updateContent を直接呼ぶ。
+  // /api/content から現在表示中ファイル (long.md) の data を取得して updateContent を直接呼ぶ。
   // lastAppliedContent と一致するため再描画が起きないことを期待する。
+  // file クエリを省略すると AppState のデフォルトファイル (README) が返ってしまい
+  // 表示中の long.md と内容が異なるため必ず再描画されてしまうので明示する。
   await page.evaluate(async () => {
-    const res = await fetch('/api/content');
+    const res = await fetch('/api/content?file=long.md');
     const data = await res.json();
     window.updateContent(data, {});
   });

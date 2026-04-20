@@ -1236,8 +1236,9 @@ function updateContent(data, options) {
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
-  if (data.content !== undefined && contentEl.innerHTML !== data.content) {
+  if (data.content !== undefined && data.content !== lastAppliedContent) {
     contentEl.innerHTML = data.content;
+    lastAppliedContent = data.content;
   }
   if (data.toc !== undefined && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(data.toc)) {
     tocEl.innerHTML = data.toc;

@@ -12,6 +12,10 @@ var liveStatusEl = document.getElementById('live-status');
 var readingProgressBar = document.getElementById('reading-progress-bar');
 var backToTop = document.getElementById('back-to-top');
 var contentRoot = document.getElementById('content');
+// updateContent の no-op 判定キャッシュ。
+// enhanceContentInteractions が DOM へ button を追記するため contentRoot の現在 HTML
+// との比較は常に mismatch する。data.content 同士の比較に切り替えるためのキャッシュ。
+var lastAppliedContent = contentRoot ? contentRoot.innerHTML : '';
 var documentSearchInputEl = document.getElementById('document-search-input');
 var documentSearchSummaryEl = document.getElementById('document-search-summary');
 var documentSearchResultsEl = document.getElementById('document-search-results');
