@@ -1,6 +1,6 @@
-const { defineConfig } = require('@playwright/test');
+import { defineConfig } from '@playwright/test';
 
-module.exports = defineConfig({
+export default defineConfig({
   testDir: './tests/e2e',
   timeout: 30000,
   // E2E は共通 fixture (tests/fixtures/e2e/{README,notes}.md) を読み書きするため
