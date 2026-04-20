@@ -23,8 +23,17 @@ run_step() {
   current_step=""
 }
 
+typecheck_e2e() {
+  if [[ ! -d node_modules ]]; then
+    echo "エラー: node_modules が存在しません。'npm ci' を先に実行してください。" >&2
+    return 1
+  fi
+  npx --no-install tsc --noEmit
+}
+
 run_step "フォーマットチェック" cargo fmt --all -- --check
 run_step "Lint (clippy)" cargo clippy --all-targets --all-features -- -D warnings
 run_step "テスト実行" cargo test --all-targets --all-features
+run_step "E2E型チェック (tsc)" typecheck_e2e
 
 echo "==> 検証が正常に完了しました。"

@@ -1,6 +1,20 @@
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const { test, expect } = require('@playwright/test');
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { test, expect, type Page } from '@playwright/test';
+
+declare global {
+  interface Window {
+    __lastWs: WebSocket & { onmessage: ((ev: MessageEvent) => void) | null };
+    __realWsOnmessage: (ev: { data: string }) => void;
+    __dispatchWsMessage: (payload: unknown) => void;
+    __markPendingCalls: number;
+    __tocActiveChanges: string[];
+    __stopTocObserver: () => void;
+    markPendingTocNavigation: (id: string) => void;
+  }
+  // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
+  function selectFile(file: string, pushHistory?: boolean, options?: Record<string, unknown>): void;
+}
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -11,15 +25,15 @@ async function resetFixtures() {
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
 
-async function selectParagraphText(page, text) {
+async function selectParagraphText(page: Page, text: string) {
   await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content'), NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
     let node = null;
     while ((node = walker.nextNode())) {
       if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection();
+        const selection = window.getSelection()!;
         const range = document.createRange();
-        range.selectNodeContents(node.parentElement);
+        range.selectNodeContents(node.parentElement!);
         selection.removeAllRanges();
         selection.addRange(range);
         return;
@@ -29,26 +43,26 @@ async function selectParagraphText(page, text) {
   }, text);
 }
 
-async function clearSelection(page) {
+async function clearSelection(page: Page) {
   await page.evaluate(() => {
-    const selection = window.getSelection();
+    const selection = window.getSelection()!;
     selection.removeAllRanges();
     document.dispatchEvent(new Event('selectionchange'));
   });
 }
 
-async function activeTocLabel(page) {
+async function activeTocLabel(page: Page) {
   return page.locator('#toc a.active').innerText();
 }
 
-async function activeTocLabelOrEmpty(page) {
+async function activeTocLabelOrEmpty(page: Page) {
   const activeLink = page.locator('#toc a.active');
   return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
 }
 
-async function clickTocLink(page, id) {
+async function clickTocLink(page: Page, id: string) {
   await page.evaluate((targetId) => {
-    const link = document.querySelector(`#toc a[href="#${targetId}"]`);
+    const link = document.querySelector(`#toc a[href="#${targetId}"]`) as HTMLAnchorElement | null;
     if (!link) {
       throw new Error(`toc link not found: ${targetId}`);
     }
@@ -56,10 +70,10 @@ async function clickTocLink(page, id) {
   }, id);
 }
 
-async function stabilizeWebSocketHarness(page) {
+async function stabilizeWebSocketHarness(page: Page) {
   await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
   await page.evaluate(() => {
-    window.__realWsOnmessage = window.__lastWs.onmessage;
+    window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;
     window.__lastWs.onmessage = function() {};
     window.__dispatchWsMessage = (payload) => {
       window.__realWsOnmessage({ data: JSON.stringify(payload) });
@@ -67,7 +81,7 @@ async function stabilizeWebSocketHarness(page) {
   });
 }
 
-async function loadDenseHeadingFixture(page) {
+async function loadDenseHeadingFixture(page: Page) {
   const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
   await fs.writeFile(
     readmePath,
@@ -94,8 +108,8 @@ async function loadDenseHeadingFixture(page) {
   await stabilizeWebSocketHarness(page);
 
   return page.evaluate(() => {
-    const alpha = document.getElementById('alpha');
-    const beta = document.getElementById('beta');
+    const alpha = document.getElementById('alpha')!;
+    const beta = document.getElementById('beta')!;
     const offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     return {
       alphaTop: alpha.getBoundingClientRect().top + window.scrollY,
@@ -105,7 +119,7 @@ async function loadDenseHeadingFixture(page) {
   });
 }
 
-async function loadBottomHeadingFixture(page) {
+async function loadBottomHeadingFixture(page: Page) {
   await fs.writeFile(
     readmePath,
     [
@@ -136,19 +150,19 @@ test.beforeEach(async ({ page }) => {
     const nativeSetTimeout = window.setTimeout.bind(window);
 
     class TestWebSocket extends NativeWebSocket {
-      constructor(...args) {
+      constructor(...args: ConstructorParameters<typeof WebSocket>) {
         super(...args);
-        window.__lastWs = this;
+        window.__lastWs = this as typeof window.__lastWs;
       }
     }
 
     TestWebSocket.prototype = NativeWebSocket.prototype;
     Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
     window.WebSocket = TestWebSocket;
-    window.setTimeout = (fn, delay, ...args) => {
+    window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) => {
       const effectiveDelay = delay === 30000 ? 50 : delay;
       return nativeSetTimeout(fn, effectiveDelay, ...args);
-    };
+    }) as typeof window.setTimeout;
   });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
@@ -266,7 +280,7 @@ test('近接した見出し境界でも目次activeが前後に揺れない', as
   }
 
   await page.evaluate(() => {
-    window.scrollTo(0, document.getElementById('beta').getBoundingClientRect().top + window.scrollY);
+    window.scrollTo(0, document.getElementById('beta')!.getBoundingClientRect().top + window.scrollY);
   });
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
   const betaActiveScrollTop = await page.evaluate(() => window.scrollY);
@@ -323,7 +337,7 @@ test('目次クリック後は猶予時間経過後に通常スクロール判�
   await page.waitForTimeout(450);
 
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
+    var alpha = document.getElementById('alpha')!;
     var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
@@ -337,7 +351,7 @@ test('目次クリック直後でも逆方向へスクロールしたら通常�
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
+    var alpha = document.getElementById('alpha')!;
     var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
@@ -380,14 +394,14 @@ test('日本語id見出しでも目次クリック直後の逆方向スクロー
   await stabilizeWebSocketHarness(page);
 
   await page.evaluate(() => {
-    const link = document.querySelector('#toc a[href$="%E6%97%A5%E6%9C%AC%E8%AA%9E%E8%A6%8B%E5%87%BA%E3%81%97"], #toc a[href$="#日本語見出し"]');
+    const link = document.querySelector('#toc a[href$="%E6%97%A5%E6%9C%AC%E8%AA%9E%E8%A6%8B%E5%87%BA%E3%81%97"], #toc a[href$="#日本語見出し"]') as HTMLAnchorElement | null;
     if (!link) throw new Error('日本語id TOC link not found');
     link.click();
   });
   await expect.poll(() => activeTocLabel(page)).toBe('日本語見出し');
 
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
+    var alpha = document.getElementById('alpha')!;
     var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
@@ -417,8 +431,8 @@ test('line-range付きhashのpopstateはpending idと不一致のためrestore�
   const line3BlockTop = await page.evaluate(() => {
     var blocks = document.querySelectorAll('[data-line-block-start]');
     for (var i = 0; i < blocks.length; i++) {
-      var s = parseInt(blocks[i].getAttribute('data-line-block-start'), 10);
-      var e = parseInt(blocks[i].getAttribute('data-line-block-end'), 10);
+      var s = parseInt(blocks[i].getAttribute('data-line-block-start') || '', 10);
+      var e = parseInt(blocks[i].getAttribute('data-line-block-end') || '', 10);
       if (s <= 3 && e >= 3) {
         return blocks[i].getBoundingClientRect().top;
       }
@@ -448,7 +462,7 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
   });
 
   await page.evaluate(() => {
-    const toc = document.getElementById('toc').innerHTML;
+    const toc = document.getElementById('toc')!.innerHTML;
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
     const payload = {
       content:
@@ -557,7 +571,7 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
         '</ul>',
       file: 'README.md'
     });
-    window.scrollTo(0, document.getElementById('beta').getBoundingClientRect().top + window.scrollY);
+    window.scrollTo(0, document.getElementById('beta')!.getBoundingClientRect().top + window.scrollY);
   });
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
@@ -571,12 +585,12 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
   await page.evaluate(() => {
-    const toc = document.getElementById('toc');
+    const toc = document.getElementById('toc')!;
     window.__tocActiveChanges = [];
     let lastLabel = '';
     const recordActive = () => {
       const active = toc.querySelector('a.active');
-      const label = active ? active.textContent : '';
+      const label = active ? active.textContent || '' : '';
       if (label !== lastLabel) {
         window.__tocActiveChanges.push(label);
         lastLabel = label;
@@ -595,7 +609,7 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
 
   await page.evaluate(() => {
     const repeated = '<p>Burst paragraph</p>'.repeat(12);
-    const currentToc = document.getElementById('toc').innerHTML;
+    const currentToc = document.getElementById('toc')!.innerHTML;
     const payload = {
       content:
         '<h1 id="readme">README</h1>' +

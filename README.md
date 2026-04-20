@@ -93,17 +93,28 @@ markdown-view README.md --port 4000 --dark --theme "base16-mocha.dark"
 ### 必要環境
 
 - Rust 1.70+
+- Node.js 20.11+ （E2Eテストと `./verify.sh` の型チェックステップに必要）
+
+### セットアップ
+
+```bash
+npm ci   # E2E 依存（Playwright / TypeScript）を取得。`./verify.sh` 実行前に一度だけ必要
+```
+
+`node_modules/` が無い状態で `./verify.sh` を実行すると E2E 型チェックステップで停止する（対応: 上記 `npm ci` を実行）。Rust のみを扱う場合も `./verify.sh` は `npm ci` 済みを前提とするため、初回セットアップ時に必須。
 
 ### ビルド・テスト
 
 ```bash
-# 一括検証（フォーマット・リント・テスト）
+# 一括検証（フォーマット・リント・テスト・E2E型チェック）
 ./verify.sh
 
 # 個別コマンド
 cargo fmt --all -- --check       # フォーマットチェック
 cargo clippy --all-targets --all-features -- -D warnings  # リント
 cargo test --all-targets --all-features   # 全テスト実行
+npm run typecheck                # E2E テストの型チェック (tsc --noEmit)
+npm run test:e2e                 # E2E テスト実行（Playwright、ブラウザ自動起動）
 ```
 
 ### アーキテクチャ

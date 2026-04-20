@@ -90,3 +90,66 @@
   - 内容: SSR 完了から WS 接続完了までの数十〜数百 ms にユーザーが目次クリック等で `.jump-highlight` を獲得した場合、A2 設計上の「初回 broadcast 1 回再描画」でクラスが消える可能性。`MutationObserver` で `#content` の childList 置換回数を監視し、初回 broadcast 後に 0 回追加置換されることを assert
   - 理由: A2 設計の「UI 影響なし」前提の境界条件検証
   - 優先度: Low（criticality 3。実用上ユーザーが SSR 直後 100ms 以内に目次クリックする可能性は低い）
+
+## TODO Issues (レビュー日: 2026-04-20, E2E TypeScript移行 PR レビュー)
+
+### Low Priority
+
+- [ ] E2E の `declare global` ブロックを `tests/e2e/globals.d.ts` に集約
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` に散在する `declare global { interface Window { ... } }` + ブラウザバンドル関数/変数の declare
+  - 内容: 共通 ambient 宣言を `tests/e2e/globals.d.ts` に一本化。各 spec の `declare global` を削除。`tsconfig.json` の `include` で拾う
+  - 理由: `Window.__lastWs` / `__realWsOnmessage` が text_selection_defer と document_search で byte 一致しているが、片方を変更すると TS2717 で破綻するリスクを根治。`selectFile` / `updateContent` 宣言の spec 間不整合も解消
+  - 優先度: Low（現状は TS declaration merging で動作、実害は将来の drift リスクのみ）
+
+- [ ] `updateContent` 型宣言の統一
+  - ファイル: `tests/e2e/memo_jump.spec.ts` (Window.updateContent プロパティ型), `tests/e2e/document_search.spec.ts` (top-level function 型)
+  - 内容: 同じランタイム binding に対し 2 通りの型宣言が存在。`opts` が memo_jump では required、document_search では optional と不整合。どちらかに統一
+  - 理由: 同一 binding を 2 型で捕捉しているため、片方の型が誤っても検出不能。ペイロード union (`{ refresh: true }` / `file?: string` 等) も未表現
+  - 優先度: Low（現行 test は両宣言で動作、実害なし）
+
+- [ ] `document_search.spec.ts:18` の冗長な `export {};` 削除
+  - 内容: `import { test, expect, type Page } from '@playwright/test';` で既に module 扱いのため `export {};` は不要。他 5 spec も import ベースで同等扱い
+  - 理由: 他 spec と対称性を保ち、コメント（declare global の要件）の誤解を防ぐ
+  - 優先度: Low（cosmetic）
+
+- [ ] `as unknown as` double-cast の説明コメント追加
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `stabilizeWebSocketHarness` 内
+  - 内容: `window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;` の直前に、`__dispatchWsMessage` が MessageEvent を生成せず `{ data: string }` を直接渡すため契約を狭めている旨の日本語コメント
+  - 理由: 2 箇所の strict エスケープハッチが無説明。`MessageEvent` contravariance の問題を説明しないと将来の保守者が削除しかねない
+  - 優先度: Low（動作は正しい、理解補助のみ）
+
+- [ ] `memo_jump.spec.ts:303` の Codex review ID `#4136142343` 削除
+  - 内容: 外部 review system の ID 参照を除去し、回帰保護の対象である false-positive パターンの説明に置き換える
+  - 理由: ID は Codex 側でアーカイブされると参照不能、典型的な rot-prone comment
+  - 優先度: Low（既存 PR #76 で持ち込まれた既存課題、E2E TS 移行とは独立）
+
+- [ ] `tsconfig.json` に `noUncheckedIndexedAccess` / `exactOptionalPropertyTypes` を追加
+  - 内容: strict の上位に両 flag を有効化
+  - 理由:
+    - `noUncheckedIndexedAccess`: `__clickObservations[href]` 等の Record アクセスに `undefined` 可能性を強制 → missing key のバグを発見
+    - `exactOptionalPropertyTypes`: `toc?: string` と `toc: undefined` の区別を厳格化 → `content.js` 側の `data.toc !== undefined` チェックと整合
+  - 優先度: Low（現状の test は既存 flag で strict、追加強化は将来の保守リスク低減目的）
+
+- [ ] E2E 共通ヘルパー (`resetFixtures`, `selectParagraphText` 等) を `tests/e2e/helpers.ts` に抽出
+  - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer}.spec.ts` に重複するヘルパー
+  - 内容: 複数 spec で同一実装されているヘルパー関数を共通モジュールに抽出
+  - 理由: DRY 違反、片方を修正して片方を忘れるリスク。TS 化の副産物として可視化されたが、E2E TS 移行スコープ外として延期
+  - 優先度: Low（現状動作、保守性向上のみ）
+
+- [ ] `TestWebSocket` を `tests/e2e/browser/test-websocket.ts` に抽出し `addInitScript` 経由でロード
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `page.addInitScript` 内 TestWebSocket 定義
+  - 内容: 共有ブラウザハーネスモジュールとして切り出し、`page.addInitScript(path)` で読み込む
+  - 理由: 2 spec で TestWebSocket 定義が重複、片方に `setTimeout` override が付く等の drift が発生している
+  - 優先度: Low（現状動作、将来の drift 防止）
+
+- [ ] E2E を `verify.sh` に統合するか検討
+  - ファイル: `verify.sh`
+  - 内容: 現状 `tsc --noEmit` のみで `npm run test:e2e` は手動実行。verify.sh で Rust server 立ち上げ→ playwright 実行まで含めるか
+  - 理由: E2E を CI で回していない現状、type check のみが SSoT。実行コストと速度のトレードオフ要検討
+  - 優先度: Low（個人使用前提で現状維持可）
+
+- [ ] インラインブラウザJS (`src/template/assets/js/*.js`) の TS 化
+  - ファイル: 7 ファイル (bootstrap, content, fetch, memo, selection, sidebar, websocket)
+  - 内容: Rust の `include_str!` でコンパイル時に埋め込まれる JS を TS で記述し、事前 tsc でビルドして `.js` 出力を `include_str!` 対象にする
+  - 理由: ブラウザ側 JS は現在無型。ただし Rust ビルドパイプラインへの Node 依存追加が必要で、「Rust 単体ビルド」の明快さが崩れる
+  - 優先度: Low（個人利用前提・staged migration 方針、ビルド複雑化コストに見合うか要検討）

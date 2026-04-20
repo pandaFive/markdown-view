@@ -1,6 +1,6 @@
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const { test, expect } = require('@playwright/test');
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { test, expect, type Page } from '@playwright/test';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -16,22 +16,22 @@ async function resetFixtures() {
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
 
-async function openMemoTab(page) {
+async function openMemoTab(page: Page) {
   await page.locator('.sidebar-tab[data-tab="memo"]').click();
   await expect(page.locator('#panel-memo.active')).toBeVisible();
 }
 
-async function openFileTab(page) {
+async function openFileTab(page: Page) {
   await page.locator('.sidebar-tab[data-tab="files"]').click();
   await expect(page.locator('#panel-files.active')).toBeVisible();
 }
 
-async function selectFile(page, file) {
+async function selectFile(page: Page, file: string) {
   await openFileTab(page);
   await page.locator(`[data-file="${file}"]`).click();
 }
 
-async function saveMemo(page, text) {
+async function saveMemo(page: Page, text: string) {
   const editor = page.locator('#memo-editor');
   await editor.fill(text);
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');

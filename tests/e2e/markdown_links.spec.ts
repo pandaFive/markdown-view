@@ -1,6 +1,12 @@
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const { test, expect } = require('@playwright/test');
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { test, expect, type Page } from '@playwright/test';
+
+declare global {
+  interface Window {
+    __clickObservations: Record<string, { defaultPrevented: boolean }>;
+  }
+}
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -122,7 +128,7 @@ test('同一ファイル内フラグメント履歴は戻る進むでも見出�
 });
 
 test('同一ファイルの壊れたフラグメントリンクではURLのhashをクリアし警告を出す', async ({ page }) => {
-  var warnings = [];
+  const warnings: string[] = [];
   page.on('console', function(message) {
     if (message.type() === 'warning') {
       warnings.push(message.text());
@@ -138,8 +144,8 @@ test('同一ファイルの壊れたフラグメントリンクではURLのhash�
 
   await page.reload();
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
-    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    const alpha = document.getElementById('alpha')!;
+    const offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
   await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
@@ -171,7 +177,7 @@ test('同一ファイルの自己リンクもSPA内で処理され先頭へ戻�
 });
 
 test('別ファイルの壊れたフラグメントリンクでは対象文書を先頭から表示しURLのhashを消す', async ({ page }) => {
-  var warnings = [];
+  const warnings: string[] = [];
   page.on('console', function(message) {
     if (message.type() === 'warning') {
       warnings.push(message.text());
@@ -202,13 +208,13 @@ test('別ファイルの壊れたフラグメントリンクでは対象文書�
   await expect.poll(() => warnings.some((msg) => msg.indexOf('見出しが見つかりません') !== -1)).toBe(true);
 });
 
-async function installClickObserver(page) {
+async function installClickObserver(page: Page) {
   await page.evaluate(() => {
     window.__clickObservations = {};
     window.addEventListener('click', function(event) {
-      var link = event.target.closest('a[href]');
+      const link = (event.target as HTMLElement | null)?.closest('a[href]');
       if (!link) return;
-      window.__clickObservations[link.getAttribute('href')] = {
+      window.__clickObservations[link.getAttribute('href')!] = {
         defaultPrevented: event.defaultPrevented
       };
       event.preventDefault();
@@ -272,7 +278,7 @@ test('日本語見出しへのフラグメントリンクでも対象見出し�
 });
 
 test('restoreContentNavigationFromLocationは同一ファイル壊れたフラグメントで先頭スクロールとTOCリセットを行う', async ({ page }) => {
-  var warnings = [];
+  const warnings: string[] = [];
   page.on('console', function(message) {
     if (message.type() === 'warning') {
       warnings.push(message.text());
@@ -288,8 +294,8 @@ test('restoreContentNavigationFromLocationは同一ファイル壊れたフラ�
 
   await page.reload();
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
-    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    const alpha = document.getElementById('alpha')!;
+    const offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
   });
   await expect.poll(async () => page.locator('#toc a.active').innerText()).toBe('Alpha');
@@ -308,7 +314,7 @@ test('restoreContentNavigationFromLocationは同一ファイル壊れたフラ�
 });
 
 test('popstateで別ファイル壊れたフラグメントに戻っても履歴エントリのhashは破壊しない', async ({ page }) => {
-  var warnings = [];
+  const warnings: string[] = [];
   page.on('console', function(message) {
     if (message.type() === 'warning') {
       warnings.push(message.text());
@@ -363,8 +369,8 @@ test('fetch失敗時にhistoryHash指定経路では元hashへ復元する', asy
 
   await page.reload();
   await page.evaluate(() => {
-    var alpha = document.getElementById('alpha');
-    var offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
+    const alpha = document.getElementById('alpha')!;
+    const offset = parseFloat(window.getComputedStyle(alpha).scrollMarginTop) || 112;
     window.scrollTo(0, alpha.getBoundingClientRect().top + window.scrollY - offset + 8);
     history.replaceState(null, '', '?file=README.md#alpha');
   });
