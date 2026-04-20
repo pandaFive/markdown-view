@@ -87,6 +87,11 @@ test.beforeEach(async ({ page }) => {
   await resetLongFixture();
   await page.goto('/?file=long.md');
   await expect(page.locator('#content')).toContainText('TARGET BLOCK');
+  // resetLongFixture の writeFile が watcher 経由 broadcast を発火し、WS 接続後に
+  // updateContent が #content を差し替える。直後に .jump-highlight を付与すると
+  // 再描画でクラスが消失し L92 テストの toBeVisible が失敗する。debounce 300ms +
+  // WS 到達 + 処理を吸収するため 500ms 待つ。
+  await page.waitForTimeout(500);
 });
 
 test('メモ出典クリックで本文の対応ブロックへスクロールしハイライトされる', async ({ page }) => {
