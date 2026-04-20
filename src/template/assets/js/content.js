@@ -1303,5 +1303,5 @@ setupContentLinkNavigation();
 setupMemoLinkNavigation();
 
 // テスト専用 expose (tests/e2e/memo_jump.spec.js から直接呼ぶため)。
-// 本番コードからは呼ばないこと (broadcast.js / fetch.js 経由の正規ルートを使う)。
+// 本番コードからは呼ばないこと (websocket.js / fetch.js 経由の正規ルートを使う)。
 window.updateContent = updateContent;

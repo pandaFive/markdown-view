@@ -461,7 +461,10 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
     window.updateContent(data, {});
     return data.content.length;
   });
-  expect(verifyContentLen).toBe(primeContentLen);
+  expect(
+    verifyContentLen,
+    'Step1→Step3 で /api/content?file=long.md の content 長が変化 (cache 比較の前提崩壊)'
+  ).toBe(primeContentLen);
 
   const stillHighlighted = await page.evaluate(() => {
     const h = document.querySelector('#content h2');
