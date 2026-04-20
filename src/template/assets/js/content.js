@@ -399,7 +399,7 @@ function handleInternalLinkClick(event) {
       if (applyContentAnchorNavigation(target.hash, false)) {
         return;
       }
-      console.warn('[markdown-view] 同一ファイル内のジャンプ先が見つかりません:', target.hash);
+      console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
     }
     setFileParam(currentFile, false, '');
     restoreContentNavigationFromLocation();
