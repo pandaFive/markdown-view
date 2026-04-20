@@ -2,27 +2,7 @@
 
 ## E2E テスト失敗（2026-04-20 発見）
 
-`npx playwright test` 全体実行で 5 件の失敗を確認。develop baseline でも 3 件が再現するため PR #76 の変更起因ではなく pre-existing な不具合または flake。`./verify.sh` には E2E が含まれないため CI で検知されていない。
-
-### High Priority
-
-- [ ] `markdown_links.spec.js:124` 壊れたフラグメントリンクの hash クリア + 警告動作
-  - ファイル: `tests/e2e/markdown_links.spec.js`
-  - 行番号: L124（テスト開始行）
-  - 症状: 同一ファイル内の存在しないフラグメントリンクで URL hash クリアと警告が期待通りに動作しない
-  - 再現: `npx playwright test tests/e2e/markdown_links.spec.js:124`
-  - 再現性: develop でも再現（stable）
-  - 理由: markdown 内リンクの基本 UX、壊れたアンカーの fallback 挙動
-  - 優先度: High
-
-- [ ] `document_search.spec.js:389` ディレクトリモード検索 API 結果の一覧表示
-  - ファイル: `tests/e2e/document_search.spec.js`
-  - 行番号: L389（テスト開始行）
-  - 症状: ディレクトリモードで `/api/search` 結果の一覧描画が期待通りにならない
-  - 再現: `npx playwright test tests/e2e/document_search.spec.js:389`
-  - 再現性: develop でも再現（stable）
-  - 理由: 検索機能の E2E 検証、ディレクトリモード固有の描画経路
-  - 優先度: High
+`npx playwright test` 全体実行で当初 5 件の失敗を確認。うち High Priority 2件は修正済み（本ブランチ）。残る Medium の flake 2件は `./verify.sh` に E2E を組み込む前提で対応する。
 
 ### Medium Priority
 
