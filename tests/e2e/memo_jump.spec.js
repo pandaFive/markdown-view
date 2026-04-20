@@ -87,14 +87,6 @@ test.beforeEach(async ({ page }) => {
   await resetLongFixture();
   await page.goto('/?file=long.md');
   await expect(page.locator('#content')).toContainText('TARGET BLOCK');
-  // resetLongFixture の writeFile が watcher 経由 broadcast を発火し、WS 接続後に
-  // updateContent が #content を差し替える。直後に .jump-highlight を付与すると
-  // 再描画でクラスが消失し L92 相当テストの toBeVisible / scrollY 検証が失敗する。
-  // enhanceContentInteractions が heading-anchor button を innerHTML に追加するため
-  // content.js:1239 の no-op check (innerHTML === data.content) が常に mismatch し
-  // 遅延 broadcast が必ず #content を再描画するという構造的 race（本 PR では test 側で
-  // 回避）。debounce 300ms + WS 到達 + jitter を余裕で吸収するため 1000ms 待つ。
-  await page.waitForTimeout(1000);
 });
 
 test('メモ出典クリックで本文の対応ブロックへスクロールしハイライトされる', async ({ page }) => {
@@ -228,10 +220,6 @@ test('旧形式メモ（リンク外の行番号）の出典クリックでも�
 
   // サーバー側で初期描画にメモを反映させるためリロード
   await page.reload();
-  // memo writeFile 由来の watcher broadcast が reload 後に到達して #content を
-  // 差し替え、直後の .jump-highlight 検証が空振る race を避ける。beforeEach と
-  // 同じく debounce 300ms + WS 到達 + jitter を吸収する 1000ms 待ちを入れる。
-  await page.waitForTimeout(1000);
   await page.locator('.sidebar-tab[data-tab="memo"]').click();
   await expect(page.locator('#panel-memo.active')).toBeVisible();
 
@@ -436,4 +424,51 @@ test('複数行にまたがる段落の中間行へのジャンプは段落全�
   const highlighted = page.locator('#content .jump-highlight');
   await expect(highlighted).toBeVisible();
   await expect(highlighted).toContainText('MULTILINE TARGET');
+});
+
+test('同じdata.contentでの2回目updateContentは.jump-highlightを消さない', async ({ page }) => {
+  // beforeEach で /?file=long.md へ goto 済み
+  await expect(page.locator('#content h2').first()).toBeVisible();
+
+  // Step 1: 1 回目 updateContent で lastAppliedContent を data.content に prime。
+  // 初期値 null は仕様 (bootstrap.js の lastAppliedContent 宣言コメント参照) のため
+  // ここでの 1 回目は必ず再描画される、を前提に Step 2/3 が組まれている。
+  // fetch / data.content の異常を黙殺すると Step 3 の no-op が「cache 不一致」ではなく
+  // 「両方 undefined で skip」で偽陽性化するため必ず ok / 型を assert する。
+  const primeContentLen = await page.evaluate(async () => {
+    const res = await fetch('/api/content?file=long.md');
+    if (!res.ok) throw new Error('Step 1 fetch failed: ' + res.status);
+    const data = await res.json();
+    if (typeof data.content !== 'string') throw new Error('Step 1 data.content missing');
+    window.updateContent(data, {});
+    return data.content.length;
+  });
+  expect(primeContentLen).toBeGreaterThan(0);
+
+  // Step 2: prime 後に .jump-highlight を付与
+  await page.evaluate(() => {
+    const h = document.querySelector('#content h2');
+    h.classList.add('jump-highlight');
+  });
+
+  // Step 3: 2 回目 updateContent (同一 data.content) → cache 一致で no-op。
+  // 再描画されないため .jump-highlight が保持されることを検証
+  const verifyContentLen = await page.evaluate(async () => {
+    const res = await fetch('/api/content?file=long.md');
+    if (!res.ok) throw new Error('Step 3 fetch failed: ' + res.status);
+    const data = await res.json();
+    if (typeof data.content !== 'string') throw new Error('Step 3 data.content missing');
+    window.updateContent(data, {});
+    return data.content.length;
+  });
+  expect(
+    verifyContentLen,
+    'Step1→Step3 で /api/content?file=long.md の content 長が変化 (cache 比較の前提崩壊)'
+  ).toBe(primeContentLen);
+
+  const stillHighlighted = await page.evaluate(() => {
+    const h = document.querySelector('#content h2');
+    return h && h.classList.contains('jump-highlight');
+  });
+  expect(stillHighlighted).toBe(true);
 });

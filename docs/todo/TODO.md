@@ -52,14 +52,41 @@
   - 理由: フラッシュ系の視覚バグは poll で見逃されるため、より厳密な回帰検知を整備する
   - 優先度: Low（criticality 6。現実の視認性には影響するが現状 pass で安定）
 
-## TODO Issues (レビュー日: 2026-04-20, PR `#E2E-flake-fix` レビュー)
+
+## TODO Issues (レビュー日: 2026-04-20, PR #80 レビュー)
+
+### Medium Priority
+
+- [ ] `updateContent` の inverse case (file-switch / data.content 変更時) の再描画検証
+  - ファイル: `tests/e2e/memo_jump.spec.js` (回帰テスト L429 周辺に Step 4 追加 or 別テスト)
+  - 内容: 現状の回帰テストは「同一 data.content での 2 回目 no-op」のみ検証。**逆方向**である「data.content が変わったら必ず再描画される」を直接検証するテストが欠落
+  - 想定実装: 既存 prime → highlight → 同一 no-op の後に Step 4 として、別の `data.content` 文字列 (例: ダミー HTML) を渡して `window.updateContent` を呼び、(a) `.jump-highlight` が消えている (= 再描画された) (b) その後同一の changed content で再度呼ぶと no-op (= cache が新値で更新された) の 2 点を検証
+  - 理由: cache invariant が逆転した regression (条件が常に false 化する書き換え等) を現状の suite では検出できない
+  - 優先度: Medium（criticality 7。修正は 5 行だが invariant の半分が未検証）
+
+- [ ] `updateContent` で `data.content === undefined` を契約違反として明示ログ
+  - ファイル: `src/template/assets/js/content.js` L1239 周辺
+  - 内容: `UpdateMessage` (`src/template/message.rs`) は `content` / `toc` に `skip_serializing_if` を付けていないため `data.content` は **必ず** 存在するはずだが、現状は `undefined` を no-op で黙殺している。サーバ契約変更や中継プロキシ改変で content が欠落した場合「ファイル編集してもプレビュー更新されない」サイレント失敗になる
+  - 想定実装: `data.content === undefined` の場合 `console.warn('[markdown-view] updateContent: data.content が欠落 (契約違反)', data);` を出し、TOC 更新等の副作用は継続
+  - 理由: WS フレームを直接覗かないとデバッグ不能なサイレント失敗の予防
+  - 優先度: Medium（criticality 6。現状の契約では発生しないが将来の regression 検出に有効）
 
 ### Low Priority
 
-- [ ] `updateContent` の no-op check を `enhanceContentInteractions` 後の innerHTML ズレに対応させる
-  - ファイル: `src/template/assets/js/content.js`
-  - 行番号: L1239 の `if (data.content !== undefined && contentEl.innerHTML !== data.content)`
-  - 内容: `enhanceContentInteractions` (L345) が heading-anchor button / code-copy button を DOM 追記するため、server-side rendered HTML (`data.content`) と `contentEl.innerHTML` が常に mismatch し、遅延 broadcast が必ず `#content` を再描画する。結果として `.jump-highlight` クラスや進行中のスクロール状態が消失する。修正案: (a) 比較前に enhancement 由来の button を strip する、(b) enhancement 要素を別コンテナ化する、(c) DOM tree 比較に切り替える
-  - 影響: 現象として `tests/e2e/memo_jump.spec.js` が `page.waitForTimeout(1000)` で回避中。UI としてもリンククリック直後のハイライトが消える軽微な visual バグ
-  - 理由: 本 PR で test 側に workaround を入れたが product 側の構造的欠陥。将来同様のアニメーション/一時状態を追加した場合に類似バグが再発する
-  - 優先度: Low（実害は test の +~10秒、UI のハイライト一瞬消失のみ）
+- [ ] `window.updateContent` を E2E モード限定 expose に変更
+  - ファイル: `src/template/assets/js/content.js` L1303 (現状 `window.updateContent = updateContent;`)
+  - 内容: Playwright 実行時のみ expose する形 (`if (window.__MV_E2E__) window.updateContent = updateContent;`) に変更。E2E 側は `page.addInitScript(() => { window.__MV_E2E__ = true; })` で有効化
+  - 理由: 個人 markdown viewer (127.0.0.1 限定) なので実害はないが、テスト hook が production HTML に常時露出している。将来 OSS 化 / 公開ホスティングに転じた際にサニタイズ層をバイパスして任意 HTML payload を流す呼び出しが可能になる
+  - 優先度: Low（criticality 4。コメントで「本番から呼ぶな」とは明示済み、用途上は許容）
+
+- [ ] `contentEl` への HTML 代入時の例外可視化
+  - ファイル: `src/template/assets/js/content.js` L1239-L1242
+  - 内容: 現状は `try/catch` なし。CSP 違反 / 拡張機能が DOM mutation observer 経由で throw を投げ込んだ場合、例外が呼出元まで bubble up し `live-status` も曖昧に。想定実装: `try` で代入と cache 更新を囲み、`catch` で `console.error` + `showWsParseErrorBanner` + `setLiveStatus('error')` + early return
+  - 理由: 失敗時に「ライブ更新が止まっている」と「変更がなかった」をユーザーが区別できない silent failure 化
+  - 優先度: Low（criticality 3。本 PR 修正前から同じ挙動、本質的に既存問題）
+
+- [ ] 初回 broadcast 中に付与済みクラスが消失する edge case の検証
+  - ファイル: `tests/e2e/memo_jump.spec.js` 新規テスト
+  - 内容: SSR 完了から WS 接続完了までの数十〜数百 ms にユーザーが目次クリック等で `.jump-highlight` を獲得した場合、A2 設計上の「初回 broadcast 1 回再描画」でクラスが消える可能性。`MutationObserver` で `#content` の childList 置換回数を監視し、初回 broadcast 後に 0 回追加置換されることを assert
+  - 理由: A2 設計の「UI 影響なし」前提の境界条件検証
+  - 優先度: Low（criticality 3。実用上ユーザーが SSR 直後 100ms 以内に目次クリックする可能性は低い）

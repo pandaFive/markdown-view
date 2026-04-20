@@ -1236,8 +1236,12 @@ function updateContent(data, options) {
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
-  if (data.content !== undefined && contentEl.innerHTML !== data.content) {
+  // 比較対象は contentEl の現在 HTML ではなく lastAppliedContent (キャッシュ変数)。
+  // enhanceContentInteractions が描画後に DOM を改変するため DOM 比較は常に mismatch する。
+  // 詳細は bootstrap.js の lastAppliedContent 宣言コメント参照。
+  if (data.content !== undefined && data.content !== lastAppliedContent) {
     contentEl.innerHTML = data.content;
+    lastAppliedContent = data.content;
   }
   if (data.toc !== undefined && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(data.toc)) {
     tocEl.innerHTML = data.toc;
@@ -1297,3 +1301,7 @@ function updateContent(data, options) {
 setupDocumentSearch();
 setupContentLinkNavigation();
 setupMemoLinkNavigation();
+
+// テスト専用 expose (tests/e2e/memo_jump.spec.js から直接呼ぶため)。
+// 本番コードからは呼ばないこと (websocket.js / fetch.js 経由の正規ルートを使う)。
+window.updateContent = updateContent;
