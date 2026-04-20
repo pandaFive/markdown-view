@@ -1,23 +1,5 @@
 # TODO Issues
 
-## E2E テスト失敗（2026-04-20 発見）
-
-`npx playwright test` 全体実行で当初 5 件の失敗を確認。うち High Priority 2件は修正済み（本ブランチ）。残る Medium の flake は `./verify.sh` に E2E を組み込む前提で対応する。
-
-### Medium Priority
-
-- [ ] Flaky E2E テスト 3 件の安定化
-  - ファイル:
-    - `tests/e2e/markdown_links.spec.js:41` ディレクトリモード相対リンクフラグメント遷移
-    - `tests/e2e/markdown_links.spec.js:310` popstateで別ファイル壊れたフラグメントに戻っても履歴エントリのhashは破壊しない
-    - `tests/e2e/memo_sync.spec.js:48` 別ページへのメモ更新同期
-  - 症状: 同じコマンドを連続実行すると pass/fail が揺れる
-  - 再現: `npx playwright test tests/e2e/markdown_links.spec.js:41` を複数回実行
-  - 方針: `test.retry(2)` で許容せず、待機条件（selector の安定化 / broadcast 到達確認）を特定して根治
-  - 理由: `./verify.sh` に E2E を組み込む前提で flake は許容しない
-  - 優先度: Medium
-  - 備考: L310 は 2026-04-20 PR #78 検証中に観測（1 回再実行で pass）
-
 ## TODO Issues (レビュー日: 2026-04-20, PR #76 レビュー)
 
 ### Low Priority
