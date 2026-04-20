@@ -225,6 +225,10 @@ test('旧形式メモ（リンク外の行番号）の出典クリックでも�
 
   // サーバー側で初期描画にメモを反映させるためリロード
   await page.reload();
+  // memo writeFile 由来の watcher broadcast が reload 後に到達して #content を
+  // 差し替え、直後の .jump-highlight 検証が空振る race を避ける。debounce 300ms +
+  // WS 到達を吸収する 500ms 待ちを追加（beforeEach の理由と同じ）。
+  await page.waitForTimeout(500);
   await page.locator('.sidebar-tab[data-tab="memo"]').click();
   await expect(page.locator('#panel-memo.active')).toBeVisible();
 
