@@ -17,6 +17,8 @@ Markdownファイルをブラウザでリアルタイムプレビューする軽
 cargo fmt --all -- --check       # フォーマットチェック
 cargo clippy --all-targets --all-features -- -D warnings  # リント
 cargo test --all-targets --all-features   # 全テスト実行
+npm run typecheck                        # E2Eテストの型チェック (tsc --noEmit)
+npm run test:e2e                          # E2Eテスト実行 (Playwright)
 
 # 単一テスト実行
 cargo test test_見出しにidが付与される     # テスト名で指定
@@ -89,6 +91,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - `src/server/files.rs` 内テスト — ファイル解決、トラバーサル防止、サイズ制限
 - `src/server/messages.rs` 内テスト — BroadcastMessage直列化
 - `src/server/broadcast.rs` 内テスト — notify_update、遅延回復
+- `tests/e2e/*.spec.ts` — Playwright E2Eテスト（TypeScript strict、`npm run test:e2e`で実行）
 
 テスト名は日本語で記述する。
 
@@ -98,3 +101,4 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - `tracing::info!/warn!/error!` マクロで構造化ログ出力（初期化失敗時のみ `eprintln!` フォールバック）
 - syntect/pulldown-cmarkの静的リソースは`OnceLock`でlazy初期化
 - 公開関数に`///`ドキュメントコメントを付与
+- E2Eテストは TypeScript strict で記述し、`tsc --noEmit`（`verify.sh`内）で型検査する
