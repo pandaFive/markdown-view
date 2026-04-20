@@ -437,3 +437,29 @@ test('複数行にまたがる段落の中間行へのジャンプは段落全�
   await expect(highlighted).toBeVisible();
   await expect(highlighted).toContainText('MULTILINE TARGET');
 });
+
+test('同じdata.contentでの2回目updateContentは.jump-highlightを消さない', async ({ page }) => {
+  // beforeEach で /?file=long.md へ goto 済み。最初の h2 が見えていることを確認する
+  await expect(page.locator('#content h2').first()).toBeVisible();
+
+  // セットアップ: #content の最初の h2 に .jump-highlight を付与
+  await page.evaluate(() => {
+    const h = document.querySelector('#content h2');
+    h.classList.add('jump-highlight');
+  });
+
+  // /api/content から現在の data を取得して updateContent を直接呼ぶ。
+  // lastAppliedContent と一致するため再描画が起きないことを期待する。
+  await page.evaluate(async () => {
+    const res = await fetch('/api/content');
+    const data = await res.json();
+    window.updateContent(data, {});
+  });
+
+  // 再描画されなかったので .jump-highlight が残っているはず
+  const stillHighlighted = await page.evaluate(() => {
+    const h = document.querySelector('#content h2');
+    return h && h.classList.contains('jump-highlight');
+  });
+  expect(stillHighlighted).toBe(true);
+});

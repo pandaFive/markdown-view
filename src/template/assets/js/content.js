@@ -1297,3 +1297,6 @@ function updateContent(data, options) {
 setupDocumentSearch();
 setupContentLinkNavigation();
 setupMemoLinkNavigation();
+
+// テストから updateContent を直接呼ぶための expose。
+window.updateContent = updateContent;
