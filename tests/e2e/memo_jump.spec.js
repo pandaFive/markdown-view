@@ -430,13 +430,20 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
   // beforeEach で /?file=long.md へ goto 済み
   await expect(page.locator('#content h2').first()).toBeVisible();
 
-  // Step 1: 1 回目 updateContent で lastAppliedContent を data.content に prime
-  // 初期値は null のため必ず再描画されるが、これは設計上意図された挙動
-  await page.evaluate(async () => {
+  // Step 1: 1 回目 updateContent で lastAppliedContent を data.content に prime。
+  // 初期値 null は仕様 (bootstrap.js の lastAppliedContent 宣言コメント参照) のため
+  // ここでの 1 回目は必ず再描画される、を前提に Step 2/3 が組まれている。
+  // fetch / data.content の異常を黙殺すると Step 3 の no-op が「cache 不一致」ではなく
+  // 「両方 undefined で skip」で偽陽性化するため必ず ok / 型を assert する。
+  const primeContentLen = await page.evaluate(async () => {
     const res = await fetch('/api/content?file=long.md');
+    if (!res.ok) throw new Error('Step 1 fetch failed: ' + res.status);
     const data = await res.json();
+    if (typeof data.content !== 'string') throw new Error('Step 1 data.content missing');
     window.updateContent(data, {});
+    return data.content.length;
   });
+  expect(primeContentLen).toBeGreaterThan(0);
 
   // Step 2: prime 後に .jump-highlight を付与
   await page.evaluate(() => {
@@ -444,13 +451,17 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
     h.classList.add('jump-highlight');
   });
 
-  // Step 3: 2 回目 updateContent (同一 data.content) → cache 一致で no-op
+  // Step 3: 2 回目 updateContent (同一 data.content) → cache 一致で no-op。
   // 再描画されないため .jump-highlight が保持されることを検証
-  await page.evaluate(async () => {
+  const verifyContentLen = await page.evaluate(async () => {
     const res = await fetch('/api/content?file=long.md');
+    if (!res.ok) throw new Error('Step 3 fetch failed: ' + res.status);
     const data = await res.json();
+    if (typeof data.content !== 'string') throw new Error('Step 3 data.content missing');
     window.updateContent(data, {});
+    return data.content.length;
   });
+  expect(verifyContentLen).toBe(primeContentLen);
 
   const stillHighlighted = await page.evaluate(() => {
     const h = document.querySelector('#content h2');

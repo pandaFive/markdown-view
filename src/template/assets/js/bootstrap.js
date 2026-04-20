@@ -13,8 +13,13 @@ var readingProgressBar = document.getElementById('reading-progress-bar');
 var backToTop = document.getElementById('back-to-top');
 var contentRoot = document.getElementById('content');
 // updateContent の no-op 判定キャッシュ。
-// SSR HTML と WS 由来 data.content はブラウザの HTML 正規化で完全一致しないため
-// null 初期化とする。初回 broadcast で 1 回再描画されるが UI 影響なし。
+// 初期化部 (sidebar.js) が connectWS() 直後に enhanceContentInteractions() を呼び
+// heading-anchor / code-copy ボタンを #content に追記するため、SSR 時点の
+// contentRoot.innerHTML は WS 経由 data.content と必ず乖離する (副次的に
+// ブラウザの HTML 正規化差も存在)。よって DOM ではなく「最後に適用した
+// data.content 文字列」を比較対象とする。null 初期化は初回 broadcast で 1 回だけ
+// 再描画させる設計 (.jump-highlight 等の一時状態は初回 broadcast 以降に付与される
+// 想定なので UI 影響なし)。
 var lastAppliedContent = null;
 var documentSearchInputEl = document.getElementById('document-search-input');
 var documentSearchSummaryEl = document.getElementById('document-search-summary');
