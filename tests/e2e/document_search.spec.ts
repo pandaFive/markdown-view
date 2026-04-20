@@ -1,6 +1,23 @@
-const { test, expect } = require('@playwright/test');
+import { test, expect, type Page } from '@playwright/test';
 
-function searchFixtureContent() {
+declare global {
+  interface Window {
+    __lastWs: WebSocket & { onmessage: ((ev: MessageEvent) => void) | null };
+    __realWsOnmessage: (ev: { data: string }) => void;
+  }
+  // ブラウザ側バンドルで定義される変数・関数（page.evaluate 内で参照）
+  var isDirMode: boolean;
+  var currentFile: string;
+  function updateContent(data: { content: string; toc?: string }, opts?: Record<string, unknown>): void;
+  function activateSidebarTab(tab: string): void;
+  function applyDocumentSearchQuery(value: string): void;
+  function moveDocumentSearch(direction: number): void;
+  function selectFile(file: string, resetScroll?: boolean): void;
+}
+
+export {}; // ファイルをモジュールとして扱わせる（declare global の要件）
+
+function searchFixtureContent(): string {
   return (
     '<h1 id="readme">README</h1>' +
     '<p>Alpha note appears here.</p>' +
@@ -11,7 +28,7 @@ function searchFixtureContent() {
   );
 }
 
-function searchFixtureToc() {
+function searchFixtureToc(): string {
   return (
     '<ul>' +
     '<li><a href="#readme">README</a></li>' +
@@ -21,7 +38,7 @@ function searchFixtureToc() {
   );
 }
 
-async function loadSearchFixture(page) {
+async function loadSearchFixture(page: Page) {
   await page.evaluate(({ content, toc }) => {
     isDirMode = false;
     updateContent({ content, toc });
@@ -34,15 +51,15 @@ async function loadSearchFixture(page) {
   await expect(page.locator('#content')).toContainText('Alpha note appears here.');
 }
 
-async function visibleMatchCount(page) {
+async function visibleMatchCount(page: Page) {
   return page.evaluate(() => {
     return new Set(
-      Array.from(document.querySelectorAll('#content mark.document-search-match')).map((mark) => mark.dataset.matchId)
+      Array.from(document.querySelectorAll<HTMLElement>('#content mark.document-search-match')).map((mark) => mark.dataset.matchId)
     ).size;
   });
 }
 
-async function currentMatchText(page) {
+async function currentMatchText(page: Page) {
   return page.evaluate(() => {
     return Array.from(document.querySelectorAll('#content mark.document-search-match.current'))
       .map((mark) => mark.textContent || '')
@@ -50,18 +67,18 @@ async function currentMatchText(page) {
   });
 }
 
-async function stabilizeWebSocketHarness(page) {
+async function stabilizeWebSocketHarness(page: Page) {
   await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
   await page.evaluate(() => {
-    window.__realWsOnmessage = window.__lastWs.onmessage;
+    window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;
     window.__lastWs.onmessage = function() {};
   });
 }
 
-async function setDocumentSearchQuery(page, query) {
+async function setDocumentSearchQuery(page: Page, query: string) {
   await page.evaluate((value) => {
     const input = document.getElementById('document-search-input');
-    if (!input) {
+    if (!(input instanceof HTMLInputElement)) {
       throw new Error('document search input not found');
     }
     input.value = value;
@@ -78,14 +95,12 @@ test.beforeEach(async ({ page }) => {
     const NativeWebSocket = window.WebSocket;
 
     class TestWebSocket extends NativeWebSocket {
-      constructor(...args) {
+      constructor(...args: ConstructorParameters<typeof WebSocket>) {
         super(...args);
         window.__lastWs = this;
       }
     }
 
-    TestWebSocket.prototype = NativeWebSocket.prototype;
-    Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
     window.WebSocket = TestWebSocket;
   });
   await page.goto('/');
@@ -351,7 +366,7 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
 
   const secondResult = page.locator('#document-search-results .document-search-result').nth(1);
   await expect(secondResult).toBeVisible();
-  await secondResult.evaluate((element) => {
+  await secondResult.evaluate((element: HTMLElement) => {
     element.click();
   });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
@@ -372,7 +387,7 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(18);
 
   const beforeScrollTop = await page.evaluate(() => {
-    const results = document.getElementById('document-search-results');
+    const results = document.getElementById('document-search-results')!;
     results.scrollTop = results.scrollHeight;
     return results.scrollTop;
   });
@@ -382,7 +397,7 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
   });
 
   await expect.poll(() => page.evaluate(() => {
-    return document.getElementById('document-search-results').scrollTop;
+    return document.getElementById('document-search-results')!.scrollTop;
   })).toBe(beforeScrollTop);
 });
 
