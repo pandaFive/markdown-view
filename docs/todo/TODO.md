@@ -2,6 +2,28 @@
 
 ## TODO Issues (レビュー日: 2026-04-20, PR #76 レビュー)
 
+#### セキュリティ・堅牢性
+
+- [ ] CSP フォールバック時の方針整理（fail-fast vs 現状運用）
+  - ファイル: `src/server/guards.rs` L30-36
+  - 現状: `HeaderValue::from_str(&csp)` 失敗時のフォールバック CSP は `default-src 'self'; object-src 'none'; frame-ancestors 'none'`。inline は暗黙拒否されるが、sha256 ハッシュベースの厳格制約は失われる
+  - 対応候補: (a) CSP 生成失敗をサーバー起動中止扱いにする、(b) フォールバック CSP に `script-src 'none'; style-src 'none'` を明示する、(c) 現状維持で運用ログ監視に任せる
+  - 理由: フォールバック発生時の動作セマンティクスが不明瞭。個人使用前提だが、意図ある設計として明文化したい
+
+- [ ] エラー経路ログのパス情報を base 相対化
+  - ファイル: `src/server/files/resolve.rs` ほか `tracing::warn!` でパスを出す箇所
+  - 現状: パス正規化失敗時にユーザー指定パス・サーバー実ディレクトリ構造をそのまま warn ログに出力
+  - 対応: base_dir 基準での相対化ヘルパー `sanitize_path_for_logging(path, base)` を抽出し、絶対パスや base 外パスを丸めて出力
+  - 理由: 個人使用前提でもディレクトリ構造の漏出は望ましくない
+
+#### 可読性改善
+
+- [ ] `is_hidden_relative` のネスト深度を 3 → 2 階層に削減
+  - ファイル: `src/watcher/strategy.rs` L162-195
+  - 現状: `match strip_prefix → match canonicalize(path) → match canonicalize(base)` の 3 段ネストで、canonicalize 失敗時のフォールバックログが 2 回重複
+  - 対応: `try_relative_components(path, base) -> Option<impl Iterator<Component>>` 風のヘルパーを抽出し、呼び出し側は 1 回 match
+  - 理由: 直前の watcher リファクタで隠し判定のロジックだけが旧形状のまま残っている
+
 ### Low Priority
 
 - [ ] `augmentHashWithTrailingLineHint` ELEMENT_NODE sibling のユニットテスト
@@ -153,3 +175,80 @@
   - 内容: Rust の `include_str!` でコンパイル時に埋め込まれる JS を TS で記述し、事前 tsc でビルドして `.js` 出力を `include_str!` 対象にする
   - 理由: ブラウザ側 JS は現在無型。ただし Rust ビルドパイプラインへの Node 依存追加が必要で、「Rust 単体ビルド」の明快さが崩れる
   - 優先度: Low（個人利用前提・staged migration 方針、ビルド複雑化コストに見合うか要検討）
+
+## TODO Issues (レビュー日: 2026-04-18, コードベース探索 - PR #59)
+
+### High Priority
+
+#### セキュリティ境界
+
+- [ ] `is_trusted_host` / `normalize_authority` の IPv6 網羅テストを追加
+  - ファイル: `src/server/guards.rs`
+  - 現状: L171-173 の `test_trusted_host_loopback_ipv6` が `[::1]` のみを検証
+  - 追加観点: `[::1]:3000`（port 付き bracketed）、`::1`（非 bracketed）、`[fe80::1]`（非 loopback）、`[::1]:abc`（非数値 port）の 4 パターン
+  - 理由: DNS Rebinding 対策の核。正規化エッジケースで想定外に通過するとセキュリティ境界が崩れる
+
+- [ ] メモ sidecar fallback 経路の超長ファイル名＋特殊文字テストを追加
+  - ファイル: `src/server/files/memo.rs`, `src/server/files/tests.rs`
+  - 現状: `ensure_safe_memo_path` / `truncate_to_bytes` の基本テストと非utf8/拡張子大小テストはあるが、255 バイト超のファイル名と `../` や `\..\` の組み合わせが未検証
+  - 追加観点: (a) 超長名＋特殊文字で sidecar 名が隔離され破損しないこと、(b) 異なる長い名前が同一 sidecar 名に衝突しないこと
+  - 理由: パストラバーサル境界の回帰テスト
+
+- [ ] メモ API のボディ制限値を意図明文化し、境界テストを追加
+  - ファイル: `src/server/routes.rs` L27
+  - 現状: `MEMO_JSON_BODY_LIMIT = (MAX_FILE_SIZE * 2) + 4096` が無説明で定義
+  - 対応: JSON エスケープで最悪 2 倍になる前提を doc コメントで明示。`MAX_FILE_SIZE + 小さなマージン` に引き締める可否を再検討。境界テスト（10MB + 1 バイト、20MB 付近）を追加
+  - 理由: 将来の保守時に「なぜ 2 倍か」が読めないと制限緩和や強化判断を誤る
+
+- [ ] WebSocket close_code マッピングの統合テストを追加
+  - ファイル: `tests/integration_test.rs`
+  - 現状: `ReadMarkdownError::close_code()` のユニットテストは存在、`load_initial_socket_update` のエラー arm も Low 側で TODO 化済み。だが実際の WebSocket フレームまで透過確認する E2E はない
+  - 追加観点: IO → 1011、TooLarge → 1009、NotUtf8 → 1003 の 3 シナリオを実サーバー + WebSocket クライアントで検証
+  - 理由: WebSocket プロトコル境界。クライアント側の再接続ロジックが close_code に依存するため、中間層のどこかで書き換わると下流が壊れる
+
+### Medium Priority
+
+#### セキュリティ・堅牢性
+
+- [ ] CSP フォールバック時の方針整理（fail-fast vs 現状運用）
+  - ファイル: `src/server/guards.rs` L30-36
+  - 現状: `HeaderValue::from_str(&csp)` 失敗時のフォールバック CSP は `default-src 'self'; object-src 'none'; frame-ancestors 'none'`。inline は暗黙拒否されるが、sha256 ハッシュベースの厳格制約は失われる
+  - 対応候補: (a) CSP 生成失敗をサーバー起動中止扱いにする、(b) フォールバック CSP に `script-src 'none'; style-src 'none'` を明示する、(c) 現状維持で運用ログ監視に任せる
+  - 理由: フォールバック発生時の動作セマンティクスが不明瞭。個人使用前提だが、意図ある設計として明文化したい
+
+- [ ] エラー経路ログのパス情報を base 相対化
+  - ファイル: `src/server/files/resolve.rs` ほか `tracing::warn!` でパスを出す箇所
+  - 現状: パス正規化失敗時にユーザー指定パス・サーバー実ディレクトリ構造をそのまま warn ログに出力
+  - 対応: base_dir 基準での相対化ヘルパー `sanitize_path_for_logging(path, base)` を抽出し、絶対パスや base 外パスを丸めて出力
+  - 理由: 個人使用前提でもディレクトリ構造の漏出は望ましくない
+
+#### 可読性改善
+
+- [ ] `is_hidden_relative` のネスト深度を 3 → 2 階層に削減
+  - ファイル: `src/watcher/strategy.rs` L162-200
+  - 現状: `match strip_prefix → match canonicalize(path) → match canonicalize(base)` の 3 段ネストで、canonicalize 失敗時のフォールバックログが 2 回重複
+  - 対応: `try_relative_components(path, base) -> Option<impl Iterator<Component>>` 風のヘルパーを抽出し、呼び出し側は 1 回 match
+  - 理由: 直前の watcher リファクタで隠し判定のロジックだけが旧形状のまま残っている
+
+### Low Priority
+
+#### リファクタ・ドキュメント整合性
+
+- [ ] `render_markdown` の責務分割（大規模）
+  - ファイル: `src/renderer/mod.rs` L184-540（約 357 行）
+  - 現状: pulldown-cmark の `Event` ループと状態管理（heading / code block / table / image / link の各フェーズ）が 1 関数に同居。ファイル全体 951 行
+  - 対応方針: フェーズ別ハンドラを `RenderState` の impl メソッドとして抽出、メイン関数はイベントディスパッチのみにする
+  - 注意: 大規模リファクタ。既存テスト（`renderer_test.rs`, `toc_test.rs`）が振る舞い等価性を担保するため、先にテストカバレッジを確認
+  - 理由: CLAUDE.md にも「見出しパースが 2 回実行される既知トレードオフ」が記載されており、renderer の保守重心は既に認識済み
+
+- [ ] `catalog.rs` のパス構築での Vec アロケーション削減
+  - ファイル: `src/server/files/catalog.rs` L127-128
+  - 現状: 相対パス構築で `collect::<Vec<_>>()` してから `join("/")`。上限 1000 件だが呼出あたり Vec アロケーションが発生
+  - 対応: イテレータ駆動で直接 String を構築する（`itertools::Itertools::join()` もしくは手書き fold）
+  - 理由: マイクロ最適化。計測前に効果確認推奨
+
+- [ ] README のアーキテクチャ図を実装構成に揃える
+  - ファイル: `README.md` L121-125 周辺
+  - 現状: `websocket.rs` / `renderer.rs` / `template.rs` / `files.rs` が単一ファイル前提で記載。実装は `src/server/session.rs`、`src/renderer/`（ディレクトリ）、`src/template/`（ディレクトリ）、`src/server/files/`（サブモジュール分割）
+  - 対応: CLAUDE.md の「アーキテクチャ」節と同じ粒度で README を更新
+  - 理由: ドキュメント rot。新規コントリビュータが実装構造を誤解する
