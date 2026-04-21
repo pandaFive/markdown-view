@@ -28,7 +28,7 @@
   - 追加観点: IO → 1011、TooLarge → 1009、NotUtf8 → 1003 の 3 シナリオを実サーバー + WebSocket クライアントで検証
   - 理由: WebSocket プロトコル境界。クライアント側の再接続ロジックが close_code に依存するため、中間層のどこかで書き換わると下流が壊れる
 
-- [ ] `is_allowed_ws_origin` の拒否経路に warn ログを追加（HOST 経路との観測性を揃える）
+- [x] `is_allowed_ws_origin` の拒否経路に warn ログを追加（HOST 経路との観測性を揃える）
   - ファイル: `src/server/guards.rs` L75-102
   - 現状: `is_allowed_ws_origin` は 6 箇所以上で silent な `false` return（Origin なし / HOST なし / 非 http(s) / authority 不一致 / 非数値 port / userinfo 付き等）。対して `ensure_allowed_request_host` は拒否時に raw HOST 値を warn ログする監査経路を持つ
   - 対応: 各拒否分岐に `tracing::warn!` を追加し、どの理由で弾かれたかと原始 HOST/Origin を記録。`is_trusted_authority` の non-numeric port / userinfo 拒否も同様に観測可能にする
