@@ -398,6 +398,7 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
     }
 
     #[test]
@@ -406,6 +407,11 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:4000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        // 両 authority が trusted かつ normalize 結果が異なるため AuthorityMismatch
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::AuthorityMismatch)
+        );
     }
 
     #[test]
@@ -414,6 +420,10 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "ftp://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UnsupportedScheme)
+        );
     }
 
     #[test]
@@ -422,6 +432,12 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://evil.example:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        // HOST は trusted だが Origin authority が trusted でないため
+        // AuthorityMismatch ではなく UntrustedOriginAuthority に到達する
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedOriginAuthority)
+        );
     }
 
     #[test]
@@ -429,6 +445,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingOrigin)
+        );
     }
 
     #[test]
@@ -436,6 +456,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingHost)
+        );
     }
 
     #[test]
@@ -479,6 +503,7 @@ mod tests {
         headers.insert(HOST, "LOCALHOST.:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
     }
 
     #[test]
@@ -488,19 +513,29 @@ mod tests {
         headers.insert(HOST, "[::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[::1]:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
 
         // 失敗ケース：port 不一致
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "[::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[::1]:4000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::AuthorityMismatch)
+        );
 
         // 失敗ケース：非 loopback IPv6（link-local）は
         // HOST/Origin が一致していても拒否される
+        // (HOST が trusted でない時点で UntrustedHost に到達)
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "[fe80::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[fe80::1]:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedHost)
+        );
     }
 
     #[test]
