@@ -65,7 +65,7 @@ pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    is_trusted_authority(host)
+    is_trusted_authority(host, "host")
 }
 
 /// WebSocket接続時のOriginヘッダーを検証する
@@ -79,7 +79,7 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    if !is_trusted_authority(host) {
+    if !is_trusted_authority(host, "host") {
         return false;
     }
     let Ok(origin_uri) = origin.parse::<Uri>() else {
@@ -94,15 +94,20 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     let Some(origin_authority) = origin_uri.authority() else {
         return false;
     };
-    if !is_trusted_authority(origin_authority.as_str()) {
+    if !is_trusted_authority(origin_authority.as_str(), "origin_authority") {
         return false;
     }
 
     normalize_authority(origin_authority.as_str()) == normalize_authority(host)
 }
 
-pub(super) fn is_trusted_authority(authority: &str) -> bool {
+pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bool {
     let Ok(parsed) = authority.parse::<Authority>() else {
+        tracing::warn!(
+            "[markdown-view] authority の parse に失敗し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     };
     // userinfo 付き authority (user@host 形式) は拒否する。
@@ -111,6 +116,11 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
     // （例: "user@[::1]:3000" は http クレートのパーサを通過するが、
     //   host() が "[::1]" を返すため loopback 認定されてしまう）
     if parsed.as_str().contains('@') {
+        tracing::warn!(
+            "[markdown-view] authority に userinfo を検出し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     }
     // http クレート (1.x) の Authority パーサは非数値port（例: "[::1]:abc"）も受け入れ、
@@ -118,6 +128,11 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
     // DNS Rebinding境界として信頼するには数値portを必須とするため、
     // 元文字列を直接検査してport接尾辞の有無を判定する。
     if has_port_suffix(parsed.as_str()) && parsed.port_u16().is_none() {
+        tracing::warn!(
+            "[markdown-view] authority に非数値 port を検出し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     }
     is_trusted_host(parsed.host())
@@ -221,32 +236,32 @@ mod tests {
     #[test]
     fn test_trusted_authority_ipv6_port付きを検証する() {
         // 正常系：port 付き IPv6 loopback authority
-        assert!(is_trusted_authority("[::1]:3000"));
+        assert!(is_trusted_authority("[::1]:3000", "host"));
 
         // 非数値 port：is_trusted_authority 内の has_port_suffix チェックで明示拒否
         // （httpクレートのAuthorityパーサ自体は非数値portを受け入れてしまうため、
         //  このガードが無いとloopback認定されて通過してしまう）
-        assert!(!is_trusted_authority("[::1]:abc"));
+        assert!(!is_trusted_authority("[::1]:abc", "host"));
 
         // 非 loopback IPv6 + port：is_trusted_host 側で拒否
-        assert!(!is_trusted_authority("[fe80::1]:3000"));
+        assert!(!is_trusted_authority("[fe80::1]:3000", "host"));
 
         // 空 port 接尾辞：":"はあるが port_u16 が None → has_port_suffix チェックで拒否
-        assert!(!is_trusted_authority("[::1]:"));
+        assert!(!is_trusted_authority("[::1]:", "host"));
 
         // u16 範囲外の port：u16 overflow → port_u16 が None → 拒否
-        assert!(!is_trusted_authority("[::1]:65536"));
-        assert!(!is_trusted_authority("[::1]:99999"));
+        assert!(!is_trusted_authority("[::1]:65536", "host"));
+        assert!(!is_trusted_authority("[::1]:99999", "host"));
 
         // port 0：RFC 上は予約だが port_u16 が Some(0) のため現状の実装では許可される。
         // 実害のない挙動を固定化することで、将来「0 を予約として拒否」する選択を
         // 意識的に行えるようにする
-        assert!(is_trusted_authority("[::1]:0"));
+        assert!(is_trusted_authority("[::1]:0", "host"));
 
         // IPv6 zone ID：http クレートは解析を許すが、is_trusted_host の IpAddr::parse
         // が zone suffix 付き文字列を受け付けないため最終的に拒否される
-        assert!(!is_trusted_authority("[fe80::1%25eth0]"));
-        assert!(!is_trusted_authority("[fe80::1%25eth0]:3000"));
+        assert!(!is_trusted_authority("[fe80::1%25eth0]", "host"));
+        assert!(!is_trusted_authority("[fe80::1%25eth0]:3000", "host"));
     }
 
     #[test]
@@ -273,10 +288,10 @@ mod tests {
         // userinfo 経由のバイパス防御。http クレートの Authority パーサは
         // user@host 形式を受理し、host() は userinfo を除いた host を返すため、
         // 明示的に弾かないと攻撃者が任意の userinfo を埋め込んで loopback 認定させうる
-        assert!(!is_trusted_authority("user@localhost:3000"));
-        assert!(!is_trusted_authority("user@[::1]:3000"));
-        assert!(!is_trusted_authority("user:pass@localhost:3000"));
-        assert!(!is_trusted_authority("user:pass@[::1]:3000"));
+        assert!(!is_trusted_authority("user@localhost:3000", "host"));
+        assert!(!is_trusted_authority("user@[::1]:3000", "host"));
+        assert!(!is_trusted_authority("user:pass@localhost:3000", "host"));
+        assert!(!is_trusted_authority("user:pass@[::1]:3000", "host"));
     }
 
     #[test]
