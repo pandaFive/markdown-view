@@ -72,12 +72,7 @@ pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
 ///
 /// `is_allowed_ws_origin` の silent return を観測可能にするため、
 /// 各拒否分岐を variant として表現する。
-///
-/// Task 2 時点では T1 テストからのみ使用される（Task 3 で `is_allowed_ws_origin`
-/// を wrapper 化して本 enum を消費する予定）。中間状態の dead_code 警告を
-/// 抑止するため `#[allow(dead_code)]` を付与する。
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) enum WsOriginRejection {
     MissingOrigin,
     MissingHost,
@@ -92,13 +87,15 @@ pub(super) enum WsOriginRejection {
     /// 将来の http クレート挙動変更や、axum 以外のパスから到達した場合の
     /// 防御的フォールバックとして残し、DNS Rebinding 防御の核となる
     /// validation 経路から panic を排除する。
+    /// 到達不能なため構築箇所は `check_ws_origin` 内の let-else のみだが、
+    /// 防御的 variant として保持するため個別に `#[allow(dead_code)]` を付与する。
+    #[allow(dead_code)]
     OriginMissingAuthority,
     UntrustedOriginAuthority,
     AuthorityMismatch,
 }
 
 /// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
-#[allow(dead_code)]
 pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejection> {
     let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
         return Err(WsOriginRejection::MissingOrigin);
@@ -138,33 +135,41 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
 ///
 /// DNS Rebinding対策として、Host検証に加えてOriginのauthority一致も要求する。
 /// Originスキームは`http`/`https`のみ許可する。
+/// 拒否時は `check_ws_origin` の返す `WsOriginRejection` を使って
+/// info / warn の監査ログを出力する。
 pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    if !is_trusted_authority(host, "host") {
-        return false;
+    match check_ws_origin(headers) {
+        Ok(()) => true,
+        Err(rejection) => {
+            let host = headers
+                .get(HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<missing>");
+            let origin = headers
+                .get(ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<missing>");
+            match rejection {
+                WsOriginRejection::MissingOrigin | WsOriginRejection::MissingHost => {
+                    tracing::info!(
+                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                        rejection,
+                        host,
+                        origin
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                        rejection,
+                        host,
+                        origin
+                    );
+                }
+            }
+            false
+        }
     }
-    let Ok(origin_uri) = origin.parse::<Uri>() else {
-        return false;
-    };
-
-    match origin_uri.scheme_str() {
-        Some("http") | Some("https") => {}
-        _ => return false,
-    }
-
-    let Some(origin_authority) = origin_uri.authority() else {
-        return false;
-    };
-    if !is_trusted_authority(origin_authority.as_str(), "origin_authority") {
-        return false;
-    }
-
-    normalize_authority(origin_authority.as_str()) == normalize_authority(host)
 }
 
 pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bool {
