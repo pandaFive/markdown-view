@@ -333,4 +333,26 @@ mod tests {
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
     }
+
+    #[test]
+    fn test_allowed_ws_origin_ipv6_loopback許可と境界() {
+        // 成功ケース：HOST と Origin が同一 IPv6 loopback authority
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "[::1]:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://[::1]:3000".parse().unwrap());
+        assert!(is_allowed_ws_origin(&headers));
+
+        // 失敗ケース：port 不一致
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "[::1]:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://[::1]:4000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+
+        // 失敗ケース：非 loopback IPv6（link-local）は
+        // HOST/Origin が一致していても拒否される
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "[fe80::1]:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://[fe80::1]:3000".parse().unwrap());
+        assert!(!is_allowed_ws_origin(&headers));
+    }
 }
