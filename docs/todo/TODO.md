@@ -4,7 +4,7 @@
 
 ## High Priority
 
-- [ ] `is_trusted_host` / `normalize_authority` の IPv6 網羅テストを追加
+- [x] `is_trusted_host` / `normalize_authority` の IPv6 網羅テストを追加
   - ファイル: `src/server/guards.rs`
   - 現状: L171-173 の `test_trusted_host_loopback_ipv6` が `[::1]` のみを検証
   - 追加観点: `[::1]:3000`（port 付き bracketed）、`::1`（非 bracketed）、`[fe80::1]`（非 loopback）、`[::1]:abc`（非数値 port）の 4 パターン
@@ -27,6 +27,12 @@
   - 現状: `ReadMarkdownError::close_code()` のユニットテストは存在、`load_initial_socket_update` のエラー arm も Low 側で TODO 化済み。だが実際の WebSocket フレームまで透過確認する E2E はない
   - 追加観点: IO → 1011、TooLarge → 1009、NotUtf8 → 1003 の 3 シナリオを実サーバー + WebSocket クライアントで検証
   - 理由: WebSocket プロトコル境界。クライアント側の再接続ロジックが close_code に依存するため、中間層のどこかで書き換わると下流が壊れる
+
+- [ ] `is_allowed_ws_origin` の拒否経路に warn ログを追加（HOST 経路との観測性を揃える）
+  - ファイル: `src/server/guards.rs` L75-102
+  - 現状: `is_allowed_ws_origin` は 6 箇所以上で silent な `false` return（Origin なし / HOST なし / 非 http(s) / authority 不一致 / 非数値 port / userinfo 付き等）。対して `ensure_allowed_request_host` は拒否時に raw HOST 値を warn ログする監査経路を持つ
+  - 対応: 各拒否分岐に `tracing::warn!` を追加し、どの理由で弾かれたかと原始 HOST/Origin を記録。`is_trusted_authority` の non-numeric port / userinfo 拒否も同様に観測可能にする
+  - 理由: 攻撃者が WebSocket 経路で DNS Rebinding を試行した際、HOST 経路では検知できるが Origin 経路では完全に silent で「ブラウザが Origin を送っていない」と区別できない。pr-review-toolkit の silent-failure-hunter が指摘
 
 ## Medium Priority
 
