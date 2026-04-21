@@ -176,6 +176,19 @@ mod tests {
     }
 
     #[test]
+    fn test_trusted_host_ipv6_非loopbackを拒否する() {
+        // link-local：loopback ではない
+        assert!(!is_trusted_host("[fe80::1]"));
+        // unspecified（::）：0.0.0.0 相当。loopback と紛らわしいため明示
+        assert!(!is_trusted_host("[::]"));
+        // public IPv6（RFC 3849 ドキュメント用アドレス）
+        assert!(!is_trusted_host("[2001:db8::1]"));
+        // IPv4-mapped IPv6：Ipv6Addr::is_loopback は ::1 のみ true を返す仕様
+        // （IPv4-mapped を loopback 扱いする将来の書き換えを防ぐ固定テスト）
+        assert!(!is_trusted_host("[::ffff:127.0.0.1]"));
+    }
+
+    #[test]
     fn test_trusted_host_rejects_external() {
         assert!(!is_trusted_host("evil.example"));
         assert!(!is_trusted_host("example.com"));
