@@ -84,6 +84,15 @@ pub(super) enum WsOriginRejection {
     UntrustedHost,
     OriginParseError,
     UnsupportedScheme,
+    /// scheme は http/https だが authority が欠落した Origin の拒否
+    ///
+    /// 現在の axum (http 1.x) では `"http:"`, `"http:/"`, `"http:?query"`,
+    /// `"http:path-only"`, `"http:///"` のいずれも本 variant に到達しない
+    /// （scheme が欠落するか parse が失敗する）ことを実測確認済み。
+    /// 将来の http クレート挙動変更や、axum 以外のパスから到達した場合の
+    /// 防御的フォールバックとして残し、DNS Rebinding 防御の核となる
+    /// validation 経路から panic を排除する。
+    OriginMissingAuthority,
     UntrustedOriginAuthority,
     AuthorityMismatch,
 }
@@ -107,14 +116,15 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
         Some("http") | Some("https") => {}
         _ => return Err(WsOriginRejection::UnsupportedScheme),
     }
-    // 注: axum::http::Uri は "http:" のような scheme 単独文字列を
-    // `scheme_str()==None` で受理するため、scheme が http/https を満たした時点で
-    // authority は常に Some になる（= `OriginMissingAuthority` variant は観測不能）。
-    // YAGNI 判断により authority() の None 分岐は variant として設けず、
-    // `expect` でコードパスを明示する。
-    let origin_authority = origin_uri
-        .authority()
-        .expect("scheme が http/https を満たす Uri は authority を伴う");
+    // 注: 現行 axum (http 1.x) では scheme が http/https として受理された Uri は
+    // 実測上 authority を必ず伴う（"http:" 系は scheme_str()==None で UnsupportedScheme、
+    // "http:///" は parse エラーで OriginParseError に流れる）。
+    // ただし DNS Rebinding 防御の核となる validation 経路で panic を生むのは
+    // DoS 経路になりうるため、将来の http クレート挙動変更に備えて
+    // 防御的フォールバックとして let-else で早期 return する。
+    let Some(origin_authority) = origin_uri.authority() else {
+        return Err(WsOriginRejection::OriginMissingAuthority);
+    };
     if !is_trusted_authority(origin_authority.as_str(), "origin_authority") {
         return Err(WsOriginRejection::UntrustedOriginAuthority);
     }
@@ -556,9 +566,10 @@ mod tests {
             Err(WsOriginRejection::AuthorityMismatch)
         );
 
-        // 注: spec で想定されていた OriginMissingAuthority variant は、
-        // axum::http::Uri が "http:" を scheme_str()==None で受理するため
-        // 到達可能な入力が存在しない（4 候補すべて UnsupportedScheme / PARSE ERROR に
-        // 流れることを実測で確認）。YAGNI 判断により variant 自体を削除している。
+        // 注: OriginMissingAuthority variant は現行 axum (http 1.x) では
+        // 到達可能な入力が実測確認できない（"http:", "http:/", "http:?q",
+        // "http:path-only", "http:///" はいずれも scheme 欠落 or parse エラーに
+        // 流れる）。ただし validation 経路の panic を排除する防御的 fallback として
+        // variant と let-else 分岐を残しているため、本テストでの assertion は省略する。
     }
 }
