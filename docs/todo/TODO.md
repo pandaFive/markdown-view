@@ -4,7 +4,7 @@
 
 ## High Priority
 
-- [ ] `is_trusted_host` / `normalize_authority` の IPv6 網羅テストを追加
+- [x] `is_trusted_host` / `normalize_authority` の IPv6 網羅テストを追加
   - ファイル: `src/server/guards.rs`
   - 現状: L171-173 の `test_trusted_host_loopback_ipv6` が `[::1]` のみを検証
   - 追加観点: `[::1]:3000`（port 付き bracketed）、`::1`（非 bracketed）、`[fe80::1]`（非 loopback）、`[::1]:abc`（非数値 port）の 4 パターン
