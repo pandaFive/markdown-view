@@ -105,7 +105,15 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
     let Ok(parsed) = authority.parse::<Authority>() else {
         return false;
     };
-    // httpクレート(v1.4)のAuthorityパーサは非数値port（例: "[::1]:abc"）も受け入れ、
+    // userinfo 付き authority (user@host 形式) は拒否する。
+    // 現実の Host / Origin ヘッダーには userinfo は含まれず、
+    // 攻撃者が任意 host 文字列を埋め込むバイパス経路になりうるため。
+    // （例: "user@[::1]:3000" は http クレートのパーサを通過するが、
+    //   host() が "[::1]" を返すため loopback 認定されてしまう）
+    if parsed.as_str().contains('@') {
+        return false;
+    }
+    // http クレート (1.x) の Authority パーサは非数値port（例: "[::1]:abc"）も受け入れ、
     // この場合 port() / port_u16() はいずれも None を返す（=無port扱い）。
     // DNS Rebinding境界として信頼するには数値portを必須とするため、
     // 元文字列を直接検査してport接尾辞の有無を判定する。
@@ -116,6 +124,10 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
 }
 
 /// authority 文字列に `:port` 接尾辞が存在するかを判定する。
+///
+/// is_trusted_authority が http クレートの非数値port受理を補正するために使用する
+/// **DNS Rebinding対策の一部**。「Authority::port_u16() が None」だけでは
+/// 「port未指定」と「非数値port」を区別できないため、元文字列を直接検査する。
 ///
 /// IPv6 (bracketed) の場合は `]` の直後に `:` が続くかで判断し、
 /// 内部のコロン（`::`）を port 区切りと誤認しないようにする。
@@ -218,6 +230,17 @@ mod tests {
 
         // 非 loopback IPv6 + port：is_trusted_host 側で拒否
         assert!(!is_trusted_authority("[fe80::1]:3000"));
+    }
+
+    #[test]
+    fn test_trusted_authority_userinfo_を拒否する() {
+        // userinfo 経由のバイパス防御。http クレートの Authority パーサは
+        // user@host 形式を受理し、host() は userinfo を除いた host を返すため、
+        // 明示的に弾かないと攻撃者が任意の userinfo を埋め込んで loopback 認定させうる
+        assert!(!is_trusted_authority("user@localhost:3000"));
+        assert!(!is_trusted_authority("user@[::1]:3000"));
+        assert!(!is_trusted_authority("user:pass@localhost:3000"));
+        assert!(!is_trusted_authority("user:pass@[::1]:3000"));
     }
 
     #[test]
