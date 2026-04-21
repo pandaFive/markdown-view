@@ -102,10 +102,28 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
 }
 
 pub(super) fn is_trusted_authority(authority: &str) -> bool {
-    let Ok(authority) = authority.parse::<Authority>() else {
+    let Ok(parsed) = authority.parse::<Authority>() else {
         return false;
     };
-    is_trusted_host(authority.host())
+    // httpクレート(v1.4)のAuthorityパーサは非数値port（例: "[::1]:abc"）も受け入れ、
+    // この場合 port() / port_u16() はいずれも None を返す（=無port扱い）。
+    // DNS Rebinding境界として信頼するには数値portを必須とするため、
+    // 元文字列を直接検査してport接尾辞の有無を判定する。
+    if has_port_suffix(parsed.as_str()) && parsed.port_u16().is_none() {
+        return false;
+    }
+    is_trusted_host(parsed.host())
+}
+
+/// authority 文字列に `:port` 接尾辞が存在するかを判定する。
+///
+/// IPv6 (bracketed) の場合は `]` の直後に `:` が続くかで判断し、
+/// 内部のコロン（`::`）を port 区切りと誤認しないようにする。
+fn has_port_suffix(authority: &str) -> bool {
+    match authority.find(']') {
+        Some(i) => authority[i + 1..].starts_with(':'),
+        None => authority.contains(':'),
+    }
 }
 
 pub(super) fn is_trusted_host(host: &str) -> bool {
@@ -186,6 +204,20 @@ mod tests {
         // IPv4-mapped IPv6：Ipv6Addr::is_loopback は ::1 のみ true を返す仕様
         // （IPv4-mapped を loopback 扱いする将来の書き換えを防ぐ固定テスト）
         assert!(!is_trusted_host("[::ffff:127.0.0.1]"));
+    }
+
+    #[test]
+    fn test_trusted_authority_ipv6_port付きを検証する() {
+        // 正常系：port 付き IPv6 loopback authority
+        assert!(is_trusted_authority("[::1]:3000"));
+
+        // 非数値 port：is_trusted_authority 内の has_port_suffix チェックで明示拒否
+        // （httpクレートのAuthorityパーサ自体は非数値portを受け入れてしまうため、
+        //  このガードが無いとloopback認定されて通過してしまう）
+        assert!(!is_trusted_authority("[::1]:abc"));
+
+        // 非 loopback IPv6 + port：is_trusted_host 側で拒否
+        assert!(!is_trusted_authority("[fe80::1]:3000"));
     }
 
     #[test]
