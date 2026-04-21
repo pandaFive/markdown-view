@@ -49,9 +49,9 @@ pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), Api
         let host = headers
             .get(HOST)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing-or-invalid>");
+            .unwrap_or("<missing>");
         tracing::warn!(
-            "[markdown-view] 許可されていないHostヘッダーを拒否: {}",
+            "[markdown-view] 許可されていないHostヘッダーを拒否: {:?}",
             host
         );
         Err(json_error(
@@ -611,5 +611,19 @@ mod tests {
         // "http:path-only", "http:///" はいずれも scheme 欠落 or parse エラーに
         // 流れる）。ただし validation 経路の panic を排除する防御的 fallback として
         // variant と let-else 分岐を残しているため、本テストでの assertion は省略する。
+    }
+
+    #[test]
+    fn test_is_trusted_authority_context_引数を受け取る() {
+        // userinfo 経由バイパスは "host" コンテキストで拒否される
+        assert!(!is_trusted_authority("user@localhost:3000", "host"));
+
+        // 非数値 port は "origin_authority" コンテキストで拒否される
+        // (warn ログには context=origin_authority が記録される)
+        assert!(!is_trusted_authority("[::1]:abc", "origin_authority"));
+
+        // 正常系: context 値に関わらず判定結果は不変
+        assert!(is_trusted_authority("[::1]:3000", "host"));
+        assert!(is_trusted_authority("localhost:3000", "origin_authority"));
     }
 }
