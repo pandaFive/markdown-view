@@ -230,6 +230,42 @@ mod tests {
 
         // 非 loopback IPv6 + port：is_trusted_host 側で拒否
         assert!(!is_trusted_authority("[fe80::1]:3000"));
+
+        // 空 port 接尾辞：":"はあるが port_u16 が None → has_port_suffix チェックで拒否
+        assert!(!is_trusted_authority("[::1]:"));
+
+        // u16 範囲外の port：u16 overflow → port_u16 が None → 拒否
+        assert!(!is_trusted_authority("[::1]:65536"));
+        assert!(!is_trusted_authority("[::1]:99999"));
+
+        // port 0：RFC 上は予約だが port_u16 が Some(0) のため現状の実装では許可される。
+        // 実害のない挙動を固定化することで、将来「0 を予約として拒否」する選択を
+        // 意識的に行えるようにする
+        assert!(is_trusted_authority("[::1]:0"));
+
+        // IPv6 zone ID：http クレートは解析を許すが、is_trusted_host の IpAddr::parse
+        // が zone suffix 付き文字列を受け付けないため最終的に拒否される
+        assert!(!is_trusted_authority("[fe80::1%25eth0]"));
+        assert!(!is_trusted_authority("[fe80::1%25eth0]:3000"));
+    }
+
+    #[test]
+    fn test_has_port_suffix_直接検証() {
+        // IPv6 bracketed
+        assert!(!has_port_suffix("[::1]"));
+        assert!(has_port_suffix("[::1]:3000"));
+        assert!(has_port_suffix("[::1]:abc"));
+        assert!(has_port_suffix("[::1]:"));
+        // 非 bracketed（hostname / IPv4）
+        assert!(!has_port_suffix("localhost"));
+        assert!(has_port_suffix("localhost:3000"));
+        assert!(has_port_suffix("127.0.0.1:3000"));
+        // 非 bracketed IPv6 ("::1") は内部コロンを port 区切りと誤認する既知仕様。
+        // Authority 正規形式では IPv6 は bracketed が必須のため、この経路の authority は
+        // そもそも parse<Authority>() 前段でほぼ到達しない。現状挙動を固定。
+        assert!(has_port_suffix("::1"));
+        // 空文字
+        assert!(!has_port_suffix(""));
     }
 
     #[test]
@@ -341,9 +377,11 @@ mod tests {
             .as_str();
         assert_eq!(host_normalized, normalize_authority(origin_authority));
 
-        // 非空かつ IPv6 情報と port が含まれていることを確認
-        // （axum の Authority::host() が brackets を剥がすため具体的な文字列形式は
-        // 内容ベースで検証：brackets 有無を決め打ちしない）
+        // 非空かつ IPv6 情報と port が含まれていることを確認する。
+        // 具体的な文字列形式（brackets 有無など）は http クレートのバージョン差で
+        // 変化しうるため、内容ベースで検証する。
+        // 参考：http 1.x の Authority::host() は IPv6 の brackets を保持して返すが、
+        // 将来それが変わっても「::1 と 3000 を含むこと」という意味的要件は不変。
         assert!(!host_normalized.is_empty());
         assert!(host_normalized.contains("::1"));
         assert!(host_normalized.contains("3000"));
