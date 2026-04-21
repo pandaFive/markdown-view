@@ -306,6 +306,27 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_authority_ipv6_等価性() {
+        // is_allowed_ws_origin 内部で実行される比較を直接再現：
+        // HOST ヘッダー文字列と Origin URI から取得した authority 文字列が
+        // 同じ正規化結果になることを保証する
+        let host_normalized = normalize_authority("[::1]:3000");
+        let origin_uri: Uri = "http://[::1]:3000".parse().expect("有効な URI");
+        let origin_authority = origin_uri
+            .authority()
+            .expect("authority が存在する")
+            .as_str();
+        assert_eq!(host_normalized, normalize_authority(origin_authority));
+
+        // 非空かつ IPv6 情報と port が含まれていることを確認
+        // （axum の Authority::host() が brackets を剥がすため具体的な文字列形式は
+        // 内容ベースで検証：brackets 有無を決め打ちしない）
+        assert!(!host_normalized.is_empty());
+        assert!(host_normalized.contains("::1"));
+        assert!(host_normalized.contains("3000"));
+    }
+
+    #[test]
     fn test_allowed_ws_origin_trailing_dotとmixed_caseを許可する() {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "LOCALHOST.:3000".parse().unwrap());
