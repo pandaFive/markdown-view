@@ -14,8 +14,7 @@ use super::files::{
     search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_SIZE,
 };
 use super::guards::{
-    build_csp_header, ensure_allowed_request_host, is_allowed_request_host, is_allowed_ws_origin,
-    json_error,
+    build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
 };
 use super::messages::{ApiError, BroadcastMessage};
 use super::session::handle_socket;
@@ -329,7 +328,10 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !is_allowed_request_host(&headers) || !is_allowed_ws_origin(&headers) {
+    // HOST 経路の拒否を監査ログに残すため ensure_allowed_request_host を使う。
+    // `||` の短絡評価により、HOST 拒否時は is_allowed_ws_origin (内部で HOST を
+    // 再チェックする) が走らず、重複ログを防ぐ。
+    if ensure_allowed_request_host(&headers).is_err() || !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();
     }

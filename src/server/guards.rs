@@ -41,17 +41,29 @@ pub(super) fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiErr
     (status, Json(error_message_json(message)))
 }
 
+/// ヘッダー値を audit log 用に安全に取り出す。
+///
+/// - ヘッダー不在 → `"<absent>"`
+/// - ヘッダー存在するが `to_str()` 失敗（非 ASCII バイト含む） → `"<non-ascii>"`
+///
+/// 2 つの失敗モードを sentinel で区別することで、正常な欠落と攻撃者制御の
+/// malformed header probe を audit log 上で分離する。security triage の
+/// 観点で重要。
+fn log_value_for_header<'a>(headers: &'a HeaderMap, name: &axum::http::HeaderName) -> &'a str {
+    match headers.get(name) {
+        None => "<absent>",
+        Some(v) => v.to_str().unwrap_or("<non-ascii>"),
+    }
+}
+
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
     if is_allowed_request_host(headers) {
         Ok(())
     } else {
-        let host = headers
-            .get(HOST)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing-or-invalid>");
+        let host = log_value_for_header(headers, &HOST);
         tracing::warn!(
-            "[markdown-view] 許可されていないHostヘッダーを拒否: {}",
+            "[markdown-view] 許可されていないHostヘッダーを拒否: {:?}",
             host
         );
         Err(json_error(
@@ -65,44 +77,134 @@ pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    is_trusted_authority(host)
+    is_trusted_authority(host, "host")
+}
+
+/// WebSocket Origin 検証の拒否理由
+///
+/// `is_allowed_ws_origin` の silent return を観測可能にするため、
+/// 各拒否分岐を variant として表現する。
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub(super) enum WsOriginRejection {
+    MissingOrigin,
+    MissingHost,
+    /// Origin ヘッダーは存在するが `to_str()` に失敗（非 ASCII バイト含む）
+    ///
+    /// 通常のブラウザは ASCII のみで構成された Origin を送る。非 ASCII
+    /// バイトを含む Origin は malformed header probe の兆候として warn
+    /// レベルで記録する（MissingOrigin の info より強い信号）。
+    OriginMalformed,
+    /// Host ヘッダーは存在するが `to_str()` に失敗（非 ASCII バイト含む）
+    ///
+    /// 通常のブラウザ／プロキシは ASCII のみで構成された Host を送る。
+    /// 非 ASCII バイトを含む Host は malformed header probe の兆候として
+    /// warn レベルで記録する。
+    HostMalformed,
+    UntrustedHost,
+    OriginParseError,
+    UnsupportedScheme,
+    /// scheme は http/https だが authority が欠落した Origin の拒否
+    ///
+    /// 現在の axum (http 1.x) では実測で以下のように振る舞い、本 variant に
+    /// 到達する入力は確認できていない:
+    /// - `"http:"` / `"http:path-only"` → `scheme_str() == None` → `UnsupportedScheme`
+    /// - `"http:/"` / `"http:?query"` / `"http:///"` → `Uri::parse` 失敗 → `OriginParseError`
+    ///
+    /// 将来の http クレート挙動変更や、axum 以外のパスから到達した場合の
+    /// 防御的フォールバックとして残し、DNS Rebinding 防御の核となる
+    /// validation 経路から panic を排除する。
+    #[allow(dead_code)]
+    OriginMissingAuthority,
+    UntrustedOriginAuthority,
+    AuthorityMismatch,
+}
+
+/// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
+///
+/// ヘッダー不在（`Missing*`）と非 ASCII 等で `to_str()` に失敗するケース
+/// （`*Malformed`）を別 variant で区別し、呼び出し元でログレベルを
+/// 段階化できるようにする。
+pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejection> {
+    let origin = match headers.get(ORIGIN) {
+        None => return Err(WsOriginRejection::MissingOrigin),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::OriginMalformed),
+        },
+    };
+    let host = match headers.get(HOST) {
+        None => return Err(WsOriginRejection::MissingHost),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::HostMalformed),
+        },
+    };
+    if !is_trusted_authority(host, "host") {
+        return Err(WsOriginRejection::UntrustedHost);
+    }
+    let Ok(origin_uri) = origin.parse::<Uri>() else {
+        return Err(WsOriginRejection::OriginParseError);
+    };
+    match origin_uri.scheme_str() {
+        Some("http") | Some("https") => {}
+        _ => return Err(WsOriginRejection::UnsupportedScheme),
+    }
+    // 到達不能だが将来の http クレート挙動変更と axum 外経路からの防御的 fallback。
+    // 背景は `WsOriginRejection::OriginMissingAuthority` の doc を参照。
+    let Some(origin_authority) = origin_uri.authority() else {
+        return Err(WsOriginRejection::OriginMissingAuthority);
+    };
+    if !is_trusted_authority(origin_authority.as_str(), "origin_authority") {
+        return Err(WsOriginRejection::UntrustedOriginAuthority);
+    }
+    if normalize_authority(origin_authority.as_str()) != normalize_authority(host) {
+        return Err(WsOriginRejection::AuthorityMismatch);
+    }
+    Ok(())
 }
 
 /// WebSocket接続時のOriginヘッダーを検証する
 ///
 /// DNS Rebinding対策として、Host検証に加えてOriginのauthority一致も要求する。
 /// Originスキームは`http`/`https`のみ許可する。
+/// 拒否時は `check_ws_origin` の返す `WsOriginRejection` を使って
+/// info / warn の監査ログを出力する。
 pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    if !is_trusted_authority(host) {
-        return false;
+    match check_ws_origin(headers) {
+        Ok(()) => true,
+        Err(rejection) => {
+            let host = log_value_for_header(headers, &HOST);
+            let origin = log_value_for_header(headers, &ORIGIN);
+            match rejection {
+                WsOriginRejection::MissingOrigin | WsOriginRejection::MissingHost => {
+                    tracing::info!(
+                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                        rejection,
+                        host,
+                        origin
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                        rejection,
+                        host,
+                        origin
+                    );
+                }
+            }
+            false
+        }
     }
-    let Ok(origin_uri) = origin.parse::<Uri>() else {
-        return false;
-    };
-
-    match origin_uri.scheme_str() {
-        Some("http") | Some("https") => {}
-        _ => return false,
-    }
-
-    let Some(origin_authority) = origin_uri.authority() else {
-        return false;
-    };
-    if !is_trusted_authority(origin_authority.as_str()) {
-        return false;
-    }
-
-    normalize_authority(origin_authority.as_str()) == normalize_authority(host)
 }
 
-pub(super) fn is_trusted_authority(authority: &str) -> bool {
+pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bool {
     let Ok(parsed) = authority.parse::<Authority>() else {
+        tracing::warn!(
+            "[markdown-view] authority の parse に失敗し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     };
     // userinfo 付き authority (user@host 形式) は拒否する。
@@ -111,6 +213,11 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
     // （例: "user@[::1]:3000" は http クレートのパーサを通過するが、
     //   host() が "[::1]" を返すため loopback 認定されてしまう）
     if parsed.as_str().contains('@') {
+        tracing::warn!(
+            "[markdown-view] authority に userinfo を検出し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     }
     // http クレート (1.x) の Authority パーサは非数値port（例: "[::1]:abc"）も受け入れ、
@@ -118,6 +225,11 @@ pub(super) fn is_trusted_authority(authority: &str) -> bool {
     // DNS Rebinding境界として信頼するには数値portを必須とするため、
     // 元文字列を直接検査してport接尾辞の有無を判定する。
     if has_port_suffix(parsed.as_str()) && parsed.port_u16().is_none() {
+        tracing::warn!(
+            "[markdown-view] authority に非数値 port を検出し拒否 (context={}): {:?}",
+            context,
+            authority
+        );
         return false;
     }
     is_trusted_host(parsed.host())
@@ -159,6 +271,14 @@ pub(super) fn is_trusted_host(host: &str) -> bool {
 /// authority文字列（`host[:port]`）を比較用に正規化する
 ///
 /// 末尾ドットを除去し、大小文字差を吸収する。
+///
+/// # 呼び出し側契約
+///
+/// 呼び出し元は本関数に渡す authority を事前に [`is_trusted_authority`] で
+/// 検証すること。parse 失敗フォールバックは防御的保険であり、permissive な
+/// lowercase/trim 比較によって DNS Rebinding 境界が弱まらないよう、
+/// 呼び出し側で pre-validation を保証する必要がある。現行 `check_ws_origin`
+/// はこの契約を満たしており、fallback 分岐は構造上到達不能。
 pub(super) fn normalize_authority(authority: &str) -> String {
     if let Ok(parsed) = authority.parse::<Authority>() {
         let host = parsed.host().trim_end_matches('.').to_ascii_lowercase();
@@ -221,32 +341,32 @@ mod tests {
     #[test]
     fn test_trusted_authority_ipv6_port付きを検証する() {
         // 正常系：port 付き IPv6 loopback authority
-        assert!(is_trusted_authority("[::1]:3000"));
+        assert!(is_trusted_authority("[::1]:3000", "host"));
 
         // 非数値 port：is_trusted_authority 内の has_port_suffix チェックで明示拒否
         // （httpクレートのAuthorityパーサ自体は非数値portを受け入れてしまうため、
         //  このガードが無いとloopback認定されて通過してしまう）
-        assert!(!is_trusted_authority("[::1]:abc"));
+        assert!(!is_trusted_authority("[::1]:abc", "host"));
 
         // 非 loopback IPv6 + port：is_trusted_host 側で拒否
-        assert!(!is_trusted_authority("[fe80::1]:3000"));
+        assert!(!is_trusted_authority("[fe80::1]:3000", "host"));
 
         // 空 port 接尾辞：":"はあるが port_u16 が None → has_port_suffix チェックで拒否
-        assert!(!is_trusted_authority("[::1]:"));
+        assert!(!is_trusted_authority("[::1]:", "host"));
 
         // u16 範囲外の port：u16 overflow → port_u16 が None → 拒否
-        assert!(!is_trusted_authority("[::1]:65536"));
-        assert!(!is_trusted_authority("[::1]:99999"));
+        assert!(!is_trusted_authority("[::1]:65536", "host"));
+        assert!(!is_trusted_authority("[::1]:99999", "host"));
 
         // port 0：RFC 上は予約だが port_u16 が Some(0) のため現状の実装では許可される。
         // 実害のない挙動を固定化することで、将来「0 を予約として拒否」する選択を
         // 意識的に行えるようにする
-        assert!(is_trusted_authority("[::1]:0"));
+        assert!(is_trusted_authority("[::1]:0", "host"));
 
         // IPv6 zone ID：http クレートは解析を許すが、is_trusted_host の IpAddr::parse
         // が zone suffix 付き文字列を受け付けないため最終的に拒否される
-        assert!(!is_trusted_authority("[fe80::1%25eth0]"));
-        assert!(!is_trusted_authority("[fe80::1%25eth0]:3000"));
+        assert!(!is_trusted_authority("[fe80::1%25eth0]", "host"));
+        assert!(!is_trusted_authority("[fe80::1%25eth0]:3000", "host"));
     }
 
     #[test]
@@ -273,10 +393,10 @@ mod tests {
         // userinfo 経由のバイパス防御。http クレートの Authority パーサは
         // user@host 形式を受理し、host() は userinfo を除いた host を返すため、
         // 明示的に弾かないと攻撃者が任意の userinfo を埋め込んで loopback 認定させうる
-        assert!(!is_trusted_authority("user@localhost:3000"));
-        assert!(!is_trusted_authority("user@[::1]:3000"));
-        assert!(!is_trusted_authority("user:pass@localhost:3000"));
-        assert!(!is_trusted_authority("user:pass@[::1]:3000"));
+        assert!(!is_trusted_authority("user@localhost:3000", "host"));
+        assert!(!is_trusted_authority("user@[::1]:3000", "host"));
+        assert!(!is_trusted_authority("user:pass@localhost:3000", "host"));
+        assert!(!is_trusted_authority("user:pass@[::1]:3000", "host"));
     }
 
     #[test]
@@ -312,6 +432,7 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
     }
 
     #[test]
@@ -320,6 +441,11 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:4000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        // 両 authority が trusted かつ normalize 結果が異なるため AuthorityMismatch
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::AuthorityMismatch)
+        );
     }
 
     #[test]
@@ -328,6 +454,10 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "ftp://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UnsupportedScheme)
+        );
     }
 
     #[test]
@@ -336,6 +466,12 @@ mod tests {
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://evil.example:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        // HOST は trusted だが Origin authority が trusted でないため
+        // AuthorityMismatch ではなく UntrustedOriginAuthority に到達する
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedOriginAuthority)
+        );
     }
 
     #[test]
@@ -343,6 +479,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingOrigin)
+        );
     }
 
     #[test]
@@ -350,6 +490,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingHost)
+        );
     }
 
     #[test]
@@ -393,6 +537,7 @@ mod tests {
         headers.insert(HOST, "LOCALHOST.:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
     }
 
     #[test]
@@ -402,18 +547,157 @@ mod tests {
         headers.insert(HOST, "[::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[::1]:3000".parse().unwrap());
         assert!(is_allowed_ws_origin(&headers));
+        assert_eq!(check_ws_origin(&headers), Ok(()));
 
         // 失敗ケース：port 不一致
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "[::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[::1]:4000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::AuthorityMismatch)
+        );
 
         // 失敗ケース：非 loopback IPv6（link-local）は
         // HOST/Origin が一致していても拒否される
+        // (HOST が trusted でない時点で UntrustedHost に到達)
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "[fe80::1]:3000".parse().unwrap());
         headers.insert(ORIGIN, "http://[fe80::1]:3000".parse().unwrap());
         assert!(!is_allowed_ws_origin(&headers));
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedHost)
+        );
+    }
+
+    #[test]
+    fn test_check_ws_origin_variants_網羅() {
+        // MissingOrigin: Origin ヘッダー不在
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingOrigin)
+        );
+
+        // MissingHost: HOST ヘッダー不在
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingHost)
+        );
+
+        // UntrustedHost: HOST が trusted でない
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedHost)
+        );
+
+        // OriginParseError: Origin が URI として parse 不可
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "not a uri".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::OriginParseError)
+        );
+
+        // UnsupportedScheme: http/https 以外
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "ftp://localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UnsupportedScheme)
+        );
+
+        // UntrustedOriginAuthority: HOST は trusted、Origin authority が trusted でない
+        // (AuthorityMismatch ではなく UntrustedOriginAuthority に到達する：
+        //  is_trusted_authority("evil.example:3000") が false を返すため、
+        //  AuthorityMismatch チェックより前に早期 return される)
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://evil.example:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedOriginAuthority)
+        );
+
+        // AuthorityMismatch: 両 authority が trusted だが正規化結果が異なる
+        // (localhost と 127.0.0.1 はどちらも is_trusted_host で true だが、
+        //  normalize_authority の出力文字列が異なるため AuthorityMismatch 発火)
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::AuthorityMismatch)
+        );
+
+        // 評価順序の固定: UntrustedHost が OriginParseError より先に評価される。
+        // HOST untrusted + Origin parse 不可の入力では、先に評価される HOST 側の
+        // UntrustedHost が返ることを保証する（将来 check_ws_origin の早期 return
+        // 順を入れ替えた場合に検出される）
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        headers.insert(ORIGIN, "not a uri".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedHost)
+        );
+
+        // OriginMalformed: Origin ヘッダーは存在するが to_str() 失敗（非 ASCII）
+        // (HeaderValue は obs-text 範囲 0x80-0xFF を許容するが to_str() は
+        //  visible ASCII のみ受理するため、\xff を含む入力で失敗する)
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::OriginMalformed)
+        );
+
+        // HostMalformed: Host ヘッダーは存在するが to_str() 失敗（非 ASCII）
+        // OriginMalformed と同じ境界だが、評価順は Origin 側が先のため
+        // Origin を正常値にして Host を malformed にする
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::HostMalformed)
+        );
+
+        // 注: OriginMissingAuthority variant は現行 axum (http 1.x) では
+        // 到達可能な入力が実測確認できない（"http:", "http:/", "http:?q",
+        // "http:path-only", "http:///" はいずれも scheme 欠落 or parse エラーに
+        // 流れる）。ただし validation 経路の panic を排除する防御的 fallback として
+        // variant と let-else 分岐を残しているため、本テストでの assertion は省略する。
+    }
+
+    #[test]
+    fn test_is_trusted_authority_context_引数を受け取る() {
+        // userinfo 経由バイパスは "host" コンテキストで拒否される
+        assert!(!is_trusted_authority("user@localhost:3000", "host"));
+
+        // 非数値 port は "origin_authority" コンテキストで拒否される
+        // (warn ログには context=origin_authority が記録される)
+        assert!(!is_trusted_authority("[::1]:abc", "origin_authority"));
+
+        // 正常系: context 値に関わらず判定結果は不変
+        assert!(is_trusted_authority("[::1]:3000", "host"));
+        assert!(is_trusted_authority("localhost:3000", "origin_authority"));
     }
 }
