@@ -1584,7 +1584,7 @@ async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含�
     // サーバーがclose frameを送信するのを受信
     assert_close_frame_message(
         &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Unsupported,
+        1003,
         "このファイルはUTF-8テキストではありません",
     )
     .await;
@@ -1604,7 +1604,7 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
 
     assert_close_frame_message(
         &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+        1008,
         "ファイル検証に失敗しました: ファイルが見つかりません",
     )
     .await;
@@ -1622,7 +1622,7 @@ async fn test_websocket_サイズ超過ファイルでclose_frameにuser_message
 
     assert_close_frame_message(
         &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size,
+        1009,
         "ファイルサイズが上限（10MB）を超えています",
     )
     .await;
@@ -1802,13 +1802,13 @@ async fn next_ws_message(read: &mut WsReadHalf) -> tokio_tungstenite::tungstenit
 
 async fn assert_close_frame_message(
     read: &mut WsReadHalf,
-    expected_code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode,
+    expected_code: u16,
     expected_reason: &str,
 ) {
     let msg = next_ws_message(read).await;
     match msg {
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
-            assert_eq!(frame.code, expected_code);
+            assert_eq!(u16::from(frame.code), expected_code);
             let reason: &str = frame.reason.as_ref();
             assert_eq!(reason, expected_reason);
         }
