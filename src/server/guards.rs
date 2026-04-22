@@ -41,15 +41,27 @@ pub(super) fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiErr
     (status, Json(error_message_json(message)))
 }
 
+/// ヘッダー値を audit log 用に安全に取り出す。
+///
+/// - ヘッダー不在 → `"<absent>"`
+/// - ヘッダー存在するが `to_str()` 失敗（非 ASCII バイト含む） → `"<non-ascii>"`
+///
+/// 2 つの失敗モードを sentinel で区別することで、正常な欠落と攻撃者制御の
+/// malformed header probe を audit log 上で分離する。security triage の
+/// 観点で重要。
+fn log_value_for_header<'a>(headers: &'a HeaderMap, name: &axum::http::HeaderName) -> &'a str {
+    match headers.get(name) {
+        None => "<absent>",
+        Some(v) => v.to_str().unwrap_or("<non-ascii>"),
+    }
+}
+
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
     if is_allowed_request_host(headers) {
         Ok(())
     } else {
-        let host = headers
-            .get(HOST)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>");
+        let host = log_value_for_header(headers, &HOST);
         tracing::warn!(
             "[markdown-view] 許可されていないHostヘッダーを拒否: {:?}",
             host
@@ -76,6 +88,18 @@ pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
 pub(super) enum WsOriginRejection {
     MissingOrigin,
     MissingHost,
+    /// Origin ヘッダーは存在するが `to_str()` に失敗（非 ASCII バイト含む）
+    ///
+    /// 通常のブラウザは ASCII のみで構成された Origin を送る。非 ASCII
+    /// バイトを含む Origin は malformed header probe の兆候として warn
+    /// レベルで記録する（MissingOrigin の info より強い信号）。
+    OriginMalformed,
+    /// Host ヘッダーは存在するが `to_str()` に失敗（非 ASCII バイト含む）
+    ///
+    /// 通常のブラウザ／プロキシは ASCII のみで構成された Host を送る。
+    /// 非 ASCII バイトを含む Host は malformed header probe の兆候として
+    /// warn レベルで記録する。
+    HostMalformed,
     UntrustedHost,
     OriginParseError,
     UnsupportedScheme,
@@ -96,12 +120,24 @@ pub(super) enum WsOriginRejection {
 }
 
 /// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
+///
+/// ヘッダー不在（`Missing*`）と非 ASCII 等で `to_str()` に失敗するケース
+/// （`*Malformed`）を別 variant で区別し、呼び出し元でログレベルを
+/// 段階化できるようにする。
 pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejection> {
-    let Some(origin) = headers.get(ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return Err(WsOriginRejection::MissingOrigin);
+    let origin = match headers.get(ORIGIN) {
+        None => return Err(WsOriginRejection::MissingOrigin),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::OriginMalformed),
+        },
     };
-    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
-        return Err(WsOriginRejection::MissingHost);
+    let host = match headers.get(HOST) {
+        None => return Err(WsOriginRejection::MissingHost),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::HostMalformed),
+        },
     };
     if !is_trusted_authority(host, "host") {
         return Err(WsOriginRejection::UntrustedHost);
@@ -137,14 +173,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     match check_ws_origin(headers) {
         Ok(()) => true,
         Err(rejection) => {
-            let host = headers
-                .get(HOST)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("<missing>");
-            let origin = headers
-                .get(ORIGIN)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("<missing>");
+            let host = log_value_for_header(headers, &HOST);
+            let origin = log_value_for_header(headers, &ORIGIN);
             match rejection {
                 WsOriginRejection::MissingOrigin | WsOriginRejection::MissingHost => {
                     tracing::info!(
@@ -620,6 +650,34 @@ mod tests {
         assert_eq!(
             check_ws_origin(&headers),
             Err(WsOriginRejection::UntrustedHost)
+        );
+
+        // OriginMalformed: Origin ヘッダーは存在するが to_str() 失敗（非 ASCII）
+        // (HeaderValue は obs-text 範囲 0x80-0xFF を許容するが to_str() は
+        //  visible ASCII のみ受理するため、\xff を含む入力で失敗する)
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::OriginMalformed)
+        );
+
+        // HostMalformed: Host ヘッダーは存在するが to_str() 失敗（非 ASCII）
+        // OriginMalformed と同じ境界だが、評価順は Origin 側が先のため
+        // Origin を正常値にして Host を malformed にする
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::HostMalformed)
         );
 
         // 注: OriginMissingAuthority variant は現行 axum (http 1.x) では
