@@ -1582,12 +1582,7 @@ async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含�
     let (_write, mut read) = ws_stream.split();
 
     // サーバーがclose frameを送信するのを受信
-    assert_close_frame_message(
-        &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Unsupported,
-        "このファイルはUTF-8テキストではありません",
-    )
-    .await;
+    assert_close_frame_message(&mut read, 1003, "このファイルはUTF-8テキストではありません").await;
 }
 
 #[tokio::test]
@@ -1604,7 +1599,7 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
 
     assert_close_frame_message(
         &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+        1008,
         "ファイル検証に失敗しました: ファイルが見つかりません",
     )
     .await;
@@ -1622,10 +1617,33 @@ async fn test_websocket_サイズ超過ファイルでclose_frameにuser_message
 
     assert_close_frame_message(
         &mut read,
-        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size,
+        1009,
         "ファイルサイズが上限（10MB）を超えています",
     )
     .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_websocket_ioエラーでclose_frameが1011を返す() {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_state, addr, _tmp_dir, file_path) =
+        setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
+
+    // 読込 IO を誘発: resolve (canonicalize/is_file) はパスするが open(2) が EACCES で失敗
+    let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
+    fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    assert_close_frame_message(&mut read, 1011, "ファイルの読み込みに失敗しました").await;
+
+    // teardown: TempDir drop で失敗しないよう権限を復元
+    fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
 }
 
 // ==============================
@@ -1802,13 +1820,13 @@ async fn next_ws_message(read: &mut WsReadHalf) -> tokio_tungstenite::tungstenit
 
 async fn assert_close_frame_message(
     read: &mut WsReadHalf,
-    expected_code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode,
+    expected_code: u16,
     expected_reason: &str,
 ) {
     let msg = next_ws_message(read).await;
     match msg {
         tokio_tungstenite::tungstenite::Message::Close(Some(frame)) => {
-            assert_eq!(frame.code, expected_code);
+            assert_eq!(u16::from(frame.code), expected_code);
             let reason: &str = frame.reason.as_ref();
             assert_eq!(reason, expected_reason);
         }
