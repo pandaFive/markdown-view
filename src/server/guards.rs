@@ -72,7 +72,7 @@ pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
 ///
 /// `is_allowed_ws_origin` の silent return を観測可能にするため、
 /// 各拒否分岐を variant として表現する。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(super) enum WsOriginRejection {
     MissingOrigin,
     MissingHost,
@@ -81,14 +81,14 @@ pub(super) enum WsOriginRejection {
     UnsupportedScheme,
     /// scheme は http/https だが authority が欠落した Origin の拒否
     ///
-    /// 現在の axum (http 1.x) では `"http:"`, `"http:/"`, `"http:?query"`,
-    /// `"http:path-only"`, `"http:///"` のいずれも本 variant に到達しない
-    /// （scheme が欠落するか parse が失敗する）ことを実測確認済み。
+    /// 現在の axum (http 1.x) では実測で以下のように振る舞い、本 variant に
+    /// 到達する入力は確認できていない:
+    /// - `"http:"` / `"http:path-only"` → `scheme_str() == None` → `UnsupportedScheme`
+    /// - `"http:/"` / `"http:?query"` / `"http:///"` → `Uri::parse` 失敗 → `OriginParseError`
+    ///
     /// 将来の http クレート挙動変更や、axum 以外のパスから到達した場合の
     /// 防御的フォールバックとして残し、DNS Rebinding 防御の核となる
     /// validation 経路から panic を排除する。
-    /// 到達不能なため構築箇所は `check_ws_origin` 内の let-else のみだが、
-    /// 防御的 variant として保持するため個別に `#[allow(dead_code)]` を付与する。
     #[allow(dead_code)]
     OriginMissingAuthority,
     UntrustedOriginAuthority,
@@ -113,12 +113,8 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
         Some("http") | Some("https") => {}
         _ => return Err(WsOriginRejection::UnsupportedScheme),
     }
-    // 注: 現行 axum (http 1.x) では scheme が http/https として受理された Uri は
-    // 実測上 authority を必ず伴う（"http:" 系は scheme_str()==None で UnsupportedScheme、
-    // "http:///" は parse エラーで OriginParseError に流れる）。
-    // ただし DNS Rebinding 防御の核となる validation 経路で panic を生むのは
-    // DoS 経路になりうるため、将来の http クレート挙動変更に備えて
-    // 防御的フォールバックとして let-else で早期 return する。
+    // 到達不能だが将来の http クレート挙動変更と axum 外経路からの防御的 fallback。
+    // 背景は `WsOriginRejection::OriginMissingAuthority` の doc を参照。
     let Some(origin_authority) = origin_uri.authority() else {
         return Err(WsOriginRejection::OriginMissingAuthority);
     };
@@ -245,6 +241,14 @@ pub(super) fn is_trusted_host(host: &str) -> bool {
 /// authority文字列（`host[:port]`）を比較用に正規化する
 ///
 /// 末尾ドットを除去し、大小文字差を吸収する。
+///
+/// # 呼び出し側契約
+///
+/// 呼び出し元は本関数に渡す authority を事前に [`is_trusted_authority`] で
+/// 検証すること。parse 失敗フォールバックは防御的保険であり、permissive な
+/// lowercase/trim 比較によって DNS Rebinding 境界が弱まらないよう、
+/// 呼び出し側で pre-validation を保証する必要がある。現行 `check_ws_origin`
+/// はこの契約を満たしており、fallback 分岐は構造上到達不能。
 pub(super) fn normalize_authority(authority: &str) -> String {
     if let Ok(parsed) = authority.parse::<Authority>() {
         let host = parsed.host().trim_end_matches('.').to_ascii_lowercase();
@@ -604,6 +608,18 @@ mod tests {
         assert_eq!(
             check_ws_origin(&headers),
             Err(WsOriginRejection::AuthorityMismatch)
+        );
+
+        // 評価順序の固定: UntrustedHost が OriginParseError より先に評価される。
+        // HOST untrusted + Origin parse 不可の入力では、先に評価される HOST 側の
+        // UntrustedHost が返ることを保証する（将来 check_ws_origin の早期 return
+        // 順を入れ替えた場合に検出される）
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        headers.insert(ORIGIN, "not a uri".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedHost)
         );
 
         // 注: OriginMissingAuthority variant は現行 axum (http 1.x) では
