@@ -65,3 +65,15 @@
   - 内容: `UpdateMessage` (`src/template/message.rs`) は `content` / `toc` に `skip_serializing_if` を付けていないため `data.content` は **必ず** 存在するはずだが、現状は `undefined` を no-op で黙殺している。サーバ契約変更や中継プロキシ改変で content が欠落した場合「ファイル編集してもプレビュー更新されない」サイレント失敗になる
   - 想定実装: `data.content === undefined` の場合 `console.warn('[markdown-view] updateContent: data.content が欠落 (契約違反)', data);` を出し、TOC 更新等の副作用は継続
   - 理由: WS フレームを直接覗かないとデバッグ不能なサイレント失敗の予防
+
+- [ ] HTTP `/api/content` の IO エラー経路 (500) の統合テストを追加
+  - ファイル: `tests/integration_test.rs`
+  - 現状: `ReadMarkdownError::into_response()` が `Io(_) → 500 INTERNAL_SERVER_ERROR` にマップされる (`src/server/files/content.rs:236-240`) が、HTTP 境界の統合テストは存在しない (grep で `INTERNAL_SERVER_ERROR` は L376 のディレクトリ delete 経路のみ)
+  - 対応: WebSocket 1011 テストと同じ手法 (`chmod 0o000` で EACCES 誘発) を `/api/content` の reqwest 呼び出しに適用し、status 500 と JSON `error` フィールドが `"ファイルの読み込みに失敗しました"` であることを検証。既存 `assert_json_error_for_paths` (L1707) と同じ構造で実装可能
+  - 理由: WebSocket 経路の 1011 透過確認と対称。IO エラーが `NotUtf8`/`TooLarge` の HTTP ステータスに誤分類されても現状は検知できない
+
+- [ ] `build_change_broadcast_message` / `build_lagged_recovery_message` の IO エラー経路を統合テストでカバー
+  - ファイル: `tests/integration_test.rs`
+  - 現状: `load_initial_socket_update` の ReadFailed arm は 1011 統合テストで固定されたが、`build_change_broadcast_message` (`src/server/files/content.rs:163-199`) と `build_lagged_recovery_message` (同 L128-157) は同じ `ReadMarkdownError` を `BroadcastMessage::Error(format!("..."))` に畳み込む別経路。ユニットテストはあるが実 WebSocket 経由の透過確認なし
+  - 対応: (a) ファイル更新を watcher に拾わせて chmod 0o000 → notify のシーケンスで change 経路を刺激、(b) lag recovery は broadcast channel を意図的に溢れさせる必要があり難易度高い。まず (a) のみ検討
+  - 理由: 3 経路 (初期化 / 変更 / 遅延回復) で同じ `ReadMarkdownError` の扱いが分かれており、一つの経路のリファクタで他経路が silent に壊れる可能性がある
