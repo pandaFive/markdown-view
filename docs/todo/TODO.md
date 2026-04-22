@@ -22,7 +22,7 @@
   - 対応: JSON エスケープで最悪 2 倍になる前提を doc コメントで明示。`MAX_FILE_SIZE + 小さなマージン` に引き締める可否を再検討。境界テスト（10MB + 1 バイト、20MB 付近）を追加
   - 理由: 将来の保守時に「なぜ 2 倍か」が読めないと制限緩和や強化判断を誤る
 
-- [ ] WebSocket close_code マッピングの統合テストを追加
+- [x] WebSocket close_code マッピングの統合テストを追加
   - ファイル: `tests/integration_test.rs`
   - 現状: `ReadMarkdownError::close_code()` のユニットテストは存在、`load_initial_socket_update` のエラー arm も Low 側で TODO 化済み。だが実際の WebSocket フレームまで透過確認する E2E はない
   - 追加観点: IO → 1011、TooLarge → 1009、NotUtf8 → 1003 の 3 シナリオを実サーバー + WebSocket クライアントで検証
