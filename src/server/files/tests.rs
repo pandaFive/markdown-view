@@ -269,7 +269,7 @@ fn test_list_markdown_files_深度上限を超えるパスは除外される() {
 fn test_list_markdown_files_recursive_通常ディレクトリcanonicalize失敗時はスキップ扱い() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing-dir");
-    assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ").is_none());
+    assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ", dir.path()).is_none());
 }
 
 #[tokio::test]
