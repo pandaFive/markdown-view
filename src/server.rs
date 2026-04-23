@@ -3,7 +3,7 @@
 mod broadcast;
 mod files;
 mod guards;
-mod log_path;
+pub(crate) mod log_path;
 mod messages;
 mod routes;
 mod session;

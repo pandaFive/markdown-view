@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 
+use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::{AppMode, CanonicalPath};
 
 #[derive(Debug, Clone)]
@@ -131,7 +132,7 @@ fn collect_directory_changes(base_dir: &Path, events: &[DebouncedEvent]) -> Vec<
         if !is_within_base_dir(&event.path, base_dir) {
             tracing::warn!(
                 "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                event.path.display()
+                sanitize_path_for_logging(&event.path, base_dir)
             );
             continue;
         }
@@ -170,7 +171,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
                 Err(e) => {
                     tracing::warn!(
                         "[markdown-view] 隠しファイル判定: パス正規化失敗（元パスで再試行）: {} ({})",
-                        path.display(), e
+                        sanitize_path_for_logging(path, base), e
                     );
                     path.to_path_buf()
                 }
@@ -192,7 +193,7 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
                 Err(_) => {
                     tracing::warn!(
                         "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
-                        path.display()
+                        sanitize_path_for_logging(path, base)
                     );
                     true
                 }
@@ -209,9 +210,10 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
     match event_path.canonicalize() {
         Ok(canonical) => canonical == *target_path,
         Err(e) => {
+            let log_base: &Path = target_path.parent().unwrap_or_else(|| Path::new(""));
             tracing::warn!(
                 "[markdown-view] パス正規化に失敗（ファイル名比較にフォールバック）: {} ({})",
-                event_path.display(),
+                sanitize_path_for_logging(event_path, log_base),
                 e
             );
             if event_path.file_name() != target_path.file_name() {
@@ -256,7 +258,7 @@ fn is_within_base_dir(path: &Path, base: &Path) -> bool {
         Err(e) => {
             tracing::warn!(
                 "[markdown-view] ベース配下判定: パス正規化失敗（相対化で再試行）: {} ({})",
-                path.display(),
+                sanitize_path_for_logging(path, base),
                 e
             );
             let normalized_path = normalize_lexical_path(path);
