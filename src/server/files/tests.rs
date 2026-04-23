@@ -1148,9 +1148,10 @@ async fn test_build_change_broadcast_message_ディレクトリモードでfile�
 
 #[test]
 fn test_revalidate_single_file_target_正常なファイルを許可する() {
-    let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+    let (dir, file_path) = create_markdown_fixture("test.md", "# test");
     let canonical = file_path.canonicalize().unwrap();
-    let result = revalidate_single_file_target(&canonical);
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), canonical);
 }
@@ -1159,7 +1160,8 @@ fn test_revalidate_single_file_target_正常なファイルを許可する() {
 fn test_revalidate_single_file_target_存在しないファイルはnotfoundを返す() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("nonexistent.md");
-    let result = revalidate_single_file_target(&file_path);
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&file_path, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
 }
 
@@ -1167,7 +1169,7 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
 fn test_revalidate_single_file_target_ディレクトリはnotfoundを返す() {
     let dir = tempfile::tempdir().unwrap();
     let canonical = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&canonical);
+    let result = revalidate_single_file_target(&canonical, &canonical);
     assert_eq!(result, Err(ResolveFileError::NotFound));
 }
 
@@ -1177,7 +1179,8 @@ fn test_revalidate_single_file_target_非mdファイルはnotmarkdownを返す()
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello").unwrap();
     let canonical = file_path.canonicalize().unwrap();
-    let result = revalidate_single_file_target(&canonical);
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotMarkdown));
 }
 
@@ -1189,7 +1192,8 @@ fn test_revalidate_single_file_target_シンボリックリンクはtraversalを
     std::fs::write(&real_file, "# real").unwrap();
     let link_path = dir.path().join("link.md");
     std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
-    let result = revalidate_single_file_target(&link_path);
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&link_path, &base_dir);
     assert_eq!(result, Err(ResolveFileError::Traversal));
 }
 
