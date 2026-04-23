@@ -48,7 +48,7 @@ impl ResolvedTarget {
         self.relative_path.as_deref()
     }
 
-    pub(super) fn file_label(&self) -> &str {
+    pub(in crate::server) fn file_label(&self) -> &str {
         &self.file_label
     }
 
