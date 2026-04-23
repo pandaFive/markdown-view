@@ -18,17 +18,67 @@ use std::path::{Component, Path, PathBuf};
 /// - `path == base`: `"."`
 /// - `path` が `base` 外: `<outside-base>/{file_name}`
 /// - `file_name` 取得不可（ルート等）: `<outside-base>`
+///
+/// 存在するパスでは canonicalize 後の実パスで base 配下判定を優先し、
+/// symlink 経由で base 外へ出るパスの誤判定を防ぐ。
 pub(crate) fn sanitize_path_for_logging<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
+    match canonical_path_status(path, base) {
+        Some(relative) if relative.as_os_str().is_empty() => Cow::Borrowed("."),
+        Some(relative) => Cow::Owned(relative.display().to_string()),
+        None if matches!(
+            canonicalize_status(path, base),
+            CanonicalizeStatus::OutsideBase
+        ) =>
+        {
+            sanitize_outside_path_for_logging(path)
+        }
+        None => sanitize_path_for_logging_lexical(path, base),
+    }
+}
+
+enum CanonicalizeStatus {
+    Relative(PathBuf),
+    OutsideBase,
+    Unavailable,
+}
+
+fn canonical_path_status(path: &Path, base: &Path) -> Option<PathBuf> {
+    match canonicalize_status(path, base) {
+        CanonicalizeStatus::Relative(relative) => Some(relative),
+        CanonicalizeStatus::OutsideBase | CanonicalizeStatus::Unavailable => None,
+    }
+}
+
+fn canonicalize_status(path: &Path, base: &Path) -> CanonicalizeStatus {
+    let canonical_path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return CanonicalizeStatus::Unavailable,
+    };
+    let canonical_base = match base.canonicalize() {
+        Ok(base) => base,
+        Err(_) => return CanonicalizeStatus::Unavailable,
+    };
+    match canonical_path.strip_prefix(&canonical_base) {
+        Ok(relative) => CanonicalizeStatus::Relative(relative.to_path_buf()),
+        Err(_) => CanonicalizeStatus::OutsideBase,
+    }
+}
+
+fn sanitize_path_for_logging_lexical<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
     let normalized_path = normalize_lexical_path(path);
     let normalized_base = normalize_lexical_path(base);
 
     match normalized_path.strip_prefix(&normalized_base) {
         Ok(relative) if relative.as_os_str().is_empty() => Cow::Borrowed("."),
         Ok(relative) => Cow::Owned(relative.display().to_string()),
-        Err(_) => match path.file_name() {
-            Some(name) => Cow::Owned(format!("<outside-base>/{}", name.to_string_lossy())),
-            None => Cow::Borrowed("<outside-base>"),
-        },
+        Err(_) => sanitize_outside_path_for_logging(path),
+    }
+}
+
+fn sanitize_outside_path_for_logging<'a>(path: &'a Path) -> Cow<'a, str> {
+    match path.file_name() {
+        Some(name) => Cow::Owned(format!("<outside-base>/{}", name.to_string_lossy())),
+        None => Cow::Borrowed("<outside-base>"),
     }
 }
 
@@ -72,6 +122,8 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
     #[test]
@@ -123,6 +175,38 @@ mod tests {
             sanitize_path_for_logging(&path, &base),
             "<outside-base>/secret.md"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sanitize_symlink経由でbase外に出る場合はoutside扱い() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(outside.join("private")).unwrap();
+        std::fs::write(outside.join("private/doc.md"), "# doc").unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+
+        let path = base.join("link/private/doc.md");
+        assert_eq!(
+            sanitize_path_for_logging(&path, &base),
+            "<outside-base>/doc.md"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sanitize_symlink経由でもbase配下なら相対化する() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("doc.md"), "# doc").unwrap();
+        symlink(&nested, base.join("link")).unwrap();
+
+        let path = base.join("link/doc.md");
+        assert_eq!(sanitize_path_for_logging(&path, &base), "nested/doc.md");
     }
 
     #[test]
