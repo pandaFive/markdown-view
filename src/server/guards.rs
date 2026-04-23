@@ -10,31 +10,22 @@ use axum::Json;
 use super::messages::ApiError;
 use crate::template::{csp_hash_sources, error_message_json};
 
-pub(super) fn build_csp_header(syntax_css: &str) -> (HeaderValue, bool) {
+pub(super) fn build_csp_header(syntax_css: &str) -> HeaderValue {
     let (script_src, style_src) = csp_hash_sources(syntax_css);
     let csp = format!(
         "default-src 'self'; script-src {}; style-src {}; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none'",
         script_src, style_src
     );
-    match HeaderValue::from_str(&csp) {
-        Ok(header) => (header, false),
-        Err(e) => {
-            tracing::error!(
-                "[markdown-view] CSPヘッダーの生成に失敗（フォールバックCSPを使用）: {} (CSP: {})",
-                e,
-                csp
-            );
-            tracing::warn!(
-                "[markdown-view] セキュリティ警告: フォールバックCSPのためscript/styleのsha256制約が無効です"
-            );
-            (
-                HeaderValue::from_static(
-                    "default-src 'self'; object-src 'none'; frame-ancestors 'none'",
-                ),
-                true,
-            )
-        }
-    }
+    // csp_hash_sources は base64 sha256 のみを返す契約のため、
+    // visible-ASCII 違反による HeaderValue::from_str 失敗は構造上到達不能。
+    // 到達した場合は契約破り（バグ）であり、permissive な fallback CSP で
+    // silent に degradation するより startup panic で表面化させる。
+    HeaderValue::from_str(&csp).unwrap_or_else(|e| {
+        panic!(
+            "CSP ヘッダー生成に失敗（csp_hash_sources の出力契約破り）: {} (CSP: {})",
+            e, csp
+        )
+    })
 }
 
 pub(super) fn json_error(status: StatusCode, message: impl AsRef<str>) -> ApiError {
