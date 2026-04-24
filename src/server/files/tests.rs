@@ -1102,6 +1102,40 @@ async fn test_save_route_memo_旧形式backslash_sidecarを新形式へ移行す
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_旧形式backslash_sidecarは新形式作成不可なら既存compatへfallbackする()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("compat sidecar should remain writable fallback");
+    assert_eq!(memo.raw(), "updated memo");
+    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "updated memo");
+    assert!(!new_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形式を優先する() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("a\\b.md");

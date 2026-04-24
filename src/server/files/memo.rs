@@ -77,15 +77,16 @@ pub(in crate::server) async fn save_route_memo(
     ensure_safe_memo_path(memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
         if let Err(error) = tokio::fs::create_dir_all(parent).await {
-            if can_fallback_to_legacy(save_target, &error) {
-                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+            if let Some(fallback) = sidecar_fallback_for_error(save_target, &error) {
+                return save_memo_to_fallback(state, target, request, &memo_paths, fallback, raw)
+                    .await;
             }
             return Err(io_api_error(target, request, "ディレクトリ作成", error));
         }
     }
     if let Err(error) = tokio::fs::write(memo_path, raw.as_bytes()).await {
-        if can_fallback_to_legacy(save_target, &error) {
-            return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+        if let Some(fallback) = sidecar_fallback_for_error(save_target, &error) {
+            return save_memo_to_fallback(state, target, request, &memo_paths, fallback, raw).await;
         }
         return Err(io_api_error(target, request, "保存", error));
     }
@@ -123,11 +124,18 @@ struct MemoPaths {
 #[derive(Debug, Clone, Copy)]
 enum SaveTarget {
     Sidecar {
-        allow_legacy_fallback: bool,
+        fallback: SidecarFallback,
         delete_legacy_after_save: bool,
         delete_compat_after_save: bool,
     },
     Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarFallback {
+    None,
+    Legacy,
+    Compat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +263,7 @@ async fn choose_save_target(
             .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
         return Ok(SaveTarget::Sidecar {
-            allow_legacy_fallback: false,
+            fallback: SidecarFallback::None,
             delete_legacy_after_save: false,
             delete_compat_after_save: false,
         });
@@ -263,7 +271,7 @@ async fn choose_save_target(
     let compat_sidecar_exists = compat_sidecar_exists(state, target, request, memo_paths).await?;
     if compat_sidecar_exists {
         return Ok(SaveTarget::Sidecar {
-            allow_legacy_fallback: false,
+            fallback: SidecarFallback::Compat,
             delete_legacy_after_save: false,
             delete_compat_after_save: true,
         });
@@ -279,14 +287,18 @@ async fn choose_save_target(
         LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe
     ) {
         return Ok(SaveTarget::Sidecar {
-            allow_legacy_fallback: state.mode().is_directory(),
+            fallback: if state.mode().is_directory() {
+                SidecarFallback::Legacy
+            } else {
+                SidecarFallback::None
+            },
             delete_legacy_after_save: false,
             delete_compat_after_save: false,
         });
     }
 
     Ok(SaveTarget::Sidecar {
-        allow_legacy_fallback: true,
+        fallback: SidecarFallback::Legacy,
         delete_legacy_after_save: true,
         delete_compat_after_save: false,
     })
@@ -348,14 +360,17 @@ async fn inspect_legacy_memo(
     }
 }
 
-fn can_fallback_to_legacy(save_target: SaveTarget, error: &std::io::Error) -> bool {
-    matches!(
-        save_target,
-        SaveTarget::Sidecar {
-            allow_legacy_fallback: true,
-            ..
-        }
-    ) && (error.kind() == std::io::ErrorKind::PermissionDenied || is_name_too_long_error(error))
+fn sidecar_fallback_for_error(
+    save_target: SaveTarget,
+    error: &std::io::Error,
+) -> Option<SidecarFallback> {
+    if error.kind() != std::io::ErrorKind::PermissionDenied && !is_name_too_long_error(error) {
+        return None;
+    }
+    match save_target {
+        SaveTarget::Sidecar { fallback, .. } if fallback != SidecarFallback::None => Some(fallback),
+        SaveTarget::Sidecar { .. } | SaveTarget::Legacy => None,
+    }
 }
 
 fn is_name_too_long_error(error: &std::io::Error) -> bool {
@@ -384,6 +399,52 @@ async fn save_memo_to_legacy(
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
     tokio::fs::write(legacy_path, raw.as_bytes())
+        .await
+        .map_err(|error| io_api_error(target, request, "保存", error))?;
+
+    Ok(MemoResponse::from_raw(
+        raw,
+        target.relative_path().map(ToOwned::to_owned),
+    ))
+}
+
+async fn save_memo_to_fallback(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+    fallback: SidecarFallback,
+    raw: String,
+) -> Result<MemoResponse, ApiError> {
+    match fallback {
+        SidecarFallback::Legacy => {
+            save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await
+        }
+        SidecarFallback::Compat => {
+            let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
+                return Err(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "メモファイルの操作に失敗しました",
+                ));
+            };
+            save_memo_to_existing_compat(state, target, request, compat_sidecar, raw).await
+        }
+        SidecarFallback::None => Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "メモファイルの操作に失敗しました",
+        )),
+    }
+}
+
+async fn save_memo_to_existing_compat(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    compat_sidecar: &Path,
+    raw: String,
+) -> Result<MemoResponse, ApiError> {
+    ensure_safe_memo_path(compat_sidecar, state, target, request)?;
+    tokio::fs::write(compat_sidecar, raw.as_bytes())
         .await
         .map_err(|error| io_api_error(target, request, "保存", error))?;
 
