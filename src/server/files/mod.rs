@@ -3,6 +3,7 @@
 mod catalog;
 mod content;
 mod memo;
+mod memo_sidecar;
 mod resolve;
 mod search;
 

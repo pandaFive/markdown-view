@@ -2,7 +2,7 @@
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
@@ -12,9 +12,20 @@ use tokio::sync::broadcast;
 
 use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
+use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
+use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
+
+fn assert_plain_sidecar_filename(name: &str) {
+    let path = Path::new(name);
+    assert!(path.parent().is_none() || path.parent() == Some(Path::new("")));
+    assert_eq!(
+        path.file_name().and_then(|file_name| file_name.to_str()),
+        Some(name)
+    );
+}
 
 #[test]
 fn test_close_code_ioエラーは1011を返す() {
@@ -32,6 +43,125 @@ fn test_close_code_too_largeは1009を返す() {
 fn test_close_code_not_utf8は1003を返す() {
     let err = ReadMarkdownError::NotUtf8;
     assert_eq!(err.close_code(), 1003);
+}
+
+#[test]
+fn test_sidecar_name_超長名は255バイト以内に短縮される() {
+    let file_name = format!("{}.md", "a".repeat(251));
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.starts_with("."));
+    assert!(name.ends_with(".memo.md"));
+    assert!(name.len() <= 255, "sidecar名が長すぎる: {}", name.len());
+}
+
+#[test]
+fn test_sidecar_name_ファイル名なしfallbackは従来名を保つ() {
+    let sidecar = SidecarMemoName::fallback();
+    assert_plain_sidecar_filename(sidecar.as_str());
+    assert_eq!(sidecar.as_str(), ".memo.md");
+}
+
+#[test]
+fn test_sidecar_name_空ファイル名はfallbackを返す() {
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(""));
+    assert_plain_sidecar_filename(sidecar.as_str());
+    assert_eq!(sidecar.as_str(), ".memo.md");
+}
+
+#[test]
+fn test_sidecar_name_同一prefixの超長名はhashで衝突しない() {
+    let common_prefix = "a".repeat(260);
+    let first_name = format!("{common_prefix}-first.md");
+    let second_name = format!("{common_prefix}-second.md");
+    let first = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&first_name));
+    let second = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&second_name));
+    assert_plain_sidecar_filename(first.as_str());
+    assert_plain_sidecar_filename(second.as_str());
+    assert_ne!(first.as_str(), second.as_str());
+    assert!(first.as_str().len() <= 255);
+    assert!(second.as_str().len() <= 255);
+}
+
+#[test]
+fn test_sidecar_name_特殊文字はパス区切りとして扱われない() {
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new("../secret\\..\\memo.md"));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.ends_with(".memo.md"));
+    assert!(!name.contains('/'), "slashが残ってはいけない: {name}");
+    assert!(!name.contains('\\'), "backslashが残ってはいけない: {name}");
+    assert!(
+        name.contains(".."),
+        "通常文字としてのdotは保持してよい: {name}"
+    );
+}
+
+#[test]
+fn test_sidecar_name_正規化された短い名前はhashで衝突しない() {
+    let plain = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a_b.md"));
+    let normalized = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    assert_plain_sidecar_filename(plain.as_str());
+    assert_plain_sidecar_filename(normalized.as_str());
+    assert_eq!(plain.as_str(), ".a_b.md.memo.md");
+    assert!(normalized.as_str().starts_with(".a_b.md."));
+    assert!(normalized.as_str().ends_with(".memo.md"));
+    assert_ne!(plain.as_str(), normalized.as_str());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sidecar_name_旧形式compat名は正規化前の名前を返す() {
+    let compat = SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a\\b.md"))
+        .expect("backslash name should have compat sidecar");
+    assert_plain_sidecar_filename(compat.as_str());
+    assert_eq!(compat.as_str(), ".a\\b.md.memo.md");
+
+    assert!(SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a_b.md")).is_none());
+}
+
+#[test]
+fn test_sidecar_name_utf8境界で切り詰める() {
+    let file_name = format!("{}終端.md", "あ".repeat(120));
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.ends_with(".memo.md"));
+    assert!(name.len() <= 255);
+    assert!(name.is_char_boundary(name.len()));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sidecar_name_非utf8名はhashで衝突しない() {
+    let first = SidecarMemoName::from_file_name(std::ffi::OsStr::from_bytes(b"guide-\xff.md"));
+    let second = SidecarMemoName::from_file_name(std::ffi::OsStr::from_bytes(b"guide-\xfe.md"));
+    assert_plain_sidecar_filename(first.as_str());
+    assert_plain_sidecar_filename(second.as_str());
+    assert!(first.as_str().starts_with("._bin."));
+    assert!(second.as_str().starts_with("._bin."));
+    assert!(first.as_str().ends_with(".memo.md"));
+    assert!(second.as_str().ends_with(".memo.md"));
+    assert_ne!(first.as_str(), second.as_str());
+}
+
+#[test]
+fn test_sidecar_parent_相対パスはbase_dirへfallbackする() {
+    let base_dir = Path::new("/tmp/markdown-view-base");
+
+    let parent = sidecar_parent_or_base(Path::new("memo.md"), base_dir);
+
+    assert_eq!(parent, base_dir);
+}
+
+#[test]
+fn test_sidecar_parent_絶対パスは親ディレクトリを使う() {
+    let base_dir = Path::new("/tmp/markdown-view-base");
+
+    let parent = sidecar_parent_for_target_path(Path::new("/tmp/docs/memo.md"), base_dir);
+
+    assert_eq!(parent, Path::new("/tmp/docs"));
 }
 
 #[test]
@@ -859,6 +989,218 @@ async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しな
     memo_entries.sort();
     assert_eq!(memo_entries.len(), 2);
     assert_ne!(memo_entries[0], memo_entries[1]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_正規化される短いファイル名でもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain_path = dir.path().join("a_b.md");
+    let separator_shaped_path = dir.path().join("a\\b.md");
+    fs::write(&plain_path, "# plain").unwrap();
+    fs::write(&separator_shaped_path, "# separator shaped").unwrap();
+
+    let plain_state = create_single_file_state(&plain_path);
+    let separator_shaped_state = create_single_file_state(&separator_shaped_path);
+    let plain_target =
+        resolve_route_target(&plain_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let separator_shaped_target =
+        resolve_route_target(&separator_shaped_state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    save_route_memo(
+        &plain_state,
+        &plain_target,
+        "plain memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("plain memo should save");
+    save_route_memo(
+        &separator_shaped_state,
+        &separator_shaped_target,
+        "separator shaped memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("separator shaped memo should save");
+
+    let plain = load_route_memo(
+        &plain_state,
+        &plain_target,
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("plain memo should load");
+    let separator_shaped = load_route_memo(
+        &separator_shaped_state,
+        &separator_shaped_target,
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("separator shaped memo should load");
+
+    assert_eq!(plain.raw(), "plain memo");
+    assert_eq!(separator_shaped.raw(), "separator shaped memo");
+
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 2);
+    assert!(memo_entries.contains(&".a_b.md.memo.md".to_string()));
+    assert_ne!(memo_entries[0], memo_entries[1]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_旧形式backslash_sidecarを読み込む() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(dir.path().join(".a\\b.md.memo.md"), "compat memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("compat sidecar memo should load");
+
+    assert_eq!(memo.raw(), "compat memo");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_旧形式backslash_sidecarを新形式へ移行する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("compat sidecar should migrate on save");
+
+    assert_eq!(memo.raw(), "new memo");
+    assert_eq!(fs::read_to_string(&new_sidecar).unwrap(), "new memo");
+    assert!(!old_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_旧形式backslash_sidecarは新形式作成不可なら既存compatへfallbackする()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+
+    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "updated memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
+
+    let memo = result.expect("compat sidecar should remain writable fallback");
+    assert_eq!(memo.raw(), "updated memo");
+    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "updated memo");
+    assert!(!new_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_既存compatが書込不可なら既存legacyへfallbackする() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let original_dir_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    let original_compat_mode = fs::metadata(&old_sidecar).unwrap().permissions().mode();
+    fs::set_permissions(&old_sidecar, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "legacy fallback memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_dir_mode)).unwrap();
+    fs::set_permissions(
+        &old_sidecar,
+        fs::Permissions::from_mode(original_compat_mode),
+    )
+    .unwrap();
+
+    let memo = result.expect("unwritable compat should fall back to existing legacy");
+    assert_eq!(memo.raw(), "legacy fallback memo");
+    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "compat memo");
+    assert_eq!(
+        fs::read_to_string(&legacy_path).unwrap(),
+        "legacy fallback memo"
+    );
+    assert!(!new_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形式を優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+    fs::write(&new_sidecar, "new memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("new sidecar memo should win");
+
+    assert_eq!(memo.raw(), "new memo");
 }
 
 #[cfg(unix)]
