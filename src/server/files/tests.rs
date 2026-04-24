@@ -56,6 +56,13 @@ fn test_sidecar_name_超長名は255バイト以内に短縮される() {
 }
 
 #[test]
+fn test_sidecar_name_ファイル名なしfallbackは従来名を保つ() {
+    let sidecar = SidecarMemoName::fallback();
+    assert_plain_sidecar_filename(sidecar.as_str());
+    assert_eq!(sidecar.as_str(), ".memo.md");
+}
+
+#[test]
 fn test_sidecar_name_同一prefixの超長名はhashで衝突しない() {
     let common_prefix = "a".repeat(260);
     let first_name = format!("{common_prefix}-first.md");

@@ -159,7 +159,7 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
     let file_name = target_path
         .file_name()
         .map(SidecarMemoName::from_file_name)
-        .unwrap_or_else(|| SidecarMemoName::from_file_name(std::ffi::OsStr::new("memo.md")));
+        .unwrap_or_else(SidecarMemoName::fallback);
     parent.join(file_name.as_str())
 }
 

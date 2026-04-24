@@ -12,6 +12,10 @@ const SIDECAR_HASH_LEN: usize = 16;
 pub(super) struct SidecarMemoName(String);
 
 impl SidecarMemoName {
+    pub(super) fn fallback() -> Self {
+        Self(MEMO_SUFFIX.to_string())
+    }
+
     pub(super) fn from_file_name(file_name: &OsStr) -> Self {
         if let Some(name) = file_name.to_str() {
             return Self::from_utf8_name(name);
@@ -28,7 +32,7 @@ impl SidecarMemoName {
 
         #[cfg(not(unix))]
         {
-            Self(MEMO_SUFFIX.to_string())
+            Self::fallback()
         }
     }
 
