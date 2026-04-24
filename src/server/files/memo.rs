@@ -136,6 +136,7 @@ enum SidecarFallback {
     None,
     Legacy,
     Compat,
+    CompatThenLegacy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,15 +270,19 @@ async fn choose_save_target(
         });
     }
     let compat_sidecar_exists = compat_sidecar_exists(state, target, request, memo_paths).await?;
+    let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy).await?;
     if compat_sidecar_exists {
         return Ok(SaveTarget::Sidecar {
-            fallback: SidecarFallback::Compat,
+            fallback: if legacy_state == LegacyMemoState::SafeExists {
+                SidecarFallback::CompatThenLegacy
+            } else {
+                SidecarFallback::Compat
+            },
             delete_legacy_after_save: false,
             delete_compat_after_save: true,
         });
     }
 
-    let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy).await?;
     if sidecar_too_long {
         return Ok(SaveTarget::Legacy);
     }
@@ -429,10 +434,48 @@ async fn save_memo_to_fallback(
             };
             save_memo_to_existing_compat(state, target, request, compat_sidecar, raw).await
         }
+        SidecarFallback::CompatThenLegacy => {
+            let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
+                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+            };
+            save_memo_to_existing_compat_or_legacy(
+                state,
+                target,
+                request,
+                compat_sidecar,
+                &memo_paths.legacy,
+                raw,
+            )
+            .await
+        }
         SidecarFallback::None => Err(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "メモファイルの操作に失敗しました",
         )),
+    }
+}
+
+async fn save_memo_to_existing_compat_or_legacy(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    compat_sidecar: &Path,
+    legacy_path: &Path,
+    raw: String,
+) -> Result<MemoResponse, ApiError> {
+    ensure_safe_memo_path(compat_sidecar, state, target, request)?;
+    match tokio::fs::write(compat_sidecar, raw.as_bytes()).await {
+        Ok(()) => Ok(MemoResponse::from_raw(
+            raw,
+            target.relative_path().map(ToOwned::to_owned),
+        )),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || is_name_too_long_error(&error) =>
+        {
+            save_memo_to_legacy(state, target, request, legacy_path, raw).await
+        }
+        Err(error) => Err(io_api_error(target, request, "保存", error)),
     }
 }
 

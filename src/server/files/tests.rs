@@ -1136,6 +1136,53 @@ async fn test_save_route_memo_旧形式backslash_sidecarは新形式作成不可
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_既存compatが書込不可なら既存legacyへfallbackする() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let original_dir_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    let original_compat_mode = fs::metadata(&old_sidecar).unwrap().permissions().mode();
+    fs::set_permissions(&old_sidecar, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "legacy fallback memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_dir_mode)).unwrap();
+    fs::set_permissions(
+        &old_sidecar,
+        fs::Permissions::from_mode(original_compat_mode),
+    )
+    .unwrap();
+
+    let memo = result.expect("unwritable compat should fall back to existing legacy");
+    assert_eq!(memo.raw(), "legacy fallback memo");
+    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "compat memo");
+    assert_eq!(
+        fs::read_to_string(&legacy_path).unwrap(),
+        "legacy fallback memo"
+    );
+    assert!(!new_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形式を優先する() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("a\\b.md");
