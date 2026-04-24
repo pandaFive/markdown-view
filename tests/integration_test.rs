@@ -238,7 +238,7 @@ async fn test_apiメモ_jsonボディ制限超過は413で拒否する() {
 async fn test_apiメモ_10mb超過は413で拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
-    let raw = "a".repeat((10 * 1024 * 1024) + 1);
+    let raw = "a".repeat((markdown_view::server::MAX_FILE_SIZE as usize) + 1);
 
     let save = client
         .put(format!("http://{}/api/memo", addr))
