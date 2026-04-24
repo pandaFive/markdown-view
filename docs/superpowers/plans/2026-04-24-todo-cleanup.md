@@ -68,11 +68,7 @@ assert!(!resp.headers().contains_key("x-markdown-view-security-warning"));
 
 - [ ] **Step 4: Run targeted CSP verification**
 
-Run: `cargo test --all-targets --all-features セキュリティヘッダー`
-
-Expected: PASS.
-
-If the filter finds no matching tests, run: `cargo test --all-targets --all-features test_httpレスポンスにセキュリティヘッダーを付与する`
+Run: `cargo test --all-targets --all-features test_セキュリティヘッダが設定されている`
 
 Expected: PASS.
 
