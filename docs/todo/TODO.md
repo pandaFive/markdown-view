@@ -10,7 +10,7 @@
   - 追加観点: `[::1]:3000`（port 付き bracketed）、`::1`（非 bracketed）、`[fe80::1]`（非 loopback）、`[::1]:abc`（非数値 port）の 4 パターン
   - 理由: DNS Rebinding 対策の核。正規化エッジケースで想定外に通過するとセキュリティ境界が崩れる
 
-- [ ] メモ sidecar fallback 経路の超長ファイル名＋特殊文字テストを追加
+- [x] メモ sidecar fallback 経路の超長ファイル名＋特殊文字テストを追加
   - ファイル: `src/server/files/memo.rs`, `src/server/files/tests.rs`
   - 現状: `ensure_safe_memo_path` / `truncate_to_bytes` の基本テストと非utf8/拡張子大小テストはあるが、255 バイト超のファイル名と `../` や `\..\` の組み合わせが未検証
   - 追加観点: (a) 超長名＋特殊文字で sidecar 名が隔離され破損しないこと、(b) 異なる長い名前が同一 sidecar 名に衝突しないこと
