@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
@@ -37,12 +37,7 @@ fn sidebar_directory_name(state: &AppState) -> &str {
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
-    let (csp_header, csp_fallback) = build_csp_header(state.syntax_css());
-    let security_warning = if csp_fallback {
-        HeaderValue::from_static("csp-fallback")
-    } else {
-        HeaderValue::from_static("none")
-    };
+    let csp_header = build_csp_header(state.syntax_css());
     Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
@@ -71,10 +66,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CONTENT_SECURITY_POLICY,
             csp_header,
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("x-markdown-view-security-warning"),
-            security_warning,
         ))
         .with_state(state)
 }

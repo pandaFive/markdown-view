@@ -929,11 +929,11 @@ async fn test_セキュリティヘッダが設定されている() {
     assert!(!csp.contains("script-src 'unsafe-inline'"));
     assert!(!csp.contains("style-src 'unsafe-inline'"));
     assert!(!csp.contains("data:"));
-    assert_eq!(
+    assert!(
         resp.headers()
             .get("x-markdown-view-security-warning")
-            .unwrap(),
-        "none"
+            .is_none(),
+        "x-markdown-view-security-warning ヘッダーは廃止済みのため応答に含まれてはならない"
     );
 }
 
