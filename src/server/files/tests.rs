@@ -63,6 +63,13 @@ fn test_sidecar_name_ファイル名なしfallbackは従来名を保つ() {
 }
 
 #[test]
+fn test_sidecar_name_空ファイル名はfallbackを返す() {
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(""));
+    assert_plain_sidecar_filename(sidecar.as_str());
+    assert_eq!(sidecar.as_str(), ".memo.md");
+}
+
+#[test]
 fn test_sidecar_name_同一prefixの超長名はhashで衝突しない() {
     let common_prefix = "a".repeat(260);
     let first_name = format!("{common_prefix}-first.md");
@@ -100,6 +107,17 @@ fn test_sidecar_name_正規化された短い名前はhashで衝突しない() {
     assert!(normalized.as_str().starts_with(".a_b.md."));
     assert!(normalized.as_str().ends_with(".memo.md"));
     assert_ne!(plain.as_str(), normalized.as_str());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sidecar_name_旧形式compat名は正規化前の名前を返す() {
+    let compat = SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a\\b.md"))
+        .expect("backslash name should have compat sidecar");
+    assert_plain_sidecar_filename(compat.as_str());
+    assert_eq!(compat.as_str(), ".a\\b.md.memo.md");
+
+    assert!(SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a_b.md")).is_none());
 }
 
 #[test]
@@ -1015,6 +1033,74 @@ async fn test_save_route_memo_正規化される短いファイル名でもsidec
     assert_eq!(memo_entries.len(), 2);
     assert!(memo_entries.contains(&".a_b.md.memo.md".to_string()));
     assert_ne!(memo_entries[0], memo_entries[1]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_旧形式backslash_sidecarを読み込む() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(dir.path().join(".a\\b.md.memo.md"), "compat memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("compat sidecar memo should load");
+
+    assert_eq!(memo.raw(), "compat memo");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_旧形式backslash_sidecarを新形式へ移行する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("compat sidecar should migrate on save");
+
+    assert_eq!(memo.raw(), "new memo");
+    assert_eq!(fs::read_to_string(&new_sidecar).unwrap(), "new memo");
+    assert!(!old_sidecar.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形式を優先する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&old_sidecar, "compat memo").unwrap();
+    fs::write(&new_sidecar, "new memo").unwrap();
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("new sidecar memo should win");
+
+    assert_eq!(memo.raw(), "new memo");
 }
 
 #[cfg(unix)]

@@ -18,6 +18,9 @@ impl SidecarMemoName {
 
     pub(super) fn from_file_name(file_name: &OsStr) -> Self {
         if let Some(name) = file_name.to_str() {
+            if name.is_empty() {
+                return Self::fallback();
+            }
             return Self::from_utf8_name(name);
         }
 
@@ -34,6 +37,20 @@ impl SidecarMemoName {
         {
             Self::fallback()
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn compat_from_file_name(file_name: &OsStr) -> Option<Self> {
+        let name = file_name.to_str().filter(|name| !name.is_empty())?;
+        if !name.contains('\\') || name.contains('/') {
+            return None;
+        }
+        Some(Self(build_legacy_utf8_name(name)))
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn compat_from_file_name(_file_name: &OsStr) -> Option<Self> {
+        None
     }
 
     pub(super) fn as_str(&self) -> &str {
@@ -53,6 +70,19 @@ impl SidecarMemoName {
         let prefix = truncate_to_bytes(&normalized, prefix_budget);
         Self(format!(".{prefix}.{hash}{MEMO_SUFFIX}"))
     }
+}
+
+fn build_legacy_utf8_name(file_name: &str) -> String {
+    let full = format!(".{file_name}{MEMO_SUFFIX}");
+    if full.len() <= MAX_FILENAME_BYTES {
+        return full;
+    }
+
+    let hash = short_hash(file_name.as_bytes());
+    let reserved = 1 + 1 + SIDECAR_HASH_LEN + MEMO_SUFFIX.len();
+    let prefix_budget = MAX_FILENAME_BYTES.saturating_sub(reserved);
+    let prefix = truncate_to_bytes(file_name, prefix_budget);
+    format!(".{prefix}.{hash}{MEMO_SUFFIX}")
 }
 
 fn normalize_visible_separators(file_name: &str) -> String {

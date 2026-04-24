@@ -54,6 +54,9 @@ pub(in crate::server) async fn save_route_memo(
             ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
             delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
         }
+        if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
+            delete_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
+        }
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
@@ -94,6 +97,15 @@ pub(in crate::server) async fn save_route_memo(
     {
         cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
     }
+    if let SaveTarget::Sidecar {
+        delete_compat_after_save: true,
+        ..
+    } = save_target
+    {
+        if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
+            cleanup_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
+        }
+    }
 
     Ok(MemoResponse::from_raw(
         raw,
@@ -104,6 +116,7 @@ pub(in crate::server) async fn save_route_memo(
 #[derive(Debug, Clone)]
 struct MemoPaths {
     sidecar: PathBuf,
+    compat_sidecar: Option<PathBuf>,
     legacy: PathBuf,
 }
 
@@ -112,6 +125,7 @@ enum SaveTarget {
     Sidecar {
         allow_legacy_fallback: bool,
         delete_legacy_after_save: bool,
+        delete_compat_after_save: bool,
     },
     Legacy,
 }
@@ -132,6 +146,7 @@ fn legacy_memo_root(base_dir: &Path) -> PathBuf {
 fn memo_paths_for_target(state: &AppState, target: &ResolvedTarget) -> MemoPaths {
     MemoPaths {
         sidecar: sidecar_memo_path_for_target(target),
+        compat_sidecar: compat_sidecar_memo_path_for_target(target),
         legacy: legacy_memo_path_for_target(state, target),
     }
 }
@@ -163,6 +178,18 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
     parent.join(file_name.as_str())
 }
 
+fn compat_sidecar_memo_path_for_target(target: &ResolvedTarget) -> Option<PathBuf> {
+    let target_path = target.file_path();
+    let parent = target_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let file_name = target_path
+        .file_name()
+        .and_then(SidecarMemoName::compat_from_file_name)?;
+    Some(parent.join(file_name.as_str()))
+}
+
 async fn resolve_active_memo_path(
     state: &AppState,
     target: &ResolvedTarget,
@@ -179,6 +206,12 @@ async fn resolve_active_memo_path(
             .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
         return Ok(memo_paths.sidecar.clone());
+    }
+    if compat_sidecar_exists(state, target, request, memo_paths).await? {
+        return Ok(memo_paths
+            .compat_sidecar
+            .clone()
+            .expect("compat path exists"));
     }
 
     match inspect_legacy_memo(state, target, request, &memo_paths.legacy).await? {
@@ -211,6 +244,15 @@ async fn choose_save_target(
         return Ok(SaveTarget::Sidecar {
             allow_legacy_fallback: false,
             delete_legacy_after_save: false,
+            delete_compat_after_save: false,
+        });
+    }
+    let compat_sidecar_exists = compat_sidecar_exists(state, target, request, memo_paths).await?;
+    if compat_sidecar_exists {
+        return Ok(SaveTarget::Sidecar {
+            allow_legacy_fallback: false,
+            delete_legacy_after_save: false,
+            delete_compat_after_save: true,
         });
     }
 
@@ -226,13 +268,38 @@ async fn choose_save_target(
         return Ok(SaveTarget::Sidecar {
             allow_legacy_fallback: state.mode().is_directory(),
             delete_legacy_after_save: false,
+            delete_compat_after_save: false,
         });
     }
 
     Ok(SaveTarget::Sidecar {
         allow_legacy_fallback: true,
         delete_legacy_after_save: true,
+        delete_compat_after_save: false,
     })
+}
+
+async fn compat_sidecar_exists(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+) -> Result<bool, ApiError> {
+    let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
+        return Ok(false);
+    };
+    if let Err(error) = ensure_safe_memo_path(compat_sidecar, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeな互換sidecarメモは未使用扱いにします ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(false);
+    }
+    tokio::fs::try_exists(compat_sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))
 }
 
 async fn legacy_memo_exists(
@@ -342,6 +409,42 @@ async fn cleanup_legacy_memo_if_safe(
         );
     }
     Ok(())
+}
+
+async fn cleanup_compat_sidecar_if_safe(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    compat_sidecar: &Path,
+) -> Result<(), ApiError> {
+    if let Err(error) = delete_compat_sidecar_if_safe(state, target, request, compat_sidecar).await
+    {
+        tracing::warn!(
+            "[markdown-view] {}互換sidecarメモcleanup失敗を無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+    }
+    Ok(())
+}
+
+async fn delete_compat_sidecar_if_safe(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    compat_sidecar: &Path,
+) -> Result<(), ApiError> {
+    if let Err(error) = ensure_safe_memo_path(compat_sidecar, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeな互換sidecarメモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+    delete_memo_file_if_exists(compat_sidecar, target, request).await
 }
 
 async fn delete_legacy_memo_if_safe_strict(
