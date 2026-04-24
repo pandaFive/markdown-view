@@ -2,9 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-04-24): IMPLEMENTED on `develop` via PR #86 (`7d872e3`).**
+> This plan is retained as historical implementation context. Do **not** execute the task list below against current `develop`: doing so would recreate the initial implementation and lose the review fixes for `..`, `path == base`, and symlink escape handling.
+
 **Goal:** 監査ログ用のパスサニタイザ `sanitize_path_for_logging` を新設し、`tracing::warn!` で絶対パスを `path.display()` で吐いている異常系経路を base 相対化する。base 外パスは file_name のみ残して `<outside-base>/{file_name}` に丸める。
 
 **Architecture:** 新規モジュール `src/server/log_path.rs` に `pub(crate) fn sanitize_path_for_logging(path: &Path, base: &Path) -> Cow<str>` を実装。`AppMode::base_dir()`（単一ファイルモード時はファイルの parent ディレクトリ）を base として渡す。`base_dir.display()` 自体はサーバー所有者が指定した値であり保守性優先で **保持**する。対象は `src/server/files/{resolve, catalog, memo, content}.rs`、`src/server/routes.rs`、`src/watcher/strategy.rs` の異常系 `tracing::warn!`。
+
+**Current develop delta:** `src/server/log_path.rs` は既に存在する。現行実装は存在するパスでは `canonicalize()` 後の実パスで base 配下判定を行い、canonicalize できないパスでは字句正規化にフォールバックする。`path == base` は `"."` を返す。
+
+**Remaining work:** なし。追加対応が必要になった場合は、この計画を再実行するのではなく、`develop` の `src/server/log_path.rs` を起点に新しい小さな修正計画を作る。
 
 **Tech Stack:** Rust 1.x, std::path::{Path, PathBuf}, std::borrow::Cow, tracing
 
@@ -13,6 +20,8 @@
 ---
 
 ## ブランチ戦略
+
+> Historical only. `feat/path-log-sanitizer` は PR #86 で squash merge 済み。
 
 このプランの実装は新規 feature ブランチ `feat/path-log-sanitizer` で行う（CLAUDE.md ブランチルール準拠）。develop へは squash merge。
 

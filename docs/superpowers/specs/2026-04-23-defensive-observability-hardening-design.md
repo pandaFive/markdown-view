@@ -5,7 +5,7 @@
 - 「CSP フォールバック時の方針整理（fail-fast vs 現状運用）」
 - 「エラー経路ログのパス情報を base 相対化」
 
-**対象ファイル（要修正）:**
+**対象ファイル（当初計画）:**
 - `src/server/guards.rs`
 - `src/server/routes.rs`
 - `src/server/files/resolve.rs`
@@ -14,6 +14,12 @@
 - `src/server/files/content.rs`
 - `src/watcher/strategy.rs`
 - `src/server/log_path.rs`（新規）
+
+## 現在の develop 状態（2026-04-24）
+
+- **Part 1: CSP fail-fast** は未実装。`develop` では `build_csp_header` がまだ `(HeaderValue, bool)` を返し、`HeaderValue::from_str` 失敗時にフォールバック CSP と `x-markdown-view-security-warning` ヘッダーを使う。
+- **Part 2: パスログサニタイザ** は PR #86（merge commit `7d872e3`）で実装済み。`src/server/log_path.rs` は既に存在し、異常系 warn ログの path 側は base 相対化済み。
+- 本ドキュメントの Part 2 は初期設計として残すが、実装計画として再実行しない。現行実装はレビュー対応により、初期案から `..` 字句正規化、`path == base` の `"."` 表示、symlink escape の canonical 判定を追加している。
 
 ## 目的
 
@@ -114,10 +120,19 @@ pub(super) fn build_csp_header(syntax_css: &str) -> HeaderValue {
 #### マスキング戦略（ブレインストーミング Q3 結論）
 
 **A) base 配下:** 相対パスで出力（`subdir/file.md`）
+**A-2) base 自身:** `"."` で出力（空文字はログ上の発生源が不明瞭になるため）
 **B) base 外:** `<outside-base>/{file_name}` で末尾コンポーネントだけ残す
 **C) file_name 取得不可（ルート等）:** `<outside-base>` で完全マスク
 
 file_name を残すのはトラブルシュート上の最低限の手がかりを担保するため。完全マスクは保守時の生産性低下が大きすぎる（Q3 A 推薦理由）。
+
+#### 実装後レビューで追加された判定要件
+
+PR #86 のレビュー対応で、以下を実装要件として追加した。
+
+- `..` を含む未正規化パスは、存在しないパスでも字句正規化して inside/outside を判定する。
+- 存在するパスでは `canonicalize()` 後の実パスで base 配下判定を優先し、symlink 経由で base 外へ出るパスを inside 扱いしない。
+- `canonicalize()` できない削除済み・未生成パスでは字句正規化へフォールバックする。
 
 #### `base_dir` 自体の表示（Q3-i 結論）
 
@@ -131,7 +146,9 @@ file_name を残すのはトラブルシュート上の最低限の手がかり�
 
 例: 単一ファイル `~/notes/today.md` を起動した場合、`base_dir = ~/notes`。同ディレクトリ内の sidecar memo (`~/notes/.memo-today.md` 等) は `".memo-today.md"` として relative 化される。
 
-### 新規モジュール: `src/server/log_path.rs`
+### 実装済みモジュール: `src/server/log_path.rs`
+
+以下は当初設計時の最小実装スケッチ。現在の `develop` 実装は PR #86 のレビュー対応により、`..` 字句正規化、`path == base` の `"."` 表示、symlink escape の canonical 判定を追加済みである。新規実装時の参考として残すが、現行コードへそのまま適用してはならない。
 
 ```rust
 //! 監査ログ用のパスサニタイザ。

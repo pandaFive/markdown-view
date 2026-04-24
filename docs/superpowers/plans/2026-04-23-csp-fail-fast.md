@@ -2,6 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-04-24): PENDING on current `develop` (`7d872e3`).**
+> `develop` already includes PR #86 path-log-sanitizer work, but CSP fail-fast is still not merged. `build_csp_header` still returns `(HeaderValue, bool)`, `create_router` still installs `x-markdown-view-security-warning`, and the integration test still expects that header to be present with `"none"`.
+
 **Goal:** `build_csp_header` のフォールバック CSP（sha256 制約を silent に喪失する経路）を削除し、`HeaderValue::from_str` 失敗時は startup panic で明示的に止める。`x-markdown-view-security-warning` ヘッダーも不要になるため削除する。
 
 **Architecture:** `build_csp_header(syntax_css: &str) -> HeaderValue` が tuple を返さなくなる。`create_router` から `csp_fallback` 変数と `security_warning` ヘッダー設定を削除。フォールバック分岐は構造上到達不能（`csp_hash_sources` は base64 sha256 のみを返すため）であり、到達した場合は契約破り（バグ）として startup を止める。
@@ -14,7 +17,9 @@
 
 ## ブランチ戦略
 
-このプランの実装は新規 feature ブランチ `feat/csp-fail-fast` で行う（CLAUDE.md ブランチルール準拠）。develop へは squash merge。
+このプランの実装は最新 `develop` から feature ブランチ `feat/csp-fail-fast` で行う（CLAUDE.md ブランチルール準拠）。develop へは squash merge。
+
+既に同名ブランチが存在する場合は、実装前に最新 `develop`（PR #86 反映済み）との差分を確認し、必要なら rebase/作り直しで path-log-sanitizer 実装を巻き戻さない状態に揃える。
 
 ```bash
 git checkout develop
