@@ -2,8 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status (2026-04-24): PENDING on current `develop` (`7d872e3`).**
-> `develop` already includes PR #86 path-log-sanitizer work, but CSP fail-fast is still not merged. `build_csp_header` still returns `(HeaderValue, bool)`, `create_router` still installs `x-markdown-view-security-warning`, and the integration test still expects that header to be present with `"none"`.
+> **Status (2026-04-24): IMPLEMENTED on `feat/csp-fail-fast`.**
+> Baseline `develop` at `7d872e3` already included PR #86 path-log-sanitizer work. This branch removes the CSP fallback, removes `x-markdown-view-security-warning`, and updates the integration test to assert that the warning header is absent.
 
 **Goal:** `build_csp_header` のフォールバック CSP（sha256 制約を silent に喪失する経路）を削除し、`HeaderValue::from_str` 失敗時は startup panic で明示的に止める。`x-markdown-view-security-warning` ヘッダーも不要になるため削除する。
 
@@ -223,7 +223,8 @@ git commit -m "feat: CSP フォールバック削除と x-markdown-view-security
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` が pass
 - [ ] `cargo fmt --all -- --check` が pass
 - [ ] `./verify.sh` が pass
-- [ ] `grep -rn 'csp_fallback\|security_warning\|x-markdown-view-security-warning' src/ tests/ --include='*.rs'` が空（全削除確認）
+- [ ] `grep -rn 'csp_fallback\|security_warning' src/ tests/ --include='*.rs'` が空（runtime fallback 経路の削除確認）
+- [ ] `grep -rn 'x-markdown-view-security-warning' src/ --include='*.rs'` が空（応答ヘッダー設定の削除確認。`tests/` の不在アサーションは許容）
 - [ ] 手動 curl で CSP ヘッダーに `script-src 'sha256-` を含み、`x-markdown-view-security-warning` ヘッダーが含まれない
 
 ---

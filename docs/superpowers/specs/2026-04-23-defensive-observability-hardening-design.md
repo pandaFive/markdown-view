@@ -15,9 +15,9 @@
 - `src/watcher/strategy.rs`
 - `src/server/log_path.rs`（新規）
 
-## 現在の develop 状態（2026-04-24）
+## 現在の実装状態（2026-04-24）
 
-- **Part 1: CSP fail-fast** は未実装。`develop` では `build_csp_header` がまだ `(HeaderValue, bool)` を返し、`HeaderValue::from_str` 失敗時にフォールバック CSP と `x-markdown-view-security-warning` ヘッダーを使う。
+- **Part 1: CSP fail-fast** は `feat/csp-fail-fast` で実装済み。baseline `develop` (`7d872e3`) では未実装だったが、このブランチでは `build_csp_header` が `HeaderValue` を直接返し、フォールバック CSP と `x-markdown-view-security-warning` ヘッダーを削除済み。
 - **Part 2: パスログサニタイザ** は PR #86（merge commit `7d872e3`）で実装済み。`src/server/log_path.rs` は既に存在し、異常系 warn ログの path 側は base 相対化済み。
 - 本ドキュメントの Part 2 は初期設計として残すが、実装計画として再実行しない。現行実装はレビュー対応により、初期案から `..` 字句正規化、`path == base` の `"."` 表示、symlink escape の canonical 判定を追加している。
 

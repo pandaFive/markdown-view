@@ -249,7 +249,7 @@ L162（`resolve_single_file_target`）:
     let validated_path = revalidate_single_file_target(file_path)?;
 ```
 
-→ 
+→
 
 ```rust
     let validated_path = revalidate_single_file_target(file_path, state.mode().base_dir())?;
