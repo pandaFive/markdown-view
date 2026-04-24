@@ -216,6 +216,25 @@ async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら�
 }
 
 #[tokio::test]
+async fn test_apiメモ_jsonボディ制限超過は413で拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+    let escaped_raw = "\\\\".repeat(markdown_view::server::MAX_FILE_SIZE as usize);
+    let padding = " ".repeat(4096 + 128);
+    let body = format!("{{\"raw\":\"{}\"}}{}", escaped_raw, padding);
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn test_apiメモ_10mb超過は413で拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
