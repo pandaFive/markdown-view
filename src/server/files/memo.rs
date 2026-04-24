@@ -1,11 +1,9 @@
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use sha2::{Digest, Sha256};
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
+use super::memo_sidecar::{SidecarMemoName, MAX_FILENAME_BYTES};
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
 use crate::server::guards::json_error;
@@ -16,9 +14,6 @@ use crate::template::MemoResponse;
 
 const LEGACY_MEMO_DIR_NAME: &str = ".markdown-view";
 const LEGACY_MEMO_SUBDIR_NAME: &str = "memos";
-const MEMO_SUFFIX: &str = ".memo.md";
-const MAX_FILENAME_BYTES: usize = 255;
-const SIDECAR_HASH_LEN: usize = 16;
 
 /// メモを読み込み、プレビューHTML付き応答へ変換する。
 pub(in crate::server) async fn load_route_memo(
@@ -161,66 +156,11 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let file_name = match target_path.file_name() {
-        Some(name) => build_sidecar_file_name(name),
-        None => format!(".{}", MEMO_SUFFIX.trim_start_matches('.')),
-    };
-    parent.join(file_name)
-}
-
-fn build_sidecar_file_name(file_name: &std::ffi::OsStr) -> String {
-    if let Some(name) = file_name.to_str().filter(|name| !name.is_empty()) {
-        return build_sidecar_file_name_from_utf8(name);
-    }
-
-    #[cfg(unix)]
-    {
-        let bytes = file_name.as_bytes();
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        let digest = hasher.finalize();
-        let hash = format!("{:x}", digest);
-        let short_hash = &hash[..SIDECAR_HASH_LEN];
-        format!("._bin.{short_hash}{MEMO_SUFFIX}")
-    }
-
-    #[cfg(not(unix))]
-    {
-        format!(".{}", MEMO_SUFFIX.trim_start_matches('.'))
-    }
-}
-
-fn build_sidecar_file_name_from_utf8(file_name: &str) -> String {
-    let full = format!(".{file_name}{MEMO_SUFFIX}");
-    if full.len() <= MAX_FILENAME_BYTES {
-        return full;
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(file_name.as_bytes());
-    let digest = hasher.finalize();
-    let hash = format!("{:x}", digest);
-    let short_hash = &hash[..SIDECAR_HASH_LEN];
-    let reserved = 1 + 1 + SIDECAR_HASH_LEN + MEMO_SUFFIX.len();
-    let prefix_budget = MAX_FILENAME_BYTES.saturating_sub(reserved);
-    let prefix = truncate_to_bytes(file_name, prefix_budget);
-    format!(".{prefix}.{short_hash}{MEMO_SUFFIX}")
-}
-
-fn truncate_to_bytes(input: &str, max_bytes: usize) -> &str {
-    if input.len() <= max_bytes {
-        return input;
-    }
-
-    let mut end = 0;
-    for (idx, ch) in input.char_indices() {
-        let next = idx + ch.len_utf8();
-        if next > max_bytes {
-            break;
-        }
-        end = next;
-    }
-    &input[..end]
+    let file_name = target_path
+        .file_name()
+        .map(SidecarMemoName::from_file_name)
+        .unwrap_or_else(|| SidecarMemoName::from_file_name(std::ffi::OsStr::new("memo.md")));
+    parent.join(file_name.as_str())
 }
 
 async fn resolve_active_memo_path(

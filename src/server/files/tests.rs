@@ -2,7 +2,7 @@
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
@@ -12,9 +12,19 @@ use tokio::sync::broadcast;
 
 use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
+use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
+
+fn assert_plain_sidecar_filename(name: &str) {
+    let path = Path::new(name);
+    assert!(path.parent().is_none() || path.parent() == Some(Path::new("")));
+    assert_eq!(
+        path.file_name().and_then(|file_name| file_name.to_str()),
+        Some(name)
+    );
+}
 
 #[test]
 fn test_close_code_ioエラーは1011を返す() {
@@ -32,6 +42,70 @@ fn test_close_code_too_largeは1009を返す() {
 fn test_close_code_not_utf8は1003を返す() {
     let err = ReadMarkdownError::NotUtf8;
     assert_eq!(err.close_code(), 1003);
+}
+
+#[test]
+fn test_sidecar_name_超長名は255バイト以内に短縮される() {
+    let file_name = format!("{}.md", "a".repeat(251));
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.starts_with("."));
+    assert!(name.ends_with(".memo.md"));
+    assert!(name.len() <= 255, "sidecar名が長すぎる: {}", name.len());
+}
+
+#[test]
+fn test_sidecar_name_同一prefixの超長名はhashで衝突しない() {
+    let common_prefix = "a".repeat(260);
+    let first_name = format!("{common_prefix}-first.md");
+    let second_name = format!("{common_prefix}-second.md");
+    let first = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&first_name));
+    let second = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&second_name));
+    assert_plain_sidecar_filename(first.as_str());
+    assert_plain_sidecar_filename(second.as_str());
+    assert_ne!(first.as_str(), second.as_str());
+    assert!(first.as_str().len() <= 255);
+    assert!(second.as_str().len() <= 255);
+}
+
+#[test]
+fn test_sidecar_name_特殊文字はパス区切りとして扱われない() {
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new("../secret\\..\\memo.md"));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.ends_with(".memo.md"));
+    assert!(!name.contains('/'), "slashが残ってはいけない: {name}");
+    assert!(!name.contains('\\'), "backslashが残ってはいけない: {name}");
+    assert!(
+        name.contains(".."),
+        "通常文字としてのdotは保持してよい: {name}"
+    );
+}
+
+#[test]
+fn test_sidecar_name_utf8境界で切り詰める() {
+    let file_name = format!("{}終端.md", "あ".repeat(120));
+    let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let name = sidecar.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(name.ends_with(".memo.md"));
+    assert!(name.len() <= 255);
+    assert!(name.is_char_boundary(name.len()));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sidecar_name_非utf8名はhashで衝突しない() {
+    let first = SidecarMemoName::from_file_name(std::ffi::OsStr::from_bytes(b"guide-\xff.md"));
+    let second = SidecarMemoName::from_file_name(std::ffi::OsStr::from_bytes(b"guide-\xfe.md"));
+    assert_plain_sidecar_filename(first.as_str());
+    assert_plain_sidecar_filename(second.as_str());
+    assert!(first.as_str().starts_with("._bin."));
+    assert!(second.as_str().starts_with("._bin."));
+    assert!(first.as_str().ends_with(".memo.md"));
+    assert!(second.as_str().ends_with(".memo.md"));
+    assert_ne!(first.as_str(), second.as_str());
 }
 
 #[test]
