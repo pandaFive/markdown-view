@@ -36,13 +36,13 @@
 
 ## Medium Priority
 
-- [ ] CSP フォールバック時の方針整理（fail-fast vs 現状運用）
+- [x] CSP フォールバック時の方針整理（fail-fast vs 現状運用）
   - ファイル: `src/server/guards.rs` L30-36
   - 現状: `HeaderValue::from_str(&csp)` 失敗時のフォールバック CSP は `default-src 'self'; object-src 'none'; frame-ancestors 'none'`。inline は暗黙拒否されるが、sha256 ハッシュベースの厳格制約は失われる
   - 対応候補: (a) CSP 生成失敗をサーバー起動中止扱いにする、(b) フォールバック CSP に `script-src 'none'; style-src 'none'` を明示する、(c) 現状維持で運用ログ監視に任せる
   - 理由: フォールバック発生時の動作セマンティクスが不明瞭。個人使用前提だが、意図ある設計として明文化したい
 
-- [ ] エラー経路ログのパス情報を base 相対化
+- [x] エラー経路ログのパス情報を base 相対化
   - ファイル: `src/server/files/resolve.rs` ほか `tracing::warn!` でパスを出す箇所
   - 現状: パス正規化失敗時にユーザー指定パス・サーバー実ディレクトリ構造をそのまま warn ログに出力
   - 対応: base_dir 基準での相対化ヘルパー `sanitize_path_for_logging(path, base)` を抽出し、絶対パスや base 外パスを丸めて出力
