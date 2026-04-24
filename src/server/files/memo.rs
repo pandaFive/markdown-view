@@ -9,6 +9,7 @@ use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
 use crate::server::guards::json_error;
+use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
 use crate::server::state::AppState;
 use crate::template::MemoResponse;
@@ -444,8 +445,8 @@ fn ensure_safe_memo_path(
             "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
             request.read_error_log_label(),
             target.file_label(),
-            memo_path.display(),
-            unsafe_component.display()
+            sanitize_path_for_logging(memo_path, base_dir),
+            sanitize_path_for_logging(&unsafe_component, base_dir)
         );
         return Err(json_error(
             StatusCode::FORBIDDEN,

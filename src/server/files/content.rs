@@ -10,6 +10,7 @@ use super::resolve::{
     ResolvedTarget, RouteTargetRequest,
 };
 use crate::renderer::render_markdown;
+use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::{ApiError, BroadcastMessage, LaggedRecoveryMessage};
 use crate::server::state::AppState;
 use crate::template::{error_message_json, UpdateMessage};
@@ -173,7 +174,9 @@ pub(in crate::server) async fn build_change_broadcast_message(
                 .mode()
                 .single_file()
                 .map(file_display_name)
-                .unwrap_or_else(|| changed_file.display().to_string());
+                .unwrap_or_else(|| {
+                    sanitize_path_for_logging(changed_file, state.mode().base_dir()).into_owned()
+                });
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
                 file_label,

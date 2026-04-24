@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 
 use super::catalog::list_markdown_files;
 use crate::server::guards::json_error;
+use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
 use crate::server::state::AppState;
 use crate::template::UpdateMessage;
@@ -47,7 +48,7 @@ impl ResolvedTarget {
         self.relative_path.as_deref()
     }
 
-    pub(super) fn file_label(&self) -> &str {
+    pub(in crate::server) fn file_label(&self) -> &str {
         &self.file_label
     }
 
@@ -159,7 +160,7 @@ pub(super) fn resolve_single_file_target(
         return Ok(None);
     };
 
-    let validated_path = revalidate_single_file_target(file_path)?;
+    let validated_path = revalidate_single_file_target(file_path, state.mode().base_dir())?;
     Ok(Some(build_resolved_target(
         state,
         validated_path,
@@ -173,7 +174,7 @@ pub(super) fn resolve_change_target(
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     if let Some(expected) = state.mode().single_file() {
-        revalidate_single_file_target(expected)?;
+        revalidate_single_file_target(expected, state.mode().base_dir())?;
         Ok(Some(build_resolved_target(
             state,
             changed_file.to_path_buf(),
@@ -190,10 +191,11 @@ fn resolve_request_target(
     request: RouteTargetRequest<'_>,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
     if let Some(path) = state.mode().single_file() {
-        let canonical = revalidate_single_file_target(path).map_err(|error| {
-            tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
-            error.status_code()
-        })?;
+        let canonical =
+            revalidate_single_file_target(path, state.mode().base_dir()).map_err(|error| {
+                tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
+                error.status_code()
+            })?;
         return Ok((canonical, None));
     }
 
@@ -255,7 +257,7 @@ fn build_resolved_target(
         tracing::warn!(
             "[markdown-view] {}: {} はベース {} の配下ではありません",
             warn_label,
-            file_path.display(),
+            sanitize_path_for_logging(&file_path, state.mode().base_dir()),
             state.mode().base_dir().display()
         );
         // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
@@ -299,7 +301,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     let canonical = candidate.canonicalize().map_err(|error| {
         tracing::warn!(
             "[markdown-view] ファイルパス正規化失敗: {} ({})",
-            candidate.display(),
+            sanitize_path_for_logging(&candidate, base_dir),
             error
         );
         ResolveFileError::NotFound
@@ -342,11 +344,12 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
 /// 攻撃を検出する。正規化後のパスが起動時と異なる場合はトラバーサルとして拒否する。
 pub(super) fn revalidate_single_file_target(
     expected_path: &Path,
+    base_dir: &Path,
 ) -> Result<PathBuf, ResolveFileError> {
     let canonical = expected_path.canonicalize().map_err(|error| {
         tracing::warn!(
             "[markdown-view] 単一ファイルパス正規化失敗: {} ({})",
-            expected_path.display(),
+            sanitize_path_for_logging(expected_path, base_dir),
             error
         );
         ResolveFileError::NotFound

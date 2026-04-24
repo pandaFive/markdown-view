@@ -205,7 +205,7 @@ async fn index_handler(
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
-                context.target().file_path().display(),
+                context.target().file_label(),
                 error
             );
             MemoResponse::empty(context.target().relative_path().map(ToOwned::to_owned))
