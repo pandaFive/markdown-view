@@ -27,6 +27,7 @@ use crate::template::{
 // ここは JSON envelope と string escape を含む HTTP body の上限。
 // backslash や quote が多い本文は JSON 上で約 2 倍に膨らむため、
 // 10MB 以下の合法メモを transport 層で誤拒否しない余白を持たせる。
+// 4096 bytes は現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
 fn sidebar_directory_name(state: &AppState) -> &str {
