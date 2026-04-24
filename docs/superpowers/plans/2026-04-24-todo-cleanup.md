@@ -116,7 +116,7 @@ Expected: warning statements that include user-controlled path values pass path 
 
 - [ ] **Step 4: Run targeted sanitizer verification**
 
-Run: `cargo test --all-targets --all-features sanitize_path_for_logging`
+Run: `cargo test --all-targets --all-features test_sanitize`
 
 Expected: PASS.
 
