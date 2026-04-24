@@ -23,11 +23,11 @@ impl SidecarMemoName {
 
         #[cfg(unix)]
         {
-            return Self(format!(
+            Self(format!(
                 "._bin.{}{}",
                 short_hash(file_name.as_bytes()),
                 MEMO_SUFFIX
-            ));
+            ))
         }
 
         #[cfg(not(unix))]
