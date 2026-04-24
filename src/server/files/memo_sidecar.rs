@@ -43,7 +43,7 @@ impl SidecarMemoName {
     fn from_utf8_name(file_name: &str) -> Self {
         let normalized = normalize_visible_separators(file_name);
         let full = format!(".{normalized}{MEMO_SUFFIX}");
-        if full.len() <= MAX_FILENAME_BYTES {
+        if normalized == file_name && full.len() <= MAX_FILENAME_BYTES {
             return Self(full);
         }
 

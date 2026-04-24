@@ -91,6 +91,18 @@ fn test_sidecar_name_特殊文字はパス区切りとして扱われない() {
 }
 
 #[test]
+fn test_sidecar_name_正規化された短い名前はhashで衝突しない() {
+    let plain = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a_b.md"));
+    let normalized = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    assert_plain_sidecar_filename(plain.as_str());
+    assert_plain_sidecar_filename(normalized.as_str());
+    assert_eq!(plain.as_str(), ".a_b.md.memo.md");
+    assert!(normalized.as_str().starts_with(".a_b.md."));
+    assert!(normalized.as_str().ends_with(".memo.md"));
+    assert_ne!(plain.as_str(), normalized.as_str());
+}
+
+#[test]
 fn test_sidecar_name_utf8境界で切り詰める() {
     let file_name = format!("{}終端.md", "あ".repeat(120));
     let sidecar = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
@@ -939,6 +951,69 @@ async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しな
         .collect::<Vec<_>>();
     memo_entries.sort();
     assert_eq!(memo_entries.len(), 2);
+    assert_ne!(memo_entries[0], memo_entries[1]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_正規化される短いファイル名でもsidecarが衝突しない() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain_path = dir.path().join("a_b.md");
+    let separator_shaped_path = dir.path().join("a\\b.md");
+    fs::write(&plain_path, "# plain").unwrap();
+    fs::write(&separator_shaped_path, "# separator shaped").unwrap();
+
+    let plain_state = create_single_file_state(&plain_path);
+    let separator_shaped_state = create_single_file_state(&separator_shaped_path);
+    let plain_target =
+        resolve_route_target(&plain_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let separator_shaped_target =
+        resolve_route_target(&separator_shaped_state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    save_route_memo(
+        &plain_state,
+        &plain_target,
+        "plain memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("plain memo should save");
+    save_route_memo(
+        &separator_shaped_state,
+        &separator_shaped_target,
+        "separator shaped memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("separator shaped memo should save");
+
+    let plain = load_route_memo(
+        &plain_state,
+        &plain_target,
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("plain memo should load");
+    let separator_shaped = load_route_memo(
+        &separator_shaped_state,
+        &separator_shaped_target,
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("separator shaped memo should load");
+
+    assert_eq!(plain.raw(), "plain memo");
+    assert_eq!(separator_shaped.raw(), "separator shaped memo");
+
+    let mut memo_entries = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".memo.md"))
+        .collect::<Vec<_>>();
+    memo_entries.sort();
+    assert_eq!(memo_entries.len(), 2);
+    assert!(memo_entries.contains(&".a_b.md.memo.md".to_string()));
     assert_ne!(memo_entries[0], memo_entries[1]);
 }
 
