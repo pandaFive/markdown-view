@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::server::log_path::sanitize_path_for_logging;
+
 /// ファイル一覧の最大件数
 pub(super) const MAX_FILE_LIST: usize = 1000;
 
@@ -29,7 +31,7 @@ fn list_markdown_files_recursive(
     if depth >= MAX_DIR_DEPTH {
         tracing::warn!(
             "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
-            current_dir.display()
+            sanitize_path_for_logging(current_dir, base_dir)
         );
         return Ok(());
     }
@@ -41,7 +43,7 @@ fn list_markdown_files_recursive(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
-                    current_dir.display(),
+                    sanitize_path_for_logging(current_dir, base_dir),
                     error
                 );
                 continue;
@@ -60,7 +62,7 @@ fn list_markdown_files_recursive(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
-                    path.display(),
+                    sanitize_path_for_logging(&path, base_dir),
                     error
                 );
                 continue;
@@ -73,7 +75,8 @@ fn list_markdown_files_recursive(
             }
 
             if file_type.is_symlink() {
-                let Some(resolved) = canonicalize_dir_for_cycle(&path, "シンボリックリンク")
+                let Some(resolved) =
+                    canonicalize_dir_for_cycle(&path, "シンボリックリンク", base_dir)
                 else {
                     continue;
                 };
@@ -91,20 +94,21 @@ fn list_markdown_files_recursive(
                 if !resolved.starts_with(&canonical_base) {
                     tracing::warn!(
                         "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
-                        path.display(),
-                        resolved.display()
+                        sanitize_path_for_logging(&path, base_dir),
+                        sanitize_path_for_logging(&resolved, base_dir)
                     );
                     continue;
                 }
                 if !visited_dirs.insert(resolved) {
                     tracing::warn!(
                         "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
-                        path.display()
+                        sanitize_path_for_logging(&path, base_dir)
                     );
                     continue;
                 }
             } else {
-                let Some(canonical) = canonicalize_dir_for_cycle(&path, "通常ディレクトリ")
+                let Some(canonical) =
+                    canonicalize_dir_for_cycle(&path, "通常ディレクトリ", base_dir)
                 else {
                     continue;
                 };
@@ -134,7 +138,7 @@ fn list_markdown_files_recursive(
                 Err(_) => {
                     tracing::warn!(
                         "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
-                        path.display(),
+                        sanitize_path_for_logging(&path, base_dir),
                         base_dir.display()
                     );
                 }
@@ -145,14 +149,18 @@ fn list_markdown_files_recursive(
     Ok(())
 }
 
-pub(super) fn canonicalize_dir_for_cycle(path: &Path, label: &str) -> Option<PathBuf> {
+pub(super) fn canonicalize_dir_for_cycle(
+    path: &Path,
+    label: &str,
+    base_dir: &Path,
+) -> Option<PathBuf> {
     match path.canonicalize() {
         Ok(canonical) => Some(canonical),
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] {}の正規化に失敗（スキップ）: {} ({})",
                 label,
-                path.display(),
+                sanitize_path_for_logging(path, base_dir),
                 error
             );
             None
