@@ -235,6 +235,8 @@ async fn test_apiメモ_jsonボディ制限超過は413で拒否する() {
         .unwrap();
 
     assert_eq!(save.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let body = save.text().await.unwrap();
+    assert!(!body.contains("メモサイズが上限"));
 }
 
 #[tokio::test]
