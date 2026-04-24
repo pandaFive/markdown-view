@@ -12,6 +12,7 @@ use tokio::sync::broadcast;
 
 use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
+use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
 use super::*;
@@ -143,6 +144,24 @@ fn test_sidecar_name_非utf8名はhashで衝突しない() {
     assert!(first.as_str().ends_with(".memo.md"));
     assert!(second.as_str().ends_with(".memo.md"));
     assert_ne!(first.as_str(), second.as_str());
+}
+
+#[test]
+fn test_sidecar_parent_相対パスはbase_dirへfallbackする() {
+    let base_dir = Path::new("/tmp/markdown-view-base");
+
+    let parent = sidecar_parent_or_base(Path::new("memo.md"), base_dir);
+
+    assert_eq!(parent, base_dir);
+}
+
+#[test]
+fn test_sidecar_parent_絶対パスは親ディレクトリを使う() {
+    let base_dir = Path::new("/tmp/markdown-view-base");
+
+    let parent = sidecar_parent_for_target_path(Path::new("/tmp/docs/memo.md"), base_dir);
+
+    assert_eq!(parent, Path::new("/tmp/docs"));
 }
 
 #[test]

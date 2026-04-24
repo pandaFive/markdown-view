@@ -145,8 +145,8 @@ fn legacy_memo_root(base_dir: &Path) -> PathBuf {
 
 fn memo_paths_for_target(state: &AppState, target: &ResolvedTarget) -> MemoPaths {
     MemoPaths {
-        sidecar: sidecar_memo_path_for_target(target),
-        compat_sidecar: compat_sidecar_memo_path_for_target(target),
+        sidecar: sidecar_memo_path_for_target(target, state.mode().base_dir()),
+        compat_sidecar: compat_sidecar_memo_path_for_target(target, state.mode().base_dir()),
         legacy: legacy_memo_path_for_target(state, target),
     }
 }
@@ -165,12 +165,9 @@ fn legacy_memo_path_for_target(state: &AppState, target: &ResolvedTarget) -> Pat
     }
 }
 
-fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
+fn sidecar_memo_path_for_target(target: &ResolvedTarget, base_dir: &Path) -> PathBuf {
     let target_path = target.file_path();
-    let parent = target_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let parent = sidecar_parent_for_target_path(target_path, base_dir);
     let file_name = target_path
         .file_name()
         .map(SidecarMemoName::from_file_name)
@@ -178,16 +175,32 @@ fn sidecar_memo_path_for_target(target: &ResolvedTarget) -> PathBuf {
     parent.join(file_name.as_str())
 }
 
-fn compat_sidecar_memo_path_for_target(target: &ResolvedTarget) -> Option<PathBuf> {
+fn compat_sidecar_memo_path_for_target(
+    target: &ResolvedTarget,
+    base_dir: &Path,
+) -> Option<PathBuf> {
     let target_path = target.file_path();
-    let parent = target_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    let parent = sidecar_parent_for_target_path(target_path, base_dir);
     let file_name = target_path
         .file_name()
         .and_then(SidecarMemoName::compat_from_file_name)?;
     Some(parent.join(file_name.as_str()))
+}
+
+pub(super) fn sidecar_parent_for_target_path(target_path: &Path, base_dir: &Path) -> PathBuf {
+    debug_assert!(
+        target_path.is_absolute(),
+        "ResolvedTarget::file_path must be absolute"
+    );
+    sidecar_parent_or_base(target_path, base_dir)
+}
+
+pub(super) fn sidecar_parent_or_base(target_path: &Path, base_dir: &Path) -> PathBuf {
+    target_path
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| base_dir.to_path_buf())
 }
 
 async fn resolve_active_memo_path(
