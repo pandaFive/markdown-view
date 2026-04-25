@@ -725,15 +725,13 @@ async fn test_websocketブロードキャスト受信() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_api_content_io_エラーで500を返す() {
-    use std::fs::{self, Permissions};
-    use std::os::unix::fs::PermissionsExt;
-
     let (_state, addr, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
 
     // resolve (canonicalize/is_file) はパスし、open(2) のみが EACCES で失敗する状態を作る
-    let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
-    fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
+    let Some(_permission_guard) = make_file_unreadable(&file_path) else {
+        return;
+    };
 
     assert_json_error_for_paths(
         addr,
@@ -742,9 +740,6 @@ async fn test_api_content_io_エラーで500を返す() {
         Some("ファイルの読み込みに失敗しました"),
     )
     .await;
-
-    // teardown: TempDir drop で失敗しないよう権限を復元
-    fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
 }
 
 #[tokio::test]
@@ -855,9 +850,6 @@ async fn test_ファイル削除でwebsocketエラー通知() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
-    use std::fs::{self, Permissions};
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("watch_io_error.md");
     tokio::fs::write(&file_path, "# Before").await.unwrap();
@@ -872,12 +864,15 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
     // 初期メッセージを消費
     let _initial_message = next_ws_message(&mut read).await;
 
-    // notify 発火 → debounce window 内に chmod 0o000 で open(2) を EACCES に落とす
-    let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
+    // notify 発火後、debounce window 内に chmod 0o000 で open(2) を EACCES に落とす
     tokio::fs::write(&file_path, "# After").await.unwrap();
-    fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
+    let Some(permission_guard) = make_file_unreadable(&file_path) else {
+        watch_service.shutdown().await;
+        drop(tmp_dir);
+        return;
+    };
 
-    // debounce 300ms 後に build_change_broadcast_message が走り、Io arm が Error broadcast を発信
+    // debounce 経過後に build_change_broadcast_message が走り、Io arm が Error broadcast を発信
     let msg = next_ws_message(&mut read).await;
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -887,8 +882,8 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
         "ファイル読み込みエラー (watch_io_error.md): ファイルの読み込みに失敗しました"
     );
 
-    // teardown
-    fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
+    // 権限復元を明示し、後続の shutdown / cleanup に読み取り不可状態を持ち越さない
+    drop(permission_guard);
     watch_service.shutdown().await;
     drop(tmp_dir);
 }
@@ -1810,6 +1805,37 @@ async fn assert_json_error_for_paths(
             Some(message) => assert_eq!(json["error"].as_str().unwrap(), message),
             None => assert!(json["error"].as_str().is_some()),
         }
+    }
+}
+
+#[cfg(unix)]
+struct FilePermissionGuard {
+    path: std::path::PathBuf,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for FilePermissionGuard {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.original_mode));
+    }
+}
+
+#[cfg(unix)]
+fn make_file_unreadable(path: &Path) -> Option<FilePermissionGuard> {
+    let original_mode = fs::metadata(path).unwrap().permissions().mode();
+    let guard = FilePermissionGuard {
+        path: path.to_path_buf(),
+        original_mode,
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if fs::File::open(path).is_ok() {
+        eprintln!("chmod 0o000 後も対象ファイルを読めるため、IOエラー統合テストをskipします");
+        drop(guard);
+        None
+    } else {
+        Some(guard)
     }
 }
 
