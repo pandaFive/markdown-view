@@ -72,11 +72,15 @@
   - 対応: WebSocket 1011 テストと同じ手法 (`chmod 0o000` で EACCES 誘発) を `/api/content` の reqwest 呼び出しに適用し、status 500 と JSON `error` フィールドが `"ファイルの読み込みに失敗しました"` であることを検証。既存 `assert_json_error_for_paths` (L1707) と同じ構造で実装可能
   - 理由: WebSocket 経路の 1011 透過確認と対称。IO エラーが `NotUtf8`/`TooLarge` の HTTP ステータスに誤分類されても現状は検知できない
 
-- [x] `build_change_broadcast_message` / `build_lagged_recovery_message` の IO エラー経路を統合テストでカバー
+- [x] `build_change_broadcast_message` の IO エラー経路を統合テストでカバー
   - ファイル: `tests/integration_test.rs`
-  - 現状: `load_initial_socket_update` の ReadFailed arm は 1011 統合テストで固定されたが、`build_change_broadcast_message` (`src/server/files/content.rs:163-199`) と `build_lagged_recovery_message` (同 L128-157) は同じ `ReadMarkdownError` を `BroadcastMessage::Error(format!("..."))` に畳み込む別経路。ユニットテストはあるが実 WebSocket 経由の透過確認なし
-  - 対応: (a) ファイル更新を watcher に拾わせて chmod 0o000 → notify のシーケンスで change 経路を刺激、(b) lag recovery は broadcast channel を意図的に溢れさせる必要があり難易度高い。まず (a) のみ検討
-  - 理由: 3 経路 (初期化 / 変更 / 遅延回復) で同じ `ReadMarkdownError` の扱いが分かれており、一つの経路のリファクタで他経路が silent に壊れる可能性がある
+  - 対応: ファイル更新を watcher に拾わせて chmod 0o000 → notify のシーケンスで change 経路を刺激
+  - 理由: 初期化 / 変更経路で同じ `ReadMarkdownError` の扱いが分かれており、一つの経路のリファクタで他経路が silent に壊れる可能性がある
+
+- [ ] `build_lagged_recovery_message` の IO エラー透過を統合テストでカバー
+  - ファイル: `tests/integration_test.rs`
+  - 対応: broadcast channel 飽和などで lag recovery を意図的に発生させる必要があり、再現性が低いため将来の宿題
+  - 理由: 遅延回復経路でも `ReadMarkdownError` が `BroadcastMessage::Error(format!("..."))` に畳み込まれるため、リファクタ時の回帰を検知したい
 
 - [x] メモ sidecar 名生成の不変条件を `SidecarMemoName` に集約し、境界テストと受容リスクを補強
   - ファイル: `src/server/files/memo.rs`, `src/server/files/memo_sidecar.rs`, `src/server/files/tests.rs`, `docs/superpowers/specs/2026-04-24-memo-sidecar-name-hardening-design.md`
