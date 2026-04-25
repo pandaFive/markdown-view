@@ -78,7 +78,7 @@
   - 対応: (a) ファイル更新を watcher に拾わせて chmod 0o000 → notify のシーケンスで change 経路を刺激、(b) lag recovery は broadcast channel を意図的に溢れさせる必要があり難易度高い。まず (a) のみ検討
   - 理由: 3 経路 (初期化 / 変更 / 遅延回復) で同じ `ReadMarkdownError` の扱いが分かれており、一つの経路のリファクタで他経路が silent に壊れる可能性がある
 
-- [ ] メモ sidecar 名生成の不変条件を `SidecarMemoName` に集約し、境界テストと受容リスクを補強
+- [x] メモ sidecar 名生成の不変条件を `SidecarMemoName` に集約し、境界テストと受容リスクを補強
   - ファイル: `src/server/files/memo.rs`, `src/server/files/memo_sidecar.rs`, `src/server/files/tests.rs`, `docs/superpowers/specs/2026-04-24-memo-sidecar-name-hardening-design.md`
   - 現状: `SidecarMemoName` が 255 bytes 以下を保証するため `sidecar_name_too_long` 分岐は実質到達不能になっている。255 bytes ちょうど / 256 bytes 超過、UTF-8 境界直前、正規化済み超長名の組み合わせテストも薄い。64 bit hash 衝突と Windows 非 UTF-8 名の fallback 集約は受容リスクとして設計書に残っていない
   - 対応: `sidecar_name_too_long` を削除または型内部へ統合し、呼び出し側の legacy fallback 分岐を現実の契約に合わせる。境界テストを追加し、hash 衝突・非 UTF-8 fallback 集約を設計書の既知リスクとして明記する
