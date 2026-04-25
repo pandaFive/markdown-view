@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use axum::http::StatusCode;
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
-use super::memo_sidecar::{SidecarMemoName, MAX_FILENAME_BYTES};
+use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
 use crate::server::guards::json_error;
@@ -50,10 +50,8 @@ pub(in crate::server) async fn save_route_memo(
     let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
         delete_legacy_memo_if_safe_strict(state, target, request, &memo_paths.legacy).await?;
-        if !sidecar_name_too_long(&memo_paths.sidecar) {
-            ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-            delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
-        }
+        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+        delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
         if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
             delete_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
         }
@@ -70,10 +68,7 @@ pub(in crate::server) async fn save_route_memo(
     }
 
     let save_target = choose_save_target(state, target, request, &memo_paths).await?;
-    let memo_path = match save_target {
-        SaveTarget::Sidecar { .. } => &memo_paths.sidecar,
-        SaveTarget::Legacy => &memo_paths.legacy,
-    };
+    let memo_path = &memo_paths.sidecar;
     ensure_safe_memo_path(memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
         if let Err(error) = tokio::fs::create_dir_all(parent).await {
@@ -91,18 +86,10 @@ pub(in crate::server) async fn save_route_memo(
         return Err(io_api_error(target, request, "保存", error));
     }
 
-    if let SaveTarget::Sidecar {
-        delete_legacy_after_save: true,
-        ..
-    } = save_target
-    {
+    if save_target.delete_legacy_after_save {
         cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
     }
-    if let SaveTarget::Sidecar {
-        delete_compat_after_save: true,
-        ..
-    } = save_target
-    {
+    if save_target.delete_compat_after_save {
         if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
             cleanup_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
         }
@@ -122,13 +109,10 @@ struct MemoPaths {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum SaveTarget {
-    Sidecar {
-        fallback: SidecarFallback,
-        delete_legacy_after_save: bool,
-        delete_compat_after_save: bool,
-    },
-    Legacy,
+struct SaveTarget {
+    fallback: SidecarFallback,
+    delete_legacy_after_save: bool,
+    delete_compat_after_save: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,14 +202,10 @@ async fn resolve_active_memo_path(
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
 ) -> Result<PathBuf, ApiError> {
-    let sidecar_usable = !sidecar_name_too_long(&memo_paths.sidecar);
-    if sidecar_usable {
-        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-    }
-    if sidecar_usable
-        && tokio::fs::try_exists(&memo_paths.sidecar)
-            .await
-            .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    if tokio::fs::try_exists(&memo_paths.sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
         return Ok(memo_paths.sidecar.clone());
     }
@@ -238,13 +218,7 @@ async fn resolve_active_memo_path(
 
     match inspect_legacy_memo(state, target, request, &memo_paths.legacy).await? {
         LegacyMemoState::SafeExists => Ok(memo_paths.legacy.clone()),
-        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => {
-            if sidecar_usable {
-                Ok(memo_paths.sidecar.clone())
-            } else {
-                Ok(memo_paths.legacy.clone())
-            }
-        }
+        LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => Ok(memo_paths.sidecar.clone()),
     }
 }
 
@@ -254,16 +228,12 @@ async fn choose_save_target(
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
 ) -> Result<SaveTarget, ApiError> {
-    let sidecar_too_long = sidecar_name_too_long(&memo_paths.sidecar);
-    if !sidecar_too_long {
-        ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-    }
-    if !sidecar_too_long
-        && tokio::fs::try_exists(&memo_paths.sidecar)
-            .await
-            .map_err(|error| io_api_error(target, request, "存在確認", error))?
+    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    if tokio::fs::try_exists(&memo_paths.sidecar)
+        .await
+        .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
-        return Ok(SaveTarget::Sidecar {
+        return Ok(SaveTarget {
             fallback: SidecarFallback::None,
             delete_legacy_after_save: false,
             delete_compat_after_save: false,
@@ -272,7 +242,7 @@ async fn choose_save_target(
     let compat_sidecar_exists = compat_sidecar_exists(state, target, request, memo_paths).await?;
     let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy).await?;
     if compat_sidecar_exists {
-        return Ok(SaveTarget::Sidecar {
+        return Ok(SaveTarget {
             fallback: if legacy_state == LegacyMemoState::SafeExists {
                 SidecarFallback::CompatThenLegacy
             } else {
@@ -283,15 +253,11 @@ async fn choose_save_target(
         });
     }
 
-    if sidecar_too_long {
-        return Ok(SaveTarget::Legacy);
-    }
-
     if matches!(
         legacy_state,
         LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe
     ) {
-        return Ok(SaveTarget::Sidecar {
+        return Ok(SaveTarget {
             fallback: if state.mode().is_directory() {
                 SidecarFallback::Legacy
             } else {
@@ -302,7 +268,7 @@ async fn choose_save_target(
         });
     }
 
-    Ok(SaveTarget::Sidecar {
+    Ok(SaveTarget {
         fallback: SidecarFallback::Legacy,
         delete_legacy_after_save: true,
         delete_compat_after_save: false,
@@ -372,9 +338,10 @@ fn sidecar_fallback_for_error(
     if error.kind() != std::io::ErrorKind::PermissionDenied && !is_name_too_long_error(error) {
         return None;
     }
-    match save_target {
-        SaveTarget::Sidecar { fallback, .. } if fallback != SidecarFallback::None => Some(fallback),
-        SaveTarget::Sidecar { .. } | SaveTarget::Legacy => None,
+    if save_target.fallback != SidecarFallback::None {
+        Some(save_target.fallback)
+    } else {
+        None
     }
 }
 
@@ -585,12 +552,6 @@ async fn delete_legacy_memo_if_safe_strict(
     }
 
     delete_memo_file_if_exists(legacy_path, target, request).await
-}
-
-fn sidecar_name_too_long(sidecar_path: &Path) -> bool {
-    sidecar_path
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().len() > MAX_FILENAME_BYTES)
 }
 
 fn ensure_safe_memo_path(

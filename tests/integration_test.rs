@@ -517,7 +517,7 @@ async fn test_apiメモ_保存成功後のlegacy削除失敗は成功扱いに�
 }
 
 #[tokio::test]
-async fn test_apiメモ_長いファイル名でもlegacyへfallbackして保存できる() {
+async fn test_apiメモ_長いファイル名でも短縮sidecarへ保存できる() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = tmp_dir.path().join(&file_name);

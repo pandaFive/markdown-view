@@ -1052,7 +1052,7 @@ async fn test_save_route_memo_拡張子の大文字小文字が異なるファ�
 }
 
 #[tokio::test]
-async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして保存できる() {
+async fn test_save_route_memo_長いファイル名でも短縮sidecarへ保存できる() {
     let dir = tempfile::tempdir().unwrap();
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = dir.path().join(&file_name);
@@ -1067,7 +1067,7 @@ async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして
         RouteTargetRequest::api_memo(None),
     )
     .await
-    .expect("long filename should still save");
+    .expect("long filename should save to shortened sidecar");
 
     assert_eq!(memo.raw(), "memo");
     let mut memo_entries = fs::read_dir(dir.path())
@@ -1082,7 +1082,7 @@ async fn test_save_route_memo_長いファイル名でもlegacyへfallbackして
 }
 
 #[tokio::test]
-async fn test_load_route_memo_長いファイル名でlegacy未作成なら空メモを返す() {
+async fn test_load_route_memo_長いファイル名で未作成なら空メモを返す() {
     let dir = tempfile::tempdir().unwrap();
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = dir.path().join(&file_name);
@@ -1092,7 +1092,7 @@ async fn test_load_route_memo_長いファイル名でlegacy未作成なら空�
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
-        .expect("overlong sidecar path should not break empty memo read");
+        .expect("long filename should not break empty memo read");
 
     assert_eq!(memo.raw(), "");
     assert_eq!(memo.html().as_str(), "");

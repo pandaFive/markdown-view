@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use sha2::{Digest, Sha256};
 
 const MEMO_SUFFIX: &str = ".memo.md";
-pub(super) const MAX_FILENAME_BYTES: usize = 255;
+const MAX_FILENAME_BYTES: usize = 255;
 const SIDECAR_HASH_LEN: usize = 16;
 
 /// メモ sidecar ファイル名生成の Single Source of Truth。
