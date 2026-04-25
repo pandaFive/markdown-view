@@ -866,9 +866,7 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
     let watch_service = WatchService::start(state.clone()).await.unwrap();
 
     let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr))
-        .await
-        .unwrap();
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
     // 初期メッセージを消費
