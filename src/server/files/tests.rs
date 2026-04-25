@@ -119,6 +119,34 @@ fn test_sidecar_name_旧形式compat名は正規化前の名前を返す() {
     assert_eq!(compat.as_str(), ".a\\b.md.memo.md");
 
     assert!(SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a_b.md")).is_none());
+    assert!(SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new("a/b\\c.md")).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sidecar_name_旧形式compat名の超長名は255バイト以下に短縮される() {
+    let file_name = format!("{}\\{}.md", "a".repeat(180), "b".repeat(120));
+    assert_eq!(file_name.len(), 304);
+
+    let compat = SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new(&file_name))
+        .expect("backslash name should have compat sidecar");
+    let name = compat.as_str();
+    assert_plain_sidecar_filename(name);
+    assert!(
+        name.len() <= 255,
+        "compat sidecar名が長すぎる: {}",
+        name.len()
+    );
+    assert!(name.ends_with(".memo.md"), ".memo.md 終端: {name}");
+
+    let parts: Vec<&str> = name.split('.').collect();
+    assert_eq!(parts.len(), 5, "compat hash 経路は 4 dot 区切り: {name}");
+    let hash = parts[2];
+    assert_eq!(hash.len(), 16, "hash suffix は 16 hex chars: {hash}");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash suffix は hex のみ: {hash}"
+    );
 }
 
 #[test]

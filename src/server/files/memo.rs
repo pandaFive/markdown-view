@@ -346,6 +346,9 @@ fn sidecar_fallback_for_error(
 }
 
 fn is_name_too_long_error(error: &std::io::Error) -> bool {
+    // SidecarMemoName は一般的な 255 bytes のファイル名上限を保証する。
+    // ここでは eCryptfs などより厳しい名前長制限や中間パス長制限に対する
+    // runtime fallback だけを扱う。
     #[cfg(unix)]
     {
         error.raw_os_error() == Some(36)

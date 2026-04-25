@@ -14,6 +14,8 @@ const SIDECAR_HASH_LEN: usize = 16;
 /// **不変条件**: 任意の `OsStr` 入力に対して、`as_str().len() <= MAX_FILENAME_BYTES (= 255)`
 /// を構築時に保証する。UTF-8 経路の hash truncation、Unix 非 UTF-8 経路の `._bin.{hash}.memo.md`、
 /// fallback の `.memo.md` がいずれも 255 bytes 以下に収まる。
+/// 255 bytes は POSIX `NAME_MAX` と ext4 / xfs など主要なローカルファイルシステムの
+/// 一般的なファイル名上限に合わせた保守的な上限値。
 ///
 /// この不変条件は `src/server/files/tests.rs` の
 /// `test_sidecar_name_任意入力で常に255バイト以下_不変条件_*` で固定される。
@@ -54,7 +56,7 @@ impl SidecarMemoName {
 
     /// 旧形式 (backslash を区切り正規化せずそのまま含む) の sidecar 名を再構築する。
     /// 出力は `MAX_FILENAME_BYTES (= 255)` bytes 以下を保証する。
-    /// 入力に区切り正規化対象 (`\`) が含まれない場合は `None` を返す。
+    /// 入力に区切り正規化対象 (`\`) が含まれない場合、または `/` が含まれる場合は `None` を返す。
     #[cfg(unix)]
     pub(super) fn compat_from_file_name(file_name: &OsStr) -> Option<Self> {
         let name = file_name.to_str().filter(|name| !name.is_empty())?;
