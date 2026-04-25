@@ -23,6 +23,11 @@ use crate::template::{
     render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage,
 };
 
+// メモ本文の保存上限は save_route_memo 側の MAX_FILE_SIZE で判定する。
+// ここは JSON envelope と string escape を含む HTTP body の上限。
+// 通常の Markdown 本文で多い backslash や quote の escape 膨張を想定する。
+// 制御文字など 2 倍を超えて膨らむ極端な JSON 入力は body limit 側で拒否され得る。
+// 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
 fn sidebar_directory_name(state: &AppState) -> &str {
