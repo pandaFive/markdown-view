@@ -852,6 +852,49 @@ async fn test_ファイル削除でwebsocketエラー通知() {
     watch_service.shutdown().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("watch_io_error.md");
+    tokio::fs::write(&file_path, "# Before").await.unwrap();
+
+    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let watch_service = WatchService::start(state.clone()).await.unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr))
+        .await
+        .unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 初期メッセージを消費
+    let _initial_message = next_ws_message(&mut read).await;
+
+    // notify 発火 → debounce window 内に chmod 0o000 で open(2) を EACCES に落とす
+    let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
+    tokio::fs::write(&file_path, "# After").await.unwrap();
+    fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
+
+    // debounce 300ms 後に build_change_broadcast_message が走り、Io arm が Error broadcast を発信
+    let msg = next_ws_message(&mut read).await;
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let error = json["error"].as_str().expect("errorフィールドが存在する");
+    assert_eq!(
+        error,
+        "ファイル読み込みエラー (watch_io_error.md): ファイルの読み込みに失敗しました"
+    );
+
+    // teardown
+    fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
+    watch_service.shutdown().await;
+    drop(tmp_dir);
+}
+
 #[tokio::test]
 async fn test_websocketは異なるoriginを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
