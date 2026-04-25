@@ -12,3 +12,4 @@ AGENTS.md
 .serena/*
 .playwright-mcp/*
 .claude/
+.worktrees/
