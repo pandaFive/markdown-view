@@ -9,13 +9,26 @@ const MEMO_SUFFIX: &str = ".memo.md";
 pub(super) const MAX_FILENAME_BYTES: usize = 255;
 const SIDECAR_HASH_LEN: usize = 16;
 
+/// メモ sidecar ファイル名生成の Single Source of Truth。
+///
+/// **不変条件**: 任意の `OsStr` 入力に対して、`as_str().len() <= MAX_FILENAME_BYTES (= 255)`
+/// を構築時に保証する。UTF-8 経路の hash truncation、Unix 非 UTF-8 経路の `._bin.{hash}.memo.md`、
+/// fallback の `.memo.md` がいずれも 255 bytes 以下に収まる。
+///
+/// この不変条件は `src/server/files/tests.rs` の
+/// `test_sidecar_name_任意入力で常に255バイト以下_不変条件_*` で固定される。
+/// 呼び出し側でファイルシステム上限の重複チェックを行う必要はない。
 pub(super) struct SidecarMemoName(String);
 
 impl SidecarMemoName {
+    /// 入力なし / 不明なファイル名向けの fallback 名 (`.memo.md`)。
+    /// 出力は常に 8 bytes で、`MAX_FILENAME_BYTES` を超えない。
     pub(super) fn fallback() -> Self {
         Self(MEMO_SUFFIX.to_string())
     }
 
+    /// `OsStr` ファイル名から sidecar 名を構築する。
+    /// 出力は任意の入力に対して `MAX_FILENAME_BYTES (= 255)` bytes 以下を保証する。
     pub(super) fn from_file_name(file_name: &OsStr) -> Self {
         if let Some(name) = file_name.to_str() {
             if name.is_empty() {
@@ -39,6 +52,9 @@ impl SidecarMemoName {
         }
     }
 
+    /// 旧形式 (backslash を区切り正規化せずそのまま含む) の sidecar 名を再構築する。
+    /// 出力は `MAX_FILENAME_BYTES (= 255)` bytes 以下を保証する。
+    /// 入力に区切り正規化対象 (`\`) が含まれない場合は `None` を返す。
     #[cfg(unix)]
     pub(super) fn compat_from_file_name(file_name: &OsStr) -> Option<Self> {
         let name = file_name.to_str().filter(|name| !name.is_empty())?;
