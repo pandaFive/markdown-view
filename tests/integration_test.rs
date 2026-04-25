@@ -722,6 +722,31 @@ async fn test_websocketブロードキャスト受信() {
     assert!(text.contains("updated"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_api_content_io_エラーで500を返す() {
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_state, addr, _tmp_dir, file_path) =
+        setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
+
+    // resolve (canonicalize/is_file) はパスし、open(2) のみが EACCES で失敗する状態を作る
+    let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
+    fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
+
+    assert_json_error_for_paths(
+        addr,
+        &["/api/content"],
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        Some("ファイルの読み込みに失敗しました"),
+    )
+    .await;
+
+    // teardown: TempDir drop で失敗しないよう権限を復元
+    fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
+}
+
 #[tokio::test]
 async fn test_存在しないファイル時は404を返す() {
     let tmp_dir = tempfile::tempdir().unwrap();
