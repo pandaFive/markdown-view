@@ -158,46 +158,19 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
 /// 正しく動作するよう、相対パス部分のみをチェックする。
 ///
 /// ## Fail-safe動作
-/// `strip_prefix`とcanonicalizeの両方に失敗した場合は`true`を返し、
+/// `try_strip_base` が `None` を返した場合は `true` を返し、
 /// 安全側に倒す（隠しファイルとして扱い処理をスキップする）。
 fn is_hidden_relative(path: &Path, base: &Path) -> bool {
-    match path.strip_prefix(base) {
-        Ok(relative) => relative
+    match try_strip_base(path, base) {
+        Some(relative) => relative
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
-        Err(_) => {
-            let canonical_path = match path.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        "[markdown-view] 隠しファイル判定: パス正規化失敗（元パスで再試行）: {} ({})",
-                        sanitize_path_for_logging(path, base), e
-                    );
-                    path.to_path_buf()
-                }
-            };
-            let canonical_base = match base.canonicalize() {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(
-                        "[markdown-view] 隠しファイル判定: ベース正規化失敗（元パスで再試行）: {} ({})",
-                        base.display(), e
-                    );
-                    base.to_path_buf()
-                }
-            };
-            match canonical_path.strip_prefix(&canonical_base) {
-                Ok(relative) => relative
-                    .components()
-                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.')),
-                Err(_) => {
-                    tracing::warn!(
-                        "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
-                        sanitize_path_for_logging(path, base)
-                    );
-                    true
-                }
-            }
+        None => {
+            tracing::warn!(
+                "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
+                sanitize_path_for_logging(path, base)
+            );
+            true
         }
     }
 }
@@ -209,7 +182,6 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
 /// そのまま使い、最終 `strip_prefix` も失敗した場合は `None` を返す。
 ///
 /// 失敗経路では `tracing::warn!` でログを残す。
-#[allow(dead_code)]
 fn try_strip_base(path: &Path, base: &Path) -> Option<PathBuf> {
     if let Ok(rel) = path.strip_prefix(base) {
         return Some(rel.to_path_buf());
