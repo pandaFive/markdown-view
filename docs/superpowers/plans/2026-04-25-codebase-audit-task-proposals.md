@@ -2,8 +2,13 @@
 
 ## 概要
 
-`README.md` / `CLAUDE.md` / 既存 TODO 群と、`cargo test --all-targets --all-features` の実行結果をもとに、
+`README.md` / `CLAUDE.md` / 既存 TODO 群と、監査時点の `cargo test --all-targets --all-features` 実行結果をもとに、
 「今すぐ修正効果が高い順」でタスクを洗い出した。
+
+2026-04-27 更新:
+- PR #93 で HTTP `/api/content` と `build_change_broadcast_message` の IO エラー統合テストは追加済み。
+- PR #93 取り込み後の `develop` では `./verify.sh` が通過済み。監査時点の `218 passed; 6 failed` は現在状態ではない。
+- `build_lagged_recovery_message` の IO エラー透過統合テストは再現性課題があるため、別 TODO として継続追跡する。
 
 - 対象領域: メモ保存経路、ファイル監視、WebSocket/HTTP エラー境界、E2E 保守性、ドキュメント整合
 - 方針: 既存 TODO の未完了項目 + 今回のテスト実行で観測した不安定ポイントを統合
@@ -13,7 +18,7 @@
 ## 優先度 High（先に着手）
 
 - [ ] **memo 保存の permission/fallback 契約を再定義し、実装・テストを一致させる**
-  - 背景: `save_route_memo` 系ユニットで 6 件失敗し、single-file / legacy fallback / safe legacy cleanup の期待が食い違っている。
+  - 背景: 監査時点では `save_route_memo` 系ユニットで 6 件失敗していた。現在の `develop` では全体検証は通過しているため、着手時はまず契約の現状確認から始める。
   - 対象: `src/server/files/memo.rs`, `src/server/files/tests.rs`
   - 完了条件:
     - fallback ルールを仕様としてコメント化（single-file と directory の差分含む）
@@ -27,18 +32,27 @@
     - 書込失敗注入を filesystem permission ではなく、テストダブル/依存注入で制御
     - Linux/macOS/CI コンテナで同一結果を確認
 
-- [ ] **`/api/content` の 500 IO エラー統合テスト追加**
-  - 背景: WebSocket 側は close_code マッピングが厚くなったが、HTTP 側の IO=500 の境界が薄い。
+- [x] **`/api/content` の 500 IO エラー統合テスト追加**
+  - 背景: WebSocket 側は close_code マッピングが厚くなったが、HTTP 側の IO=500 の境界が薄かった。
   - 対象: `tests/integration_test.rs`
+  - 対応: PR #93 で `test_api_content_io_エラーで500を返す` を追加済み。
   - 完了条件:
     - IO failure を起こし、status 500 + error JSON を検証
     - TooLarge/NotUtf8 との取り違えがないことを確認
 
-- [ ] **`build_change_broadcast_message` の実 WebSocket 経路テスト追加**
-  - 背景: 初期化経路の close code は強化済みだが、更新通知経路は回帰検知が弱い。
-  - 対象: `tests/integration_test.rs`, 必要なら `src/server/broadcast.rs`
+- [x] **`build_change_broadcast_message` の実 WebSocket 経路テスト追加**
+  - 背景: 初期化経路の close code は強化済みだが、更新通知経路は回帰検知が弱かった。
+  - 対象: `tests/integration_test.rs`
+  - 対応: PR #93 で `test_ファイル変更_io_エラーでwebsocketエラー通知` を追加済み。
   - 完了条件:
     - ファイル変更イベントから Error broadcast までを E2E で検証
+
+- [ ] **`build_lagged_recovery_message` の IO エラー透過統合テスト追加**
+  - 背景: PR #93 では change broadcast 経路を固定したが、lagged recovery 経路は再現性課題により未着手。
+  - 対象: `tests/integration_test.rs`
+  - 完了条件:
+    - `broadcast::channel(1)` の飽和などで lagged recovery を再現
+    - Error broadcast が内部 IO 詳細を漏らさず、ユーザー向け文言に畳まれることを検証
 
 ---
 
@@ -96,7 +110,7 @@
 
 1. memo 保存仕様の確定（High-1）
 2. 環境依存テストの除去（High-2）
-3. HTTP/WS 境界テストの追加（High-3,4）
+3. lagged recovery の IO エラー透過テスト追加（High-5）
 4. watcher と updateContent の保守性改善（Medium）
 5. E2E 型/共通化の債務返済（Medium〜Low）
 
