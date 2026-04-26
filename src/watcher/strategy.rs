@@ -202,6 +202,40 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
     }
 }
 
+/// path から base を取り除いた相対 PathBuf を返す。
+///
+/// `strip_prefix` が直接成功すれば即座に返す。失敗時は path/base を
+/// canonicalize して再試行する。canonicalize に失敗した側は元パスを
+/// そのまま使い、最終 `strip_prefix` も失敗した場合は `None` を返す。
+///
+/// 失敗経路では `tracing::warn!` でログを残す。
+#[allow(dead_code)]
+fn try_strip_base(path: &Path, base: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = path.strip_prefix(base) {
+        return Some(rel.to_path_buf());
+    }
+    let canonical_path = path.canonicalize().unwrap_or_else(|e| {
+        tracing::warn!(
+            "[markdown-view] 隠しファイル判定: パス正規化失敗（元パスで再試行）: {} ({})",
+            sanitize_path_for_logging(path, base),
+            e
+        );
+        path.to_path_buf()
+    });
+    let canonical_base = base.canonicalize().unwrap_or_else(|e| {
+        tracing::warn!(
+            "[markdown-view] 隠しファイル判定: ベース正規化失敗（元パスで再試行）: {} ({})",
+            base.display(),
+            e
+        );
+        base.to_path_buf()
+    });
+    canonical_path
+        .strip_prefix(&canonical_base)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
 /// パスが監視対象ファイルと一致するか判定する
 ///
 /// target_pathは起動時にcanonicalize済みの絶対パス。
@@ -277,7 +311,7 @@ mod tests {
 
     use super::{
         is_content_change_event, is_hidden_relative, is_target_file, is_within_base_dir,
-        WatchStrategy,
+        try_strip_base, WatchStrategy,
     };
     use crate::server::CanonicalPath;
 
@@ -539,5 +573,48 @@ mod tests {
         let base = Path::new("/tmp/base");
         let outside = Path::new("/tmp/other/target.md");
         assert!(!is_within_base_dir(outside, base));
+    }
+
+    #[test]
+    fn test_try_strip_base_strip_prefix直接成功() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let sub = canonical_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+
+        let result = try_strip_base(&file_path, &canonical_dir);
+
+        assert_eq!(result, Some(PathBuf::from("sub/guide.md")));
+    }
+
+    #[test]
+    fn test_try_strip_base_canonicalize経由成功() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let sub = canonical_dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+
+        // base を "sub/.." の非正規化形にして直接 strip_prefix を失敗させ、
+        // canonicalize fallback 経路で成功することを確認する
+        let non_normalized_base = sub.join("..");
+
+        let result = try_strip_base(&file_path, &non_normalized_base);
+
+        assert_eq!(result, Some(PathBuf::from("sub/guide.md")));
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_try_strip_base_完全失敗でNone() {
+        let base = Path::new("/nonexistent/base/dir");
+        let unrelated = Path::new("/completely/different/path/file.md");
+
+        let result = try_strip_base(unrelated, base);
+
+        assert!(result.is_none());
     }
 }
