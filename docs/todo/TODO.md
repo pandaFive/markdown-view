@@ -48,7 +48,7 @@
   - 対応: base_dir 基準での相対化ヘルパー `sanitize_path_for_logging(path, base)` を抽出し、絶対パスや base 外パスを丸めて出力
   - 理由: 個人使用前提でもディレクトリ構造の漏出は望ましくない
 
-- [ ] `is_hidden_relative` のネスト深度を 3 → 2 階層に削減
+- [x] `is_hidden_relative` のネスト深度を 3 → 2 階層に削減
   - ファイル: `src/watcher/strategy.rs` L162-195
   - 現状: `match strip_prefix → match canonicalize(path) → match canonicalize(base)` の 3 段ネストで、canonicalize 失敗時のフォールバックログが 2 回重複
   - 対応: `try_relative_components(path, base) -> Option<impl Iterator<Component>>` 風のヘルパーを抽出し、呼び出し側は 1 回 match
