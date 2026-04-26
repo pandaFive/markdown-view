@@ -181,7 +181,8 @@ fn is_hidden_relative(path: &Path, base: &Path) -> bool {
 /// canonicalize して再試行する。canonicalize に失敗した側は元パスを
 /// そのまま使い、最終 `strip_prefix` も失敗した場合は `None` を返す。
 ///
-/// 失敗経路では `tracing::warn!` でログを残す。
+/// canonicalize 失敗時は `tracing::warn!` でログを残す。
+/// 最終 `strip_prefix` 失敗時のログ出力は呼び出し側の責務。
 fn try_strip_base(path: &Path, base: &Path) -> Option<PathBuf> {
     if let Ok(rel) = path.strip_prefix(base) {
         return Some(rel.to_path_buf());
@@ -558,7 +559,7 @@ mod tests {
 
         let result = try_strip_base(&file_path, &canonical_dir);
 
-        assert_eq!(result, Some(PathBuf::from("sub/guide.md")));
+        assert_eq!(result, Some(PathBuf::from("sub").join("guide.md")));
     }
 
     #[test]
@@ -576,7 +577,7 @@ mod tests {
 
         let result = try_strip_base(&file_path, &non_normalized_base);
 
-        assert_eq!(result, Some(PathBuf::from("sub/guide.md")));
+        assert_eq!(result, Some(PathBuf::from("sub").join("guide.md")));
     }
 
     #[test]
