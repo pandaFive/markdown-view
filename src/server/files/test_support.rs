@@ -4,9 +4,15 @@
 
 #![cfg(test)]
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use tokio::sync::Mutex as AsyncMutex;
+
+use super::memo_fs::{MemoFs, MemoReadError, TokioMemoFs};
 
 /// tempdir + 権限戻しガード付きワークスペース。
 ///
@@ -76,6 +82,113 @@ impl Drop for TempWorkspace {
                 let _ = std::fs::set_permissions(&path, perms);
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) enum Op {
+    TryExists,
+    Metadata,
+    Read,
+    CreateDirAll,
+    Write,
+    RemoveFile,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MockMemoFs {
+    inner: TokioMemoFs,
+    failures: Mutex<HashMap<(Op, PathBuf), io::ErrorKind>>,
+    write_observer: AsyncMutex<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+impl MockMemoFs {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn fail_at(&self, op: Op, path: impl Into<PathBuf>, kind: io::ErrorKind) -> &Self {
+        self.failures
+            .lock()
+            .expect("failures mutex poisoned")
+            .insert((op, path.into()), kind);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_failures(&self) -> &Self {
+        self.failures
+            .lock()
+            .expect("failures mutex poisoned")
+            .clear();
+        self
+    }
+
+    pub async fn writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        self.write_observer.lock().await.clone()
+    }
+
+    fn lookup_failure(&self, op: Op, path: &Path) -> Option<io::ErrorKind> {
+        self.failures
+            .lock()
+            .expect("failures mutex poisoned")
+            .get(&(op, path.to_path_buf()))
+            .copied()
+    }
+}
+
+#[async_trait]
+impl MemoFs for MockMemoFs {
+    async fn try_exists(&self, path: &Path) -> io::Result<bool> {
+        if let Some(kind) = self.lookup_failure(Op::TryExists, path) {
+            return Err(io::Error::from(kind));
+        }
+
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
+        if let Some(kind) = self.lookup_failure(Op::Metadata, path) {
+            return Err(io::Error::from(kind));
+        }
+
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        if let Some(kind) = self.lookup_failure(Op::Read, path) {
+            return Err(MemoReadError::Read(io::Error::from(kind)));
+        }
+
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        if let Some(kind) = self.lookup_failure(Op::CreateDirAll, path) {
+            return Err(io::Error::from(kind));
+        }
+
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write(&self, path: &Path, content: &[u8]) -> io::Result<()> {
+        if let Some(kind) = self.lookup_failure(Op::Write, path) {
+            return Err(io::Error::from(kind));
+        }
+
+        self.write_observer
+            .lock()
+            .await
+            .push((path.to_path_buf(), content.to_vec()));
+        self.inner.write(path, content).await
+    }
+
+    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if let Some(kind) = self.lookup_failure(Op::RemoveFile, path) {
+            return Err(io::Error::from(kind));
+        }
+
+        self.inner.remove_file(path).await
     }
 }
 
