@@ -1225,6 +1225,26 @@ function normalizeTocHtml(html) {
 // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
 function updateContent(data, options) {
   options = options || {};
+  // null/配列は UpdateMessage ではないため、空 object として契約違反扱いに寄せる。
+  var safeData = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+
+  // サーバー契約として content/toc は常に文字列で届く。欠落や型不一致は中継プロキシ
+  // 改変やサーバー実装の契約違反のサインで、サイレントに no-op になるとデバッグ困難。
+  // warn を出した上で、TOC 更新等の既存副作用は早期 return せず継続する（部分回復ケース許容）。
+  var missing = [];
+  if (typeof safeData.content !== 'string') missing.push('content');
+  if (typeof safeData.toc !== 'string') missing.push('toc');
+  var hasContractViolation = missing.length > 0;
+  if (hasContractViolation) {
+    // 長大なHTML本体をログに出さず、調査に必要な要約メタデータだけを残す。
+    console.warn('[markdown-view] updateContent: ' + missing.join(', ') + ' が欠落または不正 (契約違反)', {
+      missing: missing.slice(),
+      file: typeof safeData.file === 'string' ? safeData.file : null,
+      contentLength: typeof safeData.content === 'string' ? safeData.content.length : null,
+      tocLength: typeof safeData.toc === 'string' ? safeData.toc.length : null
+    });
+  }
+
   if (pendingUpdateTimer) {
     clearTimeout(pendingUpdateTimer);
     pendingUpdateTimer = null;
@@ -1239,12 +1259,12 @@ function updateContent(data, options) {
   // 比較対象は contentEl の現在 HTML ではなく lastAppliedContent (キャッシュ変数)。
   // enhanceContentInteractions が描画後に DOM を改変するため DOM 比較は常に mismatch する。
   // 詳細は bootstrap.js の lastAppliedContent 宣言コメント参照。
-  if (data.content !== undefined && data.content !== lastAppliedContent) {
-    contentEl.innerHTML = data.content;
-    lastAppliedContent = data.content;
+  if (typeof safeData.content === 'string' && safeData.content !== lastAppliedContent) {
+    contentEl.innerHTML = safeData.content;
+    lastAppliedContent = safeData.content;
   }
-  if (data.toc !== undefined && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(data.toc)) {
-    tocEl.innerHTML = data.toc;
+  if (typeof safeData.toc === 'string' && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(safeData.toc)) {
+    tocEl.innerHTML = safeData.toc;
   }
 
   if (typeof setupTocTracking === 'function') {
@@ -1293,8 +1313,8 @@ function updateContent(data, options) {
   if (typeof hideQuoteSelectionAction === 'function') {
     hideQuoteSelectionAction();
   }
-  if (typeof rememberAppliedLiveUpdate === 'function') {
-    rememberAppliedLiveUpdate(data);
+  if (!hasContractViolation && typeof rememberAppliedLiveUpdate === 'function') {
+    rememberAppliedLiveUpdate(safeData);
   }
 }
 

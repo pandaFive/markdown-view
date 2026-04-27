@@ -4,7 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
-    updateContent: (data: { content: string; toc?: string }, opts: Record<string, unknown>) => void;
+    updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
+    scheduleBufferedLiveUpdate: (data: { content: string; toc: string }) => void;
   }
   // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
   function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
@@ -22,6 +23,10 @@ const longContent = [
   'Paragraph A2 content.',
   '',
   'Paragraph A3 content.',
+  '',
+  // 出典クリックのスクロール検証対象が初期 viewport 内に収まると scrollY が 0 のままになる。
+  // Section B を十分下げ、テスト前提である「同一ファイル内ジャンプでスクロールが発生する」を固定する。
+  ...Array.from({ length: 24 }, (_, index) => `Viewport filler before target ${index + 1}.`),
   '',
   '## Section B',
   '',
@@ -479,4 +484,177 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
     return h && h.classList.contains('jump-highlight');
   });
   expect(stillHighlighted).toBe(true);
+});
+
+test('updateContentはdata.content/toc欠落時に契約違反warnを出す', async ({ page }) => {
+  // beforeEach で /?file=long.md へ goto 済み
+  await expect(page.locator('#content h2').first()).toBeVisible();
+
+  const contractWarnings: { text: string; argsLength: number; context: unknown }[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', async (msg) => {
+    if (msg.type() !== 'warning') return;
+    if (!msg.text().includes('updateContent') || !msg.text().includes('契約違反')) return;
+    const args = msg.args();
+    contractWarnings.push({
+      text: msg.text(),
+      argsLength: args.length,
+      context: args.length > 1 ? await args[1].jsonValue() : null
+    });
+  });
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message);
+  });
+  const OK_CONTENT = '<p>ok</p>';
+  const OK_TOC = '<ul></ul>';
+  const contractWarningSuffix = ' (契約違反)';
+
+  // ケース 1: 正常呼び出し → warn は出ない
+  await page.evaluate(
+    ({ content, toc }) => {
+      window.updateContent({ content, toc }, {});
+    },
+    { content: OK_CONTENT, toc: OK_TOC }
+  );
+  expect(contractWarnings).toHaveLength(0);
+
+  // key欠落、null、data自体のnull/undefined、WSバッファ経路を網羅し、
+  // 契約違反がDOM更新と重複抑制でサイレント化しないことを検証する。
+  // ケース 2: content だけ欠落 → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
+    // 契約違反呼び出しを意図的に再現するため unknown 経由でキャストする
+    window.updateContent({ toc } as unknown as { content: string; toc: string }, {});
+  }, OK_TOC);
+
+  // ケース 3: toc だけ欠落 → 'toc が欠落または不正' warn
+  await page.evaluate((content) => {
+    window.updateContent({ content } as unknown as { content: string; toc: string }, {});
+  }, OK_CONTENT);
+
+  // ケース 4: content と toc 両方欠落 → 'content, toc が欠落または不正' warn
+  await page.evaluate(() => {
+    window.updateContent({} as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 5: content が null → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
+    window.updateContent(
+      { content: null, toc } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_TOC);
+
+  // ケース 6: toc が null → 'toc が欠落または不正' warn
+  await page.evaluate((content) => {
+    window.updateContent(
+      { content, toc: null } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_CONTENT);
+
+  // ケース 7: content が number → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
+    window.updateContent(
+      { content: 123, toc } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_TOC);
+
+  // ケース 8: data 自体が null → 'content, toc が欠落または不正' warn
+  await page.evaluate(() => {
+    window.updateContent(null as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 9: data 自体が undefined → 'content, toc が欠落または不正' warn
+  await page.evaluate(() => {
+    window.updateContent(undefined as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 10: 同じ全欠落 payload がWSバッファ経由で再度来ても warn される
+  await page.evaluate(() => {
+    window.scheduleBufferedLiveUpdate({} as unknown as { content: string; toc: string });
+  });
+
+  await expect.poll(() => contractWarnings.length).toBe(9);
+
+  const contractWarningSummaries = contractWarnings.map((w) => w.text.split(contractWarningSuffix)[0]);
+  expect(contractWarningSummaries).toEqual([
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: toc が欠落または不正',
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正'
+  ]);
+  expect(contractWarnings.map((w) => w.argsLength)).toEqual(Array(9).fill(2));
+  expect(contractWarnings.map((w) => w.context)).toEqual([
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['toc'], file: null, contentLength: OK_CONTENT.length, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['toc'], file: null, contentLength: OK_CONTENT.length, tocLength: null },
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null }
+  ]);
+  expect(pageErrors).toEqual([]);
+  await expect(page.locator('#content')).toBeVisible();
+  await expect(page.locator('#content')).not.toHaveText('null');
+  await expect(page.locator('#toc')).toBeAttached();
+});
+
+test('data.contentが変わるとupdateContentは再描画される (cache invariantの逆方向)', async ({ page }) => {
+  // beforeEach で /?file=long.md へ goto 済み
+  await expect(page.locator('#content h2').first()).toBeVisible();
+
+  // Step 1: 実 fetch で prime → lastAppliedContent に実 HTML を入れる。
+  // 既存テスト「同じdata.contentでの2回目...」と同形のエラーメッセージ prefix で識別性を維持。
+  const primeContentLen = await page.evaluate(async () => {
+    const res = await fetch('/api/content?file=long.md');
+    if (!res.ok) throw new Error('prime fetch failed: ' + res.status);
+    const data = await res.json();
+    if (typeof data.content !== 'string') throw new Error('prime data.content missing');
+    window.updateContent(data, {});
+    return data.content.length;
+  });
+  expect(primeContentLen).toBeGreaterThan(0);
+
+  // Step 2: 再描画 sentinel として .jump-highlight を付与
+  await page.evaluate(() => {
+    const h = document.querySelector('#content h2')!;
+    h.classList.add('jump-highlight');
+  });
+
+  // Step 3: ダミー HTML で updateContent → cache 不一致で再描画される
+  // toc も <ul></ul> を渡して契約違反 warn が出ないようにする
+  const DUMMY = '<h1 data-test-changed>changed content</h1>';
+  await page.evaluate((dummy) => {
+    window.updateContent({ content: dummy, toc: '<ul></ul>' }, {});
+  }, DUMMY);
+
+  const afterRerender = await page.evaluate(() => ({
+    highlighted: !!document.querySelector('#content .jump-highlight'),
+    hasDummy: !!document.querySelector('#content [data-test-changed]')
+  }));
+  expect(afterRerender.highlighted, 'cache 不一致時に再描画されず .jump-highlight が残存').toBe(false);
+  expect(afterRerender.hasDummy, 'ダミー HTML が反映されていない').toBe(true);
+
+  // Step 4: 再度 sentinel 付与 → 同一ダミー HTML で updateContent → cache 一致で no-op
+  // lastAppliedContent が新値で更新されたことの逆方向検証
+  await page.evaluate(() => {
+    const h = document.querySelector('#content [data-test-changed]')!;
+    h.classList.add('jump-highlight');
+  });
+  await page.evaluate((dummy) => {
+    window.updateContent({ content: dummy, toc: '<ul></ul>' }, {});
+  }, DUMMY);
+
+  const afterNoOp = await page.evaluate(() =>
+    !!document.querySelector('#content .jump-highlight')
+  );
+  expect(afterNoOp, 'cache 更新後の同一呼び出しが no-op にならず再描画された').toBe(true);
 });
