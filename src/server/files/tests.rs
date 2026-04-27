@@ -1520,7 +1520,7 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
         std::io::ErrorKind::PermissionDenied,
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
-    let state = make_test_app_state(mode, memo_fs);
+    let state = make_test_app_state(mode, memo_fs.clone());
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
     let saved = save_route_memo(
@@ -1533,6 +1533,10 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
     .expect("compat cleanup failure should be non-fatal");
 
     assert_eq!(saved.raw(), "new memo");
+    assert_eq!(
+        memo_fs.writes().await,
+        vec![(new_sidecar_path.clone(), b"new memo".to_vec())]
+    );
     assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
     assert!(compat_sidecar_path.exists());
 }

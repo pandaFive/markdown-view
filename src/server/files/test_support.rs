@@ -2,8 +2,6 @@
 //!
 //! [`TempWorkspace`] は tempdir + 権限戻しガードを提供する。
 
-#![cfg(test)]
-
 use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
