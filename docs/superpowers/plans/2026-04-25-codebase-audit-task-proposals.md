@@ -17,17 +17,19 @@
 
 ## 優先度 High（先に着手）
 
-- [ ] **memo 保存の permission/fallback 契約を再定義し、実装・テストを一致させる**
+- [x] **memo 保存の permission/fallback 契約を再定義し、実装・テストを一致させる**
   - 背景: 監査時点では `save_route_memo` 系ユニットで 6 件失敗していた。現在の `develop` では全体検証は通過しているため、着手時はまず契約の現状確認から始める。
   - 対象: `src/server/files/memo.rs`, `src/server/files/tests.rs`
+  - 対応: `docs/superpowers/specs/2026-04-28-memo-save-contract-redesign-design.md` で契約を固定し、fallback を読み込み専用移行経路に限定。保存は新 sidecar のみ、legacy/compat cleanup 失敗は best-effort として警告に統一した。
   - 完了条件:
     - fallback ルールを仕様としてコメント化（single-file と directory の差分含む）
     - permission エラー時の挙動を 1 つに決め、全関連テストをその仕様へ統一
     - root 実行時でも再現可能な失敗誘発手法（`chmod` 依存を減らす）へ更新
 
-- [ ] **`test_save_route_memo_*` の環境依存を排除（root 実行でも安定させる）**
+- [x] **`test_save_route_memo_*` の環境依存を排除（root 実行でも安定させる）**
   - 背景: 現在の `chmod 0o555` などは root では期待通り失敗せず、CI/ローカル差異を生みやすい。
   - 対象: `src/server/files/tests.rs`
+  - 対応: `MemoFs` / `MockMemoFs` を導入し、書込・削除・ディレクトリ作成の失敗を permission 変更ではなく依存注入で再現する形へ移行した。
   - 完了条件:
     - 書込失敗注入を filesystem permission ではなく、テストダブル/依存注入で制御
     - Linux/macOS/CI コンテナで同一結果を確認
@@ -97,8 +99,9 @@
 
 ## 追加で提案する「実装前タスク」
 
-- [ ] **memo 保存仕様の設計ノート作成（2〜3 ページ）**
+- [x] **memo 保存仕様の設計ノート作成（2〜3 ページ）**
   - fallback 優先順位、single/directory 差分、legacy cleanup 失敗時の扱いを表形式で固定
+  - 対応: `docs/superpowers/specs/2026-04-28-memo-save-contract-redesign-design.md` を作成済み
 - [ ] **テスト失敗分類ラベル運用**
   - `logic regression` / `environment-dependent` / `test assumption drift` を導入
 - [ ] **監視系テストの共通ユーティリティ整備**

@@ -1,9 +1,11 @@
 //! サーバー状態とモード判定を管理する。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
+use super::files::{MemoFs, TokioMemoFs};
 use super::messages::BroadcastMessage;
 use crate::renderer::syntax_theme_css;
 
@@ -197,12 +199,13 @@ impl AppMode {
 }
 
 /// サーバー共有状態
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     mode: AppMode,
     dark_mode: bool,
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
+    memo_fs: Arc<dyn MemoFs>,
 }
 
 impl AppState {
@@ -218,6 +221,7 @@ impl AppState {
             mode,
             dark_mode,
             tx,
+            memo_fs: Arc::new(TokioMemoFs),
         }
     }
 
@@ -239,6 +243,18 @@ impl AppState {
     /// broadcast送信チャネルを返す
     pub fn tx(&self) -> &broadcast::Sender<BroadcastMessage> {
         &self.tx
+    }
+
+    /// メモ保存・読み込みで使用するファイルシステム抽象を返す
+    pub(crate) fn memo_fs(&self) -> &Arc<dyn MemoFs> {
+        &self.memo_fs
+    }
+
+    /// テスト用にメモ用ファイルシステムを差し替える
+    #[cfg(test)]
+    pub(crate) fn with_memo_fs(mut self, memo_fs: Arc<dyn MemoFs>) -> Self {
+        self.memo_fs = memo_fs;
+        self
     }
 }
 

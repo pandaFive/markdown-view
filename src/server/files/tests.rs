@@ -1,7 +1,5 @@
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
@@ -15,6 +13,7 @@ use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
+use super::test_support::{make_test_app_state, MockMemoFs, Op, TempWorkspace};
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
 
@@ -755,6 +754,40 @@ async fn test_load_route_memo_旧メモルートがシンボリックリンク�
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_load_route_memo_新sidecarがシンボリックリンクなら拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("README.md");
+    fs::write(&file_path, "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    fs::write(outside_dir.path().join("memo.md"), "outside").unwrap();
+    symlink(
+        outside_dir.path().join("memo.md"),
+        dir.path().join(".README.md.memo.md"),
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("unsafe primary sidecar should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_新メモファイルがシンボリックリンクなら拒否する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
@@ -939,20 +972,28 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラーにする() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("README.md"), "# README").unwrap();
-    let sidecar_path = dir.path().join(".README.md.memo.md");
-    fs::write(&sidecar_path, "memo").unwrap();
-    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
-    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
-    fs::write(&legacy_path, "legacy memo").unwrap();
+async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    workspace
+        .write_file(Path::new("README.md"), "# README")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".README.md.memo.md");
+    workspace
+        .write_file(Path::new(".README.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/README.md"), "legacy memo")
+        .expect("legacy memo should be written");
 
-    let legacy_parent = legacy_path.parent().unwrap();
-    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let state = create_directory_state(dir.path());
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &legacy_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_directory(workspace.path()).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
     let result = save_route_memo(
@@ -963,85 +1004,88 @@ async fn test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラ
     )
     .await;
 
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
-
-    let (status, body) = result.expect_err("delete should fail when safe legacy cleanup fails");
+    let (status, body) = result.expect_err("safe legacy cleanup failure should be fatal");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
-    assert!(sidecar_path.exists());
+    assert!(!sidecar_path.exists());
     assert!(legacy_path.exists());
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("README.md"), "# README").unwrap();
-    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
-    let legacy_path = dir.path().join(".markdown-view/memos/README.md");
-    fs::write(&legacy_path, "legacy memo").unwrap();
-    let legacy_parent = legacy_path.parent().unwrap();
-    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
+async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("a\\b.md"), "# separator shaped")
+        .expect("target markdown should be written");
+    workspace
+        .write_file(Path::new(".a_b.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let compat_sidecar_path = workspace
+        .write_file(Path::new(".a\\b.md.memo.md"), "compat memo")
+        .expect("compat sidecar memo should be written");
 
-    let state = create_directory_state(dir.path());
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &compat_sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
-    let memo = save_route_memo(
+    let result = save_route_memo(
         &state,
         &target,
-        "updated memo".to_string(),
+        "   \n".to_string(),
         RouteTargetRequest::api_memo(None),
     )
-    .await
-    .expect("save should succeed before legacy cleanup");
+    .await;
 
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
-    let result = save_route_memo(
+    let (status, body) = result.expect_err("safe compat cleanup failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(compat_sidecar_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    workspace
+        .write_file(Path::new("README.md"), "# README")
+        .expect("target markdown should be written");
+    let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/README.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let sidecar_path = workspace.path().join(".README.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &legacy_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_directory(workspace.path()).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let saved = save_route_memo(
         &state,
         &target,
         "updated again".to_string(),
         RouteTargetRequest::api_memo(None),
     )
-    .await;
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
+    .await
+    .expect("legacy cleanup failure should be non-fatal");
 
-    assert_eq!(memo.raw(), "updated memo");
-    let saved = result.expect("legacy cleanup failure should be non-fatal");
     assert_eq!(saved.raw(), "updated again");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする() {
-    let dir = tempfile::tempdir().unwrap();
-    let docs_dir = dir.path().join("docs");
-    fs::create_dir_all(&docs_dir).unwrap();
-    fs::write(docs_dir.join("guide.md"), "# Guide").unwrap();
-    let original_mode = fs::metadata(&docs_dir).unwrap().permissions().mode();
-    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let state = create_directory_state(dir.path());
-    let target =
-        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("docs/guide.md"))).unwrap();
-
-    let result = save_route_memo(
-        &state,
-        &target,
-        "memo".to_string(),
-        RouteTargetRequest::api_memo(Some("docs/guide.md")),
-    )
-    .await;
-
-    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(original_mode)).unwrap();
-
-    let memo = result.expect("readonly subdir should fall back to legacy");
-    assert_eq!(memo.raw(), "memo");
-    assert!(!docs_dir.join(".guide.md.memo.md").exists());
-    assert!(dir
-        .path()
-        .join(".markdown-view/memos/docs/guide.md")
-        .exists());
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "updated again");
+    assert!(legacy_path.exists());
 }
 
 #[tokio::test]
@@ -1311,87 +1355,6 @@ async fn test_save_route_memo_旧形式backslash_sidecarを新形式へ移行す
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_旧形式backslash_sidecarは新形式作成不可なら既存compatへfallbackする()
-{
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("a\\b.md");
-    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
-    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
-    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
-    fs::write(&file_path, "# separator shaped").unwrap();
-    fs::write(&old_sidecar, "compat memo").unwrap();
-
-    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
-
-    let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
-
-    let result = save_route_memo(
-        &state,
-        &target,
-        "updated memo".to_string(),
-        RouteTargetRequest::api_memo(None),
-    )
-    .await;
-
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
-
-    let memo = result.expect("compat sidecar should remain writable fallback");
-    assert_eq!(memo.raw(), "updated memo");
-    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "updated memo");
-    assert!(!new_sidecar.exists());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_save_route_memo_既存compatが書込不可なら既存legacyへfallbackする() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("a\\b.md");
-    let old_sidecar = dir.path().join(".a\\b.md.memo.md");
-    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
-    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
-    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
-    fs::write(&file_path, "# separator shaped").unwrap();
-    fs::write(&old_sidecar, "compat memo").unwrap();
-    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    fs::write(&legacy_path, "legacy memo").unwrap();
-
-    let original_dir_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
-    let original_compat_mode = fs::metadata(&old_sidecar).unwrap().permissions().mode();
-    fs::set_permissions(&old_sidecar, fs::Permissions::from_mode(0o444)).unwrap();
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
-
-    let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
-
-    let result = save_route_memo(
-        &state,
-        &target,
-        "legacy fallback memo".to_string(),
-        RouteTargetRequest::api_memo(None),
-    )
-    .await;
-
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_dir_mode)).unwrap();
-    fs::set_permissions(
-        &old_sidecar,
-        fs::Permissions::from_mode(original_compat_mode),
-    )
-    .unwrap();
-
-    let memo = result.expect("unwritable compat should fall back to existing legacy");
-    assert_eq!(memo.raw(), "legacy fallback memo");
-    assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), "compat memo");
-    assert_eq!(
-        fs::read_to_string(&legacy_path).unwrap(),
-        "legacy fallback memo"
-    );
-    assert!(!new_sidecar.exists());
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形式を優先する() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("a\\b.md");
@@ -1414,14 +1377,167 @@ async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_単一ファイルモードではpermission_deniedでもlegacyへfallbackしない() {
+async fn test_load_route_memo_sidecar優先_compat_legacy両方存在しても新sidecarを返す() {
     let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("test.md");
-    fs::write(&file_path, "# test").unwrap();
-    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    let compat_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&new_sidecar, "new memo").unwrap();
+    fs::write(&compat_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
 
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+
+    let memo = load_route_memo(
+        &state,
+        &target,
+        RouteTargetRequest::api_memo(Some("a\\b.md")),
+    )
+    .await
+    .expect("new sidecar memo should win over compat and legacy");
+
+    assert_eq!(memo.raw(), "new memo");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let compat_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&compat_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+
+    let memo = load_route_memo(
+        &state,
+        &target,
+        RouteTargetRequest::api_memo(Some("a\\b.md")),
+    )
+    .await
+    .expect("compat sidecar memo should win over legacy");
+
+    assert_eq!(memo.raw(), "compat memo");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_sidecarがmetadata前に消えたらlegacyへフォールバックする() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar memo")
+        .expect("sidecar memo should be written");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Metadata, &sidecar_path, std::io::ErrorKind::NotFound);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("disappeared sidecar should fall back to legacy memo");
+
+    assert_eq!(memo.raw(), "legacy memo");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_sidecarがread中に消えたらlegacyへフォールバックする() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar memo")
+        .expect("sidecar memo should be written");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Read, &sidecar_path, std::io::ErrorKind::NotFound);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("disappeared sidecar should fall back to legacy memo");
+
+    assert_eq!(memo.raw(), "legacy memo");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_非utf8メモは422を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    fs::write(
+        workspace.path().join(".note.md.memo.md"),
+        [0xff, 0xfe, 0xfd],
+    )
+    .expect("non-utf8 memo sidecar should be written");
     let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("non-utf8 memo should be rejected");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモはUTF-8テキストである必要があります");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_全て不在なら空メモ() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("missing memo files should load as empty memo");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイルモードでpermission_deniedなら500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::Write,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
     let result = save_route_memo(
@@ -1432,9 +1548,100 @@ async fn test_save_route_memo_単一ファイルモードではpermission_denied
     )
     .await;
 
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
-
     let (status, body) = result.expect_err("single file mode should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_sidecar書込不可で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::Write,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar write failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_create_dir_all失敗で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_parent = workspace.path().to_path_buf();
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::CreateDirAll,
+        &sidecar_parent,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar parent creation failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn test_save_route_memo_disk_full系IO失敗で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Write, &sidecar_path, std::io::ErrorKind::Other);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar io failure should not fall back");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
@@ -1442,41 +1649,132 @@ async fn test_save_route_memo_単一ファイルモードではpermission_denied
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_単一ファイルモードでも既存legacyがあればpermission_denied時にfallbackする(
-) {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("test.md");
-    fs::write(&file_path, "# test").unwrap();
-    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
-    fs::write(
-        dir.path().join(".markdown-view/memos/test.md"),
-        "legacy memo",
-    )
-    .unwrap();
+async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("a\\b.md"), "# separator shaped")
+        .expect("target markdown should be written");
+    let compat_sidecar_path = workspace
+        .write_file(Path::new(".a\\b.md.memo.md"), "compat memo")
+        .expect("compat sidecar memo should be written");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar_path = workspace.path().join(new_sidecar_name.as_str());
 
-    let original_mode = fs::metadata(dir.path()).unwrap().permissions().mode();
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &compat_sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs.clone());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let saved = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("compat cleanup failure should be non-fatal");
+
+    assert_eq!(saved.raw(), "new memo");
+    assert_eq!(
+        memo_fs.writes().await,
+        vec![(new_sidecar_path.clone(), b"new memo".to_vec())]
+    );
+    assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
+    assert!(compat_sidecar_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_compatと新sidecarが同一パスならcleanupで削除しない() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_name = format!("{}\\tail-tail-tail.md", "a".repeat(229));
+    let file_path = workspace
+        .write_md(Path::new(&file_name), "# separator shaped")
+        .expect("target markdown should be written");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let compat_sidecar_name =
+        SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new(&file_name))
+            .expect("backslash name should have compat sidecar");
+    assert_eq!(new_sidecar_name.as_str(), compat_sidecar_name.as_str());
+    let new_sidecar_path = workspace.path().join(new_sidecar_name.as_str());
 
     let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let saved = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("same compat sidecar path should not delete active sidecar");
+
+    assert_eq!(saved.raw(), "new memo");
+    assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_空保存_sidecarが既にない場合は冪等的に200を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " \n\t ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("blank save without sidecar should be idempotent");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+    assert!(!sidecar_path.exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_空保存_sidecar削除失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
     let result = save_route_memo(
         &state,
         &target,
-        "updated memo".to_string(),
+        " \n\t ".to_string(),
         RouteTargetRequest::api_memo(None),
     )
     .await;
 
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
-
-    let memo = result.expect("existing legacy should remain writable fallback");
-    assert_eq!(memo.raw(), "updated memo");
-    assert_eq!(
-        fs::read_to_string(dir.path().join(".markdown-view/memos/test.md")).unwrap(),
-        "updated memo"
-    );
-    assert!(!dir.path().join(".test.md.memo.md").exists());
+    let (status, body) = result.expect_err("sidecar delete failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
 }
 
 #[tokio::test]
