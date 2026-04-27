@@ -23,6 +23,10 @@ const longContent = [
   '',
   'Paragraph A3 content.',
   '',
+  // 出典クリックのスクロール検証対象が初期 viewport 内に収まると scrollY が 0 のままになる。
+  // Section B を十分下げ、テスト前提である「同一ファイル内ジャンプでスクロールが発生する」を固定する。
+  ...Array.from({ length: 24 }, (_, index) => `Viewport filler before target ${index + 1}.`),
+  '',
   '## Section B',
   '',
   'Paragraph B1 content.',
