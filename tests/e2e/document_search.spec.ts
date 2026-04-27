@@ -8,7 +8,7 @@ declare global {
   // ブラウザ側バンドルで定義される変数・関数（page.evaluate 内で参照）
   var isDirMode: boolean;
   var currentFile: string;
-  function updateContent(data: { content: string; toc?: string }, opts?: Record<string, unknown>): void;
+  function updateContent(data: { content: string; toc: string }, opts?: Record<string, unknown>): void;
   function activateSidebarTab(tab: string): void;
   function applyDocumentSearchQuery(value: string): void;
   function moveDocumentSearch(direction: number): void;
