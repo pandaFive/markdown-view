@@ -3,6 +3,7 @@
 mod catalog;
 mod content;
 mod memo;
+mod memo_fs;
 mod memo_sidecar;
 mod resolve;
 mod search;
@@ -23,6 +24,7 @@ pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
 pub(in crate::server) use self::search::{search_directory, SearchResponse};
+pub(in crate::server) use self::memo_fs::{MemoFs, TokioMemoFs};
 
 #[cfg(test)]
 pub(in crate::server) use self::resolve::RouteTargetKind;
