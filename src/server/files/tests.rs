@@ -1392,6 +1392,28 @@ async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す(
 }
 
 #[tokio::test]
+async fn test_load_route_memo_非utf8メモは422を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    fs::write(
+        workspace.path().join(".note.md.memo.md"),
+        [0xff, 0xfe, 0xfd],
+    )
+    .expect("non-utf8 memo sidecar should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("non-utf8 memo should be rejected");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモはUTF-8テキストである必要があります");
+}
+
+#[tokio::test]
 async fn test_load_route_memo_全て不在なら空メモ() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace

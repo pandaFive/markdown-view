@@ -1,6 +1,6 @@
 //! memo 経路テストの共通基盤。
 //!
-//! [`TempWorkspace`] は tempdir + 権限戻しガードを提供する。
+//! [`TempWorkspace`] は tempdir ベースのワークスペースを提供する。
 
 use std::collections::HashMap;
 use std::io;
@@ -16,21 +16,15 @@ use crate::server::state::{AppMode, AppState};
 
 use super::memo_fs::{MemoFs, MemoReadError, TokioMemoFs};
 
-/// tempdir + 権限戻しガード付きワークスペース。
-///
-/// `Drop` で記録された権限を逆順に戻してから tempdir を削除する。
-/// `MockMemoFs` 経由のエラー注入を主な手段とするため、本来 `chmod` は使わないが、
-/// 万一テスト本体が権限を変更しても tempdir 削除がブロックされないよう保険として保持する。
+/// tempdir ベースのテスト用ワークスペース。
 pub(crate) struct TempWorkspace {
     dir: tempfile::TempDir,
-    permission_resets: Mutex<Vec<(PathBuf, std::fs::Permissions)>>,
 }
 
 impl TempWorkspace {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             dir: tempfile::tempdir()?,
-            permission_resets: Mutex::new(Vec::new()),
         })
     }
 
@@ -62,28 +56,6 @@ impl TempWorkspace {
     /// 拡張子を補わずに `.md` ファイルを書く糖衣
     pub fn write_md(&self, rel: &Path, content: &str) -> io::Result<PathBuf> {
         self.write_file(rel, content)
-    }
-
-    /// `Drop` で復元する権限を記録する（chmod を使う既存テスト互換用、将来的には未使用化を期待）
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    pub fn record_permissions(&self, path: &Path) -> io::Result<()> {
-        let perms = std::fs::metadata(path)?.permissions();
-        self.permission_resets
-            .lock()
-            .expect("permission_resets mutex poisoned")
-            .push((path.to_path_buf(), perms));
-        Ok(())
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        if let Ok(mut resets) = self.permission_resets.lock() {
-            while let Some((path, perms)) = resets.pop() {
-                let _ = std::fs::set_permissions(&path, perms);
-            }
-        }
     }
 }
 

@@ -104,11 +104,13 @@ PR #93 / コミット `1e2b568` 等で IO エラー透過の統合テストは�
 4. いずれも該当しない → `MemoResponse::empty(...)`
 
 各段階の `try_exists()` で IO エラーが出た場合 → `500 INTERNAL_SERVER_ERROR`。
-unsafe な path（シンボリックリンクを含む）は warn ログを残してスキップ（次の優先順位へ）。
+primary `sidecar` が unsafe な path（シンボリックリンクを含む）の場合は `403 FORBIDDEN`。
+移行用候補である `compat_sidecar` / `legacy` が unsafe な場合は warn ログを残してスキップ（次の優先順位へ）。
 
 ファイルが見つかった場合の読み込み処理:
 - `MemoFs::metadata` の長さが `MAX_FILE_SIZE` を超える → `413 PAYLOAD_TOO_LARGE`
-- `MemoFs::read` 後、再度長さチェック（TOCTOU 二段階）し、超過なら `413 PAYLOAD_TOO_LARGE`
+- `MemoFs::read_with_limit` で実読み取り量を制限し、TOCTOU 超過なら `413 PAYLOAD_TOO_LARGE`
+- `MemoFs::read_with_limit` 後、再度長さチェック（防御的な二段階確認）し、超過なら `413 PAYLOAD_TOO_LARGE`
 - UTF-8 デコード失敗 → `422 UNPROCESSABLE_ENTITY`
 - IO エラー → `500 INTERNAL_SERVER_ERROR`
 
@@ -218,18 +220,27 @@ use async_trait::async_trait;
 pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     async fn try_exists(&self, path: &Path) -> std::io::Result<bool>;
     async fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
-    async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError>;
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
     async fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()>;
     async fn remove_file(&self, path: &Path) -> std::io::Result<()>;
 }
 ```
 
+`MemoReadError`:
+
+| variant | 意味 | HTTP 変換 |
+|---------|------|-----------|
+| `Open(std::io::Error)` | ファイル open 失敗 | `500 INTERNAL_SERVER_ERROR` |
+| `Read(std::io::Error)` | 読み取り中 IO エラー | `500 INTERNAL_SERVER_ERROR` |
+| `TooLarge` | 実読み取り量が上限超過 | `413 PAYLOAD_TOO_LARGE` |
+
 設計ポイント:
 - `Send + Sync` 必須（`Arc` 共有・tokio タスク間移動のため）
 - `Debug` 必須（`AppState` の `#[derive(Debug)]` を保つため）
 - 6 メソッドで全 `tokio::fs::*` 呼び出しをカバー
-- TOCTOU 対策（`MAX_FILE_SIZE` の二段階チェック）は呼び出し側責務、trait はシステムコール抽象に専念
+- TOCTOU 対策の最終防衛として `read_with_limit` が実読み取り量を制限する
+- 呼び出し側は `metadata` と読み取り後長さ確認で HTTP 契約を決定する
 - `NotFound` 等の特殊エラーは呼び出し側で吸収。trait は素直にエラーを透過する
 
 ### 5.3 `TokioMemoFs`
@@ -246,8 +257,17 @@ impl MemoFs for TokioMemoFs {
     async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
         tokio::fs::metadata(path).await
     }
-    async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        tokio::fs::read(path).await
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(MemoReadError::Open)?;
+        read_bytes_with_limit(file).await.map_err(|error| match error {
+            ReadMarkdownError::Io(error) => MemoReadError::Read(error),
+            ReadMarkdownError::TooLarge => MemoReadError::TooLarge,
+            ReadMarkdownError::NotUtf8 => {
+                unreachable!("read_bytes_with_limit does not validate UTF-8")
+            }
+        })
     }
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
         tokio::fs::create_dir_all(path).await

@@ -67,10 +67,9 @@ impl MemoFs for TokioMemoFs {
             .map_err(|error| match error {
                 ReadMarkdownError::Io(error) => MemoReadError::Read(error),
                 ReadMarkdownError::TooLarge => MemoReadError::TooLarge,
-                ReadMarkdownError::NotUtf8 => MemoReadError::Read(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "bounded memo read returned UTF-8 validation error",
-                )),
+                ReadMarkdownError::NotUtf8 => {
+                    unreachable!("read_bytes_with_limit does not validate UTF-8")
+                }
             })
     }
 

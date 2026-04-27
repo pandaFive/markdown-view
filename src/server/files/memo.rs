@@ -239,10 +239,15 @@ async fn pick_existing_safe_path(
     fs: &dyn MemoFs,
 ) -> Result<Option<PathBuf>, ApiError> {
     if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
+        let action = match unsafe_path {
+            UnsafeMemoPath::Reject => "読み込みを拒否します",
+            UnsafeMemoPath::Skip => "読み込み候補から除外します",
+        };
         tracing::warn!(
-            "[markdown-view] {}unsafeな{}メモは読み込み候補から除外します ({}): {:?}",
+            "[markdown-view] {}unsafeな{}メモは{} ({}): {:?}",
             request.read_error_log_label(),
             label,
+            action,
             target.file_label(),
             error
         );
