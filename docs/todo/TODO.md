@@ -54,13 +54,13 @@
   - 対応: `try_relative_components(path, base) -> Option<impl Iterator<Component>>` 風のヘルパーを抽出し、呼び出し側は 1 回 match
   - 理由: 直前の watcher リファクタで隠し判定のロジックだけが旧形状のまま残っている
 
-- [ ] `updateContent` の inverse case (file-switch / data.content 変更時) の再描画検証
+- [x] `updateContent` の inverse case (file-switch / data.content 変更時) の再描画検証
   - ファイル: `tests/e2e/memo_jump.spec.js` (回帰テスト L429 周辺に Step 4 追加 or 別テスト)
   - 内容: 現状の回帰テストは「同一 data.content での 2 回目 no-op」のみ検証。**逆方向**である「data.content が変わったら必ず再描画される」を直接検証するテストが欠落
   - 想定実装: 既存 prime → highlight → 同一 no-op の後に Step 4 として、別の `data.content` 文字列 (例: ダミー HTML) を渡して `window.updateContent` を呼び、(a) `.jump-highlight` が消えている (= 再描画された) (b) その後同一の changed content で再度呼ぶと no-op (= cache が新値で更新された) の 2 点を検証
   - 理由: cache invariant が逆転した regression (条件が常に false 化する書き換え等) を現状の suite では検出できない
 
-- [ ] `updateContent` で `data.content === undefined` を契約違反として明示ログ
+- [x] `updateContent` で `data.content === undefined` を契約違反として明示ログ
   - ファイル: `src/template/assets/js/content.js` L1239 周辺
   - 内容: `UpdateMessage` (`src/template/message.rs`) は `content` / `toc` に `skip_serializing_if` を付けていないため `data.content` は **必ず** 存在するはずだが、現状は `undefined` を no-op で黙殺している。サーバ契約変更や中継プロキシ改変で content が欠落した場合「ファイル編集してもプレビュー更新されない」サイレント失敗になる
   - 想定実装: `data.content === undefined` の場合 `console.warn('[markdown-view] updateContent: data.content が欠落 (契約違反)', data);` を出し、TOC 更新等の副作用は継続
