@@ -480,3 +480,51 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
   });
   expect(stillHighlighted).toBe(true);
 });
+
+test('updateContentはdata.content/toc欠落時に契約違反warnを出す', async ({ page }) => {
+  // beforeEach で /?file=long.md へ goto 済み
+  await expect(page.locator('#content h2').first()).toBeVisible();
+
+  // page.on('console') で warn を蓄積。test 中の page.evaluate 内で起きた warn は
+  // Playwright 経由で配信されるため waitForTimeout で flush を待つ。
+  const warnings: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'warning') warnings.push(msg.text());
+  });
+
+  // ケース 1: 正常呼び出し → warn は出ない
+  await page.evaluate(() => {
+    window.updateContent({ content: '<p>ok</p>', toc: '<ul></ul>' }, {});
+  });
+
+  // ケース 2: content だけ欠落 → 'content が欠落' warn
+  await page.evaluate(() => {
+    // 契約違反呼び出しを意図的に再現するため unknown 経由でキャストする
+    window.updateContent({ toc: '<ul></ul>' } as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 3: toc だけ欠落 → 'toc が欠落' warn
+  await page.evaluate(() => {
+    window.updateContent({ content: '<p>ok</p>' } as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 4: content と toc 両方欠落 → 'content, toc が欠落' warn
+  await page.evaluate(() => {
+    window.updateContent({} as unknown as { content: string; toc: string }, {});
+  });
+
+  // console イベントは page → test runner へ非同期配信されるため flush を待つ
+  await page.waitForTimeout(50);
+
+  const contractWarnings = warnings.filter((w) =>
+    w.includes('updateContent') && w.includes('契約違反')
+  );
+  const contractWarningSummaries = contractWarnings.map((w) => w.split(' (契約違反)')[0]);
+
+  expect(contractWarnings).toHaveLength(3);
+  expect(contractWarningSummaries).toEqual([
+    '[markdown-view] updateContent: content が欠落',
+    '[markdown-view] updateContent: toc が欠落',
+    '[markdown-view] updateContent: content, toc が欠落'
+  ]);
+});
