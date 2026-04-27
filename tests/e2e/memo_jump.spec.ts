@@ -4,7 +4,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
-    updateContent: (data: { content: string; toc?: string }, opts: Record<string, unknown>) => void;
+    updateContent: (data: { content: string; toc: string }, opts: Record<string, unknown>) => void;
   }
   // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
   function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;

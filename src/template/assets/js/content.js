@@ -1225,6 +1225,18 @@ function normalizeTocHtml(html) {
 // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
 function updateContent(data, options) {
   options = options || {};
+
+  // UpdateMessage (src/template/message.rs) の content/toc には skip_serializing_if が
+  // 付いていないため、サーバー契約として両 field は常に存在する。欠落は中継プロキシ
+  // 改変やサーバー実装の契約違反のサインで、サイレントに no-op になるとデバッグ困難。
+  // warn を出した上で、TOC 更新等の既存副作用は早期 return せず継続する（部分回復ケース許容）。
+  var missing = [];
+  if (data.content === undefined) missing.push('content');
+  if (data.toc === undefined) missing.push('toc');
+  if (missing.length > 0) {
+    console.warn('[markdown-view] updateContent: ' + missing.join(', ') + ' が欠落 (契約違反)', data);
+  }
+
   if (pendingUpdateTimer) {
     clearTimeout(pendingUpdateTimer);
     pendingUpdateTimer = null;
