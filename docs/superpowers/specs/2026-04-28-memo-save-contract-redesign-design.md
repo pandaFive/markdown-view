@@ -55,7 +55,7 @@ PR #93 / コミット `1e2b568` 等で IO エラー透過の統合テストは�
 | Q2 | fallback 構造 | **A**: 完全廃止 / sidecar 一本化 |
 | Q3 | 読み込み・移行 | **A**: 読み込み 3 段（sidecar → compat_sidecar → legacy）、保存時に他形式 cleanup（暗黙移行） |
 | Q4 | DI 戦略 | **A**: `trait MemoFs` を memo モジュール内に閉じる |
-| Q5 | 空保存削除挙動 | **D**: sidecar は厳格（NotFound のみ緩和）、legacy/compat は緩和 |
+| Q5 | 空保存削除挙動 | **E**: safe な sidecar/compat/legacy は厳格（NotFound のみ緩和）、unsafe な compat/legacy はスキップ |
 | Q6 | 既存テスト移行 | **B**: 既存名・構造保持、内部のみ DI 化＋新仕様適合 |
 | Q7 | Process-3 範囲 | **B**: 本 spec で完全消化、共通ヘルパー集を整備 |
 
@@ -135,13 +135,13 @@ mode 別で観察可能な挙動の差分は **保存先・読み込み先の物
 | 操作 | sidecar | compat_sidecar | legacy |
 |------|---------|----------------|--------|
 | 保存（非空） | **書く** | 触らない（保存後 cleanup） | 触らない（保存後 cleanup） |
-| 保存（空） | 削除（NotFound 緩和） | 削除（best-effort、warn 緩和） | 削除（best-effort、warn 緩和） |
+| 保存（空） | 削除（NotFound 緩和、その他 IO は 500） | safe なら削除（NotFound 緩和、その他 IO は 500） | safe なら削除（NotFound 緩和、その他 IO は 500） |
 | 読み込み | 1 番目 | 2 番目 | 3 番目 |
 | unsafe path 検出時 | エラー（保存・読み込み共に拒否） | スキップ（次の優先順位へ） | スキップ（次の優先順位へ） |
 
-### 4.5 [Process-1] cleanup 失敗時挙動表
+### 4.5 [Process-1] cleanup / 削除失敗時挙動表
 
-`remove_file` 結果:
+空保存削除（4.1.2）の `remove_file` 結果:
 
 | 削除対象 | 結果 | HTTP | ログ |
 |---------|------|------|------|
@@ -149,18 +149,20 @@ mode 別で観察可能な挙動の差分は **保存先・読み込み先の物
 | sidecar | NotFound | 200 | **なし**（冪等性保証） |
 | sidecar | PermissionDenied / その他 IO | **500** | warn |
 | compat_sidecar | Ok / NotFound | 200 | なし |
-| compat_sidecar | PermissionDenied / その他 IO | 200 | warn |
+| compat_sidecar | PermissionDenied / その他 IO | **500** | warn |
 | legacy | Ok / NotFound | 200 | なし |
-| legacy | PermissionDenied / その他 IO | 200 | warn |
+| legacy | PermissionDenied / その他 IO | **500** | warn |
 
-`try_exists` が IO エラーを返した場合（cleanup 文脈、4.1.1 の旧形式 cleanup および 4.1.2 の compat / legacy 削除前のチェック）:
+通常保存（4.1.1）の旧形式 cleanup は best-effort。`remove_file` または cleanup 前の `try_exists` が IO エラーを返しても warn のみで 200 を返し、次回保存時に再試行される。
+
+`try_exists` が IO エラーを返した場合（4.1.1 の旧形式 cleanup 文脈のみ）:
 
 | 対象 | `try_exists` 結果 | HTTP | ログ | 備考 |
 |------|------------------|------|------|------|
 | compat_sidecar | IO エラー | 200 | warn | best-effort なので「不在扱い」で続行 |
 | legacy | IO エラー | 200 | warn | 同上 |
 
-**通常保存（4.1.1）と空保存（4.1.2）における sidecar 自身の `try_exists` チェックは行わない**（保存 = 直接 write、空保存 = 直接 remove_file で NotFound 緩和するため）。読み込み契約（4.2）の `try_exists` IO エラー扱い（500）はこの cleanup 表とは独立した別経路。
+**通常保存（4.1.1）と空保存（4.1.2）における sidecar 自身の `try_exists` チェックは行わない**（保存 = 直接 write、空保存 = 直接 remove_file で NotFound 緩和するため）。空保存（4.1.2）の compat / legacy 削除も直接 remove し、`try_exists` IO エラーを best-effort 化しない。読み込み契約（4.2）の `try_exists` IO エラー扱い（500）はこの cleanup 表とは独立した別経路。
 
 ### 4.6 [Process-1] 互換性破壊と移行
 
@@ -177,7 +179,8 @@ mode 別で観察可能な挙動の差分は **保存先・読み込み先の物
 
 - 既存の sidecar / compat_sidecar / legacy ファイルはそのまま読み込み続けられる
 - 一度でも保存すると、その瞬間 sidecar に書かれ、旧形式は cleanup される
-- cleanup 失敗（permission denied 等）は warn のみで 200 を返す。次回保存時に再試行されるが、再試行も失敗するなら旧ファイルは残る。読み込み時は sidecar が優先されるので UI 上の表示は新しい
+- 非空保存時の旧形式 cleanup 失敗（permission denied 等）は warn のみで 200 を返す。次回保存時に再試行されるが、再試行も失敗するなら旧ファイルは残る。読み込み時は sidecar が優先されるので UI 上の表示は新しい
+- 空保存削除時の safe な旧形式削除失敗は 500 を返す。削除できなかった旧ファイルが次回読み込みで再表示される挙動を避けるため、削除失敗を成功扱いにしない
 
 #### CLI / 外部 API
 
@@ -364,7 +367,6 @@ pub(crate) enum Op {
 impl MockMemoFs {
     pub fn new() -> Self { Self::default() }
     pub fn fail_at(&self, op: Op, path: impl Into<PathBuf>, kind: io::ErrorKind) -> &Self;
-    pub fn clear_failures(&self) -> &Self;
     pub async fn writes(&self) -> Vec<(PathBuf, Vec<u8>)>;
 }
 ```
@@ -373,14 +375,12 @@ impl MockMemoFs {
 - `inner: TokioMemoFs` への delegate により、大半のテストは実 tempdir 上で動く
 - `(Op, PathBuf)` キーで失敗注入。`chmod` に依存せず、Rust 側で「このパスへのこの操作は `PermissionDenied` を返す」と決定論的に制御
 - `write_observer` で「どのパスに何が書かれたか」を検証可能（暗黙移行や cleanup の挙動検証に必要）
-- `clear_failures()` でテスト間の汚染を防ぐ
 
 ### 6.2 共通ヘルパー
 
 ```rust
 pub(crate) struct TempWorkspace {
     dir: tempfile::TempDir,
-    permission_resets: Mutex<Vec<(PathBuf, std::fs::Permissions)>>,
 }
 
 impl TempWorkspace {
@@ -388,15 +388,6 @@ impl TempWorkspace {
     pub fn path(&self) -> &Path;
     pub fn write_file(&self, rel: &Path, content: &str) -> io::Result<PathBuf>;
     pub fn write_md(&self, rel: &Path, content: &str) -> io::Result<PathBuf>;
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        // permission_resets を逆順で復元してから tempdir を削除
-        // chmod 0o555 等の状態が残っていてもクリーンアップ可能にする
-        // （MockMemoFs 経由でエラー注入する設計なので chmod は本来使われないが、
-        //  念のため安全策として保持）
-    }
 }
 
 pub(crate) fn make_test_app_state(
@@ -418,7 +409,7 @@ pub(crate) fn make_test_app_state(
 | `test_save_route_memo_旧パスのみ存在する場合は新sidecarへ移行して保存する` | 維持（暗黙移行の核心テスト。`MockMemoFs::writes()` で書き込み履歴を検証） |
 | `test_save_route_memo_旧symlinkが残っていてもsidecar保存を継続できる` | 維持（unsafe legacy がスキップされる挙動） |
 | `test_save_route_memo_空白保存はunsafeなlegacyがあってもsidecar削除を優先する` | 維持（空保存削除挙動） |
-| `test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラーにする` | **挙動変更**: テスト名を `test_save_route_memo_空白保存_safe_legacy削除失敗は警告のみで200を返す` に変更し、新仕様（warn＋200）を検証 |
+| `test_save_route_memo_空白保存でsafe_legacy削除失敗ならエラーにする` | 維持（`test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す` として、新仕様の strict 500 を検証） |
 | `test_save_route_memo_保存成功後のlegacy削除失敗は成功扱いにする` | 維持（同じ挙動。`chmod` を `MockMemoFs::fail_at` に置換） |
 | `test_save_route_memo_書込不可サブディレクトリではlegacyへfallbackする` | **削除**（fallback 廃止）。代わりに 6.4 の新規テストでカバー |
 | `test_save_route_memo_長いファイル名でも短縮sidecarへ保存できる` | 維持 |

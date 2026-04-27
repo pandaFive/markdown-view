@@ -89,15 +89,6 @@ impl MockMemoFs {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn clear_failures(&self) -> &Self {
-        self.failures
-            .lock()
-            .expect("failures mutex poisoned")
-            .clear();
-        self
-    }
-
     pub async fn writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
         self.write_observer.lock().await.clone()
     }
