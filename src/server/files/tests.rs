@@ -754,6 +754,40 @@ async fn test_load_route_memo_旧メモルートがシンボリックリンク�
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_load_route_memo_新sidecarがシンボリックリンクなら拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("README.md");
+    fs::write(&file_path, "# README").unwrap();
+    fs::create_dir_all(dir.path().join(".markdown-view/memos")).unwrap();
+    fs::write(
+        dir.path().join(".markdown-view/memos/README.md"),
+        "legacy memo",
+    )
+    .unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    fs::write(outside_dir.path().join("memo.md"), "outside").unwrap();
+    symlink(
+        outside_dir.path().join("memo.md"),
+        dir.path().join(".README.md.memo.md"),
+    )
+    .unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("unsafe primary sidecar should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_新メモファイルがシンボリックリンクなら拒否する() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();

@@ -181,22 +181,52 @@ async fn resolve_active_memo_path(
     memo_paths: &MemoPaths,
     fs: &dyn MemoFs,
 ) -> Result<Option<PathBuf>, ApiError> {
-    if let Some(path) =
-        pick_existing_safe_path(state, target, request, &memo_paths.sidecar, "sidecar", fs).await?
+    if let Some(path) = pick_existing_safe_path(
+        state,
+        target,
+        request,
+        &memo_paths.sidecar,
+        "sidecar",
+        UnsafeMemoPath::Reject,
+        fs,
+    )
+    .await?
     {
         return Ok(Some(path));
     }
 
     if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
-        if let Some(path) =
-            pick_existing_safe_path(state, target, request, compat_sidecar, "互換sidecar", fs)
-                .await?
+        if let Some(path) = pick_existing_safe_path(
+            state,
+            target,
+            request,
+            compat_sidecar,
+            "互換sidecar",
+            UnsafeMemoPath::Skip,
+            fs,
+        )
+        .await?
         {
             return Ok(Some(path));
         }
     }
 
-    pick_existing_safe_path(state, target, request, &memo_paths.legacy, "legacy", fs).await
+    pick_existing_safe_path(
+        state,
+        target,
+        request,
+        &memo_paths.legacy,
+        "legacy",
+        UnsafeMemoPath::Skip,
+        fs,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum UnsafeMemoPath {
+    Reject,
+    Skip,
 }
 
 async fn pick_existing_safe_path(
@@ -205,6 +235,7 @@ async fn pick_existing_safe_path(
     request: RouteTargetRequest<'_>,
     path: &Path,
     label: &str,
+    unsafe_path: UnsafeMemoPath,
     fs: &dyn MemoFs,
 ) -> Result<Option<PathBuf>, ApiError> {
     if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
@@ -215,7 +246,10 @@ async fn pick_existing_safe_path(
             target.file_label(),
             error
         );
-        return Ok(None);
+        return match unsafe_path {
+            UnsafeMemoPath::Reject => Err(error),
+            UnsafeMemoPath::Skip => Ok(None),
+        };
     }
 
     match fs.try_exists(path).await {
