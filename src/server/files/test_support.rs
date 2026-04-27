@@ -10,7 +10,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
+
+use crate::server::messages::BroadcastMessage;
+use crate::server::state::{AppMode, AppState};
 
 use super::memo_fs::{MemoFs, MemoReadError, TokioMemoFs};
 
@@ -190,6 +194,14 @@ impl MemoFs for MockMemoFs {
 
         self.inner.remove_file(path).await
     }
+}
+
+/// テスト用 `AppState` を組み立てる。
+/// 既存の `create_*_state` ヘルパーは tests.rs 内に残置するが、
+/// 新仕様でメモ用 `MemoFs` を差し替えるテストは本ヘルパーを経由する。
+pub(crate) fn make_test_app_state(mode: AppMode, memo_fs: Arc<dyn MemoFs>) -> AppState {
+    let (tx, _rx) = broadcast::channel::<BroadcastMessage>(4);
+    AppState::new(mode, false, None, tx).with_memo_fs(memo_fs)
 }
 
 #[cfg(test)]
