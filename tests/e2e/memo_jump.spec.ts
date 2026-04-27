@@ -4,7 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
-    updateContent: (data: { content: string; toc: string }, opts: Record<string, unknown>) => void;
+    updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
+    scheduleBufferedLiveUpdate: (data: { content: string; toc: string }) => void;
   }
   // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
   function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
@@ -489,48 +490,121 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
   // beforeEach で /?file=long.md へ goto 済み
   await expect(page.locator('#content h2').first()).toBeVisible();
 
-  // page.on('console') で warn を蓄積。test 中の page.evaluate 内で起きた warn は
-  // Playwright 経由で配信されるため waitForTimeout で flush を待つ。
-  const warnings: string[] = [];
-  page.on('console', (msg) => {
-    if (msg.type() === 'warning') warnings.push(msg.text());
+  const contractWarnings: { text: string; argsLength: number; context: unknown }[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', async (msg) => {
+    if (msg.type() !== 'warning') return;
+    if (!msg.text().includes('updateContent') || !msg.text().includes('契約違反')) return;
+    const args = msg.args();
+    contractWarnings.push({
+      text: msg.text(),
+      argsLength: args.length,
+      context: args.length > 1 ? await args[1].jsonValue() : null
+    });
   });
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message);
+  });
+  const OK_CONTENT = '<p>ok</p>';
+  const OK_TOC = '<ul></ul>';
+  const contractWarningSuffix = ' (契約違反)';
 
   // ケース 1: 正常呼び出し → warn は出ない
-  await page.evaluate(() => {
-    window.updateContent({ content: '<p>ok</p>', toc: '<ul></ul>' }, {});
-  });
+  await page.evaluate(
+    ({ content, toc }) => {
+      window.updateContent({ content, toc }, {});
+    },
+    { content: OK_CONTENT, toc: OK_TOC }
+  );
+  expect(contractWarnings).toHaveLength(0);
 
-  // ケース 2: content だけ欠落 → 'content が欠落' warn
-  await page.evaluate(() => {
+  // key欠落、null、data自体のnull/undefined、WSバッファ経路を網羅し、
+  // 契約違反がDOM更新と重複抑制でサイレント化しないことを検証する。
+  // ケース 2: content だけ欠落 → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
     // 契約違反呼び出しを意図的に再現するため unknown 経由でキャストする
-    window.updateContent({ toc: '<ul></ul>' } as unknown as { content: string; toc: string }, {});
-  });
+    window.updateContent({ toc } as unknown as { content: string; toc: string }, {});
+  }, OK_TOC);
 
-  // ケース 3: toc だけ欠落 → 'toc が欠落' warn
-  await page.evaluate(() => {
-    window.updateContent({ content: '<p>ok</p>' } as unknown as { content: string; toc: string }, {});
-  });
+  // ケース 3: toc だけ欠落 → 'toc が欠落または不正' warn
+  await page.evaluate((content) => {
+    window.updateContent({ content } as unknown as { content: string; toc: string }, {});
+  }, OK_CONTENT);
 
-  // ケース 4: content と toc 両方欠落 → 'content, toc が欠落' warn
+  // ケース 4: content と toc 両方欠落 → 'content, toc が欠落または不正' warn
   await page.evaluate(() => {
     window.updateContent({} as unknown as { content: string; toc: string }, {});
   });
 
-  // console イベントは page → test runner へ非同期配信されるため flush を待つ
-  await page.waitForTimeout(50);
+  // ケース 5: content が null → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
+    window.updateContent(
+      { content: null, toc } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_TOC);
 
-  const contractWarnings = warnings.filter((w) =>
-    w.includes('updateContent') && w.includes('契約違反')
-  );
-  const contractWarningSummaries = contractWarnings.map((w) => w.split(' (契約違反)')[0]);
+  // ケース 6: toc が null → 'toc が欠落または不正' warn
+  await page.evaluate((content) => {
+    window.updateContent(
+      { content, toc: null } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_CONTENT);
 
-  expect(contractWarnings).toHaveLength(3);
+  // ケース 7: content が number → 'content が欠落または不正' warn
+  await page.evaluate((toc) => {
+    window.updateContent(
+      { content: 123, toc } as unknown as { content: string; toc: string },
+      {}
+    );
+  }, OK_TOC);
+
+  // ケース 8: data 自体が null → 'content, toc が欠落または不正' warn
+  await page.evaluate(() => {
+    window.updateContent(null as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 9: data 自体が undefined → 'content, toc が欠落または不正' warn
+  await page.evaluate(() => {
+    window.updateContent(undefined as unknown as { content: string; toc: string }, {});
+  });
+
+  // ケース 10: 同じ全欠落 payload がWSバッファ経由で再度来ても warn される
+  await page.evaluate(() => {
+    window.scheduleBufferedLiveUpdate({} as unknown as { content: string; toc: string });
+  });
+
+  await expect.poll(() => contractWarnings.length).toBe(9);
+
+  const contractWarningSummaries = contractWarnings.map((w) => w.text.split(contractWarningSuffix)[0]);
   expect(contractWarningSummaries).toEqual([
-    '[markdown-view] updateContent: content が欠落',
-    '[markdown-view] updateContent: toc が欠落',
-    '[markdown-view] updateContent: content, toc が欠落'
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: toc が欠落または不正',
+    '[markdown-view] updateContent: content が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正',
+    '[markdown-view] updateContent: content, toc が欠落または不正'
   ]);
+  expect(contractWarnings.map((w) => w.argsLength)).toEqual(Array(9).fill(2));
+  expect(contractWarnings.map((w) => w.context)).toEqual([
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['toc'], file: null, contentLength: OK_CONTENT.length, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['toc'], file: null, contentLength: OK_CONTENT.length, tocLength: null },
+    { missing: ['content'], file: null, contentLength: null, tocLength: OK_TOC.length },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null },
+    { missing: ['content', 'toc'], file: null, contentLength: null, tocLength: null }
+  ]);
+  expect(pageErrors).toEqual([]);
+  await expect(page.locator('#content')).toBeVisible();
+  await expect(page.locator('#content')).not.toHaveText('null');
+  await expect(page.locator('#toc')).toBeAttached();
 });
 
 test('data.contentが変わるとupdateContentは再描画される (cache invariantの逆方向)', async ({ page }) => {
