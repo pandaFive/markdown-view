@@ -1302,6 +1302,80 @@ async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_load_route_memo_sidecar優先_compat_legacy両方存在しても新sidecarを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar = dir.path().join(new_sidecar_name.as_str());
+    let compat_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&new_sidecar, "new memo").unwrap();
+    fs::write(&compat_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+
+    let memo = load_route_memo(
+        &state,
+        &target,
+        RouteTargetRequest::api_memo(Some("a\\b.md")),
+    )
+    .await
+    .expect("new sidecar memo should win over compat and legacy");
+
+    assert_eq!(memo.raw(), "new memo");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("a\\b.md");
+    let compat_sidecar = dir.path().join(".a\\b.md.memo.md");
+    let legacy_path = dir.path().join(".markdown-view/memos/a\\b.md");
+    fs::write(&file_path, "# separator shaped").unwrap();
+    fs::write(&compat_sidecar, "compat memo").unwrap();
+    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    fs::write(&legacy_path, "legacy memo").unwrap();
+
+    let state = create_directory_state(dir.path());
+    let target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+
+    let memo = load_route_memo(
+        &state,
+        &target,
+        RouteTargetRequest::api_memo(Some("a\\b.md")),
+    )
+    .await
+    .expect("compat sidecar memo should win over legacy");
+
+    assert_eq!(memo.raw(), "compat memo");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_全て不在なら空メモ() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("missing memo files should load as empty memo");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_単一ファイルモードでpermission_deniedなら500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
@@ -1328,6 +1402,194 @@ async fn test_save_route_memo_単一ファイルモードでpermission_deniedな
     .await;
 
     let (status, body) = result.expect_err("single file mode should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_sidecar書込不可で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::Write,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar write failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_create_dir_all失敗で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_parent = workspace.path().to_path_buf();
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::CreateDirAll,
+        &sidecar_parent,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar parent creation failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn test_save_route_memo_disk_full系IO失敗で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Write, &sidecar_path, std::io::ErrorKind::Other);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar io failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("a\\b.md"), "# separator shaped")
+        .expect("target markdown should be written");
+    let compat_sidecar_path = workspace
+        .write_file(Path::new(".a\\b.md.memo.md"), "compat memo")
+        .expect("compat sidecar memo should be written");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new("a\\b.md"));
+    let new_sidecar_path = workspace.path().join(new_sidecar_name.as_str());
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &compat_sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let saved = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("compat cleanup failure should be non-fatal");
+
+    assert_eq!(saved.raw(), "new memo");
+    assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
+    assert!(compat_sidecar_path.exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_空保存_sidecarが既にない場合は冪等的に200を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " \n\t ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("blank save without sidecar should be idempotent");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(memo.html().as_str(), "");
+    assert!(!sidecar_path.exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_空保存_sidecar削除失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        " \n\t ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("sidecar delete failure should be fatal");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
