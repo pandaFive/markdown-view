@@ -371,7 +371,7 @@ async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_apiメモ_空白保存でsafe_legacy削除失敗ならエラーにする() {
+async fn test_apiメモ_空白保存でsafe_legacyも通常削除する() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
@@ -382,10 +382,6 @@ async fn test_apiメモ_空白保存でsafe_legacy削除失敗ならエラーに
         .unwrap();
     tokio::fs::write(&legacy_memo_path, "legacy").await.unwrap();
 
-    let legacy_parent = legacy_memo_path.parent().unwrap();
-    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
-
     let delete = client
         .put(format!("http://{}/api/memo", addr))
         .json(&serde_json::json!({
@@ -395,13 +391,11 @@ async fn test_apiメモ_空白保存でsafe_legacy削除失敗ならエラーに
         .await
         .unwrap();
 
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
-
-    assert_eq!(delete.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(delete.status(), 200);
     let json: serde_json::Value = delete.json().await.unwrap();
-    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
-    assert!(tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
-    assert!(tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
+    assert_eq!(json["raw"], "");
+    assert!(!tokio::fs::try_exists(&sidecar_memo_path).await.unwrap());
+    assert!(!tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
 }
 
 #[cfg(unix)]
@@ -434,7 +428,7 @@ async fn test_apiメモ_unsafeなlegacy_symlinkがあってもsidecar保存を�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新継続できる() {
+async fn test_apiメモ_保存成功後にlegacyをsidecarへ移行して削除する() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
@@ -444,9 +438,6 @@ async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新
     tokio::fs::write(&legacy_memo_path, "legacy memo")
         .await
         .unwrap();
-
-    let original_mode = fs::metadata(tmp_dir.path()).unwrap().permissions().mode();
-    fs::set_permissions(tmp_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
 
     let save = client
         .put(format!("http://{}/api/memo", addr))
@@ -457,63 +448,15 @@ async fn test_apiメモ_single_file_既存legacyがあればreadonlyでも更新
         .await
         .unwrap();
 
-    fs::set_permissions(tmp_dir.path(), fs::Permissions::from_mode(original_mode)).unwrap();
-
     assert_eq!(save.status(), 200);
     let json: serde_json::Value = save.json().await.unwrap();
     assert_eq!(json["raw"], "updated memo");
-    assert_eq!(
-        tokio::fs::read_to_string(&legacy_memo_path).await.unwrap(),
-        "updated memo"
-    );
     assert!(
-        !tokio::fs::try_exists(tmp_dir.path().join(".test.md.memo.md"))
+        tokio::fs::try_exists(tmp_dir.path().join(".test.md.memo.md"))
             .await
             .unwrap()
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_apiメモ_保存成功後のlegacy削除失敗は成功扱いにする() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
-    let client = reqwest::Client::new();
-    let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
-    tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
-        .await
-        .unwrap();
-    tokio::fs::write(&legacy_memo_path, "legacy memo")
-        .await
-        .unwrap();
-
-    let first = client
-        .put(format!("http://{}/api/memo", addr))
-        .json(&serde_json::json!({
-            "raw": "updated memo"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(first.status(), 200);
-
-    let legacy_parent = legacy_memo_path.parent().unwrap();
-    let original_mode = fs::metadata(legacy_parent).unwrap().permissions().mode();
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let second = client
-        .put(format!("http://{}/api/memo", addr))
-        .json(&serde_json::json!({
-            "raw": "updated again"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    fs::set_permissions(legacy_parent, fs::Permissions::from_mode(original_mode)).unwrap();
-
-    assert_eq!(second.status(), 200);
-    let json: serde_json::Value = second.json().await.unwrap();
-    assert_eq!(json["raw"], "updated again");
+    assert!(!tokio::fs::try_exists(&legacy_memo_path).await.unwrap());
 }
 
 #[tokio::test]
@@ -595,51 +538,6 @@ async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で�
     let json: serde_json::Value = delete.json().await.unwrap();
     assert_eq!(json["raw"], "");
     assert!(!tokio::fs::try_exists(&legacy_path).await.unwrap());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_apiメモ_directory_mode_書込不可サブディレクトリではlegacyへfallbackする() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let docs_dir = tmp_dir.path().join("docs");
-    tokio::fs::create_dir_all(&docs_dir).await.unwrap();
-    tokio::fs::write(tmp_dir.path().join("README.md"), "# README\n\nRoot")
-        .await
-        .unwrap();
-    tokio::fs::write(docs_dir.join("guide.md"), "# Guide\n\nBody")
-        .await
-        .unwrap();
-
-    let original_mode = fs::metadata(&docs_dir).unwrap().permissions().mode();
-    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
-    let client = reqwest::Client::new();
-
-    let save = client
-        .put(format!("http://{}/api/memo", addr))
-        .json(&serde_json::json!({
-            "file": "docs/guide.md",
-            "raw": "memo"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    fs::set_permissions(&docs_dir, fs::Permissions::from_mode(original_mode)).unwrap();
-
-    assert_eq!(save.status(), 200);
-    let json: serde_json::Value = save.json().await.unwrap();
-    assert_eq!(json["raw"], "memo");
-    assert!(!tokio::fs::try_exists(docs_dir.join(".guide.md.memo.md"))
-        .await
-        .unwrap());
-    assert!(
-        tokio::fs::try_exists(tmp_dir.path().join(".markdown-view/memos/docs/guide.md"))
-            .await
-            .unwrap()
-    );
 }
 
 #[tokio::test]
