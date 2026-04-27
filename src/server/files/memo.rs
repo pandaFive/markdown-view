@@ -24,14 +24,12 @@ pub(in crate::server) async fn load_route_memo(
 ) -> Result<MemoResponse, ApiError> {
     let fs = state.memo_fs().as_ref();
     let memo_paths = memo_paths_for_target(state, target);
-    let Some(memo_path) = resolve_active_memo_path(state, target, request, &memo_paths, fs).await?
-    else {
+    let Some(raw) = read_active_memo_file(state, target, request, &memo_paths, fs).await? else {
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
         ));
     };
 
-    let raw = read_memo_file(&memo_path, target, request, fs).await?;
     Ok(MemoResponse::from_raw(
         raw,
         target.relative_path().map(ToOwned::to_owned),
@@ -174,14 +172,14 @@ pub(super) fn sidecar_parent_or_base(target_path: &Path, base_dir: &Path) -> Pat
         .unwrap_or_else(|| base_dir.to_path_buf())
 }
 
-async fn resolve_active_memo_path(
+async fn read_active_memo_file(
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
     fs: &dyn MemoFs,
-) -> Result<Option<PathBuf>, ApiError> {
-    if let Some(path) = pick_existing_safe_path(
+) -> Result<Option<String>, ApiError> {
+    if let Some(raw) = read_existing_safe_memo_file(
         state,
         target,
         request,
@@ -192,11 +190,11 @@ async fn resolve_active_memo_path(
     )
     .await?
     {
-        return Ok(Some(path));
+        return Ok(Some(raw));
     }
 
     if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
-        if let Some(path) = pick_existing_safe_path(
+        if let Some(raw) = read_existing_safe_memo_file(
             state,
             target,
             request,
@@ -207,11 +205,11 @@ async fn resolve_active_memo_path(
         )
         .await?
         {
-            return Ok(Some(path));
+            return Ok(Some(raw));
         }
     }
 
-    pick_existing_safe_path(
+    read_existing_safe_memo_file(
         state,
         target,
         request,
@@ -221,6 +219,24 @@ async fn resolve_active_memo_path(
         fs,
     )
     .await
+}
+
+async fn read_existing_safe_memo_file(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    path: &Path,
+    label: &str,
+    unsafe_path: UnsafeMemoPath,
+    fs: &dyn MemoFs,
+) -> Result<Option<String>, ApiError> {
+    let Some(path) =
+        pick_existing_safe_path(state, target, request, path, label, unsafe_path, fs).await?
+    else {
+        return Ok(None);
+    };
+
+    read_memo_file_if_present(&path, target, request, fs).await
 }
 
 #[derive(Clone, Copy)]
@@ -430,16 +446,17 @@ fn first_symlink_component(base_dir: &Path, target: &Path) -> Option<PathBuf> {
     None
 }
 
-async fn read_memo_file(
+async fn read_memo_file_if_present(
     memo_path: &Path,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     fs: &dyn MemoFs,
-) -> Result<String, ApiError> {
-    let metadata = fs
-        .metadata(memo_path)
-        .await
-        .map_err(|error| io_api_error(target, request, "メタデータ取得", error))?;
+) -> Result<Option<String>, ApiError> {
+    let metadata = match fs.metadata(memo_path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_api_error(target, request, "メタデータ取得", error)),
+    };
     if metadata.len() > MAX_FILE_SIZE {
         return Err(json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -447,17 +464,22 @@ async fn read_memo_file(
         ));
     }
 
-    let bytes = fs
-        .read_with_limit(memo_path)
-        .await
-        .map_err(|error| memo_read_error_to_api_error(target, request, error))?;
+    let bytes = match fs.read_with_limit(memo_path).await {
+        Ok(bytes) => bytes,
+        Err(MemoReadError::Open(error)) | Err(MemoReadError::Read(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(memo_read_error_to_api_error(target, request, error)),
+    };
     if bytes.len() as u64 > MAX_FILE_SIZE {
         return Err(json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "メモサイズが上限（10MB）を超えています",
         ));
     }
-    String::from_utf8(bytes).map_err(|error| {
+    String::from_utf8(bytes).map(Some).map_err(|error| {
         tracing::warn!(
             "[markdown-view] {}メモUTF-8デコード失敗 ({}): {}",
             request.read_error_log_label(),

@@ -115,6 +115,7 @@ primary `sidecar` が unsafe な path（シンボリックリンクを含む）�
 - `MemoFs::metadata` の長さが `MAX_FILE_SIZE` を超える → `413 PAYLOAD_TOO_LARGE`
 - `MemoFs::read_with_limit` で実読み取り量を制限し、TOCTOU 超過なら `413 PAYLOAD_TOO_LARGE`
 - `MemoFs::read_with_limit` 後、再度長さチェック（防御的な二段階確認）し、超過なら `413 PAYLOAD_TOO_LARGE`
+- `try_exists() == true` 後に `metadata` / `read_with_limit` が `NotFound` を返した場合 → その候補は消えたものとして次の優先順位へ進む（全候補が消えた場合は空メモ）
 - UTF-8 デコード失敗 → `422 UNPROCESSABLE_ENTITY`
 - IO エラー → `500 INTERNAL_SERVER_ERROR`
 

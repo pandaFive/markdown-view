@@ -1433,6 +1433,56 @@ async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す(
 }
 
 #[tokio::test]
+async fn test_load_route_memo_sidecarがmetadata前に消えたらlegacyへフォールバックする() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar memo")
+        .expect("sidecar memo should be written");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Metadata, &sidecar_path, std::io::ErrorKind::NotFound);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("disappeared sidecar should fall back to legacy memo");
+
+    assert_eq!(memo.raw(), "legacy memo");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_sidecarがread中に消えたらlegacyへフォールバックする() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar memo")
+        .expect("sidecar memo should be written");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(Op::Read, &sidecar_path, std::io::ErrorKind::NotFound);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("disappeared sidecar should fall back to legacy memo");
+
+    assert_eq!(memo.raw(), "legacy memo");
+}
+
+#[tokio::test]
 async fn test_load_route_memo_非utf8メモは422を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
