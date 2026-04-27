@@ -38,6 +38,7 @@ TODO #3 (`build_lagged_recovery_message` の IO エラー統合テスト) は本
 
 - `src/template/assets/js/content.js` への契約違反 warn ブロック追加（content と toc の両方を対称的にチェック）
 - `tests/e2e/memo_jump.spec.ts` への新規テスト 2 本追加
+- `tests/e2e/memo_jump.spec.ts:7` の `window.updateContent` 型宣言を `toc?: string`（optional）→ `toc: string`（required）へ修正（契約と一致させる）
 - `docs/todo/TODO.md` の該当 2 件を完了マーク
 
 ### Out of scope
@@ -127,21 +128,21 @@ TODO #3 (`build_lagged_recovery_message` の IO エラー統合テスト) は本
 | ファイル | 変更種別 | 内容 |
 |---|---|---|
 | `src/template/assets/js/content.js` | edit | `updateContent` 冒頭に契約違反 warn ブロックを追加（4.1） |
-| `tests/e2e/memo_jump.spec.ts` | edit | 新規テスト 2 本を末尾に追加（4.2, 4.3） |
+| `tests/e2e/memo_jump.spec.ts` | edit | (a) L7 の `window.updateContent` 型宣言を `toc?: string` → `toc: string` に修正 (b) 新規テスト 2 本を末尾に追加（4.2, 4.3） |
 | `docs/todo/TODO.md` | edit | 該当 2 件を `[x]` に更新 |
 
 ## 6. コミット計画
 
 squash merge 前提だが、レビュー時の差分整理のため小コミットで配信する。
 
-| # | type | コミットメッセージ |
-|---|---|---|
-| 1 | feat | `feat: updateContentにdata.content/toc欠落時の契約違反warnを追加` |
-| 2 | test | `test: updateContent契約違反warnのE2Eテストを追加` |
-| 3 | test | `test: updateContentのcache invariant逆方向 (再描画) E2Eテストを追加` |
-| 4 | chore | `chore: TODO.mdの完了項目を更新` |
+| # | type | コミットメッセージ | 含む変更 |
+|---|---|---|---|
+| 1 | feat | `feat: updateContentにdata.content/toc欠落時の契約違反warnを追加` | content.js の warn ブロック + memo_jump.spec.ts L7 の型宣言修正（`toc: string` 必須化） |
+| 2 | test | `test: updateContent契約違反warnのE2Eテストを追加` | warn 捕捉テスト（4.3） |
+| 3 | test | `test: updateContentのcache invariant逆方向 (再描画) E2Eテストを追加` | inverse case テスト（4.2） |
+| 4 | chore | `chore: TODO.mdの完了項目を更新` | TODO.md チェック |
 
-**コミット順の根拠**: 1 → 2 で「実装と直接の検証」を組にし、各 commit が単独で意味を持つ。3 は別目的（cache 不変条件の逆方向）なので独立。4 は最後。
+**コミット順の根拠**: 1 → 2 で「実装と直接の検証」を組にし、各 commit が単独で意味を持つ。型宣言修正は warn の契約強化と同じ意図なので 1 にまとめる。3 は別目的（cache 不変条件の逆方向）なので独立。4 は最後。
 
 ## 7. エッジケースとリスク
 
