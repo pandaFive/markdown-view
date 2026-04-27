@@ -1731,6 +1731,57 @@ async fn test_websocket_ioエラーでclose_frameが1011を返す() {
     fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する() {
+    // current_thread runtime 前提: tokio::test のデフォルト。flavor = "multi_thread" を
+    // 指定すると burst 中に session task が並走してしまい、決定的に Lagged を誘発できない。
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("lagged_io.md");
+    tokio::fs::write(&file_path, "# Before lagged")
+        .await
+        .unwrap();
+
+    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    // 初期 Update を消費。session task が rx.subscribe 済みかつ recv ループに入った
+    // ことの暗黙的バリアになる。
+    let _initial_message = next_ws_message(&mut read).await;
+
+    // recovery 実行中は chmod 0o000 が維持されている必要があるため、burst 直前で取得し
+    // assert 完了後に drop して権限復元する。
+    let Some(permission_guard) = make_file_unreadable(&file_path) else {
+        drop(tmp_dir);
+        return;
+    };
+
+    // burst 件数 = 容量 16 + 1 = 17。await を挟まず synchronous に発火することで、
+    // 受信タスクが起きる前にチャネルが overflow し、次の recv で Lagged(1) が確定する。
+    for _ in 0..17 {
+        state.tx().send(BroadcastMessage::Refresh).unwrap();
+    }
+
+    // 次フレームは Lagged → build_lagged_recovery_message → Io ReadFailed →
+    // BroadcastMessage::Error 経路で送出される
+    let msg = next_ws_message(&mut read).await;
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let error = json["error"].as_str().expect("errorフィールドが存在する");
+    assert_eq!(
+        error,
+        "ファイル読み込みエラー (lagged_io.md): ファイルの読み込みに失敗しました"
+    );
+
+    // 順序: assert 後に権限復元 → tempdir 自動 drop。recovery 実行中は guard 生存中で
+    // chmod 0o000 が維持されている必要がある。
+    drop(permission_guard);
+    drop(tmp_dir);
+}
+
 // ==============================
 // ヘルパー関数
 // ==============================
