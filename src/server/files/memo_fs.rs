@@ -9,10 +9,19 @@ use std::path::Path;
 
 use async_trait::async_trait;
 
+use super::content::{read_bytes_with_limit, ReadMarkdownError};
+
+#[derive(Debug)]
+pub(crate) enum MemoReadError {
+    Open(std::io::Error),
+    Read(std::io::Error),
+    TooLarge,
+}
+
 /// メモ保存先ファイルシステムの抽象。
 ///
-/// `MAX_FILE_SIZE` の二段階チェック等のドメイン責務は呼び出し側で行い、
-/// このトレイトはシステムコールの薄いラッパーに専念する。
+/// サイズ上限の事前チェック等のドメイン責務は呼び出し側で行い、
+/// 実読み取り量の上限は `read_with_limit` 側でも保証する。
 /// `NotFound` 等の特殊エラー処理も呼び出し側で吸収する。
 #[async_trait]
 pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
@@ -22,8 +31,8 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// メタデータ取得（サイズ制限の一段目チェック用）
     async fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
 
-    /// バイト列読み込み。サイズ制限は呼び出し側で再検証する（TOCTOU 二段目）。
-    async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    /// バイト列読み込み。TOCTOU 対策として実読み取り量を上限以下に制限する。
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError>;
 
     /// 親ディレクトリを再帰的に作成（既存ならエラーを返さない）
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
@@ -49,8 +58,20 @@ impl MemoFs for TokioMemoFs {
         tokio::fs::metadata(path).await
     }
 
-    async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        tokio::fs::read(path).await
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(MemoReadError::Open)?;
+        read_bytes_with_limit(file)
+            .await
+            .map_err(|error| match error {
+                ReadMarkdownError::Io(error) => MemoReadError::Read(error),
+                ReadMarkdownError::TooLarge => MemoReadError::TooLarge,
+                ReadMarkdownError::NotUtf8 => MemoReadError::Read(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bounded memo read returned UTF-8 validation error",
+                )),
+            })
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {

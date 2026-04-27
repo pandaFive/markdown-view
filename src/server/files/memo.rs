@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
-use super::content::{read_bytes_with_limit, ReadMarkdownError, MAX_FILE_SIZE};
+use super::content::MAX_FILE_SIZE;
+use super::memo_fs::{MemoFs, MemoReadError};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
@@ -21,9 +22,11 @@ pub(in crate::server) async fn load_route_memo(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
+    let fs = state.memo_fs().as_ref();
     let memo_paths = memo_paths_for_target(state, target);
-    let memo_path = resolve_active_memo_path(state, target, request, &memo_paths).await?;
-    if !tokio::fs::try_exists(&memo_path)
+    let memo_path = resolve_active_memo_path(state, target, request, &memo_paths, fs).await?;
+    if !fs
+        .try_exists(&memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
@@ -32,7 +35,7 @@ pub(in crate::server) async fn load_route_memo(
         ));
     }
 
-    let raw = read_memo_file(&memo_path, target, request).await?;
+    let raw = read_memo_file(&memo_path, target, request, fs).await?;
     Ok(MemoResponse::from_raw(
         raw,
         target.relative_path().map(ToOwned::to_owned),
@@ -46,14 +49,15 @@ pub(in crate::server) async fn save_route_memo(
     raw: String,
     request: RouteTargetRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
+    let fs = state.memo_fs().as_ref();
     let trimmed = raw.trim();
     let memo_paths = memo_paths_for_target(state, target);
     if trimmed.is_empty() {
-        delete_legacy_memo_if_safe_strict(state, target, request, &memo_paths.legacy).await?;
+        delete_legacy_memo_if_safe_strict(state, target, request, &memo_paths.legacy, fs).await?;
         ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-        delete_memo_file_if_exists(&memo_paths.sidecar, target, request).await?;
+        delete_memo_file_if_exists(&memo_paths.sidecar, target, request, fs).await?;
         if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
-            delete_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
+            delete_compat_sidecar_if_safe(state, target, request, compat_sidecar, fs).await?;
         }
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
@@ -67,31 +71,40 @@ pub(in crate::server) async fn save_route_memo(
         ));
     }
 
-    let save_target = choose_save_target(state, target, request, &memo_paths).await?;
+    let save_target = choose_save_target(state, target, request, &memo_paths, fs).await?;
     let memo_path = &memo_paths.sidecar;
     ensure_safe_memo_path(memo_path, state, target, request)?;
     if let Some(parent) = memo_path.parent() {
-        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+        if let Err(error) = fs.create_dir_all(parent).await {
             if let Some(fallback) = sidecar_fallback_for_error(save_target, &error) {
-                return save_memo_to_fallback(state, target, request, &memo_paths, fallback, raw)
-                    .await;
+                return save_memo_to_fallback(
+                    state,
+                    target,
+                    request,
+                    &memo_paths,
+                    fallback,
+                    raw,
+                    fs,
+                )
+                .await;
             }
             return Err(io_api_error(target, request, "ディレクトリ作成", error));
         }
     }
-    if let Err(error) = tokio::fs::write(memo_path, raw.as_bytes()).await {
+    if let Err(error) = fs.write(memo_path, raw.as_bytes()).await {
         if let Some(fallback) = sidecar_fallback_for_error(save_target, &error) {
-            return save_memo_to_fallback(state, target, request, &memo_paths, fallback, raw).await;
+            return save_memo_to_fallback(state, target, request, &memo_paths, fallback, raw, fs)
+                .await;
         }
         return Err(io_api_error(target, request, "保存", error));
     }
 
     if save_target.delete_legacy_after_save {
-        cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy).await?;
+        cleanup_legacy_memo_if_safe(state, target, request, &memo_paths.legacy, fs).await?;
     }
     if save_target.delete_compat_after_save {
         if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
-            cleanup_compat_sidecar_if_safe(state, target, request, compat_sidecar).await?;
+            cleanup_compat_sidecar_if_safe(state, target, request, compat_sidecar, fs).await?;
         }
     }
 
@@ -201,22 +214,24 @@ async fn resolve_active_memo_path(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
+    fs: &dyn MemoFs,
 ) -> Result<PathBuf, ApiError> {
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-    if tokio::fs::try_exists(&memo_paths.sidecar)
+    if fs
+        .try_exists(&memo_paths.sidecar)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
         return Ok(memo_paths.sidecar.clone());
     }
-    if compat_sidecar_exists(state, target, request, memo_paths).await? {
+    if compat_sidecar_exists(state, target, request, memo_paths, fs).await? {
         return Ok(memo_paths
             .compat_sidecar
             .clone()
             .expect("compat path exists"));
     }
 
-    match inspect_legacy_memo(state, target, request, &memo_paths.legacy).await? {
+    match inspect_legacy_memo(state, target, request, &memo_paths.legacy, fs).await? {
         LegacyMemoState::SafeExists => Ok(memo_paths.legacy.clone()),
         LegacyMemoState::SafeMissing | LegacyMemoState::Unsafe => Ok(memo_paths.sidecar.clone()),
     }
@@ -227,9 +242,11 @@ async fn choose_save_target(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
+    fs: &dyn MemoFs,
 ) -> Result<SaveTarget, ApiError> {
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
-    if tokio::fs::try_exists(&memo_paths.sidecar)
+    if fs
+        .try_exists(&memo_paths.sidecar)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))?
     {
@@ -239,8 +256,9 @@ async fn choose_save_target(
             delete_compat_after_save: false,
         });
     }
-    let compat_sidecar_exists = compat_sidecar_exists(state, target, request, memo_paths).await?;
-    let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy).await?;
+    let compat_sidecar_exists =
+        compat_sidecar_exists(state, target, request, memo_paths, fs).await?;
+    let legacy_state = inspect_legacy_memo(state, target, request, &memo_paths.legacy, fs).await?;
     if compat_sidecar_exists {
         return Ok(SaveTarget {
             fallback: if legacy_state == LegacyMemoState::SafeExists {
@@ -280,6 +298,7 @@ async fn compat_sidecar_exists(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     memo_paths: &MemoPaths,
+    fs: &dyn MemoFs,
 ) -> Result<bool, ApiError> {
     let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
         return Ok(false);
@@ -293,7 +312,7 @@ async fn compat_sidecar_exists(
         );
         return Ok(false);
     }
-    tokio::fs::try_exists(compat_sidecar)
+    fs.try_exists(compat_sidecar)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))
 }
@@ -302,8 +321,9 @@ async fn legacy_memo_exists(
     legacy_memo_path: &Path,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
+    fs: &dyn MemoFs,
 ) -> Result<bool, ApiError> {
-    tokio::fs::try_exists(legacy_memo_path)
+    fs.try_exists(legacy_memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "存在確認", error))
 }
@@ -313,6 +333,7 @@ async fn inspect_legacy_memo(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     legacy_memo_path: &Path,
+    fs: &dyn MemoFs,
 ) -> Result<LegacyMemoState, ApiError> {
     if let Err(error) = ensure_safe_memo_path(legacy_memo_path, state, target, request) {
         tracing::warn!(
@@ -324,7 +345,7 @@ async fn inspect_legacy_memo(
         return Ok(LegacyMemoState::Unsafe);
     }
 
-    if legacy_memo_exists(legacy_memo_path, target, request).await? {
+    if legacy_memo_exists(legacy_memo_path, target, request, fs).await? {
         Ok(LegacyMemoState::SafeExists)
     } else {
         Ok(LegacyMemoState::SafeMissing)
@@ -366,14 +387,15 @@ async fn save_memo_to_legacy(
     request: RouteTargetRequest<'_>,
     legacy_path: &Path,
     raw: String,
+    fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     ensure_safe_memo_path(legacy_path, state, target, request)?;
     if let Some(parent) = legacy_path.parent() {
-        tokio::fs::create_dir_all(parent)
+        fs.create_dir_all(parent)
             .await
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
-    tokio::fs::write(legacy_path, raw.as_bytes())
+    fs.write(legacy_path, raw.as_bytes())
         .await
         .map_err(|error| io_api_error(target, request, "保存", error))?;
 
@@ -390,10 +412,11 @@ async fn save_memo_to_fallback(
     memo_paths: &MemoPaths,
     fallback: SidecarFallback,
     raw: String,
+    fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     match fallback {
         SidecarFallback::Legacy => {
-            save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await
+            save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw, fs).await
         }
         SidecarFallback::Compat => {
             let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
@@ -402,11 +425,12 @@ async fn save_memo_to_fallback(
                     "メモファイルの操作に失敗しました",
                 ));
             };
-            save_memo_to_existing_compat(state, target, request, compat_sidecar, raw).await
+            save_memo_to_existing_compat(state, target, request, compat_sidecar, raw, fs).await
         }
         SidecarFallback::CompatThenLegacy => {
             let Some(compat_sidecar) = &memo_paths.compat_sidecar else {
-                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw).await;
+                return save_memo_to_legacy(state, target, request, &memo_paths.legacy, raw, fs)
+                    .await;
             };
             save_memo_to_existing_compat_or_legacy(
                 state,
@@ -415,6 +439,7 @@ async fn save_memo_to_fallback(
                 compat_sidecar,
                 &memo_paths.legacy,
                 raw,
+                fs,
             )
             .await
         }
@@ -432,9 +457,10 @@ async fn save_memo_to_existing_compat_or_legacy(
     compat_sidecar: &Path,
     legacy_path: &Path,
     raw: String,
+    fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     ensure_safe_memo_path(compat_sidecar, state, target, request)?;
-    match tokio::fs::write(compat_sidecar, raw.as_bytes()).await {
+    match fs.write(compat_sidecar, raw.as_bytes()).await {
         Ok(()) => Ok(MemoResponse::from_raw(
             raw,
             target.relative_path().map(ToOwned::to_owned),
@@ -443,7 +469,7 @@ async fn save_memo_to_existing_compat_or_legacy(
             if error.kind() == std::io::ErrorKind::PermissionDenied
                 || is_name_too_long_error(&error) =>
         {
-            save_memo_to_legacy(state, target, request, legacy_path, raw).await
+            save_memo_to_legacy(state, target, request, legacy_path, raw, fs).await
         }
         Err(error) => Err(io_api_error(target, request, "保存", error)),
     }
@@ -455,9 +481,10 @@ async fn save_memo_to_existing_compat(
     request: RouteTargetRequest<'_>,
     compat_sidecar: &Path,
     raw: String,
+    fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     ensure_safe_memo_path(compat_sidecar, state, target, request)?;
-    tokio::fs::write(compat_sidecar, raw.as_bytes())
+    fs.write(compat_sidecar, raw.as_bytes())
         .await
         .map_err(|error| io_api_error(target, request, "保存", error))?;
 
@@ -472,6 +499,7 @@ async fn cleanup_legacy_memo_if_safe(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     legacy_path: &Path,
+    fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
     if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
         tracing::warn!(
@@ -483,11 +511,11 @@ async fn cleanup_legacy_memo_if_safe(
         return Ok(());
     }
 
-    if !legacy_memo_exists(legacy_path, target, request).await? {
+    if !legacy_memo_exists(legacy_path, target, request, fs).await? {
         return Ok(());
     }
 
-    if let Err(error) = delete_memo_file_if_exists(legacy_path, target, request).await {
+    if let Err(error) = delete_memo_file_if_exists(legacy_path, target, request, fs).await {
         tracing::warn!(
             "[markdown-view] {}legacyメモcleanup失敗を無視します ({}): {:?}",
             request.read_error_log_label(),
@@ -503,8 +531,10 @@ async fn cleanup_compat_sidecar_if_safe(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     compat_sidecar: &Path,
+    fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
-    if let Err(error) = delete_compat_sidecar_if_safe(state, target, request, compat_sidecar).await
+    if let Err(error) =
+        delete_compat_sidecar_if_safe(state, target, request, compat_sidecar, fs).await
     {
         tracing::warn!(
             "[markdown-view] {}互換sidecarメモcleanup失敗を無視します ({}): {:?}",
@@ -521,6 +551,7 @@ async fn delete_compat_sidecar_if_safe(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     compat_sidecar: &Path,
+    fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
     if let Err(error) = ensure_safe_memo_path(compat_sidecar, state, target, request) {
         tracing::warn!(
@@ -531,7 +562,7 @@ async fn delete_compat_sidecar_if_safe(
         );
         return Ok(());
     }
-    delete_memo_file_if_exists(compat_sidecar, target, request).await
+    delete_memo_file_if_exists(compat_sidecar, target, request, fs).await
 }
 
 async fn delete_legacy_memo_if_safe_strict(
@@ -539,6 +570,7 @@ async fn delete_legacy_memo_if_safe_strict(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     legacy_path: &Path,
+    fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
     if let Err(error) = ensure_safe_memo_path(legacy_path, state, target, request) {
         tracing::warn!(
@@ -550,11 +582,11 @@ async fn delete_legacy_memo_if_safe_strict(
         return Ok(());
     }
 
-    if !legacy_memo_exists(legacy_path, target, request).await? {
+    if !legacy_memo_exists(legacy_path, target, request, fs).await? {
         return Ok(());
     }
 
-    delete_memo_file_if_exists(legacy_path, target, request).await
+    delete_memo_file_if_exists(legacy_path, target, request, fs).await
 }
 
 fn ensure_safe_memo_path(
@@ -599,8 +631,10 @@ async fn read_memo_file(
     memo_path: &Path,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
+    fs: &dyn MemoFs,
 ) -> Result<String, ApiError> {
-    let metadata = tokio::fs::metadata(memo_path)
+    let metadata = fs
+        .metadata(memo_path)
         .await
         .map_err(|error| io_api_error(target, request, "メタデータ取得", error))?;
     if metadata.len() > MAX_FILE_SIZE {
@@ -610,12 +644,16 @@ async fn read_memo_file(
         ));
     }
 
-    let file = tokio::fs::File::open(memo_path)
+    let bytes = fs
+        .read_with_limit(memo_path)
         .await
-        .map_err(|error| io_api_error(target, request, "読込", error))?;
-    let bytes = read_bytes_with_limit(file)
-        .await
-        .map_err(|error| read_error_to_api_error(target, request, error))?;
+        .map_err(|error| memo_read_error_to_api_error(target, request, error))?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        return Err(json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "メモサイズが上限（10MB）を超えています",
+        ));
+    }
     String::from_utf8(bytes).map_err(|error| {
         tracing::warn!(
             "[markdown-view] {}メモUTF-8デコード失敗 ({}): {}",
@@ -634,8 +672,9 @@ async fn delete_memo_file_if_exists(
     memo_path: &Path,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
+    fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
-    match tokio::fs::remove_file(memo_path).await {
+    match fs.remove_file(memo_path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_api_error(target, request, "削除", error)),
@@ -661,10 +700,10 @@ fn io_api_error(
     )
 }
 
-fn read_error_to_api_error(
+fn read_io_api_error(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
-    error: ReadMarkdownError,
+    error: std::io::Error,
 ) -> ApiError {
     tracing::warn!(
         "[markdown-view] {}メモ読み込みエラー ({}): {}",
@@ -672,18 +711,23 @@ fn read_error_to_api_error(
         target.file_label(),
         error
     );
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "メモファイルの読み込みに失敗しました",
+    )
+}
+
+fn memo_read_error_to_api_error(
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    error: MemoReadError,
+) -> ApiError {
     match error {
-        ReadMarkdownError::TooLarge => json_error(
+        MemoReadError::Open(error) => io_api_error(target, request, "読込", error),
+        MemoReadError::Read(error) => read_io_api_error(target, request, error),
+        MemoReadError::TooLarge => json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "メモサイズが上限（10MB）を超えています",
-        ),
-        ReadMarkdownError::NotUtf8 => json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "メモはUTF-8テキストである必要があります",
-        ),
-        ReadMarkdownError::Io(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "メモファイルの読み込みに失敗しました",
         ),
     }
 }
