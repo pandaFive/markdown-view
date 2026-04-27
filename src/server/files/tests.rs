@@ -972,7 +972,7 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_空白保存_safe_legacy削除失敗は警告のみで200を返す() {
+async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     workspace
         .write_file(Path::new("README.md"), "# README")
@@ -996,18 +996,59 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は警告の�
     let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
 
-    let memo = save_route_memo(
+    let result = save_route_memo(
         &state,
         &target,
         "   \n".to_string(),
         RouteTargetRequest::api_memo(None),
     )
-    .await
-    .expect("safe legacy cleanup failure should be non-fatal");
+    .await;
 
-    assert_eq!(memo.raw(), "");
+    let (status, body) = result.expect_err("safe legacy cleanup failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
     assert!(!sidecar_path.exists());
     assert!(legacy_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("a\\b.md"), "# separator shaped")
+        .expect("target markdown should be written");
+    workspace
+        .write_file(Path::new(".a_b.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let compat_sidecar_path = workspace
+        .write_file(Path::new(".a\\b.md.memo.md"), "compat memo")
+        .expect("compat sidecar memo should be written");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::RemoveFile,
+        &compat_sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("safe compat cleanup failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(compat_sidecar_path.exists());
 }
 
 #[cfg(unix)]
@@ -1595,6 +1636,37 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
     );
     assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
     assert!(compat_sidecar_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_compatと新sidecarが同一パスならcleanupで削除しない() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_name = format!("{}\\tail-tail-tail.md", "a".repeat(229));
+    let file_path = workspace
+        .write_md(Path::new(&file_name), "# separator shaped")
+        .expect("target markdown should be written");
+    let new_sidecar_name = SidecarMemoName::from_file_name(std::ffi::OsStr::new(&file_name));
+    let compat_sidecar_name =
+        SidecarMemoName::compat_from_file_name(std::ffi::OsStr::new(&file_name))
+            .expect("backslash name should have compat sidecar");
+    assert_eq!(new_sidecar_name.as_str(), compat_sidecar_name.as_str());
+    let new_sidecar_path = workspace.path().join(new_sidecar_name.as_str());
+
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let saved = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("same compat sidecar path should not delete active sidecar");
+
+    assert_eq!(saved.raw(), "new memo");
+    assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
 }
 
 #[tokio::test]

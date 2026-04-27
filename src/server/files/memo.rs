@@ -93,8 +93,8 @@ async fn delete_route_memo(
         Err(error) => return Err(io_api_error(target, request, "削除", error)),
     }
 
-    cleanup_compat_sidecar_best_effort(state, target, request, memo_paths, fs).await;
-    cleanup_legacy_memo_best_effort(state, target, request, &memo_paths.legacy, fs).await;
+    cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
+    cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
 
     Ok(MemoResponse::empty(
         target.relative_path().map(ToOwned::to_owned),
@@ -272,9 +272,29 @@ async fn cleanup_compat_sidecar_best_effort(
     fs: &dyn MemoFs,
 ) {
     if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
+        if compat_sidecar == &memo_paths.sidecar {
+            return;
+        }
         cleanup_memo_path_best_effort(state, target, request, compat_sidecar, "互換sidecar", fs)
             .await;
     }
+}
+
+async fn cleanup_compat_sidecar_required(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    memo_paths: &MemoPaths,
+    fs: &dyn MemoFs,
+) -> Result<(), ApiError> {
+    if let Some(compat_sidecar) = &memo_paths.compat_sidecar {
+        if compat_sidecar == &memo_paths.sidecar {
+            return Ok(());
+        }
+        cleanup_memo_path_required(state, target, request, compat_sidecar, "互換sidecar", fs)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn cleanup_legacy_memo_best_effort(
@@ -285,6 +305,16 @@ async fn cleanup_legacy_memo_best_effort(
     fs: &dyn MemoFs,
 ) {
     cleanup_memo_path_best_effort(state, target, request, legacy_path, "legacy", fs).await;
+}
+
+async fn cleanup_legacy_memo_required(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    legacy_path: &Path,
+    fs: &dyn MemoFs,
+) -> Result<(), ApiError> {
+    cleanup_memo_path_required(state, target, request, legacy_path, "legacy", fs).await
 }
 
 async fn cleanup_memo_path_best_effort(
@@ -333,6 +363,32 @@ async fn cleanup_memo_path_best_effort(
                 error
             );
         }
+    }
+}
+
+async fn cleanup_memo_path_required(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    path: &Path,
+    label: &str,
+    fs: &dyn MemoFs,
+) -> Result<(), ApiError> {
+    if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
+        tracing::warn!(
+            "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
+            request.read_error_log_label(),
+            label,
+            target.file_label(),
+            error
+        );
+        return Ok(());
+    }
+
+    match fs.remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_api_error(target, request, "cleanup削除", error)),
     }
 }
 

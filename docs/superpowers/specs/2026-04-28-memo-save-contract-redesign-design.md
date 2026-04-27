@@ -77,7 +77,7 @@ PR #93 / コミット `1e2b568` 等で IO エラー透過の統合テストは�
 2. `MemoFs::create_dir_all(sidecar.parent())` 失敗 → `500 INTERNAL_SERVER_ERROR`
 3. `MemoFs::write(sidecar, raw)` 失敗 → `500 INTERNAL_SERVER_ERROR`
 4. 書き込み成功後、旧形式 cleanup を best-effort で実行:
-   - `compat_sidecar` が存在し safe なら `MemoFs::remove_file` を試行（失敗は warn のみ、200 を返す）
+   - `compat_sidecar` が存在し safe かつ `sidecar` と別パスなら `MemoFs::remove_file` を試行（失敗は warn のみ、200 を返す）
    - `legacy` が存在し safe なら `MemoFs::remove_file` を試行（失敗は warn のみ、200 を返す）
 5. `200 OK` ＋ `MemoResponse::from_raw(raw, ...)`
 
@@ -90,8 +90,12 @@ PR #93 / コミット `1e2b568` 等で IO エラー透過の統合テストは�
    - `Ok(())` → 続行
    - `Err(NotFound)` → 続行（**冪等性のため warn なし、ログなし**）
    - `Err(他 IO エラー)` → `500 INTERNAL_SERVER_ERROR`（**sidecar 削除は厳格**）
-3. `compat_sidecar` が存在し safe なら `MemoFs::remove_file` を試行（失敗は warn のみ、200 を返す）
-4. `legacy` が存在し safe なら `MemoFs::remove_file` を試行（失敗は warn のみ、200 を返す）
+3. `compat_sidecar` が存在し safe かつ `sidecar` と別パスなら `MemoFs::remove_file` を試行:
+   - `Ok(())` / `Err(NotFound)` → 続行
+   - `Err(他 IO エラー)` → `500 INTERNAL_SERVER_ERROR`
+4. `legacy` が存在し safe なら `MemoFs::remove_file` を試行:
+   - `Ok(())` / `Err(NotFound)` → 続行
+   - `Err(他 IO エラー)` → `500 INTERNAL_SERVER_ERROR`
 5. `200 OK` ＋ `MemoResponse::empty(...)`
 
 ### 4.2 読み込み契約 `load_route_memo`
