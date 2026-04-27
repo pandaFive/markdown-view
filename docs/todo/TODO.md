@@ -77,7 +77,7 @@
   - 対応: ファイル更新を watcher に拾わせて chmod 0o000 → notify のシーケンスで change 経路を刺激
   - 理由: 初期化 / 変更経路で同じ `ReadMarkdownError` の扱いが分かれており、一つの経路のリファクタで他経路が silent に壊れる可能性がある
 
-- [ ] `build_lagged_recovery_message` の IO エラー透過を統合テストでカバー
+- [x] `build_lagged_recovery_message` の IO エラー透過を統合テストでカバー
   - ファイル: `tests/integration_test.rs`
   - 対応: `broadcast::channel(1)` の飽和などで lag recovery を意図的に発生させる必要があり、再現性が低いため将来の宿題
   - 理由: 遅延回復経路でも `ReadMarkdownError` が `BroadcastMessage::Error(format!("..."))` に畳み込まれるため、リファクタ時の回帰を検知したい
