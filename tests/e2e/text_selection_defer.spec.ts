@@ -537,9 +537,13 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await dispatchWsMessage(page, await page.evaluate(() => {
+  await page.evaluate(() => {
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    return {
+    const dispatchMessage = window.__dispatchWsMessage;
+    if (!dispatchMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchMessage({
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -553,10 +557,12 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
         '<li><a href="#beta">Beta</a></li>' +
         '</ul>',
       file: 'README.md'
-    };
-  }));
-  await page.evaluate(() => {
-    window.scrollTo(0, document.getElementById('beta')!.getBoundingClientRect().top + window.scrollY);
+    });
+    const beta = document.getElementById('beta');
+    if (!beta) {
+      throw new Error('beta heading not found');
+    }
+    window.scrollTo(0, beta.getBoundingClientRect().top + window.scrollY);
   });
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
