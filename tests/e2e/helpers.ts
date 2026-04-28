@@ -11,6 +11,7 @@ export type ResetStandardFixturesOptions = {
 };
 
 export async function resetStandardFixtures(options: ResetStandardFixturesOptions = {}) {
+  // memo artifact の掃除漏れを防ぐため、必要な spec だけ false で opt-out する。
   if (options.cleanupMemoArtifacts ?? true) {
     const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
     await Promise.all(entries
@@ -182,6 +183,8 @@ export async function dispatchWsMessage(page: Page, payload: unknown) {
   }, payload);
 }
 
+// text_selection_defer のフォールバック検証用。
+// 偽メッセージ送信と実 handler 無効化を同じ browser step に閉じ込める。
 export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
     const dispatchMessage = window.__dispatchWsMessage;
