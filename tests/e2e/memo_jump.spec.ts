@@ -301,14 +301,58 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
 test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
   // ユーザー自作メモでリンク直後に行番号から始まる散文（`L10 onwards は詳しい` 等）が続く場合、
   // sibling textContent 全体が行番号トークンのみで占められないため augment しない。
-  // 旧 regex（末尾アンカーなし）は先頭 `L10` を拾って `#intro:L10` に誤書換していた既知の
-  // false positive を回帰させないことを担保（Codex review #4136142343 の再発防止）
+  // 旧 regex（末尾アンカーなし）は先頭 `L10` だけを拾って `#intro:L10` に誤書換していたため、
+  // sibling 全体が行番号トークンだけで構成されることを固定する。
   const result = await page.evaluate(() => {
     const container = document.getElementById('memo-preview')!;
     const link = document.createElement('a');
     link.href = '?file=spec.md#intro';
     link.textContent = 'spec';
     const lineHint = document.createTextNode(' L10 onwards は詳しい説明');
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return augmentHashWithTrailingLineHint(link, '#intro');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+  expect(result).toBe('#intro');
+});
+
+test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent から行番号を補完する', async ({ page }) => {
+  // renderer が旧形式メモの行番号テキストを span 等でラップしても、link.nextSibling の
+  // textContent から `L<n>` を読み、TEXT_NODE と同じ hash 補完を行うことを固定する。
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=long.md#section-b';
+    link.textContent = 'dummy';
+    const lineHint = document.createElement('span');
+    lineHint.textContent = ' L15';
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return augmentHashWithTrailingLineHint(link, '#section-b');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+  expect(result).toBe('#section-b:L15');
+});
+
+test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の散文を行番号扱いしない', async ({ page }) => {
+  // ELEMENT_NODE 経路でも TEXT_NODE と同じく、sibling textContent 全体が行番号トークン
+  // のみで構成されない散文は augment 対象にしないことを固定する。
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=spec.md#intro';
+    link.textContent = 'spec';
+    const lineHint = document.createElement('span');
+    lineHint.textContent = ' L10 onwards は詳しい説明';
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
