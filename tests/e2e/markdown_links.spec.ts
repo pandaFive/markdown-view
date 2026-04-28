@@ -2,15 +2,20 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 
-declare global {
-  interface Window {
-    __clickObservations: Record<string, { defaultPrevented: boolean }>;
-  }
-}
-
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
 const notesPath = path.join(fixtureDir, 'notes.md');
+
+function requireClickObservation(
+  results: Record<string, MvE2E.ClickObservation> | undefined,
+  href: string
+): MvE2E.ClickObservation {
+  const observation = results?.[href];
+  if (!observation) {
+    throw new Error(`click observation not found: ${href}`);
+  }
+  return observation;
+}
 
 async function resetFixtures() {
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
@@ -211,10 +216,11 @@ test('別ファイルの壊れたフラグメントリンクでは対象文書�
 async function installClickObserver(page: Page) {
   await page.evaluate(() => {
     window.__clickObservations = {};
+    const clickObservations = window.__clickObservations;
     window.addEventListener('click', function(event) {
       const link = (event.target as HTMLElement | null)?.closest('a[href]');
       if (!link) return;
-      window.__clickObservations[link.getAttribute('href')!] = {
+      clickObservations[link.getAttribute('href')!] = {
         defaultPrevented: event.defaultPrevented
       };
       event.preventDefault();
@@ -235,8 +241,8 @@ test('外部スキームのリンクはSPA内遷移されない', async ({ page 
   await page.locator('#content a[href="mailto:foo@example.com"]').click();
 
   var results = await page.evaluate(() => window.__clickObservations);
-  expect(results['https://example.com/foo.md'].defaultPrevented).toBe(false);
-  expect(results['mailto:foo@example.com'].defaultPrevented).toBe(false);
+  expect(requireClickObservation(results, 'https://example.com/foo.md').defaultPrevented).toBe(false);
+  expect(requireClickObservation(results, 'mailto:foo@example.com').defaultPrevented).toBe(false);
   await expect(page).toHaveURL(/file=README\.md$/);
 });
 
@@ -252,7 +258,7 @@ test('非Markdown拡張子の相対リンクはSPA内遷移されない', async 
   await page.locator('#content a[href="report.pdf"]').click();
 
   var results = await page.evaluate(() => window.__clickObservations);
-  expect(results['report.pdf'].defaultPrevented).toBe(false);
+  expect(requireClickObservation(results, 'report.pdf').defaultPrevented).toBe(false);
   await expect(page).toHaveURL(/file=README\.md$/);
 });
 

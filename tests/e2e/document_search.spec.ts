@@ -1,22 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-
-declare global {
-  interface Window {
-    __MV_E2E__?: boolean;
-    __lastWs: WebSocket & { onmessage: ((ev: MessageEvent) => void) | null };
-    __realWsOnmessage: (ev: { data: string }) => void;
-    updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
-  }
-  // ブラウザ側バンドルで定義される変数・関数（page.evaluate 内で参照）
-  var isDirMode: boolean;
-  var currentFile: string;
-  function activateSidebarTab(tab: string): void;
-  function applyDocumentSearchQuery(value: string): void;
-  function moveDocumentSearch(direction: number): void;
-  function selectFile(file: string, pushHistory?: boolean, options?: Record<string, unknown>): void;
-}
-
-export {}; // ファイルをモジュールとして扱わせる（declare global の要件）
+import { installTestWebSocketHarness } from './browser/test-websocket';
 
 function searchFixtureContent(): string {
   return (
@@ -41,8 +24,17 @@ function searchFixtureToc(): string {
 
 async function loadSearchFixture(page: Page) {
   await page.evaluate(({ content, toc }) => {
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
     isDirMode = false;
-    window.updateContent({ content, toc });
+    const updateContent = requireUpdateContent();
+    updateContent({ content, toc });
     activateSidebarTab('toc');
   }, {
     content: searchFixtureContent(),
@@ -69,10 +61,18 @@ async function currentMatchText(page: Page) {
 }
 
 async function stabilizeWebSocketHarness(page: Page) {
-  await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
+  await page.waitForFunction(() => {
+    const lastWs = window.__lastWs;
+    return Boolean(lastWs && typeof lastWs.onmessage === 'function');
+  });
   await page.evaluate(() => {
-    window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;
-    window.__lastWs.onmessage = function() {};
+    const lastWs = window.__lastWs;
+    if (!lastWs || typeof lastWs.onmessage !== 'function') {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    // __dispatchWsMessage は MessageEvent を生成せず { data: string } を直接渡すため、E2E ハーネス内では onmessage の契約をテスト用の狭い型へ bridge する。
+    window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    lastWs.onmessage = function() {};
   });
 }
 
@@ -92,21 +92,7 @@ async function setDocumentSearchQuery(page: Page, query: string) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    window.__MV_E2E__ = true;
-    const NativeWebSocket = window.WebSocket;
-
-    class TestWebSocket extends NativeWebSocket {
-      constructor(...args: ConstructorParameters<typeof WebSocket>) {
-        super(...args);
-        window.__lastWs = this;
-      }
-    }
-
-    TestWebSocket.prototype = NativeWebSocket.prototype;
-    Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
-    window.WebSocket = TestWebSocket;
-  });
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
   await page.goto('/');
   await stabilizeWebSocketHarness(page);
   await loadSearchFixture(page);
@@ -135,7 +121,16 @@ test('見出しテキストも文書内検索の対象に含める', async ({ pa
 
 test('リンクやコードブロック内の一致は検索ハイライト対象にしない', async ({ page }) => {
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -161,7 +156,16 @@ test('リンクやコードブロック内の一致は検索ハイライト対�
 
 test('inline code内の一致も検索対象に含める', async ({ page }) => {
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Run <code>cargo test</code> after editing.</p>',
@@ -179,7 +183,16 @@ test('inline code内の一致も検索対象に含める', async ({ page }) => {
 
 test('装飾をまたぐ語句も検索できる', async ({ page }) => {
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha <strong>note</strong> appears across formatting.</p>',
@@ -325,7 +338,16 @@ test('live update後も検索結果を再適用する', async ({ page }) => {
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -351,7 +373,16 @@ test('live update後も検索結果を再適用する', async ({ page }) => {
 
 test('検索結果一覧に前後文を表示してクリックで該当箇所へ移動する', async ({ page }) => {
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Opening sentence. Alpha note appears here. Closing sentence.</p>' +
@@ -380,7 +411,16 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
 test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
   await page.evaluate(() => {
     const paragraphs = Array.from({ length: 18 }, (_, index) => `<p>Entry ${index + 1}. Alpha note appears in result ${index + 1}. Tail ${index + 1}.</p>`).join('');
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1>' + paragraphs,
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -436,7 +476,16 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 
   await page.evaluate(() => {
     isDirMode = true;
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -485,7 +534,16 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -543,7 +601,16 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -554,7 +621,11 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
 
   await page.evaluate(() => {
-    window.__realWsOnmessage({
+    const realWsOnmessage = window.__realWsOnmessage;
+    if (!realWsOnmessage) {
+      throw new Error('WebSocket test harness message handler is not initialized');
+    }
+    realWsOnmessage({
       data: JSON.stringify({
         file: 'notes.md',
         content: '<h1 id="notes">Notes</h1><p>Notes alpha note appears after update.</p>',
@@ -611,7 +682,16 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'initial.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="initial">Initial</h1><p>Placeholder body.</p>',
       toc: '<ul><li><a href="#initial">Initial</a></li></ul>'
     });
@@ -697,7 +777,16 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Initial README content.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -757,7 +846,16 @@ test('ディレクトリ検索結果のオープン失敗時は以前の選択�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -821,7 +919,16 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -832,7 +939,16 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
 
   await page.evaluate(() => {
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -890,7 +1006,16 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    window.updateContent({
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha result is visible.</p><p>Beta result is visible.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
