@@ -4,6 +4,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
+    __MV_E2E__?: boolean;
     updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
     scheduleBufferedLiveUpdate: (data: { content: string; toc: string }) => void;
   }
@@ -97,6 +98,9 @@ async function selectParagraphText(page: Page, text: string) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__MV_E2E__ = true;
+  });
   await resetLongFixture();
   await page.goto('/?file=long.md');
   await expect(page.locator('#content')).toContainText('TARGET BLOCK');
