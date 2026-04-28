@@ -1,20 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
-
-declare global {
-  interface Window {
-    __lastWs: WebSocket & { onmessage: ((ev: MessageEvent) => void) | null };
-    __realWsOnmessage: (ev: { data: string }) => void;
-    __dispatchWsMessage: (payload: unknown) => void;
-    __markPendingCalls: number;
-    __tocActiveChanges: string[];
-    __stopTocObserver: () => void;
-    markPendingTocNavigation: (id: string) => void;
-  }
-  // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
-  function selectFile(file: string, pushHistory?: boolean, options?: Record<string, unknown>): void;
-}
+import { installTestWebSocketHarness } from './browser/test-websocket';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -71,12 +58,25 @@ async function clickTocLink(page: Page, id: string) {
 }
 
 async function stabilizeWebSocketHarness(page: Page) {
-  await page.waitForFunction(() => window.__lastWs && typeof window.__lastWs.onmessage === 'function');
+  await page.waitForFunction(() => {
+    const lastWs = window.__lastWs;
+    return Boolean(lastWs && typeof lastWs.onmessage === 'function');
+  });
   await page.evaluate(() => {
-    window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;
-    window.__lastWs.onmessage = function() {};
+    const lastWs = window.__lastWs;
+    if (!lastWs || typeof lastWs.onmessage !== 'function') {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    // __dispatchWsMessage は MessageEvent を生成せず { data: string } を直接渡すため、
+    // E2E ハーネス内では onmessage の契約をテスト用の狭い型へ bridge する。
+    window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    lastWs.onmessage = function() {};
     window.__dispatchWsMessage = (payload) => {
-      window.__realWsOnmessage({ data: JSON.stringify(payload) });
+      const realWsOnmessage = window.__realWsOnmessage;
+      if (!realWsOnmessage) {
+        throw new Error('WebSocket test harness message handler is not initialized');
+      }
+      realWsOnmessage({ data: JSON.stringify(payload) });
     };
   });
 }
@@ -145,25 +145,7 @@ async function loadBottomHeadingFixture(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await resetFixtures();
-  await page.addInitScript(() => {
-    const NativeWebSocket = window.WebSocket;
-    const nativeSetTimeout = window.setTimeout.bind(window);
-
-    class TestWebSocket extends NativeWebSocket {
-      constructor(...args: ConstructorParameters<typeof WebSocket>) {
-        super(...args);
-        window.__lastWs = this as typeof window.__lastWs;
-      }
-    }
-
-    TestWebSocket.prototype = NativeWebSocket.prototype;
-    Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
-    window.WebSocket = TestWebSocket;
-    window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) => {
-      const effectiveDelay = delay === 30000 ? 50 : delay;
-      return nativeSetTimeout(fn, effectiveDelay, ...args);
-    }) as typeof window.setTimeout;
-  });
+  await page.addInitScript(installTestWebSocketHarness, { shortenReconnectDelay: true });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
   await stabilizeWebSocketHarness(page);
@@ -177,7 +159,11 @@ test('ドラッグ選択中はWebSocket更新を延期し、選択解除後に�
   await selectParagraphText(page, 'Initial README content');
 
   await page.evaluate(() => {
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Deferred update</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>',
       file: 'README.md'
@@ -195,7 +181,11 @@ test('ファイル遷移時は保留更新をクリアし、新しいファイ�
   await selectParagraphText(page, 'Initial README content');
 
   await page.evaluate(() => {
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Pending stale update</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>',
       file: 'README.md'
@@ -218,7 +208,11 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await fs.writeFile(readmePath, '# README\n\nRefreshed from server\n');
 
   await page.evaluate(() => {
-    window.__dispatchWsMessage({ refresh: true });
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({ refresh: true });
   });
 
   await expect(page.locator('#content')).toContainText('Initial README content');
@@ -233,12 +227,16 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
 
   await page.evaluate(() => {
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>',
       file: 'README.md'
     });
-    window.__dispatchWsMessage({ refresh: true });
+    dispatchWsMessage({ refresh: true });
   });
 
   await expect(page.locator('#content')).toContainText('Initial README content');
@@ -252,14 +250,22 @@ test('選択解除されなくても30秒フォールバックで保留更新を
   await selectParagraphText(page, 'Initial README content');
 
   await page.evaluate(() => {
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    dispatchWsMessage({
       content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>',
       file: 'README.md'
     });
     // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
     // 偽メッセージ送信後にonmessageを無効化する
-    window.__lastWs.onmessage = function() {};
+    lastWs.onmessage = function() {};
   });
 
   await expect(page.locator('#content')).toContainText('Fallback applied');
@@ -431,10 +437,11 @@ test('line-range付きhashのpopstateはpending idと不一致のためrestore�
   const line3BlockTop = await page.evaluate(() => {
     var blocks = document.querySelectorAll('[data-line-block-start]');
     for (var i = 0; i < blocks.length; i++) {
-      var s = parseInt(blocks[i].getAttribute('data-line-block-start') || '', 10);
-      var e = parseInt(blocks[i].getAttribute('data-line-block-end') || '', 10);
+      var block = blocks.item(i);
+      var s = parseInt(block.getAttribute('data-line-block-start') || '', 10);
+      var e = parseInt(block.getAttribute('data-line-block-end') || '', 10);
       if (s <= 3 && e >= 3) {
-        return blocks[i].getBoundingClientRect().top;
+        return block.getBoundingClientRect().top;
       }
     }
     return null;
@@ -455,8 +462,11 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
   await page.evaluate(() => {
     window.__markPendingCalls = 0;
     const original = window.markPendingTocNavigation;
+    if (!original) {
+      throw new Error('markPendingTocNavigation is not exposed for E2E');
+    }
     window.markPendingTocNavigation = function(id) {
-      window.__markPendingCalls += 1;
+      window.__markPendingCalls = (window.__markPendingCalls ?? 0) + 1;
       return original.call(this, id);
     };
   });
@@ -474,9 +484,13 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
       toc: toc,
       file: 'README.md'
     };
-    window.__dispatchWsMessage(payload);
-    window.__dispatchWsMessage(payload);
-    window.__dispatchWsMessage(payload);
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage(payload);
+    dispatchWsMessage(payload);
+    dispatchWsMessage(payload);
   });
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
@@ -484,7 +498,7 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
   await clickTocLink(page, 'beta');
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
-  await expect.poll(() => page.evaluate(() => window.__markPendingCalls)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__markPendingCalls ?? 0)).toBe(1);
 });
 
 test('WebSocket更新後も同じ見出しを見ている間は目次activeを維持する', async ({ page }) => {
@@ -495,7 +509,11 @@ test('WebSocket更新後も同じ見出しを見ている間は目次activeを�
 
   await page.evaluate(() => {
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -526,7 +544,11 @@ test('更新で見出し位置が変わったら現在位置に合う目次activ
 
   await page.evaluate(() => {
     const inserted = '<p>Inserted before alpha</p>'.repeat(40);
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Paragraph 1</p>'.repeat(12) +
@@ -556,7 +578,11 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
 
   await page.evaluate(() => {
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    window.__dispatchWsMessage({
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage({
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -592,7 +618,11 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
       const active = toc.querySelector('a.active');
       const label = active ? active.textContent || '' : '';
       if (label !== lastLabel) {
-        window.__tocActiveChanges.push(label);
+        const tocActiveChanges = window.__tocActiveChanges;
+        if (!tocActiveChanges) {
+          throw new Error('TOC active change recorder is not initialized');
+        }
+        tocActiveChanges.push(label);
         lastLabel = label;
       }
     };
@@ -620,9 +650,13 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
       toc: currentToc,
       file: 'README.md'
     };
-    window.__dispatchWsMessage(payload);
-    window.__dispatchWsMessage(payload);
-    window.__dispatchWsMessage(payload);
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    dispatchWsMessage(payload);
+    dispatchWsMessage(payload);
+    dispatchWsMessage(payload);
   });
 
   await expect(page.locator('#content')).toContainText('Alpha burst');
@@ -631,8 +665,13 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
   const activeChanges = await page.evaluate(() => {
-    window.__stopTocObserver();
-    return window.__tocActiveChanges.slice();
+    const stopTocObserver = window.__stopTocObserver;
+    const tocActiveChanges = window.__tocActiveChanges;
+    if (!stopTocObserver || !tocActiveChanges) {
+      throw new Error('TOC active change recorder is not initialized');
+    }
+    stopTocObserver();
+    return tocActiveChanges.slice();
   });
   expect(activeChanges).toEqual(['Alpha']);
 });
