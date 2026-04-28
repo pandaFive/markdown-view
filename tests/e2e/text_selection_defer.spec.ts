@@ -438,6 +438,65 @@ test('目次クリック直後の小揺らしではクリック先のactiveが�
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 });
 
+test('目次クリックの猶予中に別の目次をクリックしたら最後のクリック先へ収束する', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await clickTocLink(page, 'alpha');
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  const expectedBetaScrollY = positions.betaTop - positions.activationOffset;
+  await expect.poll(async () => Math.abs((await currentScrollY(page)) - expectedBetaScrollY)).toBeLessThanOrEqual(4);
+});
+
+test('目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      window.scrollTo(0, betaTop - activationOffset - 22);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      window.scrollTo(0, betaTop - activationOffset - 26);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない', async ({ page }) => {
+  await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await startTocActiveChangeRecorder(page);
+
+  for (const delta of [6, -4, 3]) {
+    await page.evaluate((scrollDelta) => {
+      window.scrollTo(0, (window.scrollY || window.pageYOffset) + scrollDelta);
+    }, delta);
+    await waitForTocTrackingFrame(page);
+  }
+
+  const activeChanges = await stopTocActiveChangeRecorder(page);
+  expect(activeChanges).toContain('Beta');
+  expect(activeChanges.filter((label) => label !== 'Beta')).toEqual([]);
+});
+
 test('日本語id見出しでも目次クリック直後の逆方向スクロールで通常判定へ戻る', async ({ page }) => {
   // Chromium の location.hash は非ASCII id を URL エンコードして返すため、
   // pendingTocNavigationId (raw) と文字列一致させるには decode が必要。
