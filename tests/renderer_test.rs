@@ -505,6 +505,55 @@ fn test_見出し内インライン装飾が見出し要素内に収まる() {
 }
 
 #[test]
+fn test_render_markdown_複合入力の公開api出力を固定する() {
+    let md = "# Title `x`\n\n[link](https://example.com) ![img](https://example.com/pic.png)\n\n| L | R |\n|:--|--:|\n| A & B | `code` |\n\n```unknown-lang\n<a>\n```";
+    let html = render_markdown(md);
+    let html_str = html.as_str();
+
+    assert!(html_str.contains(
+        r#"<h1 id="title-x" data-line-block data-source-start-line="1" data-source-end-line="1">"#
+    ));
+    assert!(
+        html_str.contains(r#"<code data-source-start-line="1" data-source-end-line="1">x</code>"#)
+    );
+    assert!(html_str.contains(r#"<a href="https://example.com">"#));
+    assert!(html_str.contains(r##"<img src="#" alt="img" />"##));
+    assert!(html_str.contains(r#"<th class="align-left">"#));
+    assert!(html_str.contains(r#"<th class="align-right">"#));
+    assert!(html_str.contains("A &amp; B"));
+    assert!(html_str
+        .contains(r#"<code data-source-start-line="7" data-source-end-line="7">code</code>"#));
+    assert!(html_str.contains(r#"<code class="syn-code language-unknown-lang">&lt;a&gt;"#));
+    assert!(!html_str.contains("https://example.com/pic.png"));
+    assert!(!html_str.contains("<a>\n"));
+}
+
+#[test]
+fn test_見出し内リンクと装飾のid生成とhtmlを固定する() {
+    let md = "# A [Rust](https://www.rust-lang.org \"site\") *lang* `code`";
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains(
+        r#"<h1 id="a-rust-lang-code">A <a href="https://www.rust-lang.org" title="site">Rust</a> <em>lang</em> <code>code</code></h1>"#
+    ));
+}
+
+#[test]
+fn test_同一入力内でlinkとimageのurl_policy差分を固定する() {
+    let html = normalize_source_markup(render_markdown(
+        "[safe](mailto:user@example.com) [bad](data:text/html,<script>x</script>) ![remote](https://example.com/p.png) ![local](./local.png)",
+    ).as_str());
+    let html_str = html.as_str();
+
+    assert!(html_str.contains(r#"href="mailto:user@example.com""#));
+    assert!(html_str.contains(r##"<a href="#">bad</a>"##));
+    assert!(html_str.contains(r##"<img src="#" alt="remote" />"##));
+    assert!(html_str.contains(r#"<img src="./local.png" alt="local" />"#));
+    assert!(!html_str.contains("data:text/html"));
+    assert!(!html_str.contains("https://example.com/p.png"));
+}
+
+#[test]
 fn test_見出しidとtocリンクがインラインコード付き見出しで一致する() {
     let md = "# Title `x`";
     let html = render_markdown(md);
