@@ -27,6 +27,12 @@
   - 理由: ID は Codex 側でアーカイブされると参照不能。テストコメントは外部 ID ではなく、壊したくない仕様と入力パターンを説明する方が保守しやすい
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20、既存 PR #76 持ち込み課題)
 
+- [ ] E2E 共通ヘルパーの silent false-positive 経路を狭める
+  - ファイル: `tests/e2e/helpers.ts`
+  - 内容: `selectParagraphText` の部分一致・最初のヒット採用を明示的に失敗させる選択肢、`fs.rm(..., { force: true })` の権限/EBUSY 系エラー検知、`stabilizeWebSocketHarness` の再接続検知または既存 bridge 残存時の fail-fast を検討する
+  - 理由: いずれも今回の helper 化で再利用面積が広がった既存課題。個別 spec の意図と違う要素・古い WebSocket handler・未削除メモが silent に残ると、E2E が clean-slate 前提を満たさないまま偽陽性化しうる
+  - 由来: E2E 共通ヘルパー抽出 PR レビュー (2026-04-29、pre-existing)
+
 ## P3: 長期改善・低緊急
 
 - [ ] インラインブラウザJS の TS 化

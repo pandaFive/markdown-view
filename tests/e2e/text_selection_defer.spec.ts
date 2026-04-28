@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
-import { activeTocLabel, activeTocLabelOrEmpty, clearSelection, clickTocLink, dispatchWsMessage, dispatchWsMessages, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness, startTocActiveChangeRecorder, stopTocActiveChangeRecorder, waitForTocTrackingFrame } from './helpers';
+import { activeTocLabel, activeTocLabelOrEmpty, clearSelection, clickTocLink, dispatchWsMessage, dispatchWsMessageAndDisableRealHandler, dispatchWsMessages, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness, startTocActiveChangeRecorder, stopTocActiveChangeRecorder, waitForTocTrackingFrame } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -153,19 +153,10 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
-  await dispatchWsMessage(page, {
+  await dispatchWsMessageAndDisableRealHandler(page, {
     content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
     toc: '<ul><li><a href="#readme">README</a></li></ul>',
     file: 'README.md'
-  });
-  await page.evaluate(() => {
-    const lastWs = window.__lastWs;
-    if (!lastWs) {
-      throw new Error('WebSocket test harness is not initialized');
-    }
-    // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
-    // 偽メッセージ送信後にonmessageを無効化する
-    lastWs.onmessage = function() {};
   });
 
   await expect(page.locator('#content')).toContainText('Fallback applied');

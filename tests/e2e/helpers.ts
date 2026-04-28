@@ -11,7 +11,7 @@ export type ResetStandardFixturesOptions = {
 };
 
 export async function resetStandardFixtures(options: ResetStandardFixturesOptions = {}) {
-  if (options.cleanupMemoArtifacts === true) {
+  if (options.cleanupMemoArtifacts ?? true) {
     const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
     await Promise.all(entries
       .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
@@ -44,6 +44,7 @@ export async function clearSelection(page: Page) {
   await page.evaluate(() => {
     const selection = window.getSelection()!;
     selection.removeAllRanges();
+    // E2Eでは選択解除を直接操作するため、アプリ側のselectionchange処理も手動で発火する。
     document.dispatchEvent(new Event('selectionchange'));
   });
 }
@@ -63,6 +64,7 @@ export async function selectFile(page: Page, file: string) {
   await page.locator(`[data-file="${file}"]`).click();
 }
 
+// メモ保存のdebounce完了を保存済み表示で待つ。
 export async function saveMemo(page: Page, text: string) {
   const editor = page.locator('#memo-editor');
   await editor.fill(text);
@@ -172,22 +174,41 @@ export async function stabilizeWebSocketHarness(page: Page) {
 
 export async function dispatchWsMessage(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
+    const dispatchMessage = window.__dispatchWsMessage;
+    if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
     }
-    dispatchWsMessage(messagePayload);
+    dispatchMessage(messagePayload);
   }, payload);
 }
 
+export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload: unknown) {
+  await page.evaluate((messagePayload) => {
+    const dispatchMessage = window.__dispatchWsMessage;
+    if (!dispatchMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    dispatchMessage(messagePayload);
+    // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
+    // 偽メッセージ送信後にonmessageを無効化する。
+    lastWs.onmessage = function() {};
+  }, payload);
+}
+
+// payloadsを単一browser stepで順番にdispatchする。
+// 途中でthrowした場合、後続payloadはdispatchされない。
 export async function dispatchWsMessages(page: Page, payloads: unknown[]) {
   await page.evaluate((messagePayloads) => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
+    const dispatchMessage = window.__dispatchWsMessage;
+    if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
     }
     for (const payload of messagePayloads) {
-      dispatchWsMessage(payload);
+      dispatchMessage(payload);
     }
   }, payloads);
 }
@@ -203,5 +224,20 @@ export async function updateContent(
       throw new Error('window.updateContent is not exposed for E2E');
     }
     updateContent(payload, options);
+  }, { payload: data, options: opts });
+}
+
+export async function updateContentAndActivateToc(
+  page: Page,
+  data: MvE2E.UpdateContentPayload,
+  opts?: MvE2E.UpdateContentOptions
+) {
+  await page.evaluate(({ payload, options }) => {
+    const updateContent = window.updateContent;
+    if (!updateContent) {
+      throw new Error('window.updateContent is not exposed for E2E');
+    }
+    updateContent(payload, options);
+    activateSidebarTab('toc');
   }, { payload: data, options: opts });
 }

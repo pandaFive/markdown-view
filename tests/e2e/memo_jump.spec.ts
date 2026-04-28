@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
-import { selectParagraphText, updateContent } from './helpers';
+import { resetStandardFixtures, selectParagraphText, updateContent } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
@@ -62,11 +62,7 @@ const longContent = [
 
 async function resetLongFixture() {
   const longPath = path.join(fixtureDir, 'long.md');
-  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
-  await Promise.all(entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
-    .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
-  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
+  await resetStandardFixtures({ cleanupMemoArtifacts: true });
   await fs.writeFile(longPath, longContent);
 }
 
