@@ -254,6 +254,7 @@ Expected:
 
 ```text
 <new commit> docs: BACKLOGをリスク順に整理
+f0d7fbf docs: BACKLOGリスク順整理の実装計画を追加
 e943f63 docs: BACKLOGリスク順整理の設計を追加
 ```
 
