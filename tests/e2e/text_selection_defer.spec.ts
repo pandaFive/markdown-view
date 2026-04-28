@@ -57,6 +57,65 @@ async function clickTocLink(page: Page, id: string) {
   }, id);
 }
 
+async function currentScrollY(page: Page) {
+  return page.evaluate(() => window.scrollY || window.pageYOffset);
+}
+
+async function waitForTocTrackingFrame(page: Page) {
+  await page.evaluate(() => {
+    return new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+  });
+}
+
+async function startTocActiveChangeRecorder(page: Page) {
+  await page.evaluate(() => {
+    const toc = document.getElementById('toc');
+    if (!toc) {
+      throw new Error('TOC is not initialized');
+    }
+    window.__tocActiveChanges = [];
+    let lastLabel = '__unset__';
+    const recordActive = () => {
+      const active = toc.querySelector('a.active');
+      const label = active ? active.textContent || '' : '';
+      if (label !== lastLabel) {
+        const tocActiveChanges = window.__tocActiveChanges;
+        if (!tocActiveChanges) {
+          throw new Error('TOC active change recorder is not initialized');
+        }
+        tocActiveChanges.push(label);
+        lastLabel = label;
+      }
+    };
+    recordActive();
+    const observer = new MutationObserver(recordActive);
+    observer.observe(toc, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class']
+    });
+    window.__stopTocObserver = () => observer.disconnect();
+  });
+}
+
+async function stopTocActiveChangeRecorder(page: Page) {
+  return page.evaluate(() => {
+    const stopTocObserver = window.__stopTocObserver;
+    const tocActiveChanges = window.__tocActiveChanges;
+    if (!stopTocObserver || !tocActiveChanges) {
+      throw new Error('TOC active change recorder is not initialized');
+    }
+    stopTocObserver();
+    delete window.__stopTocObserver;
+    return tocActiveChanges.slice();
+  });
+}
+
 async function stabilizeWebSocketHarness(page: Page) {
   await page.waitForFunction(() => {
     const lastWs = window.__lastWs;
