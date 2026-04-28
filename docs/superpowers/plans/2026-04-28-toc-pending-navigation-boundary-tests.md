@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript, Playwright, Chromium E2E, Rust preview server via `cargo run`
 
+**Implementation Status:** Completed on 2026-04-28. Task commits: `c9f8b81 test: TOC active監視ヘルパーを追加`, `16dc04f test: TOC pending navigation境界を固定`, `d89794f docs: TOC pending navigation完了をBACKLOGに反映`.
+
 ---
 
 ## File Structure
