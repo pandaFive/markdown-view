@@ -343,6 +343,28 @@ test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent �
   expect(result).toBe('#section-b:L15');
 });
 
+test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の散文を行番号扱いしない', async ({ page }) => {
+  // ELEMENT_NODE 経路でも TEXT_NODE と同じく、sibling textContent 全体が行番号トークン
+  // のみで構成されない散文は augment 対象にしないことを固定する。
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=spec.md#intro';
+    link.textContent = 'spec';
+    const lineHint = document.createElement('span');
+    lineHint.textContent = ' L10 onwards は詳しい説明';
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return augmentHashWithTrailingLineHint(link, '#intro');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+  expect(result).toBe('#intro');
+});
+
 test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく hash 末尾に合成する', async ({ page }) => {
   // 範囲形式 positive branch を直接検証。regex の capture group 2 と suffix 生成
   // (`'L' + start + '-L' + end`) がともに機能することを担保

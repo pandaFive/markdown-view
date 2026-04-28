@@ -10,7 +10,7 @@
 - `augmentHashWithTrailingLineHint` が `ELEMENT_NODE` sibling の `textContent` を読む仕様を直接テストで固定する。
 - `memo_jump.spec.ts` 内の Codex review ID 参照コメントを、外部IDではなく保護したい false-positive 仕様の説明へ置き換える。
 
-`src/template/assets/js/content.js` の `augmentHashWithTrailingLineHint` は、旧形式メモの `出典: [link](url#heading) L15` を救済するため、リンク直後 sibling の `textContent` から `L<n>` または `L<n>-L<m>` を読み、hash に行範囲を補完する。ドックコメント上は `TEXT_NODE` と `ELEMENT_NODE` の双方を対象にしているが、現行テストは `document.createTextNode(...)` 経路を中心に固定している。今回の追加テストで `span` sibling 経路を直接固定し、将来のリファクタで `ELEMENT_NODE` 分岐が落ちる退行を検出できるようにする。
+`src/template/assets/js/content.js` の `augmentHashWithTrailingLineHint` は、旧形式メモの `出典: [link](url#heading) L15` を救済するため、リンク直後 sibling の `textContent` から `L<n>` または `L<n>-L<m>` を読み、hash に行範囲を補完する。ドキュメントコメント上は `TEXT_NODE` と `ELEMENT_NODE` の双方を対象にしているが、現行テストは `document.createTextNode(...)` 経路を中心に固定している。今回の追加テストで `span` sibling 経路を直接固定し、将来のリファクタで `ELEMENT_NODE` 分岐が落ちる退行を検出できるようにする。
 
 ## 非ゴール
 
@@ -22,9 +22,11 @@
 
 ## 実装方針
 
-`tests/e2e/memo_jump.spec.ts` の `augmentHashWithTrailingLineHint` 直接テスト群に、`ELEMENT_NODE` sibling 専用の positive test を1件追加する。
+`tests/e2e/memo_jump.spec.ts` の `augmentHashWithTrailingLineHint` 直接テスト群に、`ELEMENT_NODE` sibling 専用の positive test と negative test を1件ずつ追加する。
 
 テスト内では `#memo-preview` に `a` 要素と `span` 要素を順に追加する。`span.textContent = ' L15'` とし、`link.nextSibling` が `ELEMENT_NODE` になる状態で `augmentHashWithTrailingLineHint(link, '#section-b')` を直接呼ぶ。期待値は `#section-b:L15` とする。
+
+negative test では `span.textContent = ' L10 onwards は詳しい説明'` とし、`augmentHashWithTrailingLineHint(link, '#intro')` が `#intro` のまま返ることを検証する。これにより、`ELEMENT_NODE` 経路でも sibling textContent 全体が行番号トークンのみで構成される場合だけ補完する条件を固定する。
 
 cleanup は既存の明示削除方針に合わせ、`finally` で `link.remove()` と `lineHint.remove()` を実行する。末尾ノード推測や `innerHTML` 復元は使わない。
 
@@ -32,8 +34,9 @@ cleanup は既存の明示削除方針に合わせ、`finally` で `link.remove(
 
 ## 受け入れ基準
 
-- `tests/e2e/memo_jump.spec.ts` に `ELEMENT_NODE` sibling の直接テストが追加されている。
+- `tests/e2e/memo_jump.spec.ts` に `ELEMENT_NODE` sibling の positive / negative 直接テストが追加されている。
 - 追加テストは `document.createElement('span')` を使い、`augmentHashWithTrailingLineHint(link, '#section-b')` が `#section-b:L15` を返すことを検証している。
+- negative test は `document.createElement('span')` を使い、散文 `L10 onwards は詳しい説明` が `#intro` のままになることを検証している。
 - 追加テストは `#memo-preview` 配下で実行され、関数のスコープガードを迂回していない。
 - 追加テストの cleanup は追加した `link` と `span` を明示的に削除している。
 - Codex review ID のような外部IDコメントが `memo_jump.spec.ts` から消え、保護対象の仕様説明に置き換わっている。
