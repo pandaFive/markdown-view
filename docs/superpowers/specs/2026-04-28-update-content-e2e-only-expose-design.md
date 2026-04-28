@@ -28,7 +28,19 @@
 
 ## 3. 採用方針
 
-`src/template/assets/js/content.js` の末尾を、無条件 expose から E2E フラグ付き expose に変更する。
+`src/template/assets/js/content.js` の `updateContent` を global function 宣言から global lexical binding に変更し、末尾を無条件 expose から E2E フラグ付き expose に変更する。
+
+このアプリのブラウザ JS は `src/template/assets/inline_script.rs` で複数ファイルを 1 本の classic `<script>` に連結して配信される。classic script の top-level `function updateContent(...)` は `window.updateContent` を作る可能性があるため、末尾の代入だけを gate しても production 非露出を保証できない。`let updateContent = function updateContent(...) { ... };` の形にすると、同一 script 内の `websocket.js` / `fetch.js` からは lexical binding として参照できる一方、`window` property は作られない。
+
+関数定義は次の形へ変える。
+
+```js
+let updateContent = function updateContent(data, options) {
+  // existing body
+};
+```
+
+末尾の expose は次の形にする。
 
 ```js
 if (window.__MV_E2E__ === true) {
@@ -44,7 +56,7 @@ await page.addInitScript(() => {
 });
 ```
 
-対象 spec は現時点で `memo_jump.spec.ts` と `document_search.spec.ts`。`websocket.js` と `fetch.js` は同じブラウザスクリプト束内の `updateContent` 関数参照を使うため、`window` への公開有無には依存しない。
+対象 spec は現時点で `memo_jump.spec.ts` と `document_search.spec.ts`。`websocket.js` と `fetch.js` は同じブラウザスクリプト束内の lexical `updateContent` 関数参照を使うため、`window` への公開有無には依存しない。
 
 型変更は最小限に留める。必要な spec の `Window` interface に `__MV_E2E__?: boolean` を追加するが、`updateContent` の宣言形式統一は行わない。
 
@@ -103,8 +115,8 @@ E2E フラグはブラウザ内のテスト実行時だけに立てる。アプ�
 
 依存影響:
 
-- `src/template/assets/js/websocket.js`: 同一 bundle scope の `updateContent` を呼ぶため挙動不変
-- `src/template/assets/js/fetch.js`: 同一 bundle scope の `updateContent` を呼ぶため挙動不変
+- `src/template/assets/js/websocket.js`: 同一 script scope の lexical `updateContent` を呼ぶため挙動不変
+- `src/template/assets/js/fetch.js`: 同一 script scope の lexical `updateContent` を呼ぶため挙動不変
 - TypeScript ambient 宣言: `__MV_E2E__` だけ追加。既存の `updateContent` 宣言統一は行わない
 
 ## 8. リスクと対策
