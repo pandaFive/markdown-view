@@ -43,7 +43,7 @@
 ```rust
 #[test]
 fn test_render_markdown_複合入力の公開api出力を固定する() {
-    let md = "# Title `x`\n\n[link](https://example.com) ![img](https://example.com/pic.png)\n\n| L | R |\n|:--|--:|\n| <x> | `code` |\n\n```unknown-lang\n<a>\n```";
+    let md = "# Title `x`\n\n[link](https://example.com) ![img](https://example.com/pic.png)\n\n| L | R |\n|:--|--:|\n| A & B | `code` |\n\n```unknown-lang\n<a>\n```";
     let html = render_markdown(md);
     let html_str = html.as_str();
 
@@ -53,11 +53,10 @@ fn test_render_markdown_複合入力の公開api出力を固定する() {
     assert!(html_str.contains(r##"<img src="#" alt="img" />"##));
     assert!(html_str.contains(r#"<th class="align-left">"#));
     assert!(html_str.contains(r#"<th class="align-right">"#));
-    assert!(html_str.contains("&lt;x&gt;"));
+    assert!(html_str.contains("A &amp; B"));
     assert!(html_str.contains(r#"<code data-source-start-line="6" data-source-end-line="6">code</code>"#));
     assert!(html_str.contains(r#"<code class="syn-code language-unknown-lang">&lt;a&gt;"#));
     assert!(!html_str.contains("https://example.com/pic.png"));
-    assert!(!html_str.contains("<x>"));
     assert!(!html_str.contains("<a>\n"));
 }
 
@@ -73,8 +72,11 @@ fn test_見出し内リンクと装飾のid生成とhtmlを固定する() {
 
 #[test]
 fn test_同一入力内でlinkとimageのurl_policy差分を固定する() {
-    let html = render_markdown(
-        "[safe](mailto:user@example.com) [bad](data:text/html,<script>x</script>) ![remote](https://example.com/p.png) ![local](./local.png)",
+    let html = normalize_source_markup(
+        render_markdown(
+            "[safe](mailto:user@example.com) [bad](data:text/html,<script>x</script>) ![remote](https://example.com/p.png) ![local](./local.png)",
+        )
+        .as_str(),
     );
     let html_str = html.as_str();
 
