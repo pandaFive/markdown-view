@@ -117,7 +117,7 @@ git commit -m "test: E2Eグローバル型の集約先を追加"
 ```ts
 export type TestWebSocketHarnessOptions = {
   setE2EFlag?: boolean;
-  shortenReconnectDelay?: boolean;
+  shorten30sTimeouts?: boolean;
 };
 
 export function installTestWebSocketHarness(options: TestWebSocketHarnessOptions = {}) {
@@ -135,11 +135,11 @@ export function installTestWebSocketHarness(options: TestWebSocketHarnessOptions
     }
   }
 
-  TestWebSocket.prototype = NativeWebSocket.prototype;
-  Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
   window.WebSocket = TestWebSocket;
 
-  if (options.shortenReconnectDelay === true) {
+  // text_selection_defer の長時間待機を避けるため、30秒タイマーをまとめて短縮する。
+  // WebSocket reconnect だけでなく、選択中更新の30秒フォールバックも対象になる。
+  if (options.shorten30sTimeouts === true) {
     window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) => {
       const effectiveDelay = delay === 30000 ? 50 : delay;
       return nativeSetTimeout(fn, effectiveDelay, ...args);
@@ -225,7 +225,7 @@ async function stabilizeWebSocketHarness(page: Page) {
 `test.beforeEach` 内の init script は次にする。
 
 ```ts
-await page.addInitScript(installTestWebSocketHarness, { shortenReconnectDelay: true });
+await page.addInitScript(installTestWebSocketHarness, { shorten30sTimeouts: true });
 ```
 
 - [ ] **Step 4: focused typecheck を実行する**

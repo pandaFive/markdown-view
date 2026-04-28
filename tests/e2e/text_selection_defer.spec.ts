@@ -145,7 +145,7 @@ async function loadBottomHeadingFixture(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await resetFixtures();
-  await page.addInitScript(installTestWebSocketHarness, { shortenReconnectDelay: true });
+  await page.addInitScript(installTestWebSocketHarness, { shorten30sTimeouts: true });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
   await stabilizeWebSocketHarness(page);

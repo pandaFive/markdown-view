@@ -17,6 +17,7 @@ test('E2Eフラグがtrueならwindow.updateContentを公開する', async ({ pa
 
 test('E2Eフラグがtruthy非booleanならwindow.updateContentを公開しない', async ({ page }) => {
   await page.addInitScript(() => {
+    // expose 条件が __MV_E2E__ === true に固定されていることを確認するため、意図的に型を破る。
     window.__MV_E2E__ = 'true' as unknown as boolean;
   });
   await page.goto('/');

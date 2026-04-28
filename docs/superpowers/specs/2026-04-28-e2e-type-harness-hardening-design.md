@@ -58,16 +58,16 @@ E2E テストのブラウザ側グローバル型と WebSocket テストハー�
 基本 API:
 
 ```ts
-installTestWebSocketHarness(options?: { shortenReconnectDelay?: boolean }): void
+installTestWebSocketHarness(options?: { shorten30sTimeouts?: boolean }): void
 ```
 
 責務:
 
 - `window.WebSocket` を `NativeWebSocket` 継承クラスに差し替える。
 - 最後に生成された socket を `window.__lastWs` に保存する。
-- `shortenReconnectDelay` が `true` の場合だけ、`setTimeout(30000)` を `50` に短縮する。
+- `shorten30sTimeouts` が `true` の場合だけ、`setTimeout(30000)` を `50` に短縮する。WebSocket reconnect だけでなく、選択中更新の30秒フォールバックも対象になる。
 
-`document_search.spec.ts` は `shortenReconnectDelay` なしで使う。`text_selection_defer.spec.ts` は既存の再接続待ち短縮を維持するため `shortenReconnectDelay: true` で使う。
+`document_search.spec.ts` は `shorten30sTimeouts` なしで使う。`text_selection_defer.spec.ts` は既存の30秒待機短縮を維持するため `shorten30sTimeouts: true` で使う。
 
 Playwright の `page.addInitScript({ path })` で TypeScript ファイルをそのまま読み込めない場合は、実装計画で Node 側 helper へ切り替える。ただし設計上の固定点は、WebSocket 差し替えロジックを SSoT 化し、spec ごとのインライン重複をなくすこととする。
 
@@ -115,7 +115,7 @@ strict flag 追加で検出された missing key や optional property の曖昧
 - 対象 spec から重複した `declare global` が削除されている。
 - `window.updateContent` と `scheduleBufferedLiveUpdate` の payload 型が共通化されている。
 - WebSocket 差し替えロジックが `tests/e2e/browser/test-websocket.ts` または同等の単一 helper に集約されている。
-- `shortenReconnectDelay` 相当の既存挙動が `text_selection_defer.spec.ts` で維持されている。
+- `shorten30sTimeouts` 相当の既存挙動が `text_selection_defer.spec.ts` で維持されている。
 - `tsconfig.json` に `noUncheckedIndexedAccess` と `exactOptionalPropertyTypes` が追加されている。
 - `as unknown as` double-cast の直前に、日本語の契約説明コメントがある。
 - 対象 backlog 項目が完了状態へ更新されている。

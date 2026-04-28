@@ -548,6 +548,7 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
 
   // key欠落、null、data自体のnull/undefined、WSバッファ経路を網羅し、
   // 契約違反がDOM更新と重複抑制でサイレント化しないことを検証する。
+  // 以下の unknown 経由キャストは、正常系型を広げずに契約違反入力だけを再現するためのもの。
   // ケース 2: content だけ欠落 → 'content が欠落または不正' warn
   await page.evaluate((toc) => {
     function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
@@ -558,7 +559,6 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
       return updateContent;
     }
 
-    // 契約違反呼び出しを意図的に再現するため unknown 経由でキャストする
     const updateContent = requireUpdateContent();
     updateContent({ toc } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_TOC);

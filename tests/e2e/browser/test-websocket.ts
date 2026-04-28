@@ -1,6 +1,6 @@
 export type TestWebSocketHarnessOptions = {
   setE2EFlag?: boolean;
-  shortenReconnectDelay?: boolean;
+  shorten30sTimeouts?: boolean;
 };
 
 export function installTestWebSocketHarness(options: TestWebSocketHarnessOptions = {}) {
@@ -18,11 +18,11 @@ export function installTestWebSocketHarness(options: TestWebSocketHarnessOptions
     }
   }
 
-  TestWebSocket.prototype = NativeWebSocket.prototype;
-  Object.setPrototypeOf(TestWebSocket, NativeWebSocket);
   window.WebSocket = TestWebSocket;
 
-  if (options.shortenReconnectDelay === true) {
+  // text_selection_defer の長時間待機を避けるため、30秒タイマーをまとめて短縮する。
+  // WebSocket reconnect だけでなく、選択中更新の30秒フォールバックも対象になる。
+  if (options.shorten30sTimeouts === true) {
     window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) => {
       const effectiveDelay = delay === 30000 ? 50 : delay;
       return nativeSetTimeout(fn, effectiveDelay, ...args);
