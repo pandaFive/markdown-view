@@ -180,6 +180,18 @@ export async function dispatchWsMessage(page: Page, payload: unknown) {
   }, payload);
 }
 
+export async function dispatchWsMessages(page: Page, payloads: unknown[]) {
+  await page.evaluate((messagePayloads) => {
+    const dispatchWsMessage = window.__dispatchWsMessage;
+    if (!dispatchWsMessage) {
+      throw new Error('WebSocket test harness dispatcher is not initialized');
+    }
+    for (const payload of messagePayloads) {
+      dispatchWsMessage(payload);
+    }
+  }, payloads);
+}
+
 export async function updateContent(
   page: Page,
   data: MvE2E.UpdateContentPayload,

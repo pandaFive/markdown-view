@@ -1,14 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
-import { activeTocLabel, activeTocLabelOrEmpty, clearSelection, clickTocLink, dispatchWsMessage, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness, startTocActiveChangeRecorder, stopTocActiveChangeRecorder, waitForTocTrackingFrame } from './helpers';
+import { activeTocLabel, activeTocLabelOrEmpty, clearSelection, clickTocLink, dispatchWsMessage, dispatchWsMessages, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness, startTocActiveChangeRecorder, stopTocActiveChangeRecorder, waitForTocTrackingFrame } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
-type E2EPage = Parameters<typeof selectParagraphText>[0];
 
-async function loadDenseHeadingFixture(page: E2EPage) {
+async function loadDenseHeadingFixture(page: Page) {
   const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
   await fs.writeFile(
     readmePath,
@@ -46,7 +45,7 @@ async function loadDenseHeadingFixture(page: E2EPage) {
   });
 }
 
-async function loadBottomHeadingFixture(page: E2EPage) {
+async function loadBottomHeadingFixture(page: Page) {
   await fs.writeFile(
     readmePath,
     [
@@ -135,12 +134,14 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await selectParagraphText(page, 'Initial README content');
   await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
 
-  await dispatchWsMessage(page, {
-    content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
-    toc: '<ul><li><a href="#readme">README</a></li></ul>',
-    file: 'README.md'
-  });
-  await dispatchWsMessage(page, { refresh: true });
+  await dispatchWsMessages(page, [
+    {
+      content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
+      toc: '<ul><li><a href="#readme">README</a></li></ul>',
+      file: 'README.md'
+    },
+    { refresh: true }
+  ]);
 
   await expect(page.locator('#content')).toContainText('Initial README content');
 
@@ -468,9 +469,7 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
       file: 'README.md'
     };
   });
-  await dispatchWsMessage(page, payload);
-  await dispatchWsMessage(page, payload);
-  await dispatchWsMessage(page, payload);
+  await dispatchWsMessages(page, [payload, payload, payload]);
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
   await page.waitForTimeout(150);
@@ -595,9 +594,7 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
       file: 'README.md'
     };
   });
-  await dispatchWsMessage(page, payload);
-  await dispatchWsMessage(page, payload);
-  await dispatchWsMessage(page, payload);
+  await dispatchWsMessages(page, [payload, payload, payload]);
 
   await expect(page.locator('#content')).toContainText('Alpha burst');
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
