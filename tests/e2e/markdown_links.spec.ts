@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
+import { resetStandardFixtures } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
@@ -17,19 +18,14 @@ function requireClickObservation(
   return observation;
 }
 
-async function resetFixtures() {
-  await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
-  await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
-}
-
 test.beforeEach(async ({ page }) => {
-  await resetFixtures();
+  await resetStandardFixtures();
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
 });
 
 test.afterEach(async () => {
-  await resetFixtures();
+  await resetStandardFixtures();
 });
 
 test('ディレクトリモードでMarkdown相対リンクをクリックすると同一アプリ内で対象文書へ遷移する', async ({ page }) => {
