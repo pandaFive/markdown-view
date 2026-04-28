@@ -12,7 +12,7 @@
   - 理由: PR #76 レビュー（pr-test-analyzer）で指摘された全テスト共通の懸念。本 PR 単独の課題ではなくテスト基盤改善
   - 由来: PR #76 レビュー (2026-04-20)
 
-- [ ] E2E を `verify.sh` に統合するか検討
+- [x] E2E を `verify.sh` に統合するか検討
   - ファイル: `verify.sh`
   - 内容: 現状 `tsc --noEmit` のみで `npm run test:e2e` は手動実行。verify.sh で Rust server 立ち上げ→ playwright 実行まで含めるか
   - 理由: E2E を CI で回していない現状、type check のみが SSoT。実行コストと速度のトレードオフ要検討

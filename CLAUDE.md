@@ -15,6 +15,7 @@ npm ci                                    # Node 20.11+ が前提（package.json
 
 # 一括検証（フォーマット・リント・テスト・E2E型チェック）
 ./verify.sh                               # npm ci 済みが前提。未済なら明示エラーで停止
+./verify.sh --e2e                         # 上記に加えて Playwright E2E も実行
 
 # 個別コマンド
 cargo fmt --all -- --check       # フォーマットチェック
