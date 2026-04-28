@@ -11,7 +11,7 @@ export type ResetStandardFixturesOptions = {
 };
 
 export async function resetStandardFixtures(options: ResetStandardFixturesOptions = {}) {
-  // memo artifact の掃除漏れを防ぐため、必要な spec だけ false で opt-out する。
+  // 既定で memo artifact を掃除し、前テスト残骸の混入を防ぐ。温存したい spec だけ false で opt-out する。
   if (options.cleanupMemoArtifacts ?? true) {
     const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
     await Promise.all(entries
@@ -185,6 +185,7 @@ export async function dispatchWsMessage(page: Page, payload: unknown) {
 
 // text_selection_defer のフォールバック検証用。
 // 偽メッセージ送信と実 handler 無効化を同じ browser step に閉じ込める。
+// この helper の後に dispatchWsMessage を続けて呼ぶ用途では使わない。
 export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
     const dispatchMessage = window.__dispatchWsMessage;
@@ -202,16 +203,19 @@ export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload
   }, payload);
 }
 
-// payloadsを単一browser stepで順番にdispatchする。
-// 途中でthrowした場合、後続payloadはdispatchされない。
 export async function dispatchWsMessages(page: Page, payloads: unknown[]) {
   await page.evaluate((messagePayloads) => {
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
     }
-    for (const payload of messagePayloads) {
-      dispatchMessage(payload);
+    for (const [index, payload] of messagePayloads.entries()) {
+      try {
+        dispatchMessage(payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`WebSocket test harness dispatcher failed at payload ${index}: ${message}`);
+      }
     }
   }, payloads);
 }
@@ -239,6 +243,9 @@ export async function updateContentAndActivateToc(
     const updateContent = window.updateContent;
     if (!updateContent) {
       throw new Error('window.updateContent is not exposed for E2E');
+    }
+    if (typeof activateSidebarTab !== 'function') {
+      throw new Error('activateSidebarTab is not exposed for E2E');
     }
     updateContent(payload, options);
     activateSidebarTab('toc');

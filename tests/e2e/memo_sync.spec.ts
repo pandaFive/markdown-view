@@ -2,11 +2,11 @@ import { test, expect } from '@playwright/test';
 import { openMemoTab, resetStandardFixtures, saveMemo } from './helpers';
 
 test.beforeEach(async () => {
-  await resetStandardFixtures({ cleanupMemoArtifacts: true });
+  await resetStandardFixtures();
 });
 
 test.afterEach(async () => {
-  await resetStandardFixtures({ cleanupMemoArtifacts: true });
+  await resetStandardFixtures();
 });
 
 test('同一ファイルを開いている別ページへメモ更新が同期される', async ({ page, context }) => {

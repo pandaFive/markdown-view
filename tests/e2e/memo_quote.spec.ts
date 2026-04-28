@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { resetStandardFixtures, selectParagraphText } from './helpers';
 
 test.beforeEach(async ({ page }) => {
-  await resetStandardFixtures({ cleanupMemoArtifacts: true });
+  await resetStandardFixtures();
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
 });

@@ -62,7 +62,7 @@ const longContent = [
 
 async function resetLongFixture() {
   const longPath = path.join(fixtureDir, 'long.md');
-  await resetStandardFixtures({ cleanupMemoArtifacts: true });
+  await resetStandardFixtures();
   await fs.writeFile(longPath, longContent);
 }
 
