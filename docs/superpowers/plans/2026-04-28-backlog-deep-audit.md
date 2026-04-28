@@ -168,7 +168,7 @@ Use `apply_patch` to replace the file content with:
 
 - [x] E2E テストの DOM クリーンアップ戦略見直し
   - ファイル: `tests/e2e/memo_jump.spec.ts`
-  - 内容: `augmentHashWithTrailingLineHint` 系テストの DOM cleanup を、`container.lastChild` 推測ではなく、追加した `lineHint` ノードを直接 `remove()` する方式へ変更
+  - 内容: `augmentHashWithTrailingLineHint` 系テストの DOM cleanup を、末尾ノード推測ではなく、追加した `lineHint` ノードを直接 `remove()` する方式へ変更
   - 完了根拠: `1ee8916 test: E2E DOM cleanupを明示ノード削除に変更 (#99)`
   - 由来: PR #76 レビュー (2026-04-20)
 
@@ -238,7 +238,7 @@ Expected: P1 の空状態、P2/P3 の残存項目、Done の opt-in 統合が表
 Run:
 
 ```bash
-rg -n "container\\.lastChild|lastChild\\.remove\\(|memo_jump\\.spec\\.js|text_selection_defer\\.spec\\.js|L347|L359 付近|L245-L407|現状 `tsc --noEmit` のみ" docs/todo/BACKLOG.md
+rg -n 'container\.lastChild|lastChild\.remove\(|memo_jump\.spec\.js|text_selection_defer\.spec\.js|L347|L359 付近|L245-L407|現状 `tsc --noEmit` のみ' docs/todo/BACKLOG.md
 ```
 
 Expected: no output, exit code 1.
