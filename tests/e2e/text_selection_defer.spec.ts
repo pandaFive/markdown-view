@@ -57,10 +57,6 @@ async function clickTocLink(page: Page, id: string) {
   }, id);
 }
 
-async function currentScrollY(page: Page) {
-  return page.evaluate(() => window.scrollY ?? window.pageYOffset);
-}
-
 async function waitForTocTrackingFrame(page: Page) {
   await page.evaluate(() => {
     // 通常の scroll 由来更新用。suppressTocTrackingFor が有効な期間は別途待つ。
@@ -456,11 +452,9 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
     alpha.click();
     beta.click();
   });
-  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
-
-  const expectedBetaScrollY = positions.betaTop - positions.activationOffset;
-  await expect.poll(async () => Math.abs((await currentScrollY(page)) - expectedBetaScrollY)).toBeLessThanOrEqual(4);
-
+  // poll 待ちで TOC_NAVIGATION_GRACE_MS (400ms) を消費しないよう、
+  // アンカー既定処理だけ次タスクへ流してから grace 内の slack 判定へ進める。
+  await page.waitForTimeout(0);
   await page.evaluate(
     ({ betaTop, activationOffset }) => {
       // 通常の viewport 判定なら Alpha になるが、beta pending の slack 内に収まる位置。
