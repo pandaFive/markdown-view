@@ -50,6 +50,8 @@ TOC pending navigation の未固定境界を E2E で回帰検知できるよう�
 
 次に Beta 見出しの viewport top が `activationOffset + 26` 相当になるよう `window.scrollTo` する。`26px` は `TOC_NAVIGATION_SLACK_PX + 2` に相当する。この状態では pending が解除され、通常の viewport 判定へ戻る。Beta は activation line より下にあるため、直前の見出しである `Alpha` が active になることを確認する。
 
+このテストは dense fixture を使い、Beta の後ろにも本文を置く。`sidebar.js` のページ末端例外分岐（scroll が下端で、見出しが activation line より上に届かない場合は pending を維持する経路）は対象外とし、slack 外で通常判定へ戻る通常経路だけを固定する。
+
 このテストでは `TOC_NAVIGATION_SLACK_PX` の値を production から読み取らない。backlog に明記された現行契約である 24px の内側 / 外側を E2E として固定する。
 
 ### 3. 小揺らし中の active 遷移監視

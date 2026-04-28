@@ -21,6 +21,12 @@
   - 理由: DRY 違反、片方を修正して片方を忘れるリスク。`tests/e2e/browser/test-websocket.ts` と `tests/e2e/globals.d.ts` は既に整備済みだが、spec-local helper の重複は残っている
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
+- [ ] TOC pending navigation 小揺らしテストの grace 内外分離
+  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
+  - 内容: `目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない` が、grace 失効後でも Beta 位置にいるため偽 PASS にならないよう、grace 内の pending 維持と grace 外の通常判定を分離して検証する
+  - 理由: 現行テストは可視的な active 点滅の検知には有効だが、grace 期間内であること自体を厳密には固定していない。専用テストとして切り出す方が責務が明確
+  - 由来: TOC pending navigation PR 再レビュー (2026-04-28)
+
 - [ ] `memo_jump.spec.ts` の Codex review ID コメント削除
   - ファイル: `tests/e2e/memo_jump.spec.ts`
   - 内容: `Codex review #4136142343` という外部 review system の ID 参照を除去し、回帰保護の対象である false-positive パターンの説明に置き換える
