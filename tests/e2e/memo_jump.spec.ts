@@ -2,16 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 
-declare global {
-  interface Window {
-    __MV_E2E__?: boolean;
-    updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
-    scheduleBufferedLiveUpdate: (data: { content: string; toc: string }) => void;
-  }
-  // ブラウザ側バンドルで定義されるグローバル関数（page.evaluate 内で参照）
-  function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
-}
-
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
 const longContent = [
@@ -459,11 +449,20 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
   // fetch / data.content の異常を黙殺すると Step 3 の no-op が「cache 不一致」ではなく
   // 「両方 undefined で skip」で偽陽性化するため必ず ok / 型を assert する。
   const primeContentLen = await page.evaluate(async () => {
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
     const res = await fetch('/api/content?file=long.md');
     if (!res.ok) throw new Error('Step 1 fetch failed: ' + res.status);
     const data = await res.json();
     if (typeof data.content !== 'string') throw new Error('Step 1 data.content missing');
-    window.updateContent(data, {});
+    const updateContent = requireUpdateContent();
+    updateContent(data, {});
     return data.content.length;
   });
   expect(primeContentLen).toBeGreaterThan(0);
@@ -477,11 +476,20 @@ test('同じdata.contentでの2回目updateContentは.jump-highlightを消さな
   // Step 3: 2 回目 updateContent (同一 data.content) → cache 一致で no-op。
   // 再描画されないため .jump-highlight が保持されることを検証
   const verifyContentLen = await page.evaluate(async () => {
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
     const res = await fetch('/api/content?file=long.md');
     if (!res.ok) throw new Error('Step 3 fetch failed: ' + res.status);
     const data = await res.json();
     if (typeof data.content !== 'string') throw new Error('Step 3 data.content missing');
-    window.updateContent(data, {});
+    const updateContent = requireUpdateContent();
+    updateContent(data, {});
     return data.content.length;
   });
   expect(
@@ -506,10 +514,11 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
     if (msg.type() !== 'warning') return;
     if (!msg.text().includes('updateContent') || !msg.text().includes('契約違反')) return;
     const args = msg.args();
+    const contextArg = args[1];
     contractWarnings.push({
       text: msg.text(),
       argsLength: args.length,
-      context: args.length > 1 ? await args[1].jsonValue() : null
+      context: contextArg ? await contextArg.jsonValue() : null
     });
   });
   page.on('pageerror', (error) => {
@@ -522,7 +531,16 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
   // ケース 1: 正常呼び出し → warn は出ない
   await page.evaluate(
     ({ content, toc }) => {
-      window.updateContent({ content, toc }, {});
+      function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+        const updateContent = window.updateContent;
+        if (!updateContent) {
+          throw new Error('window.updateContent is not exposed for E2E');
+        }
+        return updateContent;
+      }
+
+      const updateContent = requireUpdateContent();
+      updateContent({ content, toc }, {});
     },
     { content: OK_CONTENT, toc: OK_TOC }
   );
@@ -532,57 +550,120 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
   // 契約違反がDOM更新と重複抑制でサイレント化しないことを検証する。
   // ケース 2: content だけ欠落 → 'content が欠落または不正' warn
   await page.evaluate((toc) => {
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
     // 契約違反呼び出しを意図的に再現するため unknown 経由でキャストする
-    window.updateContent({ toc } as unknown as { content: string; toc: string }, {});
+    const updateContent = requireUpdateContent();
+    updateContent({ toc } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_TOC);
 
   // ケース 3: toc だけ欠落 → 'toc が欠落または不正' warn
   await page.evaluate((content) => {
-    window.updateContent({ content } as unknown as { content: string; toc: string }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_CONTENT);
 
   // ケース 4: content と toc 両方欠落 → 'content, toc が欠落または不正' warn
   await page.evaluate(() => {
-    window.updateContent({} as unknown as { content: string; toc: string }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({} as unknown as MvE2E.UpdateContentPayload, {});
   });
 
   // ケース 5: content が null → 'content が欠落または不正' warn
   await page.evaluate((toc) => {
-    window.updateContent(
-      { content: null, toc } as unknown as { content: string; toc: string },
-      {}
-    );
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content: null, toc } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_TOC);
 
   // ケース 6: toc が null → 'toc が欠落または不正' warn
   await page.evaluate((content) => {
-    window.updateContent(
-      { content, toc: null } as unknown as { content: string; toc: string },
-      {}
-    );
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content, toc: null } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_CONTENT);
 
   // ケース 7: content が number → 'content が欠落または不正' warn
   await page.evaluate((toc) => {
-    window.updateContent(
-      { content: 123, toc } as unknown as { content: string; toc: string },
-      {}
-    );
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content: 123, toc } as unknown as MvE2E.UpdateContentPayload, {});
   }, OK_TOC);
 
   // ケース 8: data 自体が null → 'content, toc が欠落または不正' warn
   await page.evaluate(() => {
-    window.updateContent(null as unknown as { content: string; toc: string }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent(null as unknown as MvE2E.UpdateContentPayload, {});
   });
 
   // ケース 9: data 自体が undefined → 'content, toc が欠落または不正' warn
   await page.evaluate(() => {
-    window.updateContent(undefined as unknown as { content: string; toc: string }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent(undefined as unknown as MvE2E.UpdateContentPayload, {});
   });
 
   // ケース 10: 同じ全欠落 payload がWSバッファ経由で再度来ても warn される
   await page.evaluate(() => {
-    window.scheduleBufferedLiveUpdate({} as unknown as { content: string; toc: string });
+    window.scheduleBufferedLiveUpdate({} as unknown as MvE2E.UpdateContentPayload);
   });
 
   await expect.poll(() => contractWarnings.length).toBe(9);
@@ -624,11 +705,20 @@ test('data.contentが変わるとupdateContentは再描画される (cache invar
   // Step 1: 実 fetch で prime → lastAppliedContent に実 HTML を入れる。
   // 既存テスト「同じdata.contentでの2回目...」と同形のエラーメッセージ prefix で識別性を維持。
   const primeContentLen = await page.evaluate(async () => {
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
     const res = await fetch('/api/content?file=long.md');
     if (!res.ok) throw new Error('prime fetch failed: ' + res.status);
     const data = await res.json();
     if (typeof data.content !== 'string') throw new Error('prime data.content missing');
-    window.updateContent(data, {});
+    const updateContent = requireUpdateContent();
+    updateContent(data, {});
     return data.content.length;
   });
   expect(primeContentLen).toBeGreaterThan(0);
@@ -643,7 +733,16 @@ test('data.contentが変わるとupdateContentは再描画される (cache invar
   // toc も <ul></ul> を渡して契約違反 warn が出ないようにする
   const DUMMY = '<h1 data-test-changed>changed content</h1>';
   await page.evaluate((dummy) => {
-    window.updateContent({ content: dummy, toc: '<ul></ul>' }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content: dummy, toc: '<ul></ul>' }, {});
   }, DUMMY);
 
   const afterRerender = await page.evaluate(() => ({
@@ -660,7 +759,16 @@ test('data.contentが変わるとupdateContentは再描画される (cache invar
     h.classList.add('jump-highlight');
   });
   await page.evaluate((dummy) => {
-    window.updateContent({ content: dummy, toc: '<ul></ul>' }, {});
+    function requireUpdateContent(): (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void {
+      const updateContent = window.updateContent;
+      if (!updateContent) {
+        throw new Error('window.updateContent is not exposed for E2E');
+      }
+      return updateContent;
+    }
+
+    const updateContent = requireUpdateContent();
+    updateContent({ content: dummy, toc: '<ul></ul>' }, {});
   }, DUMMY);
 
   const afterNoOp = await page.evaluate(() =>
