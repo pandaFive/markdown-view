@@ -3,16 +3,25 @@
 //! このモジュールとそのサブモジュールは [`SanitizedHtml`] の構築権を持つ
 //! 信頼境界を構成する。サブモジュールの追加はセキュリティ影響を伴う。
 
-pub mod toc;
+mod highlight;
+mod line;
+mod security;
 
 use std::ops::Range;
 use std::sync::OnceLock;
 
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
-use syntect::html::{css_for_theme_with_class_style, ClassStyle, ClassedHTMLGenerator};
+use syntect::html::{css_for_theme_with_class_style, ClassStyle};
 use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
+
+pub mod toc;
+
+use highlight::render_code_block_html;
+use line::{block_line_attrs, line_block_marker_with, source_line_attrs, LineLookup};
+use security::{sanitize_image_src, sanitize_link_href};
+
+pub use security::html_escape;
 
 /// サニタイズ済みHTMLを表すnewtype
 ///
@@ -95,51 +104,14 @@ impl RenderState {
             })
             .map(|full_range| line_block_marker_with(source_line_attrs(line_lookup, &full_range)))
             .unwrap_or_default();
-        if let Some(ref lang) = self.code_block_lang {
-            let highlighted = ss
-                .find_syntax_by_token(lang)
-                .or_else(|| ss.find_syntax_by_extension(lang))
-                .and_then(|syntax| {
-                    let mut generator = ClassedHTMLGenerator::new_with_class_style(
-                        syntax,
-                        ss,
-                        ClassStyle::SpacedPrefixed { prefix: "syn-" },
-                    );
-                    for line in LinesWithEndings::from(&self.code_block_content) {
-                        if let Err(e) = generator.parse_html_for_line_which_includes_newline(line) {
-                            tracing::warn!(
-                                "[markdown-view] コードハイライトエラー (lang={}): {}",
-                                lang,
-                                e
-                            );
-                            return None;
-                        }
-                    }
-                    Some(generator.finalize())
-                });
-
-            if let Some(highlighted) = highlighted {
-                self.push_html(&format!(
-                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
-                    line_attrs,
-                    html_escape(lang),
-                    highlighted
-                ));
-            } else {
-                self.push_html(&format!(
-                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
-                    line_attrs,
-                    html_escape(lang),
-                    html_escape(&self.code_block_content)
-                ));
-            }
-        } else {
-            self.push_html(&format!(
-                "<pre class=\"code-block\"{}><code class=\"syn-code\">{}</code></pre>\n",
-                line_attrs,
-                html_escape(&self.code_block_content)
-            ));
-        }
+        let rendered = render_code_block_html(
+            ss,
+            self.code_block_lang.as_deref(),
+            &self.code_block_content,
+            &line_attrs,
+            true,
+        );
+        self.push_html(&rendered);
 
         self.in_code_block = false;
         self.code_block_lang = None;
@@ -521,68 +493,6 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
     SanitizedHtml::from_sanitized_html(state.html_output)
 }
 
-struct LineLookup {
-    line_starts: Vec<usize>,
-}
-
-impl LineLookup {
-    fn new(input: &str) -> Self {
-        let mut line_starts = vec![0];
-        for (idx, byte) in input.bytes().enumerate() {
-            if byte == b'\n' {
-                line_starts.push(idx + 1);
-            }
-        }
-        Self { line_starts }
-    }
-
-    fn line_for_offset(&self, offset: usize) -> usize {
-        match self.line_starts.binary_search(&offset) {
-            Ok(index) => index + 1,
-            Err(index) => index,
-        }
-    }
-
-    fn line_range(&self, range: &Range<usize>) -> (usize, usize) {
-        if range.is_empty() {
-            let line = self.line_for_offset(range.start);
-            return (line, line);
-        }
-        let start_line = self.line_for_offset(range.start);
-        let end_line = self.line_for_offset(range.end.saturating_sub(1));
-        (start_line, end_line)
-    }
-}
-
-fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
-    let (start_line, end_line) = line_lookup.line_range(range);
-    format!(
-        " data-source-start-line=\"{}\" data-source-end-line=\"{}\"",
-        start_line, end_line
-    )
-}
-
-/// block-level コンテナ（<p>, <ul>, <ol>, <li>, <table>, <blockquote>）向けの行範囲属性。
-///
-/// 設計意図: 新規attribute `data-line-block-start/end` のみを付与し、既存 `data-source-*` は
-/// 付与しない。理由は `getSelectionLineRange()` (memo.js) が `[data-source-start-line]` で
-/// 集計しており、コンテナにも `data-source-*` を付けると、中の `<li>` 単体を選択しても
-/// 祖先 `<ul>` の範囲まで拾って引用 `Lx-Ly` が広がる回帰を起こすため。
-/// heading / code-block は元から `data-source-*` を持つ（その要素の範囲を示すのが正しい）のでそちらは維持。
-fn block_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
-    let (start_line, end_line) = line_lookup.line_range(range);
-    format!(
-        " data-line-block data-line-block-start=\"{}\" data-line-block-end=\"{}\"",
-        start_line, end_line
-    )
-}
-
-/// heading / code-block 用: 既存の `source_line_attrs` に `data-line-block` マーカーを前置。
-/// これらの要素は元から `data-source-*` を持ち、quote 機能上もその範囲が「その要素の範囲」として正しい。
-fn line_block_marker_with(source_attrs: String) -> String {
-    format!(" data-line-block{}", source_attrs)
-}
-
 fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
     match alignment {
         Alignment::Left => Some(" class=\"align-left\""),
@@ -672,18 +582,6 @@ pub struct HeadingInfo {
     pub level: u8,
     pub text: String,
     pub id: String,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum UrlPolicy {
-    Link,
-    Image,
-}
-
-impl UrlPolicy {
-    fn allows_remote(self) -> bool {
-        matches!(self, Self::Link)
-    }
 }
 
 /// Markdownから見出し情報を抽出する
@@ -822,83 +720,6 @@ fn resolve_theme<'a>(
     fallback.map(|(_, theme)| theme)
 }
 
-/// リンクURLを安全な形式に正規化する
-///
-/// 前後の空白を除去し、ローカル参照・相対パス・許可スキーム(http/https/mailto/tel)
-/// 以外は `"#"` に置き換える。
-fn sanitize_link_href(dest_url: &str) -> String {
-    sanitize_url(dest_url, UrlPolicy::Link)
-}
-
-/// 画像URLを安全な形式に正規化する
-///
-/// ローカル参照以外は `"#"` に置き換える。
-fn sanitize_image_src(dest_url: &str) -> String {
-    sanitize_url(dest_url, UrlPolicy::Image)
-}
-
-fn sanitize_url(dest_url: &str, policy: UrlPolicy) -> String {
-    let trimmed = dest_url.trim();
-    if is_safe_href(trimmed, policy) {
-        trimmed.to_string()
-    } else {
-        "#".to_string()
-    }
-}
-
-/// URLが許可ポリシーに一致するか判定する
-///
-/// `UrlPolicy::Link` は `http/https/mailto/tel` とローカル参照を許可する。
-/// `UrlPolicy::Image` はローカル参照のみ許可する。
-fn is_safe_href(dest_url: &str, policy: UrlPolicy) -> bool {
-    if dest_url.is_empty() {
-        return false;
-    }
-
-    // `//example.com` のようなプロトコル相対URLは拒否する。
-    // 現在ページのスキームを継承して外部サイトへ遷移できるため、
-    // ローカル参照のみ許可するポリシーを迂回する余地を作らない。
-    if dest_url.starts_with("//") {
-        return false;
-    }
-
-    if dest_url.starts_with('#')
-        || dest_url.starts_with('/')
-        || dest_url.starts_with("./")
-        || dest_url.starts_with("../")
-        || dest_url.starts_with('?')
-    {
-        return true;
-    }
-
-    let Some(colon_pos) = dest_url.find(':') else {
-        return true;
-    };
-
-    if !policy.allows_remote() {
-        return false;
-    }
-
-    let scheme = dest_url[..colon_pos].to_ascii_lowercase();
-    matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel")
-}
-
-/// HTML特殊文字のエスケープ（属性値にも安全）
-pub fn html_escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,26 +747,5 @@ mod tests {
                 "toc": "<ul><li>toc</li></ul>"
             })
         );
-    }
-
-    #[test]
-    fn test_line_lookup_line_for_offsetは改行境界を正しく返す() {
-        let lookup = LineLookup::new("alpha\nbeta\ncharlie");
-
-        assert_eq!(lookup.line_for_offset(0), 1);
-        assert_eq!(lookup.line_for_offset(5), 1);
-        assert_eq!(lookup.line_for_offset(6), 2);
-        assert_eq!(lookup.line_for_offset(10), 2);
-        assert_eq!(lookup.line_for_offset(11), 3);
-    }
-
-    #[test]
-    fn test_line_lookup_line_rangeは複数行範囲を正しく返す() {
-        let lookup = LineLookup::new("alpha\nbeta\ncharlie");
-
-        assert_eq!(lookup.line_range(&(0..5)), (1, 1));
-        assert_eq!(lookup.line_range(&(0..10)), (1, 2));
-        assert_eq!(lookup.line_range(&(6..18)), (2, 3));
-        assert_eq!(lookup.line_range(&(6..6)), (2, 2));
     }
 }
