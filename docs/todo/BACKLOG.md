@@ -35,9 +35,9 @@
   - 理由: フラッシュ系の視覚バグは poll で見逃されるため、より厳密な回帰検知を整備する
   - 由来: PR #77 レビュー (2026-04-20)
 
-- [ ] `window.updateContent` を E2E モード限定 expose に変更
+- [x] `window.updateContent` を E2E モード限定 expose に変更
   - ファイル: `src/template/assets/js/content.js` L1303 (現状 `window.updateContent = updateContent;`)
-  - 内容: Playwright 実行時のみ expose する形 (`if (window.__MV_E2E__) window.updateContent = updateContent;`) に変更。E2E 側は `page.addInitScript(() => { window.__MV_E2E__ = true; })` で有効化
+  - 内容: Playwright 実行時のみ expose する形 (`if (window.__MV_E2E__ === true) { window.updateContent = updateContent; }`) に変更。truthy 非 boolean では expose しない。E2E 側は `page.addInitScript(() => { window.__MV_E2E__ = true; })` で有効化
   - 理由: 個人 markdown viewer (127.0.0.1 限定) なので実害はないが、テスト hook が production HTML に常時露出している。将来 OSS 化 / 公開ホスティングに転じた際にサニタイズ層をバイパスして任意 HTML payload を流す呼び出しが可能になる
   - 由来: PR #80 レビュー (2026-04-20)
 

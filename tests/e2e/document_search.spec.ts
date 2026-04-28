@@ -2,13 +2,14 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
+    __MV_E2E__?: boolean;
     __lastWs: WebSocket & { onmessage: ((ev: MessageEvent) => void) | null };
     __realWsOnmessage: (ev: { data: string }) => void;
+    updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
   }
   // ブラウザ側バンドルで定義される変数・関数（page.evaluate 内で参照）
   var isDirMode: boolean;
   var currentFile: string;
-  function updateContent(data: { content: string; toc: string }, opts?: Record<string, unknown>): void;
   function activateSidebarTab(tab: string): void;
   function applyDocumentSearchQuery(value: string): void;
   function moveDocumentSearch(direction: number): void;
@@ -41,7 +42,7 @@ function searchFixtureToc(): string {
 async function loadSearchFixture(page: Page) {
   await page.evaluate(({ content, toc }) => {
     isDirMode = false;
-    updateContent({ content, toc });
+    window.updateContent({ content, toc });
     activateSidebarTab('toc');
   }, {
     content: searchFixtureContent(),
@@ -92,6 +93,7 @@ async function setDocumentSearchQuery(page: Page, query: string) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
+    window.__MV_E2E__ = true;
     const NativeWebSocket = window.WebSocket;
 
     class TestWebSocket extends NativeWebSocket {
@@ -133,7 +135,7 @@ test('見出しテキストも文書内検索の対象に含める', async ({ pa
 
 test('リンクやコードブロック内の一致は検索ハイライト対象にしない', async ({ page }) => {
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -159,7 +161,7 @@ test('リンクやコードブロック内の一致は検索ハイライト対�
 
 test('inline code内の一致も検索対象に含める', async ({ page }) => {
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Run <code>cargo test</code> after editing.</p>',
@@ -177,7 +179,7 @@ test('inline code内の一致も検索対象に含める', async ({ page }) => {
 
 test('装飾をまたぐ語句も検索できる', async ({ page }) => {
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha <strong>note</strong> appears across formatting.</p>',
@@ -323,7 +325,7 @@ test('live update後も検索結果を再適用する', async ({ page }) => {
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -349,7 +351,7 @@ test('live update後も検索結果を再適用する', async ({ page }) => {
 
 test('検索結果一覧に前後文を表示してクリックで該当箇所へ移動する', async ({ page }) => {
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Opening sentence. Alpha note appears here. Closing sentence.</p>' +
@@ -378,7 +380,7 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
 test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
   await page.evaluate(() => {
     const paragraphs = Array.from({ length: 18 }, (_, index) => `<p>Entry ${index + 1}. Alpha note appears in result ${index + 1}. Tail ${index + 1}.</p>`).join('');
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1>' + paragraphs,
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -434,7 +436,7 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
 
   await page.evaluate(() => {
     isDirMode = true;
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -483,7 +485,7 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -541,7 +543,7 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -609,7 +611,7 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'initial.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="initial">Initial</h1><p>Placeholder body.</p>',
       toc: '<ul><li><a href="#initial">Initial</a></li></ul>'
     });
@@ -695,7 +697,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Initial README content.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -755,7 +757,7 @@ test('ディレクトリ検索結果のオープン失敗時は以前の選択�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -819,7 +821,7 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });
@@ -830,7 +832,7 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
 
   await page.evaluate(() => {
-    updateContent({
+    window.updateContent({
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Alpha note appears here.</p>' +
@@ -888,7 +890,7 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
   await page.evaluate(() => {
     isDirMode = true;
     currentFile = 'README.md';
-    updateContent({
+    window.updateContent({
       content: '<h1 id="readme">README</h1><p>Alpha result is visible.</p><p>Beta result is visible.</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>'
     });

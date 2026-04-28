@@ -1223,7 +1223,7 @@ function normalizeTocHtml(html) {
 
 // サーバーサイドでサニタイズ済みのHTMLを反映する
 // XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
-function updateContent(data, options) {
+let updateContent = function updateContent(data, options) {
   options = options || {};
   // null/配列は UpdateMessage ではないため、空 object として契約違反扱いに寄せる。
   var safeData = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
@@ -1316,12 +1316,14 @@ function updateContent(data, options) {
   if (!hasContractViolation && typeof rememberAppliedLiveUpdate === 'function') {
     rememberAppliedLiveUpdate(safeData);
   }
-}
+};
 
 setupDocumentSearch();
 setupContentLinkNavigation();
 setupMemoLinkNavigation();
 
-// テスト専用 expose (tests/e2e/memo_jump.spec.js から直接呼ぶため)。
-// 本番コードからは呼ばないこと (websocket.js / fetch.js 経由の正規ルートを使う)。
-window.updateContent = updateContent;
+// テスト専用 expose。production では window に公開しない。
+// E2E は page.addInitScript で window.__MV_E2E__ = true を事前注入する。
+if (window.__MV_E2E__ === true) {
+  window.updateContent = updateContent;
+}

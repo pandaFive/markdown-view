@@ -4,6 +4,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
+    __MV_E2E__?: boolean;
     updateContent: (data: { content: string; toc: string }, opts?: Record<string, unknown>) => void;
     scheduleBufferedLiveUpdate: (data: { content: string; toc: string }) => void;
   }
@@ -97,12 +98,21 @@ async function selectParagraphText(page: Page, text: string) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__MV_E2E__ = true;
+  });
   await resetLongFixture();
   await page.goto('/?file=long.md');
   await expect(page.locator('#content')).toContainText('TARGET BLOCK');
 });
 
 test('メモ出典クリックで本文の対応ブロックへスクロールしハイライトされる', async ({ page }) => {
+  // 初回WebSocket updateContent が未適用のまま出典クリックすると、クリック直後の
+  // live update 再描画で一時ハイライトが消えるため、ユーザー操作前に初期同期を待つ。
+  await page.waitForFunction(() => {
+    return (window as unknown as { lastAppliedContent: string | null }).lastAppliedContent !== null;
+  });
+
   // 1. 中盤の段落を選択して引用追加 → メモタブが activate される
   await selectParagraphText(page, 'TARGET BLOCK');
   const quoteButton = page.locator('#quote-selection-action');
