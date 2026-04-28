@@ -12,31 +12,6 @@
   - 理由: PR #76 レビュー（pr-test-analyzer）で指摘された全テスト共通の懸念。本 PR 単独の課題ではなくテスト基盤改善
   - 由来: PR #76 レビュー (2026-04-20)
 
-- [ ] E2E の `declare global` ブロックを `tests/e2e/globals.d.ts` に集約
-  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` に散在する `declare global { interface Window { ... } }` + ブラウザバンドル関数/変数の declare
-  - 内容: 共通 ambient 宣言を `tests/e2e/globals.d.ts` に一本化。各 spec の `declare global` を削除。`tsconfig.json` の `include` で拾う
-  - 理由: `Window.__lastWs` / `__realWsOnmessage` が text_selection_defer と document_search で byte 一致しているが、片方を変更すると TS2717 で破綻するリスクを根治。`selectFile` / `updateContent` 宣言の spec 間不整合も解消
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
-- [ ] `updateContent` 型宣言の統一
-  - ファイル: `tests/e2e/memo_jump.spec.ts` (Window.updateContent プロパティ型), `tests/e2e/document_search.spec.ts` (top-level function 型)
-  - 内容: 同じランタイム binding に対し 2 通りの型宣言が存在。`opts` が memo_jump では required、document_search では optional と不整合。どちらかに統一
-  - 理由: 同一 binding を 2 型で捕捉しているため、片方の型が誤っても検出不能。ペイロード union (`{ refresh: true }` / `file?: string` 等) も未表現
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
-- [ ] `tsconfig.json` に strict flag 追加
-  - 内容: strict の上位に両 flag を有効化
-  - 理由:
-    - `noUncheckedIndexedAccess`: `__clickObservations[href]` 等の Record アクセスに `undefined` 可能性を強制 → missing key のバグを発見
-    - `exactOptionalPropertyTypes`: `toc?: string` と `toc: undefined` の区別を厳格化 → `content.js` 側の `data.toc !== undefined` チェックと整合
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
-- [ ] `TestWebSocket` を `tests/e2e/browser/test-websocket.ts` に抽出
-  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `page.addInitScript` 内 TestWebSocket 定義
-  - 内容: 共有ブラウザハーネスモジュールとして切り出し、`page.addInitScript(path)` で読み込む
-  - 理由: 2 spec で TestWebSocket 定義が重複、片方に `setTimeout` override が付く等の drift が発生している
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
 - [ ] E2E を `verify.sh` に統合するか検討
   - ファイル: `verify.sh`
   - 内容: 現状 `tsc --noEmit` のみで `npm run test:e2e` は手動実行。verify.sh で Rust server 立ち上げ→ playwright 実行まで含めるか
@@ -75,12 +50,6 @@
   - 理由: DRY 違反、片方を修正して片方を忘れるリスク。TS 化の副産物として可視化されたが、E2E TS 移行スコープ外として延期
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
-- [ ] `as unknown as` double-cast の説明コメント追加
-  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `stabilizeWebSocketHarness` 内
-  - 内容: `window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;` の直前に、`__dispatchWsMessage` が MessageEvent を生成せず `{ data: string }` を直接渡すため契約を狭めている旨の日本語コメント
-  - 理由: 2 箇所の strict エスケープハッチが無説明。`MessageEvent` contravariance の問題を説明しないと将来の保守者が削除しかねない
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
 - [ ] `memo_jump.spec.ts:303` の Codex review ID 削除
   - 内容: 外部 review system の ID 参照を除去し、回帰保護の対象である false-positive パターンの説明に置き換える
   - 理由: ID は Codex 側でアーカイブされると参照不能、典型的な rot-prone comment
@@ -117,6 +86,37 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] E2E の `declare global` ブロックを `tests/e2e/globals.d.ts` に集約
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` に散在する `declare global { interface Window { ... } }` + ブラウザバンドル関数/変数の declare
+  - 内容: 共通 ambient 宣言を `tests/e2e/globals.d.ts` に一本化。各 spec の `declare global` を削除。`tsconfig.json` の `include` で拾う
+  - 理由: `Window.__lastWs` / `__realWsOnmessage` が text_selection_defer と document_search で byte 一致しているが、片方を変更すると TS2717 で破綻するリスクを根治。`selectFile` / `updateContent` 宣言の spec 間不整合も解消
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
+
+- [x] `updateContent` 型宣言の統一
+  - ファイル: `tests/e2e/memo_jump.spec.ts` (Window.updateContent プロパティ型), `tests/e2e/document_search.spec.ts` (top-level function 型)
+  - 内容: 同じランタイム binding に対し 2 通りの型宣言が存在。`opts` が memo_jump では required、document_search では optional と不整合。どちらかに統一
+  - 理由: 同一 binding を 2 型で捕捉しているため、片方の型が誤っても検出不能。ペイロード union (`{ refresh: true }` / `file?: string` 等) も未表現
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
+
+- [x] `tsconfig.json` に strict flag 追加
+  - 内容: strict の上位に両 flag を有効化
+  - 理由:
+    - `noUncheckedIndexedAccess`: `__clickObservations[href]` 等の Record アクセスに `undefined` 可能性を強制 → missing key のバグを発見
+    - `exactOptionalPropertyTypes`: `toc?: string` と `toc: undefined` の区別を厳格化 → `content.js` 側の `data.toc !== undefined` チェックと整合
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
+
+- [x] `TestWebSocket` を `tests/e2e/browser/test-websocket.ts` に抽出
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `page.addInitScript` 内 TestWebSocket 定義
+  - 内容: 共有ブラウザハーネスモジュールとして切り出し、`page.addInitScript(path)` で読み込む
+  - 理由: 2 spec で TestWebSocket 定義が重複、片方に `setTimeout` override が付く等の drift が発生している
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
+
+- [x] `as unknown as` double-cast の説明コメント追加
+  - ファイル: `tests/e2e/{text_selection_defer,document_search}.spec.ts` の `stabilizeWebSocketHarness` 内
+  - 内容: `window.__realWsOnmessage = window.__lastWs.onmessage! as unknown as (ev: { data: string }) => void;` の直前に、`__dispatchWsMessage` が MessageEvent を生成せず `{ data: string }` を直接渡すため契約を狭めている旨の日本語コメント
+  - 理由: 2 箇所の strict エスケープハッチが無説明。`MessageEvent` contravariance の問題を説明しないと将来の保守者が削除しかねない
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
 - [x] `window.updateContent` を E2E モード限定 expose に変更
   - ファイル: `src/template/assets/js/content.js` L1303 (現状 `window.updateContent = updateContent;`)
