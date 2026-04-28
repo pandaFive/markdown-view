@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Playwright, Chromium E2E, Rust preview server via `cargo run`
 
-**Implementation Status:** Completed on 2026-04-28. Task commits: `c9f8b81 test: TOC active監視ヘルパーを追加`, `16dc04f test: TOC pending navigation境界を固定`, `d89794f docs: TOC pending navigation完了をBACKLOGに反映`.
+**Implementation Status:** Completed on 2026-04-28. Task commits: `c9f8b81 test: TOC active監視ヘルパーを追加`, `16dc04f test: TOC pending navigation境界を固定`, `d89794f docs: TOC pending navigation完了をBACKLOGに反映`. Task 3 was skipped because the new E2E tests passed without `sidebar.js` changes. Task 5 passed with `npm run test:e2e -- text_selection_defer.spec.ts`, `npm run typecheck`, and `./verify.sh`.
 
 ---
 
@@ -33,11 +33,12 @@
 
 ```ts
 async function currentScrollY(page: Page) {
-  return page.evaluate(() => window.scrollY || window.pageYOffset);
+  return page.evaluate(() => window.scrollY ?? window.pageYOffset);
 }
 
 async function waitForTocTrackingFrame(page: Page) {
   await page.evaluate(() => {
+    // 通常の scroll 由来更新用。suppressTocTrackingFor が有効な期間は別途待つ。
     return new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => resolve());
@@ -86,8 +87,10 @@ async function stopTocActiveChangeRecorder(page: Page) {
       throw new Error('TOC active change recorder is not initialized');
     }
     stopTocObserver();
-    window.__stopTocObserver = undefined;
-    return tocActiveChanges.slice();
+    const changes = tocActiveChanges.slice();
+    delete window.__stopTocObserver;
+    delete window.__tocActiveChanges;
+    return changes;
   });
 }
 ```
@@ -125,9 +128,15 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await clickTocLink(page, 'alpha');
-  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
-  await clickTocLink(page, 'beta');
+  await page.evaluate(() => {
+    const alpha = document.querySelector('#toc a[href="#alpha"]') as HTMLAnchorElement | null;
+    const beta = document.querySelector('#toc a[href="#beta"]') as HTMLAnchorElement | null;
+    if (!alpha || !beta) {
+      throw new Error('toc links not found: alpha/beta');
+    }
+    alpha.click();
+    beta.click();
+  });
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 
   const expectedBetaScrollY = positions.betaTop - positions.activationOffset;
@@ -136,12 +145,14 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
 
 test('目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る', async ({ page }) => {
   const positions = await loadDenseHeadingFixture(page);
+  expect(positions.activationOffset).toBeGreaterThan(0);
 
   await clickTocLink(page, 'beta');
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 
   await page.evaluate(
     ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) - 2: pending active を維持する境界内。
       window.scrollTo(0, betaTop - activationOffset - 22);
     },
     { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
@@ -151,6 +162,7 @@ test('目次クリック後のslack内スクロールではpending activeを維�
 
   await page.evaluate(
     ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) + 2: pending を解除して通常判定へ戻る境界外。
       window.scrollTo(0, betaTop - activationOffset - 26);
     },
     { betaTop: positions.betaTop, activationOffset: positions.activationOffset }

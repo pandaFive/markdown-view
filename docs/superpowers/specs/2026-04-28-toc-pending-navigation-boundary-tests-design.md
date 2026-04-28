@@ -38,7 +38,7 @@ TOC pending navigation の未固定境界を E2E で回帰検知できるよう�
 
 テスト名は `目次クリックの猶予中に別の目次をクリックしたら最後のクリック先へ収束する` とする。
 
-`loadDenseHeadingFixture` で Alpha / Beta を含むページを作る。最初に Beta の少し手前へスクロールし、通常判定では `Alpha` が active になる状態を確認する。その後、400ms grace 内に `clickTocLink(page, 'alpha')`、続けて `clickTocLink(page, 'beta')` を実行する。
+`loadDenseHeadingFixture` で Alpha / Beta を含むページを作る。最初に Beta の少し手前へスクロールし、通常判定では `Alpha` が active になる状態を確認する。その後、400ms grace 内であることをテスト側で暗黙にしないため、同一 `page.evaluate` 内で `alpha.click()`、続けて `beta.click()` を実行する。
 
 期待値は、最終 active が `Beta` になり、`window.scrollY` が `betaTop - activationOffset` 近辺へ収束することとする。scrollY の検証はブラウザの丸めや scroll-margin の差を考慮し、厳密一致ではなく小さな許容幅を持たせる。
 
@@ -46,7 +46,7 @@ TOC pending navigation の未固定境界を E2E で回帰検知できるよう�
 
 テスト名は `目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る` とする。
 
-`clickTocLink(page, 'beta')` 後、Beta 見出しの viewport top が `activationOffset + 22` 相当になるよう `window.scrollTo` する。`22px` は `TOC_NAVIGATION_SLACK_PX - 2` に相当する。この状態では pending が維持され、active は `Beta` のままであることを確認する。
+`clickTocLink(page, 'beta')` 後、`activationOffset` が正値であることを確認し、Beta 見出しの viewport top が `activationOffset + 22` 相当になるよう `window.scrollTo` する。`22px` は `TOC_NAVIGATION_SLACK_PX - 2` に相当する。この状態では pending が維持され、active は `Beta` のままであることを確認する。
 
 次に Beta 見出しの viewport top が `activationOffset + 26` 相当になるよう `window.scrollTo` する。`26px` は `TOC_NAVIGATION_SLACK_PX + 2` に相当する。この状態では pending が解除され、通常の viewport 判定へ戻る。Beta は activation line より下にあるため、直前の見出しである `Alpha` が active になることを確認する。
 
@@ -58,7 +58,7 @@ TOC pending navigation の未固定境界を E2E で回帰検知できるよう�
 
 既存の `同一見出しのburst更新でも目次activeが点滅しない` と同じ `MutationObserver` 方式で `#toc a.active` の `class` 変化を記録する。`clickTocLink(page, 'beta')` 後、grace 内に `+6`, `-4`, `+3` 程度の小さな `scrollTo` を挟み、scroll イベントと `requestAnimationFrame` が処理される短い待ち時間を置く。
 
-期待値は、記録された active ラベルが `Beta` 以外を含まないこととする。初期記録を含める場合は、`Beta` クリック後に observer を開始するか、結果検証時に `Beta` 以外が含まれないことを確認する。重複した `Beta` 記録は許容するが、`Alpha` や空文字への一瞬の切り替わりは失敗にする。
+期待値は、記録された active ラベルが `Beta` 以外を含まないこととする。実装では `Beta` クリック後に observer を開始し、初期記録として `Beta` が含まれることも確認する。重複した `Beta` 記録は許容するが、`Alpha` や空文字への一瞬の切り替わりは失敗にする。
 
 ## 実装修正が必要な場合
 

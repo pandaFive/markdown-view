@@ -17,7 +17,7 @@
 
 - [ ] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出
   - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer,document_search}.spec.ts`
-  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出する
+  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent`、`currentScrollY`、`waitForTocTrackingFrame`、`startTocActiveChangeRecorder`、`stopTocActiveChangeRecorder` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出する
   - 理由: DRY 違反、片方を修正して片方を忘れるリスク。`tests/e2e/browser/test-websocket.ts` と `tests/e2e/globals.d.ts` は既に整備済みだが、spec-local helper の重複は残っている
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
@@ -65,7 +65,7 @@
     - grace 400ms 以内の連続 TOC クリックで最後のクリック先に収束することを検証
     - `TOC_NAVIGATION_SLACK_PX` の内側 / 外側で pending 維持と通常判定復帰が分かれることを検証
     - `MutationObserver` で小揺らし中にクリック先以外へ active が切り替わらないことを検証
-  - 完了根拠: `16dc04f test: TOC pending navigation境界を固定`
+  - 完了根拠: `c9f8b81 test: TOC active監視ヘルパーを追加`, `16dc04f test: TOC pending navigation境界を固定`
   - 由来: PR #77 レビュー (2026-04-20)
 
 - [x] E2E テストの DOM クリーンアップ戦略見直し

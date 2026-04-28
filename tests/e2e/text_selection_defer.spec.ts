@@ -58,11 +58,12 @@ async function clickTocLink(page: Page, id: string) {
 }
 
 async function currentScrollY(page: Page) {
-  return page.evaluate(() => window.scrollY || window.pageYOffset);
+  return page.evaluate(() => window.scrollY ?? window.pageYOffset);
 }
 
 async function waitForTocTrackingFrame(page: Page) {
   await page.evaluate(() => {
+    // 通常の scroll 由来更新用。suppressTocTrackingFor が有効な期間は別途待つ。
     return new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => resolve());
@@ -111,8 +112,10 @@ async function stopTocActiveChangeRecorder(page: Page) {
       throw new Error('TOC active change recorder is not initialized');
     }
     stopTocObserver();
+    const changes = tocActiveChanges.slice();
     delete window.__stopTocObserver;
-    return tocActiveChanges.slice();
+    delete window.__tocActiveChanges;
+    return changes;
   });
 }
 
@@ -444,9 +447,15 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await clickTocLink(page, 'alpha');
-  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
-  await clickTocLink(page, 'beta');
+  await page.evaluate(() => {
+    const alpha = document.querySelector('#toc a[href="#alpha"]') as HTMLAnchorElement | null;
+    const beta = document.querySelector('#toc a[href="#beta"]') as HTMLAnchorElement | null;
+    if (!alpha || !beta) {
+      throw new Error('toc links not found: alpha/beta');
+    }
+    alpha.click();
+    beta.click();
+  });
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 
   const expectedBetaScrollY = positions.betaTop - positions.activationOffset;
@@ -455,12 +464,14 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
 
 test('目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る', async ({ page }) => {
   const positions = await loadDenseHeadingFixture(page);
+  expect(positions.activationOffset).toBeGreaterThan(0);
 
   await clickTocLink(page, 'beta');
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
 
   await page.evaluate(
     ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) - 2: pending active を維持する境界内。
       window.scrollTo(0, betaTop - activationOffset - 22);
     },
     { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
@@ -470,6 +481,7 @@ test('目次クリック後のslack内スクロールではpending activeを維�
 
   await page.evaluate(
     ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) + 2: pending を解除して通常判定へ戻る境界外。
       window.scrollTo(0, betaTop - activationOffset - 26);
     },
     { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
