@@ -57,6 +57,64 @@ async function clickTocLink(page: Page, id: string) {
   }, id);
 }
 
+async function waitForTocTrackingFrame(page: Page) {
+  await page.evaluate(() => {
+    // 通常の scroll 由来更新用。suppressTocTrackingFor が有効な期間は別途待つ。
+    return new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    });
+  });
+}
+
+async function startTocActiveChangeRecorder(page: Page) {
+  await page.evaluate(() => {
+    const toc = document.getElementById('toc');
+    if (!toc) {
+      throw new Error('TOC is not initialized');
+    }
+    window.__tocActiveChanges = [];
+    let lastLabel = '__unset__';
+    const recordActive = () => {
+      const active = toc.querySelector('a.active');
+      const label = active ? active.textContent || '' : '';
+      if (label !== lastLabel) {
+        const tocActiveChanges = window.__tocActiveChanges;
+        if (!tocActiveChanges) {
+          throw new Error('TOC active change recorder is not initialized');
+        }
+        tocActiveChanges.push(label);
+        lastLabel = label;
+      }
+    };
+    recordActive();
+    const observer = new MutationObserver(recordActive);
+    observer.observe(toc, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class']
+    });
+    window.__stopTocObserver = () => observer.disconnect();
+  });
+}
+
+async function stopTocActiveChangeRecorder(page: Page) {
+  return page.evaluate(() => {
+    const stopTocObserver = window.__stopTocObserver;
+    const tocActiveChanges = window.__tocActiveChanges;
+    if (!stopTocObserver || !tocActiveChanges) {
+      throw new Error('TOC active change recorder is not initialized');
+    }
+    stopTocObserver();
+    const changes = tocActiveChanges.slice();
+    delete window.__stopTocObserver;
+    delete window.__tocActiveChanges;
+    return changes;
+  });
+}
+
 async function stabilizeWebSocketHarness(page: Page) {
   await page.waitForFunction(() => {
     const lastWs = window.__lastWs;
@@ -377,6 +435,90 @@ test('目次クリック直後の小揺らしではクリック先のactiveが�
   // 150msはTOC_NAVIGATION_GRACE_MS未満で意図的に小さい値
   await page.waitForTimeout(150);
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+});
+
+test('目次クリックの猶予中に別の目次をクリックしたら最後のクリック先へ収束する', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.betaTop - positions.activationOffset - 8);
+  await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
+
+  await page.evaluate(() => {
+    const alpha = document.querySelector('#toc a[href="#alpha"]') as HTMLAnchorElement | null;
+    const beta = document.querySelector('#toc a[href="#beta"]') as HTMLAnchorElement | null;
+    if (!alpha || !beta) {
+      throw new Error('toc links not found: alpha/beta');
+    }
+    alpha.click();
+    beta.click();
+  });
+  // poll 待ちで TOC_NAVIGATION_GRACE_MS (400ms) を消費しないよう、
+  // アンカー既定処理だけ次タスクへ流してから grace 内の slack 判定へ進める。
+  await page.waitForTimeout(0);
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      // 通常の viewport 判定なら Alpha になるが、beta pending の slack 内に収まる位置。
+      window.scrollTo(0, betaTop - activationOffset - 22);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Beta');
+});
+
+test('目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+  expect(positions.activationOffset).toBeGreaterThan(0);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) - 2: pending active を維持する境界内。
+      window.scrollTo(0, betaTop - activationOffset - 22);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Beta');
+
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      // TOC_NAVIGATION_SLACK_PX (24) + 2: pending を解除して通常判定へ戻る境界外。
+      window.scrollTo(0, betaTop - activationOffset - 26);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Alpha');
+});
+
+test('目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない', async ({ page }) => {
+  const positions = await loadDenseHeadingFixture(page);
+
+  await clickTocLink(page, 'beta');
+  await expect.poll(() => activeTocLabel(page)).toBe('Beta');
+  await startTocActiveChangeRecorder(page);
+
+  for (const offsetFromBetaActivation of [-22, -16, -20, -17]) {
+    await page.evaluate(
+      ({ betaTop, activationOffset, offset }) => {
+        // 通常の viewport 判定では Alpha になるが、beta pending の slack 内で小揺らしする。
+        window.scrollTo(0, betaTop - activationOffset + offset);
+      },
+      {
+        betaTop: positions.betaTop,
+        activationOffset: positions.activationOffset,
+        offset: offsetFromBetaActivation
+      }
+    );
+    await waitForTocTrackingFrame(page);
+  }
+
+  const activeChanges = await stopTocActiveChangeRecorder(page);
+  expect(activeChanges).toContain('Beta');
+  expect(activeChanges.filter((label) => label !== 'Beta')).toEqual([]);
 });
 
 test('日本語id見出しでも目次クリック直後の逆方向スクロールで通常判定へ戻る', async ({ page }) => {

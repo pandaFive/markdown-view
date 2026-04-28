@@ -15,20 +15,17 @@
   - 理由: `src/template/assets/js/content.js` のドックコメントは、renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応すると説明している。実装は `TEXT_NODE` と `ELEMENT_NODE` の双方で `textContent` を見るが、現行テストは text node 経路中心で、ELEMENT_NODE sibling の設計意図を直接固定していない
   - 由来: PR #76 レビュー (2026-04-20)
 
-- [ ] TOC pending navigation の境界回帰テスト強化
-  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
-  - 内容:
-    - grace 400ms 以内に `clickTocLink('alpha')` → `clickTocLink('beta')` と連続クリックしたとき、最終 active と scrollY が 2 番目のリンク先に正しく収束することを検証する
-    - `TOC_NAVIGATION_SLACK_PX` の境界として、`SLACK - 2 = 22px` で pending 維持、`SLACK + 2 = 26px` で通常判定復帰を検証する
-    - `MutationObserver` で `#toc a.active` の `class` 遷移を監視し、小揺らし中に Beta 以外へ切り替わらないことを検証する
-  - 理由: 3 項目はいずれも `src/template/assets/js/sidebar.js` の pending TOC navigation に対する局所回帰検知。個別 backlog のままだと粒度が細かすぎるため、同一テスト群の強化としてまとめる
-  - 由来: PR #77 レビュー (2026-04-20)
-
 - [ ] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出
   - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer,document_search}.spec.ts`
-  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出する
+  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent`、`currentScrollY`、`waitForTocTrackingFrame`、`startTocActiveChangeRecorder`、`stopTocActiveChangeRecorder` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出する
   - 理由: DRY 違反、片方を修正して片方を忘れるリスク。`tests/e2e/browser/test-websocket.ts` と `tests/e2e/globals.d.ts` は既に整備済みだが、spec-local helper の重複は残っている
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
+
+- [ ] TOC pending navigation 小揺らしテストの grace 内外分離
+  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
+  - 内容: `目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない` が、grace 失効後でも Beta 位置にいるため偽 PASS にならないよう、grace 内の pending 維持と grace 外の通常判定を分離して検証する
+  - 理由: 現行テストは可視的な active 点滅の検知には有効だが、grace 期間内であること自体を厳密には固定していない。専用テストとして切り出す方が責務が明確
+  - 由来: TOC pending navigation PR 再レビュー (2026-04-28)
 
 - [ ] `memo_jump.spec.ts` の Codex review ID コメント削除
   - ファイル: `tests/e2e/memo_jump.spec.ts`
@@ -67,6 +64,15 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] TOC pending navigation の境界回帰テスト強化
+  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
+  - 内容:
+    - grace 400ms 以内の連続 TOC クリックで最後のクリック先に収束することを検証
+    - `TOC_NAVIGATION_SLACK_PX` の内側 / 外側で pending 維持と通常判定復帰が分かれることを検証
+    - `MutationObserver` で小揺らし中にクリック先以外へ active が切り替わらないことを検証
+  - 完了根拠: `c9f8b81 test: TOC active監視ヘルパーを追加`, `16dc04f test: TOC pending navigation境界を固定`
+  - 由来: PR #77 レビュー (2026-04-20)
 
 - [x] E2E テストの DOM クリーンアップ戦略見直し
   - ファイル: `tests/e2e/memo_jump.spec.ts`
