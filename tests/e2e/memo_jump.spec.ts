@@ -107,6 +107,12 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('メモ出典クリックで本文の対応ブロックへスクロールしハイライトされる', async ({ page }) => {
+  // 初回WebSocket updateContent が未適用のまま出典クリックすると、クリック直後の
+  // live update 再描画で一時ハイライトが消えるため、ユーザー操作前に初期同期を待つ。
+  await page.waitForFunction(() => {
+    return (window as unknown as { lastAppliedContent: string | null }).lastAppliedContent !== null;
+  });
+
   // 1. 中盤の段落を選択して引用追加 → メモタブが activate される
   await selectParagraphText(page, 'TARGET BLOCK');
   const quoteButton = page.locator('#quote-selection-action');
