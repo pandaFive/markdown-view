@@ -263,16 +263,14 @@ test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは has
     const link = document.createElement('a');
     link.href = 'other.md';
     link.textContent = 'other';
+    const lineHint = document.createTextNode(' L10 onwards');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L10 onwards'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '');
     } finally {
       link.remove();
-      // 末尾のテキストノードを除去（container の最後の child を削除）
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   // ガードが外れると `#L10` に augment される。空文字列のままなら正しくスキップされている
@@ -287,15 +285,14 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
+    const lineHint = document.createTextNode(' L5abc trailing');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L5abc trailing'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(result).toBe('#section-b');
@@ -311,15 +308,14 @@ test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では
     const link = document.createElement('a');
     link.href = '?file=spec.md#intro';
     link.textContent = 'spec';
+    const lineHint = document.createTextNode(' L10 onwards は詳しい説明');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L10 onwards は詳しい説明'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '#intro');
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(result).toBe('#intro');
@@ -333,15 +329,14 @@ test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく has
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
+    const lineHint = document.createTextNode(' L15-L17');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L15-L17'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(result).toBe('#section-b:L15-L17');
@@ -355,15 +350,14 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b';
     link.textContent = 'dummy';
+    const lineHint = document.createTextNode(' L17-L15');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L17-L15'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(result).toBe('#section-b:L17');
@@ -378,15 +372,14 @@ test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば li
     const link = document.createElement('a');
     link.href = '?file=long.md#section-b:L15';
     link.textContent = 'dummy';
+    const lineHint = document.createTextNode(' L20');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L20'));
+    container.appendChild(lineHint);
     try {
       return augmentHashWithTrailingLineHint(link, '#section-b:L15');
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(result).toBe('#section-b:L15');
@@ -402,8 +395,9 @@ test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n>
     const link = document.createElement('a');
     link.href = '?file=long.md';
     link.textContent = 'dummy';
+    const lineHint = document.createTextNode(' L42');
     container.appendChild(link);
-    container.appendChild(document.createTextNode(' L42'));
+    container.appendChild(lineHint);
     try {
       return {
         empty: augmentHashWithTrailingLineHint(link, ''),
@@ -411,9 +405,7 @@ test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n>
       };
     } finally {
       link.remove();
-      if (container.lastChild && container.lastChild.nodeType === Node.TEXT_NODE) {
-        container.lastChild.remove();
-      }
+      lineHint.remove();
     }
   });
   expect(results.empty).toBe('#L42');
