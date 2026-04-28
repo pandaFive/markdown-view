@@ -15,12 +15,6 @@
   - 理由: `src/template/assets/js/content.js` のドックコメントは、renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応すると説明している。実装は `TEXT_NODE` と `ELEMENT_NODE` の双方で `textContent` を見るが、現行テストは text node 経路中心で、ELEMENT_NODE sibling の設計意図を直接固定していない
   - 由来: PR #76 レビュー (2026-04-20)
 
-- [ ] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出
-  - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer,document_search}.spec.ts`
-  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent`、`currentScrollY`、`waitForTocTrackingFrame`、`startTocActiveChangeRecorder`、`stopTocActiveChangeRecorder` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出する
-  - 理由: DRY 違反、片方を修正して片方を忘れるリスク。`tests/e2e/browser/test-websocket.ts` と `tests/e2e/globals.d.ts` は既に整備済みだが、spec-local helper の重複は残っている
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
 - [ ] TOC pending navigation 小揺らしテストの grace 内外分離
   - ファイル: `tests/e2e/text_selection_defer.spec.ts`
   - 内容: `目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない` が、grace 失効後でも Beta 位置にいるため偽 PASS にならないよう、grace 内の pending 維持と grace 外の通常判定を分離して検証する
@@ -64,6 +58,13 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出
+  - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer,document_search}.spec.ts`
+  - 内容: `resetFixtures`、`selectParagraphText`、`stabilizeWebSocketHarness`、`requireUpdateContent`、`currentScrollY`、`waitForTocTrackingFrame`、`startTocActiveChangeRecorder`、`stopTocActiveChangeRecorder` 系など、複数 spec に残る近いヘルパーを共通モジュールへ抽出した
+  - 理由: DRY 違反、片方を修正して片方を忘れるリスク。`tests/e2e/browser/test-websocket.ts` と `tests/e2e/globals.d.ts` は既に整備済みだが、spec-local helper の重複が残っていた
+  - 完了根拠: `0b37aaa test: E2E共通ヘルパーを追加`, `791e5eb test: E2E fixture helperを共通化`, `0f5851d test: TOCとWebSocket E2E helperを共通化`, `098bc0c test: WebSocket連続dispatch helperを追加`, `268ae3a test: document searchのupdateContent helperを共通化`, `e898260 test: memo jumpのE2E helperを共通化`
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
 - [x] TOC pending navigation の境界回帰テスト強化
   - ファイル: `tests/e2e/text_selection_defer.spec.ts`
