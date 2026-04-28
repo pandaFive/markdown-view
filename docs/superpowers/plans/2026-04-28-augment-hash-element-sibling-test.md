@@ -4,7 +4,7 @@
 
 **Goal:** `augmentHashWithTrailingLineHint` の `ELEMENT_NODE` sibling 対応を直接テストで固定し、外部 review ID コメントを仕様説明へ置き換える。
 
-**Architecture:** 変更は `tests/e2e/memo_jump.spec.ts` に閉じる。既存の `augmentHashWithTrailingLineHint` 直接テスト群へ `span` sibling の positive test を1件追加し、既存コメントは外部IDではなく false-positive 防止仕様を説明する形へ置き換える。
+**Architecture:** 変更は `tests/e2e/memo_jump.spec.ts` に閉じる。既存の `augmentHashWithTrailingLineHint` 直接テスト群へ `span` sibling の positive / negative test を1件ずつ追加し、既存コメントは外部IDではなく false-positive 防止仕様を説明する形へ置き換える。
 
 **Tech Stack:** Playwright Test, TypeScript, browser-side DOM evaluation, existing `window.__MV_E2E__` test exposure.
 
@@ -62,7 +62,7 @@ Use this exact comment:
 
 - [ ] **Step 3: ELEMENT_NODE sibling の直接テストを追加する**
 
-Insert this test immediately after the `L10 onwards` test and before the `L15-L17` range test:
+Insert these tests immediately after the `L10 onwards` test and before the `L15-L17` range test:
 
 ```ts
 test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent から行番号を補完する', async ({ page }) => {
@@ -85,6 +85,30 @@ test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent �
     }
   });
   expect(result).toBe('#section-b:L15');
+});
+```
+
+```ts
+test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の散文を行番号扱いしない', async ({ page }) => {
+  // ELEMENT_NODE 経路でも TEXT_NODE と同じく、sibling textContent 全体が行番号トークン
+  // のみで構成されない散文は augment 対象にしないことを固定する。
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=spec.md#intro';
+    link.textContent = 'spec';
+    const lineHint = document.createElement('span');
+    lineHint.textContent = ' L10 onwards は詳しい説明';
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return augmentHashWithTrailingLineHint(link, '#intro');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+  expect(result).toBe('#intro');
 });
 ```
 
@@ -141,7 +165,7 @@ git diff -- tests/e2e/memo_jump.spec.ts
 Expected:
 
 ```text
-差分は `tests/e2e/memo_jump.spec.ts` のテスト1件追加とコメント置換だけ
+差分は `tests/e2e/memo_jump.spec.ts` のテスト2件追加とコメント置換だけ
 ```
 
 - [ ] **Step 8: 実装変更をコミットする**
@@ -161,7 +185,7 @@ Expected:
 
 ## Self-Review
 
-- Spec coverage: 設計書の受け入れ基準は Task 1 の Step 2, Step 3, Step 4, Step 7 で満たす。
+- Spec coverage: 設計書の受け入れ基準は Task 1 の Step 2, Step 3, Step 4, Step 7 で満たす。レビュー対応後は Step 3 に ELEMENT_NODE negative test も含める。
 - Placeholder scan: この計画に未確定の作業指示や空の実装手順はない。
 - Type consistency: 追加コードは既存 spec と同じ `page.evaluate`、DOM API、`expect(result).toBe(...)` の形を使う。新しい helper や型宣言は追加しない。
 - Security: URL hash 補完経路の test-only 変更であり、`#memo-preview` スコープガード、既存 hash 優先、散文除外の既存テストを維持する。

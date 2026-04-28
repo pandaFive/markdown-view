@@ -73,7 +73,7 @@ rg -n "T(BD|ODO)|#[0-9]{6,}" docs/superpowers/specs/2026-04-28-augment-hash-elem
 - 変更対象: `tests/e2e/memo_jump.spec.ts`
 - 参照対象: `src/template/assets/js/content.js`
 - 実装コードへの影響: なし
-- テストコードへの影響: `memo_jump.spec.ts` の直接テストが1件増える
+- テストコードへの影響: `memo_jump.spec.ts` の直接テストが2件増える
 - ドキュメントへの影響: この設計書のみ
 
 ## ロールバック
