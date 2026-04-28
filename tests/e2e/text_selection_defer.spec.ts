@@ -2,142 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
+import { activeTocLabel, activeTocLabelOrEmpty, clearSelection, clickTocLink, dispatchWsMessage, dispatchWsMessageAndDisableRealHandler, dispatchWsMessages, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness, startTocActiveChangeRecorder, stopTocActiveChangeRecorder, waitForTocTrackingFrame } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
-const notesPath = path.join(fixtureDir, 'notes.md');
-
-async function resetFixtures() {
-  await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
-  await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
-}
-
-async function selectParagraphText(page: Page, text: string) {
-  await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
-    let node = null;
-    while ((node = walker.nextNode())) {
-      if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection()!;
-        const range = document.createRange();
-        range.selectNodeContents(node.parentElement!);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
-      }
-    }
-    throw new Error(`text not found: ${targetText}`);
-  }, text);
-}
-
-async function clearSelection(page: Page) {
-  await page.evaluate(() => {
-    const selection = window.getSelection()!;
-    selection.removeAllRanges();
-    document.dispatchEvent(new Event('selectionchange'));
-  });
-}
-
-async function activeTocLabel(page: Page) {
-  return page.locator('#toc a.active').innerText();
-}
-
-async function activeTocLabelOrEmpty(page: Page) {
-  const activeLink = page.locator('#toc a.active');
-  return (await activeLink.count()) > 0 ? activeLink.innerText() : '';
-}
-
-async function clickTocLink(page: Page, id: string) {
-  await page.evaluate((targetId) => {
-    const link = document.querySelector(`#toc a[href="#${targetId}"]`) as HTMLAnchorElement | null;
-    if (!link) {
-      throw new Error(`toc link not found: ${targetId}`);
-    }
-    link.click();
-  }, id);
-}
-
-async function waitForTocTrackingFrame(page: Page) {
-  await page.evaluate(() => {
-    // 通常の scroll 由来更新用。suppressTocTrackingFor が有効な期間は別途待つ。
-    return new Promise<void>((resolve) => {
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => resolve());
-      });
-    });
-  });
-}
-
-async function startTocActiveChangeRecorder(page: Page) {
-  await page.evaluate(() => {
-    const toc = document.getElementById('toc');
-    if (!toc) {
-      throw new Error('TOC is not initialized');
-    }
-    window.__tocActiveChanges = [];
-    let lastLabel = '__unset__';
-    const recordActive = () => {
-      const active = toc.querySelector('a.active');
-      const label = active ? active.textContent || '' : '';
-      if (label !== lastLabel) {
-        const tocActiveChanges = window.__tocActiveChanges;
-        if (!tocActiveChanges) {
-          throw new Error('TOC active change recorder is not initialized');
-        }
-        tocActiveChanges.push(label);
-        lastLabel = label;
-      }
-    };
-    recordActive();
-    const observer = new MutationObserver(recordActive);
-    observer.observe(toc, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ['class']
-    });
-    window.__stopTocObserver = () => observer.disconnect();
-  });
-}
-
-async function stopTocActiveChangeRecorder(page: Page) {
-  return page.evaluate(() => {
-    const stopTocObserver = window.__stopTocObserver;
-    const tocActiveChanges = window.__tocActiveChanges;
-    if (!stopTocObserver || !tocActiveChanges) {
-      throw new Error('TOC active change recorder is not initialized');
-    }
-    stopTocObserver();
-    const changes = tocActiveChanges.slice();
-    delete window.__stopTocObserver;
-    delete window.__tocActiveChanges;
-    return changes;
-  });
-}
-
-async function stabilizeWebSocketHarness(page: Page) {
-  await page.waitForFunction(() => {
-    const lastWs = window.__lastWs;
-    return Boolean(lastWs && typeof lastWs.onmessage === 'function');
-  });
-  await page.evaluate(() => {
-    const lastWs = window.__lastWs;
-    if (!lastWs || typeof lastWs.onmessage !== 'function') {
-      throw new Error('WebSocket test harness is not initialized');
-    }
-    // __dispatchWsMessage は MessageEvent を生成せず { data: string } を直接渡すため、
-    // E2E ハーネス内では onmessage の契約をテスト用の狭い型へ bridge する。
-    window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
-    lastWs.onmessage = function() {};
-    window.__dispatchWsMessage = (payload) => {
-      const realWsOnmessage = window.__realWsOnmessage;
-      if (!realWsOnmessage) {
-        throw new Error('WebSocket test harness message handler is not initialized');
-      }
-      realWsOnmessage({ data: JSON.stringify(payload) });
-    };
-  });
-}
 
 async function loadDenseHeadingFixture(page: Page) {
   const repeated = Array.from({ length: 12 }, (_, index) => `Paragraph ${index + 1}`).join('\n\n');
@@ -202,7 +70,7 @@ async function loadBottomHeadingFixture(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await resetFixtures();
+  await resetStandardFixtures();
   await page.addInitScript(installTestWebSocketHarness, { shorten30sTimeouts: true });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
@@ -210,22 +78,16 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async () => {
-  await resetFixtures();
+  await resetStandardFixtures();
 });
 
 test('ドラッグ選択中はWebSocket更新を延期し、選択解除後に適用する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
-  await page.evaluate(() => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({
-      content: '<h1 id="readme">README</h1><p>Deferred update</p>',
-      toc: '<ul><li><a href="#readme">README</a></li></ul>',
-      file: 'README.md'
-    });
+  await dispatchWsMessage(page, {
+    content: '<h1 id="readme">README</h1><p>Deferred update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>',
+    file: 'README.md'
   });
 
   await expect(page.locator('#content')).toContainText('Initial README content');
@@ -238,16 +100,10 @@ test('ドラッグ選択中はWebSocket更新を延期し、選択解除後に�
 test('ファイル遷移時は保留更新をクリアし、新しいファイル内容を維持する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
-  await page.evaluate(() => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({
-      content: '<h1 id="readme">README</h1><p>Pending stale update</p>',
-      toc: '<ul><li><a href="#readme">README</a></li></ul>',
-      file: 'README.md'
-    });
+  await dispatchWsMessage(page, {
+    content: '<h1 id="readme">README</h1><p>Pending stale update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>',
+    file: 'README.md'
   });
 
   await page.evaluate(() => {
@@ -265,13 +121,7 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await selectParagraphText(page, 'Initial README content');
   await fs.writeFile(readmePath, '# README\n\nRefreshed from server\n');
 
-  await page.evaluate(() => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({ refresh: true });
-  });
+  await dispatchWsMessage(page, { refresh: true });
 
   await expect(page.locator('#content')).toContainText('Initial README content');
   await expect(page.locator('#content')).not.toContainText('Refreshed from server');
@@ -284,18 +134,14 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await selectParagraphText(page, 'Initial README content');
   await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
 
-  await page.evaluate(() => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({
+  await dispatchWsMessages(page, [
+    {
       content: '<h1 id="readme">README</h1><p>Stale buffered update</p>',
       toc: '<ul><li><a href="#readme">README</a></li></ul>',
       file: 'README.md'
-    });
-    dispatchWsMessage({ refresh: true });
-  });
+    },
+    { refresh: true }
+  ]);
 
   await expect(page.locator('#content')).toContainText('Initial README content');
 
@@ -307,23 +153,10 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {
   await selectParagraphText(page, 'Initial README content');
 
-  await page.evaluate(() => {
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    const lastWs = window.__lastWs;
-    if (!lastWs) {
-      throw new Error('WebSocket test harness is not initialized');
-    }
-    dispatchWsMessage({
-      content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
-      toc: '<ul><li><a href="#readme">README</a></li></ul>',
-      file: 'README.md'
-    });
-    // watcher経由の実WSメッセージがpendingUpdateを上書きしないよう、
-    // 偽メッセージ送信後にonmessageを無効化する
-    lastWs.onmessage = function() {};
+  await dispatchWsMessageAndDisableRealHandler(page, {
+    content: '<h1 id="readme">README</h1><p>Fallback applied</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>',
+    file: 'README.md'
   });
 
   await expect(page.locator('#content')).toContainText('Fallback applied');
@@ -613,10 +446,10 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
     };
   });
 
-  await page.evaluate(() => {
+  const payload = await page.evaluate(() => {
     const toc = document.getElementById('toc')!.innerHTML;
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    const payload = {
+    return {
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -626,14 +459,8 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
       toc: toc,
       file: 'README.md'
     };
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage(payload);
-    dispatchWsMessage(payload);
-    dispatchWsMessage(payload);
   });
+  await dispatchWsMessages(page, [payload, payload, payload]);
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
   await page.waitForTimeout(150);
@@ -649,13 +476,9 @@ test('WebSocket更新後も同じ見出しを見ている間は目次activeを�
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await page.evaluate(() => {
+  await dispatchWsMessage(page, await page.evaluate(() => {
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({
+    return {
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -669,8 +492,8 @@ test('WebSocket更新後も同じ見出しを見ている間は目次activeを�
         '<li><a href="#beta">Beta</a></li>' +
         '</ul>',
       file: 'README.md'
-    });
-  });
+    };
+  }));
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
@@ -684,13 +507,9 @@ test('更新で見出し位置が変わったら現在位置に合う目次activ
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await page.evaluate(() => {
+  await dispatchWsMessage(page, await page.evaluate(() => {
     const inserted = '<p>Inserted before alpha</p>'.repeat(40);
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage({
+    return {
       content:
         '<h1 id="readme">README</h1>' +
         '<p>Paragraph 1</p>'.repeat(12) +
@@ -705,8 +524,8 @@ test('更新で見出し位置が変わったら現在位置に合う目次activ
         '<li><a href="#beta">Beta</a></li>' +
         '</ul>',
       file: 'README.md'
-    });
-  });
+    };
+  }));
 
   await expect(page.locator('#content')).toContainText('Alpha moved down');
   await expect.poll(() => activeTocLabel(page)).toBe('README');
@@ -720,11 +539,11 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
 
   await page.evaluate(() => {
     const repeated = '<p>Updated paragraph</p>'.repeat(12);
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
+    const dispatchMessage = window.__dispatchWsMessage;
+    if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
     }
-    dispatchWsMessage({
+    dispatchMessage({
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -739,7 +558,11 @@ test('抑止中のスクロールも抑止明けに目次activeへ反映され�
         '</ul>',
       file: 'README.md'
     });
-    window.scrollTo(0, document.getElementById('beta')!.getBoundingClientRect().top + window.scrollY);
+    const beta = document.getElementById('beta');
+    if (!beta) {
+      throw new Error('beta heading not found');
+    }
+    window.scrollTo(0, beta.getBoundingClientRect().top + window.scrollY);
   });
 
   await expect(page.locator('#content')).toContainText('Alpha body updated');
@@ -752,37 +575,12 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
   await page.evaluate((scrollTop) => window.scrollTo(0, scrollTop), positions.alphaTop - positions.activationOffset + 8);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  await page.evaluate(() => {
-    const toc = document.getElementById('toc')!;
-    window.__tocActiveChanges = [];
-    let lastLabel = '';
-    const recordActive = () => {
-      const active = toc.querySelector('a.active');
-      const label = active ? active.textContent || '' : '';
-      if (label !== lastLabel) {
-        const tocActiveChanges = window.__tocActiveChanges;
-        if (!tocActiveChanges) {
-          throw new Error('TOC active change recorder is not initialized');
-        }
-        tocActiveChanges.push(label);
-        lastLabel = label;
-      }
-    };
-    recordActive();
-    const observer = new MutationObserver(recordActive);
-    observer.observe(toc, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ['class']
-    });
-    window.__stopTocObserver = () => observer.disconnect();
-  });
+  await startTocActiveChangeRecorder(page);
 
-  await page.evaluate(() => {
+  const payload = await page.evaluate(() => {
     const repeated = '<p>Burst paragraph</p>'.repeat(12);
     const currentToc = document.getElementById('toc')!.innerHTML;
-    const payload = {
+    return {
       content:
         '<h1 id="readme">README</h1>' +
         repeated +
@@ -792,28 +590,14 @@ test('同一見出しのburst更新でも目次activeが点滅しない', async 
       toc: currentToc,
       file: 'README.md'
     };
-    const dispatchWsMessage = window.__dispatchWsMessage;
-    if (!dispatchWsMessage) {
-      throw new Error('WebSocket test harness dispatcher is not initialized');
-    }
-    dispatchWsMessage(payload);
-    dispatchWsMessage(payload);
-    dispatchWsMessage(payload);
   });
+  await dispatchWsMessages(page, [payload, payload, payload]);
 
   await expect(page.locator('#content')).toContainText('Alpha burst');
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
   await page.waitForTimeout(250);
   await expect.poll(() => activeTocLabel(page)).toBe('Alpha');
 
-  const activeChanges = await page.evaluate(() => {
-    const stopTocObserver = window.__stopTocObserver;
-    const tocActiveChanges = window.__tocActiveChanges;
-    if (!stopTocObserver || !tocActiveChanges) {
-      throw new Error('TOC active change recorder is not initialized');
-    }
-    stopTocObserver();
-    return tocActiveChanges.slice();
-  });
+  const activeChanges = await stopTocActiveChangeRecorder(page);
   expect(activeChanges).toEqual(['Alpha']);
 });

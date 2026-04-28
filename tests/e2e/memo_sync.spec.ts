@@ -1,48 +1,12 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { test, expect, type Page } from '@playwright/test';
-
-const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
-const readmePath = path.join(fixtureDir, 'README.md');
-const notesPath = path.join(fixtureDir, 'notes.md');
-
-async function resetFixtures() {
-  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
-  await Promise.all(entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
-    .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
-  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
-  await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
-  await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
-}
-
-async function openMemoTab(page: Page) {
-  await page.locator('.sidebar-tab[data-tab="memo"]').click();
-  await expect(page.locator('#panel-memo.active')).toBeVisible();
-}
-
-async function openFileTab(page: Page) {
-  await page.locator('.sidebar-tab[data-tab="files"]').click();
-  await expect(page.locator('#panel-files.active')).toBeVisible();
-}
-
-async function selectFile(page: Page, file: string) {
-  await openFileTab(page);
-  await page.locator(`[data-file="${file}"]`).click();
-}
-
-async function saveMemo(page: Page, text: string) {
-  const editor = page.locator('#memo-editor');
-  await editor.fill(text);
-  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
-}
+import { test, expect } from '@playwright/test';
+import { openMemoTab, resetStandardFixtures, saveMemo } from './helpers';
 
 test.beforeEach(async () => {
-  await resetFixtures();
+  await resetStandardFixtures();
 });
 
 test.afterEach(async () => {
-  await resetFixtures();
+  await resetStandardFixtures();
 });
 
 test('同一ファイルを開いている別ページへメモ更新が同期される', async ({ page, context }) => {

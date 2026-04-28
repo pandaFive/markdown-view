@@ -1,40 +1,8 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { test, expect, type Page } from '@playwright/test';
-
-const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
-const readmePath = path.join(fixtureDir, 'README.md');
-const notesPath = path.join(fixtureDir, 'notes.md');
-async function resetFixtures() {
-  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
-  await Promise.all(entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
-    .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
-  await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
-  await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
-  await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
-}
-
-async function selectParagraphText(page: Page, text: string) {
-  await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
-    let node = null;
-    while ((node = walker.nextNode())) {
-      if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection()!;
-        const range = document.createRange();
-        range.selectNodeContents(node.parentElement!);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
-      }
-    }
-    throw new Error(`text not found: ${targetText}`);
-  }, text);
-}
+import { test, expect } from '@playwright/test';
+import { resetStandardFixtures, selectParagraphText } from './helpers';
 
 test.beforeEach(async ({ page }) => {
-  await resetFixtures();
+  await resetStandardFixtures();
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
 });
