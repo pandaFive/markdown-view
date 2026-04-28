@@ -60,12 +60,12 @@ require_node_modules() {
 }
 
 typecheck_e2e() {
-  require_node_modules
+  require_node_modules || return $?
   npx --no-install tsc --noEmit
 }
 
 run_playwright_e2e() {
-  require_node_modules
+  require_node_modules || return $?
   npm run test:e2e
 }
 

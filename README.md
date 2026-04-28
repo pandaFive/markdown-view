@@ -108,6 +108,7 @@ npm ci   # E2E 依存（Playwright / TypeScript）を取得。`./verify.sh` 実�
 ```bash
 # 一括検証（フォーマット・リント・テスト・E2E型チェック）
 ./verify.sh
+./verify.sh --e2e                # 上記に加えて Playwright E2E も実行
 
 # 個別コマンド
 cargo fmt --all -- --check       # フォーマットチェック

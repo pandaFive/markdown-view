@@ -45,11 +45,13 @@ opt-in にする理由は、E2E が `cargo run` の webServer 起動、Playwrigh
 - `-h` / `--help`: usage を表示して正常終了する。
 - 未知引数: usage を表示して失敗する。
 
-既存の `typecheck_e2e` は `node_modules` 存在確認を持っている。この確認を E2E 実行でも再利用できるよう、共通ヘルパーに分けるか、同じチェックを `run_e2e` に持たせる。
+引数はリテラル一致のみを受け付ける。`--e2e --e2e` の重複指定は冪等であり、`--E2E` のような大小違いは未知引数として失敗する。
+
+既存の `typecheck_e2e` は `node_modules` 存在確認を持っている。この確認を E2E 実行でも再利用できるよう、共通ヘルパーに分けるか、同じチェックを `run_playwright_e2e` に持たせる。
 
 E2E 実行は、既存 script を尊重して `npm run test:e2e` を呼ぶ。`package.json` の script が Playwright 実行の single source of truth であり、将来オプションが増えても `verify.sh` 側を追随させやすい。
 
-`set -Eeuo pipefail`、`run_step`、`ERR` trap の構造は維持する。E2E も `run_step "E2E実行 (Playwright)" run_e2e` の形で既存の失敗報告に乗せる。
+`set -Eeuo pipefail`、`run_step`、`ERR` trap の構造は維持する。E2E も `run_step "E2E実行 (Playwright)" run_playwright_e2e` の形で既存の失敗報告に乗せる。
 
 ## エラー処理
 
