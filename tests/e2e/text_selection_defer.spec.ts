@@ -460,6 +460,16 @@ test('目次クリックの猶予中に別の目次をクリックしたら最�
 
   const expectedBetaScrollY = positions.betaTop - positions.activationOffset;
   await expect.poll(async () => Math.abs((await currentScrollY(page)) - expectedBetaScrollY)).toBeLessThanOrEqual(4);
+
+  await page.evaluate(
+    ({ betaTop, activationOffset }) => {
+      // 通常の viewport 判定なら Alpha になるが、beta pending の slack 内に収まる位置。
+      window.scrollTo(0, betaTop - activationOffset - 22);
+    },
+    { betaTop: positions.betaTop, activationOffset: positions.activationOffset }
+  );
+  await waitForTocTrackingFrame(page);
+  expect(await activeTocLabel(page)).toBe('Beta');
 });
 
 test('目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る', async ({ page }) => {
@@ -491,16 +501,24 @@ test('目次クリック後のslack内スクロールではpending activeを維�
 });
 
 test('目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない', async ({ page }) => {
-  await loadDenseHeadingFixture(page);
+  const positions = await loadDenseHeadingFixture(page);
 
   await clickTocLink(page, 'beta');
   await expect.poll(() => activeTocLabel(page)).toBe('Beta');
   await startTocActiveChangeRecorder(page);
 
-  for (const delta of [6, -4, 3]) {
-    await page.evaluate((scrollDelta) => {
-      window.scrollTo(0, (window.scrollY || window.pageYOffset) + scrollDelta);
-    }, delta);
+  for (const offsetFromBetaActivation of [-22, -16, -20, -17]) {
+    await page.evaluate(
+      ({ betaTop, activationOffset, offset }) => {
+        // 通常の viewport 判定では Alpha になるが、beta pending の slack 内で小揺らしする。
+        window.scrollTo(0, betaTop - activationOffset + offset);
+      },
+      {
+        betaTop: positions.betaTop,
+        activationOffset: positions.activationOffset,
+        offset: offsetFromBetaActivation
+      }
+    );
     await waitForTocTrackingFrame(page);
   }
 
