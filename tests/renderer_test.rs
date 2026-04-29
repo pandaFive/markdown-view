@@ -563,6 +563,20 @@ fn test_render_markdown_複合入力の公開api出力を固定する() {
 }
 
 #[test]
+fn test_見出しとコードブロックの行属性は観測性強化後も維持される() {
+    let md = "# Title\n\n```unknown-lang\n<x>&\n```";
+    let html = render_markdown(md);
+    let html = html.as_str();
+
+    assert!(html.contains(
+        r#"<h1 id="title" data-line-block data-source-start-line="1" data-source-end-line="1">"#
+    ));
+    assert!(html.contains(
+        r#"<pre class="code-block" data-line-block data-source-start-line="3" data-source-end-line="5"><code class="syn-code language-unknown-lang">&lt;x&gt;&amp;"#
+    ));
+}
+
+#[test]
 fn test_render_markdown_主要event_dispatchの出力を固定する() {
     let md = "> **strong** *em* ~~del~~  \n> soft\n\n---\n\n3. three\n4. four\n\n- item\n- [x] done\n- [ ] todo";
     let html = normalize_source_markup(render_markdown(md).as_str());
