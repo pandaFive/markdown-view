@@ -6,20 +6,20 @@
 mod highlight;
 mod line;
 mod security;
+mod state;
 
-use std::ops::Range;
 use std::sync::OnceLock;
 
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use syntect::highlighting::ThemeSet;
 use syntect::html::{css_for_theme_with_class_style, ClassStyle};
 use syntect::parsing::SyntaxSet;
 
 pub mod toc;
 
-use highlight::render_code_block_html;
-use line::{block_line_attrs, line_block_marker_with, source_line_attrs, LineLookup};
-use security::{sanitize_image_src, sanitize_link_href};
+use line::{block_line_attrs, source_line_attrs, LineLookup};
+use security::sanitize_link_href;
+use state::RenderState;
 
 pub use security::html_escape;
 
@@ -48,105 +48,6 @@ impl SanitizedHtml {
     }
 }
 
-struct RenderState {
-    html_output: String,
-    in_code_block: bool,
-    code_block_lang: Option<String>,
-    code_block_content: String,
-    code_block_range: Option<Range<usize>>,
-    image_src: Option<String>,
-    image_title: Option<String>,
-    image_alt: String,
-}
-
-impl RenderState {
-    fn new() -> Self {
-        Self {
-            html_output: String::new(),
-            in_code_block: false,
-            code_block_lang: None,
-            code_block_content: String::new(),
-            code_block_range: None,
-            image_src: None,
-            image_title: None,
-            image_alt: String::new(),
-        }
-    }
-
-    fn push_html(&mut self, html: &str) {
-        self.html_output.push_str(html);
-    }
-
-    fn start_code_block(&mut self, kind: pulldown_cmark::CodeBlockKind<'_>, range: Range<usize>) {
-        self.in_code_block = true;
-        self.code_block_range = Some(range);
-        self.code_block_lang = match kind {
-            pulldown_cmark::CodeBlockKind::Fenced(lang) => {
-                let lang_str = lang.to_string();
-                if lang_str.is_empty() {
-                    None
-                } else {
-                    Some(lang_str)
-                }
-            }
-            _ => None,
-        };
-        self.code_block_content.clear();
-    }
-
-    fn finish_code_block(&mut self, ss: &SyntaxSet, range: Range<usize>, line_lookup: &LineLookup) {
-        let line_attrs = self
-            .code_block_range
-            .as_ref()
-            .map(|start_range| Range {
-                start: start_range.start,
-                end: range.end,
-            })
-            .map(|full_range| line_block_marker_with(source_line_attrs(line_lookup, &full_range)))
-            .unwrap_or_default();
-        let rendered = render_code_block_html(
-            ss,
-            self.code_block_lang.as_deref(),
-            &self.code_block_content,
-            &line_attrs,
-            true,
-        );
-        self.push_html(&rendered);
-
-        self.in_code_block = false;
-        self.code_block_lang = None;
-        self.code_block_content.clear();
-        self.code_block_range = None;
-    }
-
-    fn start_image(&mut self, dest_url: &str, title: &str) {
-        self.image_src = Some(dest_url.to_string());
-        self.image_title = if title.is_empty() {
-            None
-        } else {
-            Some(title.to_string())
-        };
-        self.image_alt.clear();
-    }
-
-    fn finish_image(&mut self) -> Option<String> {
-        let src = self.image_src.take()?;
-        let safe_src = sanitize_image_src(&src);
-        let mut image_html = format!(
-            "<img src=\"{}\" alt=\"{}\"",
-            html_escape(&safe_src),
-            html_escape(&self.image_alt)
-        );
-        if let Some(title) = self.image_title.take() {
-            image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
-        }
-        image_html.push_str(" />");
-        self.image_title = None;
-        self.image_alt.clear();
-        Some(image_html)
-    }
-}
-
 /// Markdownテキストを HTML に変換する
 ///
 /// - GFM拡張（テーブル、タスクリスト、取消線）対応
@@ -163,13 +64,6 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
     let line_lookup = LineLookup::new(input);
 
     let mut state = RenderState::new();
-    let mut heading_level: Option<u8> = None;
-    let mut heading_range: Option<Range<usize>> = None;
-    let mut heading_plain_text = String::new();
-    let mut heading_html = String::new();
-    let mut in_table_head = false;
-    let mut table_alignments: Vec<Alignment> = Vec::new();
-    let mut table_cell_index = 0usize;
     let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for (event, range) in parser {
@@ -179,36 +73,17 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 state.start_code_block(kind, range);
             }
             Event::End(TagEnd::CodeBlock) => {
-                state.finish_code_block(ss, range, &line_lookup);
+                state.finish_code_block(ss, range, &line_lookup, true);
             }
             Event::Start(Tag::Heading { level, .. }) => {
-                heading_level = Some(level as u8);
-                heading_range = Some(range);
-                heading_plain_text.clear();
-                heading_html.clear();
+                state.start_heading(level as u8, range);
             }
             Event::End(TagEnd::Heading(_)) => {
-                if let Some(level) = heading_level {
-                    let slug = slugify(&heading_plain_text);
-                    let id = generate_unique_id(&slug, &mut id_counts);
-                    let heading_attrs = heading_range
-                        .as_ref()
-                        .map(|heading_range| {
-                            line_block_marker_with(source_line_attrs(&line_lookup, heading_range))
-                        })
-                        .unwrap_or_default();
-
-                    state.push_html(&format!(
-                        "<h{} id=\"{}\"{}>{}</h{}>\n",
-                        level,
-                        html_escape(&id),
-                        heading_attrs,
-                        heading_html,
-                        level
-                    ));
+                let slug = slugify(state.heading_plain_text());
+                let id = generate_unique_id(&slug, &mut id_counts);
+                if let Some(heading_html) = state.finish_heading(&line_lookup, id) {
+                    state.push_html(&heading_html);
                 }
-                heading_level = None;
-                heading_range = None;
             }
             Event::Start(Tag::Image {
                 dest_url, title, ..
@@ -217,31 +92,29 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             }
             Event::End(TagEnd::Image) => {
                 if let Some(image_html) = state.finish_image() {
-                    if heading_level.is_some() {
-                        heading_html.push_str(&image_html);
+                    if state.in_heading() {
+                        state.push_heading_html(&image_html);
                     } else {
                         state.push_html(&image_html);
                     }
                 }
             }
             Event::Text(text) => {
-                if state.in_code_block {
-                    state.code_block_content.push_str(&text);
+                if state.in_code_block() {
+                    state.push_code_text(&text);
                     continue;
                 }
 
-                if state.image_src.is_some() {
-                    state.image_alt.push_str(&text);
+                if state.in_image() {
+                    state.push_image_alt_text(&text);
                     continue;
                 }
 
-                if heading_level.is_some() {
-                    heading_plain_text.push_str(&text);
-                    heading_html.push_str(&format!(
-                        "<span{}>{}</span>",
-                        line_attrs,
-                        html_escape(&text)
-                    ));
+                if state.in_heading() {
+                    state.push_heading_text(
+                        &text,
+                        &format!("<span{}>{}</span>", line_attrs, html_escape(&text)),
+                    );
                 } else {
                     state.push_html(&format!(
                         "<span{}>{}</span>",
@@ -251,18 +124,16 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
             }
             Event::Code(text) => {
-                if state.image_src.is_some() {
-                    state.image_alt.push_str(&text);
+                if state.in_image() {
+                    state.push_image_alt_text(&text);
                     continue;
                 }
 
-                if heading_level.is_some() {
-                    heading_plain_text.push_str(&text);
-                    heading_html.push_str(&format!(
-                        "<code{}>{}</code>",
-                        line_attrs,
-                        html_escape(&text)
-                    ));
+                if state.in_heading() {
+                    state.push_heading_text(
+                        &text,
+                        &format!("<code{}>{}</code>", line_attrs, html_escape(&text)),
+                    );
                 } else {
                     state.push_html(&format!(
                         "<code{}>{}</code>",
@@ -275,25 +146,23 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 // raw HTMLイベントは出力せず破棄する（XSS防止）
             }
             Event::SoftBreak => {
-                if state.in_code_block {
-                    state.code_block_content.push('\n');
-                } else if state.image_src.is_some() {
-                    state.image_alt.push(' ');
-                } else if heading_level.is_some() {
-                    heading_plain_text.push(' ');
-                    heading_html.push(' ');
+                if state.in_code_block() {
+                    state.push_code_break();
+                } else if state.in_image() {
+                    state.push_image_alt_space();
+                } else if state.in_heading() {
+                    state.push_heading_space();
                 } else {
-                    state.html_output.push('\n');
+                    state.push_soft_break();
                 }
             }
             Event::HardBreak => {
-                if state.in_code_block {
-                    state.code_block_content.push('\n');
-                } else if state.image_src.is_some() {
-                    state.image_alt.push(' ');
-                } else if heading_level.is_some() {
-                    heading_plain_text.push(' ');
-                    heading_html.push_str("<br />");
+                if state.in_code_block() {
+                    state.push_code_break();
+                } else if state.in_image() {
+                    state.push_image_alt_space();
+                } else if state.in_heading() {
+                    state.push_heading_text(" ", "<br />");
                 } else {
                     state.push_html("<br />\n");
                 }
@@ -309,61 +178,61 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 state.push_html("</p>\n");
             }
             Event::Start(Tag::Emphasis) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("<em>");
+                if state.in_heading() {
+                    state.push_heading_html("<em>");
                 } else {
                     state.push_html("<em>");
                 }
             }
             Event::End(TagEnd::Emphasis) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("</em>");
+                if state.in_heading() {
+                    state.push_heading_html("</em>");
                 } else {
                     state.push_html("</em>");
                 }
             }
             Event::Start(Tag::Strong) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("<strong>");
+                if state.in_heading() {
+                    state.push_heading_html("<strong>");
                 } else {
                     state.push_html("<strong>");
                 }
             }
             Event::End(TagEnd::Strong) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("</strong>");
+                if state.in_heading() {
+                    state.push_heading_html("</strong>");
                 } else {
                     state.push_html("</strong>");
                 }
             }
             Event::Start(Tag::Strikethrough) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("<del>");
+                if state.in_heading() {
+                    state.push_heading_html("<del>");
                 } else {
                     state.push_html("<del>");
                 }
             }
             Event::End(TagEnd::Strikethrough) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
-                if heading_level.is_some() {
-                    heading_html.push_str("</del>");
+                if state.in_heading() {
+                    state.push_heading_html("</del>");
                 } else {
                     state.push_html("</del>");
                 }
@@ -371,7 +240,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::Start(Tag::Link {
                 dest_url, title, ..
             }) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
 
@@ -382,19 +251,19 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
                 link_html.push('>');
 
-                if heading_level.is_some() {
-                    heading_html.push_str(&link_html);
+                if state.in_heading() {
+                    state.push_heading_html(&link_html);
                 } else {
                     state.push_html(&link_html);
                 }
             }
             Event::End(TagEnd::Link) => {
-                if state.image_src.is_some() {
+                if state.in_image() {
                     continue;
                 }
 
-                if heading_level.is_some() {
-                    heading_html.push_str("</a>");
+                if state.in_heading() {
+                    state.push_heading_html("</a>");
                 } else {
                     state.push_html("</a>");
                 }
@@ -437,49 +306,33 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::Start(Tag::Table(alignments)) => {
                 let attrs = block_line_attrs(&line_lookup, &range);
                 state.push_html(&format!("<table{}>\n", attrs));
-                in_table_head = false;
-                table_alignments = alignments;
-                table_cell_index = 0;
+                state.start_table(alignments);
             }
             Event::End(TagEnd::Table) => {
                 state.push_html("</table>\n");
-                in_table_head = false;
-                table_alignments.clear();
-                table_cell_index = 0;
+                state.finish_table();
             }
             Event::Start(Tag::TableHead) => {
-                in_table_head = true;
+                state.start_table_head();
                 state.push_html("<thead>\n");
             }
             Event::End(TagEnd::TableHead) => {
                 state.push_html("</thead>\n");
-                in_table_head = false;
+                state.finish_table_head();
             }
             Event::Start(Tag::TableRow) => {
                 state.push_html("<tr>\n");
-                table_cell_index = 0;
+                state.reset_table_row();
             }
             Event::End(TagEnd::TableRow) => {
                 state.push_html("</tr>\n");
             }
             Event::Start(Tag::TableCell) => {
-                let align_class = table_alignments
-                    .get(table_cell_index)
-                    .and_then(table_align_class_attr)
-                    .unwrap_or("");
-                if in_table_head {
-                    state.push_html(&format!("<th{}>", align_class));
-                } else {
-                    state.push_html(&format!("<td{}>", align_class));
-                }
-                table_cell_index = table_cell_index.saturating_add(1);
+                let tag = state.table_cell_start_tag();
+                state.push_html(&tag);
             }
             Event::End(TagEnd::TableCell) => {
-                if in_table_head {
-                    state.push_html("</th>\n");
-                } else {
-                    state.push_html("</td>\n");
-                }
+                state.push_html(state.table_cell_end_tag());
             }
             other => {
                 tracing::debug!(
@@ -490,16 +343,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
         }
     }
 
-    SanitizedHtml::from_sanitized_html(state.html_output)
-}
-
-fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
-    match alignment {
-        Alignment::Left => Some(" class=\"align-left\""),
-        Alignment::Center => Some(" class=\"align-center\""),
-        Alignment::Right => Some(" class=\"align-right\""),
-        Alignment::None => None,
-    }
+    SanitizedHtml::from_sanitized_html(state.into_html())
 }
 
 fn syntax_set() -> &'static SyntaxSet {
