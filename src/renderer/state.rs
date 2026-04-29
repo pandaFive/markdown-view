@@ -4,7 +4,6 @@ use pulldown_cmark::{Alignment, CodeBlockKind};
 use syntect::parsing::SyntaxSet;
 
 use super::highlight::render_code_block_html;
-use super::line::{line_block_marker_with, source_line_attrs, LineLookup};
 use super::security::{html_escape, sanitize_image_src};
 
 pub(super) struct RenderState {
@@ -107,19 +106,8 @@ impl RenderState {
         self.heading_html.clear();
     }
 
-    pub(super) fn finish_heading(
-        &mut self,
-        line_lookup: &LineLookup,
-        id: String,
-    ) -> Option<String> {
+    pub(super) fn finish_heading(&mut self, id: String, heading_attrs: String) -> Option<String> {
         let level = self.heading_level?;
-        let heading_attrs = self
-            .heading_range
-            .as_ref()
-            .map(|heading_range| {
-                line_block_marker_with(source_line_attrs(line_lookup, heading_range))
-            })
-            .unwrap_or_default();
         let html = format!(
             "<h{} id=\"{}\"{}>{}</h{}>\n",
             level,
@@ -139,6 +127,10 @@ impl RenderState {
         &self.heading_plain_text
     }
 
+    pub(super) fn heading_range(&self) -> Option<&Range<usize>> {
+        self.heading_range.as_ref()
+    }
+
     pub(super) fn start_code_block(&mut self, kind: CodeBlockKind<'_>, range: Range<usize>) {
         self.in_code_block = true;
         self.code_block_range = Some(range);
@@ -156,22 +148,19 @@ impl RenderState {
         self.code_block_content.clear();
     }
 
+    pub(super) fn code_block_full_range(&self, end_range: &Range<usize>) -> Option<Range<usize>> {
+        self.code_block_range.as_ref().map(|start_range| Range {
+            start: start_range.start,
+            end: end_range.end,
+        })
+    }
+
     pub(super) fn finish_code_block(
         &mut self,
         ss: &SyntaxSet,
-        range: Range<usize>,
-        line_lookup: &LineLookup,
+        line_attrs: String,
         syntax_highlighting: bool,
     ) {
-        let line_attrs = self
-            .code_block_range
-            .as_ref()
-            .map(|start_range| Range {
-                start: start_range.start,
-                end: range.end,
-            })
-            .map(|full_range| line_block_marker_with(source_line_attrs(line_lookup, &full_range)))
-            .unwrap_or_default();
         let rendered = render_code_block_html(
             ss,
             self.code_block_lang.as_deref(),

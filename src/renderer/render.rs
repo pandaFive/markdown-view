@@ -4,7 +4,7 @@ use std::ops::Range;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use syntect::parsing::SyntaxSet;
 
-use super::line::{block_line_attrs, source_line_attrs, LineLookup};
+use super::line::{block_line_attrs, line_block_marker_with, source_line_attrs, LineLookup};
 use super::security::{html_escape, sanitize_link_href};
 use super::state::RenderState;
 use super::{generate_unique_id, markdown_options, slugify, syntax_set, SanitizedHtml};
@@ -222,10 +222,10 @@ impl<'a> Renderer<'a> {
     }
 
     fn handle_code_block_end(&mut self, range: Range<usize>) {
+        let line_attrs = self.code_block_line_attrs(&range);
         self.state.finish_code_block(
             self.context.syntax_set,
-            range,
-            &self.context.line_lookup,
+            line_attrs,
             self.context.options.syntax_highlighting,
         );
     }
@@ -237,7 +237,8 @@ impl<'a> Renderer<'a> {
     fn handle_heading_end(&mut self) {
         let slug = slugify(self.state.heading_plain_text());
         let id = generate_unique_id(&slug, &mut self.context.id_counts);
-        if let Some(heading_html) = self.state.finish_heading(&self.context.line_lookup, id) {
+        let heading_attrs = self.heading_line_attrs();
+        if let Some(heading_html) = self.state.finish_heading(id, heading_attrs) {
             self.state.push_html(&heading_html);
         }
     }
@@ -416,5 +417,54 @@ impl<'a> Renderer<'a> {
         } else {
             String::new()
         }
+    }
+
+    fn heading_line_attrs(&self) -> String {
+        if !self.context.options.track_source_lines {
+            return String::new();
+        }
+
+        self.state
+            .heading_range()
+            .map(|range| {
+                line_block_marker_with(source_line_attrs(&self.context.line_lookup, range))
+            })
+            .unwrap_or_default()
+    }
+
+    fn code_block_line_attrs(&self, end_range: &Range<usize>) -> String {
+        if !self.context.options.track_source_lines {
+            return String::new();
+        }
+
+        self.state
+            .code_block_full_range(end_range)
+            .map(|range| {
+                line_block_marker_with(source_line_attrs(&self.context.line_lookup, &range))
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_track_source_lines_falseは全ての行属性を出力しない() {
+        let markdown = "# Heading\n\nparagraph `code`\n\n```rust\nfn main() {}\n```";
+        let html = Renderer::new(
+            markdown,
+            RenderOptions {
+                track_source_lines: false,
+                syntax_highlighting: true,
+            },
+        )
+        .render();
+        let html = html.as_str();
+
+        assert!(!html.contains("data-source-start-line"));
+        assert!(!html.contains("data-source-end-line"));
+        assert!(!html.contains("data-line-block"));
     }
 }
