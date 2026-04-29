@@ -139,6 +139,19 @@ fn test_コードブロックにソース行番号属性が付与される() {
 }
 
 #[test]
+fn test_コードブロック直後の見出しもline_block属性を維持する() {
+    let md = "```unknown-lang\n<x>\n```\n\n# Next";
+    let html = render_markdown(md);
+
+    assert!(html.as_str().contains(
+        r#"<pre class="code-block" data-line-block data-source-start-line="1" data-source-end-line="3"><code class="syn-code language-unknown-lang">&lt;x&gt;"#
+    ));
+    assert!(html.as_str().contains(
+        r#"<h1 id="next" data-line-block data-source-start-line="5" data-source-end-line="5">"#
+    ));
+}
+
+#[test]
 fn test_ソース行番号属性の値が複数行入力でも正確() {
     let md = "# Heading\n\nLine one\nLine two\n\n```rust\nfn main() {}\nprintln!(\"x\");\n```";
     let html = render_markdown(md);
@@ -412,6 +425,17 @@ fn test_画像() {
 }
 
 #[test]
+fn test_画像alt内のsoftbreakとhardbreakは空白として扱う() {
+    let soft_break =
+        normalize_source_markup(render_markdown("![first\nsecond](./pic.png)").as_str());
+    let hard_break =
+        normalize_source_markup(render_markdown("![first  \nsecond](./pic.png)").as_str());
+
+    assert_eq!(soft_break, hard_break);
+    assert!(soft_break.contains(r#"<img src="./pic.png" alt="first second" />"#));
+}
+
+#[test]
 fn test_外部画像urlは既定で無効化される() {
     let html = render_markdown("![remote](https://evil.example/track.png)");
     assert!(html.as_str().contains(r##"src="#""##));
@@ -622,6 +646,21 @@ fn test_連続テーブルでalignmentが次のテーブルへ漏れない() {
 }
 
 #[test]
+fn test_テーブルセル内画像はtableとimage状態を混同しない() {
+    let md = r#"| media |
+|:---|
+| ![logo](./logo.png "caption") |"#;
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains("<table>"));
+    assert!(html.contains(r#"<th class="align-left">media</th>"#));
+    assert!(html.contains(
+        r#"<td class="align-left"><img src="./logo.png" alt="logo" title="caption" /></td>"#
+    ));
+    assert!(html.contains("</table>"));
+}
+
+#[test]
 fn test_見出し内リンクと装飾のid生成とhtmlを固定する() {
     let md = "# A [Rust](https://www.rust-lang.org \"site\") *lang* `code`";
     let html = normalize_source_markup(render_markdown(md).as_str());
@@ -644,6 +683,41 @@ fn test_同一入力内でlinkとimageのurl_policy差分を固定する() {
     assert!(html_str.contains(r#"<img src="./local.png" alt="local" />"#));
     assert!(!html_str.contains("data:text/html"));
     assert!(!html_str.contains("https://example.com/p.png"));
+}
+
+#[test]
+fn test_renderer_state境界が連続構文で漏れない() {
+    let md = concat!(
+        "# Head ![logo](./logo.png \"caption\") `code`\n",
+        "\n",
+        "![remote](https://example.com/p.png)\n",
+        "\n",
+        "| L | R |\n",
+        "|:--|--:|\n",
+        "| a | b |\n",
+        "\n",
+        "```unknown-lang\n",
+        "<x>\n",
+        "```\n",
+        "\n",
+        "After",
+    );
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains(
+        r#"<h1 id="head-code">Head <img src="./logo.png" alt="logo" title="caption" /> <code>code</code></h1>"#
+    ));
+    assert!(html.contains(r##"<p><img src="#" alt="remote" /></p>"##));
+    assert!(html.contains(r#"<th class="align-left">L</th>"#));
+    assert!(html.contains(r#"<th class="align-right">R</th>"#));
+    assert!(html.contains(r#"<td class="align-left">a</td>"#));
+    assert!(html.contains(r#"<td class="align-right">b</td>"#));
+    assert!(html.contains(
+        r#"<pre class="code-block"><code class="syn-code language-unknown-lang">&lt;x&gt;"#
+    ));
+    assert!(html.contains("<p>After</p>"));
+    assert!(!html.contains("https://example.com/p.png"));
+    assert!(!html.contains("<x>"));
 }
 
 #[test]

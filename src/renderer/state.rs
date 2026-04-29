@@ -8,40 +8,45 @@ use super::security::{html_escape, sanitize_image_src};
 
 pub(super) struct RenderState {
     html_output: String,
-    in_code_block: bool,
-    code_block_lang: Option<String>,
-    code_block_content: String,
-    code_block_range: Option<Range<usize>>,
-    heading_level: Option<u8>,
-    heading_range: Option<Range<usize>>,
-    heading_plain_text: String,
-    heading_html: String,
-    image_src: Option<String>,
-    image_title: Option<String>,
-    image_alt: String,
-    in_table_head: bool,
-    table_alignments: Vec<Alignment>,
-    table_cell_index: usize,
+    code_block: Option<CodeBlockState>,
+    heading: Option<HeadingState>,
+    image: Option<ImageState>,
+    table: Option<TableState>,
+}
+
+struct CodeBlockState {
+    language: Option<String>,
+    content: String,
+    start_range: Range<usize>,
+}
+
+struct HeadingState {
+    level: u8,
+    range: Range<usize>,
+    plain_text: String,
+    html: String,
+}
+
+struct ImageState {
+    src: String,
+    title: Option<String>,
+    alt: String,
+}
+
+struct TableState {
+    in_head: bool,
+    alignments: Vec<Alignment>,
+    cell_index: usize,
 }
 
 impl RenderState {
     pub(super) fn new() -> Self {
         Self {
             html_output: String::new(),
-            in_code_block: false,
-            code_block_lang: None,
-            code_block_content: String::new(),
-            code_block_range: None,
-            heading_level: None,
-            heading_range: None,
-            heading_plain_text: String::new(),
-            heading_html: String::new(),
-            image_src: None,
-            image_title: None,
-            image_alt: String::new(),
-            in_table_head: false,
-            table_alignments: Vec::new(),
-            table_cell_index: 0,
+            code_block: None,
+            heading: None,
+            image: None,
+            table: None,
         }
     }
 
@@ -58,41 +63,53 @@ impl RenderState {
     }
 
     pub(super) fn in_code_block(&self) -> bool {
-        self.in_code_block
+        self.code_block.is_some()
     }
 
     pub(super) fn in_image(&self) -> bool {
-        self.image_src.is_some()
+        self.image.is_some()
     }
 
     pub(super) fn in_heading(&self) -> bool {
-        self.heading_level.is_some()
+        self.heading.is_some()
     }
 
     pub(super) fn push_code_text(&mut self, text: &str) {
-        self.code_block_content.push_str(text);
+        if let Some(code_block) = &mut self.code_block {
+            code_block.content.push_str(text);
+        }
     }
 
     pub(super) fn push_code_break(&mut self) {
-        self.code_block_content.push('\n');
+        if let Some(code_block) = &mut self.code_block {
+            code_block.content.push('\n');
+        }
     }
 
     pub(super) fn push_image_alt_text(&mut self, text: &str) {
-        self.image_alt.push_str(text);
+        if let Some(image) = &mut self.image {
+            image.alt.push_str(text);
+        }
     }
 
     pub(super) fn push_image_alt_space(&mut self) {
-        self.image_alt.push(' ');
+        if let Some(image) = &mut self.image {
+            image.alt.push(' ');
+        }
     }
 
     pub(super) fn push_heading_escaped_text_html(&mut self, text: &str, html: &str) {
-        self.heading_plain_text.push_str(text);
-        self.heading_html.push_str(html);
+        if let Some(heading) = &mut self.heading {
+            heading.plain_text.push_str(text);
+            heading.html.push_str(html);
+        }
     }
 
     pub(super) fn push_heading_space(&mut self) {
-        self.heading_plain_text.push(' ');
-        self.heading_html.push(' ');
+        if let Some(heading) = &mut self.heading {
+            heading.plain_text.push(' ');
+            heading.html.push(' ');
+        }
     }
 
     /// 見出し内へ、組み立て済みのHTML断片を追加する。
@@ -101,45 +118,45 @@ impl RenderState {
     /// または `finish_image` が返すエスケープ済み `<img>` に限る。
     /// 生テキストは `push_heading_escaped_text_html` を使う。
     pub(super) fn push_heading_rendered_html_fragment(&mut self, html: &str) {
-        self.heading_html.push_str(html);
+        if let Some(heading) = &mut self.heading {
+            heading.html.push_str(html);
+        }
     }
 
     pub(super) fn start_heading(&mut self, level: u8, range: Range<usize>) {
-        self.heading_level = Some(level);
-        self.heading_range = Some(range);
-        self.heading_plain_text.clear();
-        self.heading_html.clear();
+        self.heading = Some(HeadingState {
+            level,
+            range,
+            plain_text: String::new(),
+            html: String::new(),
+        });
     }
 
     pub(super) fn finish_heading(&mut self, id: String, heading_attrs: String) -> Option<String> {
-        let level = self.heading_level?;
-        let html = format!(
+        let heading = self.heading.take()?;
+        Some(format!(
             "<h{} id=\"{}\"{}>{}</h{}>\n",
-            level,
+            heading.level,
             html_escape(&id),
             heading_attrs,
-            self.heading_html,
-            level
-        );
-        self.heading_level = None;
-        self.heading_range = None;
-        self.heading_plain_text.clear();
-        self.heading_html.clear();
-        Some(html)
+            heading.html,
+            heading.level
+        ))
     }
 
     pub(super) fn heading_plain_text(&self) -> &str {
-        &self.heading_plain_text
+        self.heading
+            .as_ref()
+            .map(|heading| heading.plain_text.as_str())
+            .unwrap_or("")
     }
 
     pub(super) fn heading_range(&self) -> Option<&Range<usize>> {
-        self.heading_range.as_ref()
+        self.heading.as_ref().map(|heading| &heading.range)
     }
 
     pub(super) fn start_code_block(&mut self, kind: CodeBlockKind<'_>, range: Range<usize>) {
-        self.in_code_block = true;
-        self.code_block_range = Some(range);
-        self.code_block_lang = match kind {
+        let language = match kind {
             CodeBlockKind::Fenced(lang) => {
                 let lang_str = lang.to_string();
                 if lang_str.is_empty() {
@@ -150,98 +167,159 @@ impl RenderState {
             }
             _ => None,
         };
-        self.code_block_content.clear();
+        self.code_block = Some(CodeBlockState {
+            language,
+            content: String::new(),
+            start_range: range,
+        });
     }
 
     pub(super) fn code_block_full_range(&self, end_range: &Range<usize>) -> Option<Range<usize>> {
-        self.code_block_range.as_ref().map(|start_range| Range {
-            start: start_range.start,
+        self.code_block.as_ref().map(|code_block| Range {
+            start: code_block.start_range.start,
             end: end_range.end,
         })
     }
 
+    /// アクティブなコードブロックがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(CodeBlock)` / `End(CodeBlock)` 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn finish_code_block(&mut self, ss: &SyntaxSet, line_attrs: String) {
+        let Some(code_block) = self.code_block.take() else {
+            unreachable!("finish_code_block: アクティブなコードブロックがない状態で呼ばれた");
+        };
         let rendered = render_code_block_html(
             ss,
-            self.code_block_lang.as_deref(),
-            &self.code_block_content,
+            code_block.language.as_deref(),
+            &code_block.content,
             &line_attrs,
         );
         self.push_html(&rendered);
-
-        self.in_code_block = false;
-        self.code_block_lang = None;
-        self.code_block_content.clear();
-        self.code_block_range = None;
     }
 
     pub(super) fn start_image(&mut self, dest_url: &str, title: &str) {
-        self.image_src = Some(dest_url.to_string());
-        self.image_title = if title.is_empty() {
-            None
-        } else {
-            Some(title.to_string())
-        };
-        self.image_alt.clear();
+        self.image = Some(ImageState {
+            src: dest_url.to_string(),
+            title: if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            },
+            alt: String::new(),
+        });
     }
 
-    pub(super) fn finish_image(&mut self) -> Option<String> {
-        let src = self.image_src.take()?;
-        let safe_src = sanitize_image_src(&src);
+    /// アクティブな画像がある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Image)` / `End(Image)` 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
+    pub(super) fn finish_image(&mut self) -> String {
+        let Some(image) = self.image.take() else {
+            unreachable!("finish_image: アクティブな画像がない状態で呼ばれた");
+        };
+        let safe_src = sanitize_image_src(&image.src);
         let mut image_html = format!(
             "<img src=\"{}\" alt=\"{}\"",
             html_escape(&safe_src),
-            html_escape(&self.image_alt)
+            html_escape(&image.alt)
         );
-        if let Some(title) = self.image_title.take() {
+        if let Some(title) = image.title {
             image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
         }
         image_html.push_str(" />");
-        self.image_title = None;
-        self.image_alt.clear();
-        Some(image_html)
+        image_html
     }
 
     pub(super) fn start_table(&mut self, alignments: Vec<Alignment>) {
-        self.in_table_head = false;
-        self.table_alignments = alignments;
-        self.table_cell_index = 0;
+        self.table = Some(TableState {
+            in_head: false,
+            alignments,
+            cell_index: 0,
+        });
     }
 
     pub(super) fn finish_table(&mut self) {
-        self.in_table_head = false;
-        self.table_alignments.clear();
-        self.table_cell_index = 0;
+        self.table = None;
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table head 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn start_table_head(&mut self) {
-        self.in_table_head = true;
+        let Some(table) = &mut self.table else {
+            unreachable!("start_table_head: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.in_head = true;
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table head 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn finish_table_head(&mut self) {
-        self.in_table_head = false;
+        let Some(table) = &mut self.table else {
+            unreachable!("finish_table_head: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.in_head = false;
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table row 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn reset_table_row(&mut self) {
-        self.table_cell_index = 0;
+        let Some(table) = &mut self.table else {
+            unreachable!("reset_table_row: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.cell_index = 0;
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table cell 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn table_cell_start_tag(&mut self) -> String {
-        let align_class = self
-            .table_alignments
-            .get(self.table_cell_index)
+        let Some(table) = &mut self.table else {
+            unreachable!("table_cell_start_tag: アクティブなテーブルがない状態で呼ばれた");
+        };
+        let align_class = table
+            .alignments
+            .get(table.cell_index)
             .and_then(table_align_class_attr)
             .unwrap_or("");
-        self.table_cell_index = self.table_cell_index.saturating_add(1);
-        if self.in_table_head {
+        table.cell_index = table.cell_index.saturating_add(1);
+        if table.in_head {
             format!("<th{}>", align_class)
         } else {
             format!("<td{}>", align_class)
         }
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table cell 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn table_cell_end_tag(&self) -> &'static str {
-        if self.in_table_head {
+        let Some(table) = &self.table else {
+            unreachable!("table_cell_end_tag: アクティブなテーブルがない状態で呼ばれた");
+        };
+        if table.in_head {
             "</th>\n"
         } else {
             "</td>\n"
@@ -255,5 +333,67 @@ fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
         Alignment::Center => Some(" class=\"align-center\""),
         Alignment::Right => Some(" class=\"align-right\""),
         Alignment::None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "finish_code_block: アクティブなコードブロック")]
+    fn test_finish_code_blockは開始なしならpanicする() {
+        let mut state = RenderState::new();
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+
+        state.finish_code_block(&syntax_set, String::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "finish_image: アクティブな画像")]
+    fn test_finish_imageは開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        let _ = state.finish_image();
+    }
+
+    #[test]
+    #[should_panic(expected = "start_table_head: アクティブなテーブル")]
+    fn test_start_table_headはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.start_table_head();
+    }
+
+    #[test]
+    #[should_panic(expected = "finish_table_head: アクティブなテーブル")]
+    fn test_finish_table_headはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.finish_table_head();
+    }
+
+    #[test]
+    #[should_panic(expected = "reset_table_row: アクティブなテーブル")]
+    fn test_reset_table_rowはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.reset_table_row();
+    }
+
+    #[test]
+    #[should_panic(expected = "table_cell_start_tag: アクティブなテーブル")]
+    fn test_table_cell_start_tagはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        let _ = state.table_cell_start_tag();
+    }
+
+    #[test]
+    #[should_panic(expected = "table_cell_end_tag: アクティブなテーブル")]
+    fn test_table_cell_end_tagはtable開始なしならpanicする() {
+        let state = RenderState::new();
+
+        let _ = state.table_cell_end_tag();
     }
 }
