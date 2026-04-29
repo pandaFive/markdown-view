@@ -59,7 +59,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
         return SanitizedHtml::from_sanitized_html(String::new());
     }
 
-    render::Renderer::render(input)
+    render::render(input)
 }
 
 fn syntax_set() -> &'static SyntaxSet {
