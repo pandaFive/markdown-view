@@ -1,6 +1,8 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum UrlPolicy {
+    /// link は外部遷移を許可するため remote URL を許可する。
     Link,
+    /// image はローカル文書表示の範囲に閉じ、remote URL は読み込まない。
     Image,
 }
 
@@ -32,6 +34,7 @@ fn is_safe_href(dest_url: &str, policy: UrlPolicy) -> bool {
         return false;
     }
 
+    // protocol-relative URL は現在ページの scheme で外部へ出られるため拒否する。
     if dest_url.starts_with("//") {
         return false;
     }

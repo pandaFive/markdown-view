@@ -43,7 +43,7 @@ pub(super) fn source_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) 
 
 /// block-level コンテナ（<p>, <ul>, <ol>, <li>, <table>, <blockquote>）向けの行範囲属性。
 ///
-/// `data-source-*` は memo quote の集計対象なので、コンテナには付与しない。
+/// `data-source-*` は memo quote の集計対象なので、祖先コンテナの範囲を混ぜないため付与しない。
 pub(super) fn block_line_attrs(line_lookup: &LineLookup, range: &Range<usize>) -> String {
     let (start_line, end_line) = line_lookup.line_range(range);
     format!(

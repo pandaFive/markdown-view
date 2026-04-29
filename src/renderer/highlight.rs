@@ -4,6 +4,7 @@ use syntect::util::LinesWithEndings;
 
 use super::security::html_escape;
 
+/// `line_attrs` は `line` helper が生成した属性文字列だけを渡す内部API。
 pub(super) fn render_code_block_html(
     syntax_set: &SyntaxSet,
     language: Option<&str>,
