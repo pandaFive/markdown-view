@@ -86,7 +86,7 @@ impl RenderState {
         self.image_alt.push(' ');
     }
 
-    pub(super) fn push_heading_text(&mut self, text: &str, html: &str) {
+    pub(super) fn push_heading_escaped_text_html(&mut self, text: &str, html: &str) {
         self.heading_plain_text.push_str(text);
         self.heading_html.push_str(html);
     }
@@ -96,7 +96,7 @@ impl RenderState {
         self.heading_html.push(' ');
     }
 
-    pub(super) fn push_heading_html(&mut self, html: &str) {
+    pub(super) fn push_heading_safe_html(&mut self, html: &str) {
         self.heading_html.push_str(html);
     }
 
@@ -130,6 +130,8 @@ impl RenderState {
         );
         self.heading_level = None;
         self.heading_range = None;
+        self.heading_plain_text.clear();
+        self.heading_html.clear();
         Some(html)
     }
 

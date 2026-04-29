@@ -93,7 +93,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
             Event::End(TagEnd::Image) => {
                 if let Some(image_html) = state.finish_image() {
                     if state.in_heading() {
-                        state.push_heading_html(&image_html);
+                        state.push_heading_safe_html(&image_html);
                     } else {
                         state.push_html(&image_html);
                     }
@@ -111,7 +111,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
 
                 if state.in_heading() {
-                    state.push_heading_text(
+                    state.push_heading_escaped_text_html(
                         &text,
                         &format!("<span{}>{}</span>", line_attrs, html_escape(&text)),
                     );
@@ -130,7 +130,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
 
                 if state.in_heading() {
-                    state.push_heading_text(
+                    state.push_heading_escaped_text_html(
                         &text,
                         &format!("<code{}>{}</code>", line_attrs, html_escape(&text)),
                     );
@@ -162,7 +162,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 } else if state.in_image() {
                     state.push_image_alt_space();
                 } else if state.in_heading() {
-                    state.push_heading_text(" ", "<br />");
+                    state.push_heading_escaped_text_html(" ", "<br />");
                 } else {
                     state.push_html("<br />\n");
                 }
@@ -182,7 +182,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("<em>");
+                    state.push_heading_safe_html("<em>");
                 } else {
                     state.push_html("<em>");
                 }
@@ -192,7 +192,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("</em>");
+                    state.push_heading_safe_html("</em>");
                 } else {
                     state.push_html("</em>");
                 }
@@ -202,7 +202,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("<strong>");
+                    state.push_heading_safe_html("<strong>");
                 } else {
                     state.push_html("<strong>");
                 }
@@ -212,7 +212,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("</strong>");
+                    state.push_heading_safe_html("</strong>");
                 } else {
                     state.push_html("</strong>");
                 }
@@ -222,7 +222,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("<del>");
+                    state.push_heading_safe_html("<del>");
                 } else {
                     state.push_html("<del>");
                 }
@@ -232,7 +232,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                     continue;
                 }
                 if state.in_heading() {
-                    state.push_heading_html("</del>");
+                    state.push_heading_safe_html("</del>");
                 } else {
                     state.push_html("</del>");
                 }
@@ -252,7 +252,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 link_html.push('>');
 
                 if state.in_heading() {
-                    state.push_heading_html(&link_html);
+                    state.push_heading_safe_html(&link_html);
                 } else {
                     state.push_html(&link_html);
                 }
@@ -263,7 +263,7 @@ pub fn render_markdown(input: &str) -> SanitizedHtml {
                 }
 
                 if state.in_heading() {
-                    state.push_heading_html("</a>");
+                    state.push_heading_safe_html("</a>");
                 } else {
                     state.push_html("</a>");
                 }
