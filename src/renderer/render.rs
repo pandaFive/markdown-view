@@ -249,12 +249,11 @@ fn handle_image_start(dest_url: &str, title: &str, state: &mut RenderState) {
 }
 
 fn handle_image_end(state: &mut RenderState) {
-    if let Some(image_html) = state.finish_image() {
-        if state.in_heading() {
-            state.push_heading_rendered_html_fragment(&image_html);
-        } else {
-            state.push_html(&image_html);
-        }
+    let image_html = state.finish_image();
+    if state.in_heading() {
+        state.push_heading_rendered_html_fragment(&image_html);
+    } else {
+        state.push_html(&image_html);
     }
 }
 

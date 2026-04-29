@@ -182,6 +182,11 @@ impl RenderState {
     }
 
     /// アクティブなコードブロックがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(CodeBlock)` / `End(CodeBlock)` 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn finish_code_block(&mut self, ss: &SyntaxSet, line_attrs: String) {
         let Some(code_block) = self.code_block.take() else {
             unreachable!("finish_code_block: アクティブなコードブロックがない状態で呼ばれた");
@@ -207,8 +212,16 @@ impl RenderState {
         });
     }
 
-    pub(super) fn finish_image(&mut self) -> Option<String> {
-        let image = self.image.take()?;
+    /// アクティブな画像がある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Image)` / `End(Image)` 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
+    pub(super) fn finish_image(&mut self) -> String {
+        let Some(image) = self.image.take() else {
+            unreachable!("finish_image: アクティブな画像がない状態で呼ばれた");
+        };
         let safe_src = sanitize_image_src(&image.src);
         let mut image_html = format!(
             "<img src=\"{}\" alt=\"{}\"",
@@ -219,7 +232,7 @@ impl RenderState {
             image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
         }
         image_html.push_str(" />");
-        Some(image_html)
+        image_html
     }
 
     pub(super) fn start_table(&mut self, alignments: Vec<Alignment>) {
@@ -235,6 +248,11 @@ impl RenderState {
     }
 
     /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table head 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn start_table_head(&mut self) {
         let Some(table) = &mut self.table else {
             unreachable!("start_table_head: アクティブなテーブルがない状態で呼ばれた");
@@ -243,6 +261,11 @@ impl RenderState {
     }
 
     /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table head 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn finish_table_head(&mut self) {
         let Some(table) = &mut self.table else {
             unreachable!("finish_table_head: アクティブなテーブルがない状態で呼ばれた");
@@ -251,6 +274,11 @@ impl RenderState {
     }
 
     /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table row 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn reset_table_row(&mut self) {
         let Some(table) = &mut self.table else {
             unreachable!("reset_table_row: アクティブなテーブルがない状態で呼ばれた");
@@ -259,6 +287,11 @@ impl RenderState {
     }
 
     /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table cell 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn table_cell_start_tag(&mut self) -> String {
         let Some(table) = &mut self.table else {
             unreachable!("table_cell_start_tag: アクティブなテーブルがない状態で呼ばれた");
@@ -277,6 +310,11 @@ impl RenderState {
     }
 
     /// アクティブなテーブルがある状態でのみ呼ぶ。
+    ///
+    /// # Panics
+    ///
+    /// pulldown-cmark の `Start(Table)` / table cell 対応契約に反して呼ばれた場合、
+    /// debug / release ともに panic する。
     pub(super) fn table_cell_end_tag(&self) -> &'static str {
         let Some(table) = &self.table else {
             unreachable!("table_cell_end_tag: アクティブなテーブルがない状態で呼ばれた");
@@ -303,7 +341,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "アクティブなコードブロック")]
+    #[should_panic(expected = "finish_code_block: アクティブなコードブロック")]
     fn test_finish_code_blockは開始なしならpanicする() {
         let mut state = RenderState::new();
         let syntax_set = SyntaxSet::load_defaults_newlines();
@@ -312,7 +350,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "アクティブなテーブル")]
+    #[should_panic(expected = "finish_image: アクティブな画像")]
+    fn test_finish_imageは開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        let _ = state.finish_image();
+    }
+
+    #[test]
+    #[should_panic(expected = "start_table_head: アクティブなテーブル")]
     fn test_start_table_headはtable開始なしならpanicする() {
         let mut state = RenderState::new();
 
@@ -320,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "アクティブなテーブル")]
+    #[should_panic(expected = "finish_table_head: アクティブなテーブル")]
     fn test_finish_table_headはtable開始なしならpanicする() {
         let mut state = RenderState::new();
 
@@ -328,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "アクティブなテーブル")]
+    #[should_panic(expected = "reset_table_row: アクティブなテーブル")]
     fn test_reset_table_rowはtable開始なしならpanicする() {
         let mut state = RenderState::new();
 
@@ -336,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "アクティブなテーブル")]
+    #[should_panic(expected = "table_cell_start_tag: アクティブなテーブル")]
     fn test_table_cell_start_tagはtable開始なしならpanicする() {
         let mut state = RenderState::new();
 
@@ -344,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "アクティブなテーブル")]
+    #[should_panic(expected = "table_cell_end_tag: アクティブなテーブル")]
     fn test_table_cell_end_tagはtable開始なしならpanicする() {
         let state = RenderState::new();
 

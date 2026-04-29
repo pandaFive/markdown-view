@@ -83,6 +83,8 @@ struct TableState {
 
 `Option<CodeBlockState>` や `Option<HeadingState>` は残す。これは「現在その構文の内部にいるか」を表す自然な型であり、既存の `bool + Option` のような重複状態ではない。
 
+pulldown-cmark の `Start` / `End` 対応でのみ成立する状態操作は、契約違反時に silent fallback しない。`finish_code_block`、`finish_image`、table head / row / cell の終了処理などは、対応する active state がない場合に `unreachable!()` で debug / release ともに panic させる。これは壊れた HTML を静かに出力しないための内部不変条件であり、通常入力のエラー処理ではない。
+
 ## RenderContext とイベント処理
 
 `render.rs` は関数中心にする。
