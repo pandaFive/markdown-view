@@ -41,14 +41,6 @@
   - 理由: ブラウザ側 JS は現在無型。ただし Rust ビルドパイプラインへの Node 依存追加が必要で、「Rust 単体ビルド」の明快さが崩れる
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
-- [ ] `render_markdown` の責務分割（大規模）
-  - ファイル: `src/renderer/mod.rs`
-  - 現状: pulldown-cmark の `Event` ループと状態管理（heading / code block / table / image / link の各フェーズ）が 1 関数に同居。ファイル全体も大きい
-  - 対応方針: フェーズ別ハンドラを `RenderState` の impl メソッドとして抽出し、メイン関数はイベントディスパッチのみに寄せる
-  - 注意: 大規模リファクタ。既存テスト（`renderer_test.rs`, `toc_test.rs`）が振る舞い等価性を担保するため、先にテストカバレッジを確認
-  - 理由: renderer の保守重心は既に認識済みで、今後の Markdown 拡張時に局所変更しやすくする
-  - 由来: PR #59 探索 (2026-04-18)
-
 - [ ] `catalog.rs` のパス構築での Vec アロケーション削減
   - ファイル: `src/server/files/catalog.rs`
   - 現状: 相対パス構築で `components().map(...).collect::<Vec<_>>().join("/")` を使っている。上限 1000 件だが呼出あたり Vec アロケーションが発生する
@@ -64,6 +56,12 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] `render_markdown` の責務分割
+  - ファイル: `src/renderer/{mod,render,state,line,security,highlight,toc}.rs`, `tests/renderer_test.rs`
+  - 内容: `render_markdown` の公開契約を維持したまま、イベントディスパッチ、状態管理、行番号属性、URL sanitize、コードハイライトを renderer 内部モジュールへ分割した
+  - 完了根拠: `render_markdown` 境界テスト追加、`cargo test --all-targets --all-features`、`./verify.sh`
+  - 由来: PR #59 探索 (2026-04-18)
 
 - [x] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出
   - ファイル: `tests/e2e/{memo_quote,memo_sync,memo_jump,markdown_links,text_selection_defer,document_search}.spec.ts`
