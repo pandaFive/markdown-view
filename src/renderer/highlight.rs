@@ -21,6 +21,14 @@ pub(super) fn render_code_block_html(
             );
         }
 
+        return plain_code_block_html(Some(lang), code, line_attrs);
+    }
+
+    plain_code_block_html(None, code, line_attrs)
+}
+
+fn plain_code_block_html(language: Option<&str>, code: &str, line_attrs: &str) -> String {
+    if let Some(lang) = language {
         return format!(
             "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
             line_attrs,
@@ -58,4 +66,29 @@ fn highlighted_code_html(syntax_set: &SyntaxSet, language: &str, code: &str) -> 
     }
 
     Some(generator.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plain_code_block_htmlは言語と本文をescapeする() {
+        let html = plain_code_block_html(Some("bad\"lang"), "<x>&", " data-line-block");
+
+        assert_eq!(
+            html,
+            "<pre class=\"code-block\" data-line-block><code class=\"syn-code language-bad&quot;lang\">&lt;x&gt;&amp;</code></pre>\n"
+        );
+    }
+
+    #[test]
+    fn test_plain_code_block_htmlは言語なしでも本文をescapeする() {
+        let html = plain_code_block_html(None, "<x>&", "");
+
+        assert_eq!(
+            html,
+            "<pre class=\"code-block\"><code class=\"syn-code\">&lt;x&gt;&amp;</code></pre>\n"
+        );
+    }
 }
