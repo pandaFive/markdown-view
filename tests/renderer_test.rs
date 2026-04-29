@@ -647,6 +647,41 @@ fn test_同一入力内でlinkとimageのurl_policy差分を固定する() {
 }
 
 #[test]
+fn test_renderer_state境界が連続構文で漏れない() {
+    let md = concat!(
+        "# Head ![logo](./logo.png \"caption\") `code`\n",
+        "\n",
+        "![remote](https://example.com/p.png)\n",
+        "\n",
+        "| L | R |\n",
+        "|:--|--:|\n",
+        "| a | b |\n",
+        "\n",
+        "```unknown-lang\n",
+        "<x>\n",
+        "```\n",
+        "\n",
+        "After",
+    );
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains(
+        r#"<h1 id="head-code">Head <img src="./logo.png" alt="logo" title="caption" /> <code>code</code></h1>"#
+    ));
+    assert!(html.contains(r##"<p><img src="#" alt="remote" /></p>"##));
+    assert!(html.contains(r#"<th class="align-left">L</th>"#));
+    assert!(html.contains(r#"<th class="align-right">R</th>"#));
+    assert!(html.contains(r#"<td class="align-left">a</td>"#));
+    assert!(html.contains(r#"<td class="align-right">b</td>"#));
+    assert!(html.contains(
+        r#"<pre class="code-block"><code class="syn-code language-unknown-lang">&lt;x&gt;"#
+    ));
+    assert!(html.contains("<p>After</p>"));
+    assert!(!html.contains("https://example.com/p.png"));
+    assert!(!html.contains("<x>"));
+}
+
+#[test]
 fn test_見出しidとtocリンクがインラインコード付き見出しで一致する() {
     let md = "# Title `x`";
     let html = render_markdown(md);
