@@ -182,6 +182,10 @@ impl RenderState {
     }
 
     pub(super) fn finish_code_block(&mut self, ss: &SyntaxSet, line_attrs: String) {
+        debug_assert!(
+            self.code_block.is_some(),
+            "finish_code_block called without active code block"
+        );
         let Some(code_block) = self.code_block.take() else {
             return;
         };
@@ -252,6 +256,10 @@ impl RenderState {
     }
 
     pub(super) fn table_cell_start_tag(&mut self) -> String {
+        debug_assert!(
+            self.table.is_some(),
+            "table_cell_start_tag called without active table"
+        );
         let Some(table) = &mut self.table else {
             return "<td>".to_string();
         };
@@ -269,6 +277,10 @@ impl RenderState {
     }
 
     pub(super) fn table_cell_end_tag(&self) -> &'static str {
+        debug_assert!(
+            self.table.is_some(),
+            "table_cell_end_tag called without active table"
+        );
         if self
             .table
             .as_ref()
@@ -288,5 +300,35 @@ fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
         Alignment::Center => Some(" class=\"align-center\""),
         Alignment::Right => Some(" class=\"align-right\""),
         Alignment::None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "finish_code_block called without active code block")]
+    fn test_finish_code_blockは開始なしならdebug_assertで検出する() {
+        let mut state = RenderState::new();
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+
+        state.finish_code_block(&syntax_set, String::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "table_cell_start_tag called without active table")]
+    fn test_table_cell_start_tagはtable開始なしならdebug_assertで検出する() {
+        let mut state = RenderState::new();
+
+        let _ = state.table_cell_start_tag();
+    }
+
+    #[test]
+    #[should_panic(expected = "table_cell_end_tag called without active table")]
+    fn test_table_cell_end_tagはtable開始なしならdebug_assertで検出する() {
+        let state = RenderState::new();
+
+        let _ = state.table_cell_end_tag();
     }
 }

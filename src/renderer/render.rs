@@ -30,8 +30,8 @@ pub(super) fn render(input: &str) -> SanitizedHtml {
     SanitizedHtml::from_sanitized_html(state.into_html())
 }
 
-fn dispatch_event<'a>(
-    event: Event<'a>,
+fn dispatch_event(
+    event: Event<'_>,
     range: Range<usize>,
     line_lookup: &LineLookup,
     syntax_set: &SyntaxSet,
@@ -57,8 +57,8 @@ fn dispatch_event<'a>(
     }
 }
 
-fn handle_start<'a>(
-    tag: Tag<'a>,
+fn handle_start(
+    tag: Tag<'_>,
     range: Range<usize>,
     line_lookup: &LineLookup,
     state: &mut RenderState,
