@@ -49,10 +49,7 @@ fn dispatch_event(
         Event::Rule => handle_rule(state),
         Event::TaskListMarker(checked) => handle_task_list_marker(checked, state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_event(&other);
         }
     }
 }
@@ -85,10 +82,7 @@ fn handle_start(
         Tag::TableRow => handle_table_row_start(state),
         Tag::TableCell => handle_table_cell_start(state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdown開始タグを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_start_tag(&other);
         }
     }
 }
@@ -119,12 +113,40 @@ fn handle_end(
         TagEnd::TableRow => handle_table_row_end(state),
         TagEnd::TableCell => handle_table_cell_end(state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdown終了タグを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_end_tag(&other);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IgnoredMarkdownEventKind {
+    Event,
+    StartTag,
+    EndTag,
+}
+
+fn log_ignored_markdown_event(event: &Event<'_>) -> IgnoredMarkdownEventKind {
+    tracing::debug!(
+        "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
+        event
+    );
+    IgnoredMarkdownEventKind::Event
+}
+
+fn log_ignored_markdown_start_tag(tag: &Tag<'_>) -> IgnoredMarkdownEventKind {
+    tracing::debug!(
+        "[markdown-view] 未処理のMarkdown開始タグを無視: {:?}",
+        tag
+    );
+    IgnoredMarkdownEventKind::StartTag
+}
+
+fn log_ignored_markdown_end_tag(tag: &TagEnd) -> IgnoredMarkdownEventKind {
+    tracing::debug!(
+        "[markdown-view] 未処理のMarkdown終了タグを無視: {:?}",
+        tag
+    );
+    IgnoredMarkdownEventKind::EndTag
 }
 
 fn handle_text(
@@ -465,5 +487,31 @@ mod tests {
         let state = RenderState::new();
 
         let _ = code_block_line_attrs(&(0..0), &line_lookup, &state);
+    }
+
+    #[test]
+    fn test_未処理markdown_eventは観測対象として分類される() {
+        let event = Event::InlineMath(pulldown_cmark::CowStr::from("x"));
+
+        assert_eq!(
+            log_ignored_markdown_event(&event),
+            IgnoredMarkdownEventKind::Event
+        );
+    }
+
+    #[test]
+    fn test_未処理markdown_start_tagは観測対象として分類される() {
+        assert_eq!(
+            log_ignored_markdown_start_tag(&Tag::HtmlBlock),
+            IgnoredMarkdownEventKind::StartTag
+        );
+    }
+
+    #[test]
+    fn test_未処理markdown_end_tagは観測対象として分類される() {
+        assert_eq!(
+            log_ignored_markdown_end_tag(&TagEnd::HtmlBlock),
+            IgnoredMarkdownEventKind::EndTag
+        );
     }
 }
