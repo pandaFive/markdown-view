@@ -444,9 +444,11 @@ fn code_block_line_attrs(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
     use super::*;
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "heading_line_attrs: アクティブな見出し")]
     fn test_heading_line_attrsは見出し開始なしならdebug_assertで検知する() {
         let line_lookup = LineLookup::new("# title");
@@ -456,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "code_block_line_attrs: アクティブなコードブロック")]
     fn test_code_block_line_attrsはコードブロック開始なしならdebug_assertで検知する() {
         let line_lookup = LineLookup::new("```rust\nfn main() {}\n```");

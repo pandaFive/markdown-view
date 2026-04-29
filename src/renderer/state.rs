@@ -349,6 +349,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "finish_heading: アクティブな見出し")]
     fn test_finish_headingは開始なしならdebug_assertで検知する() {
         let mut state = RenderState::new();
