@@ -181,13 +181,10 @@ impl RenderState {
         })
     }
 
+    /// アクティブなコードブロックがある状態でのみ呼ぶ。
     pub(super) fn finish_code_block(&mut self, ss: &SyntaxSet, line_attrs: String) {
-        debug_assert!(
-            self.code_block.is_some(),
-            "finish_code_block called without active code block"
-        );
         let Some(code_block) = self.code_block.take() else {
-            return;
+            unreachable!("finish_code_block: アクティブなコードブロックがない状態で呼ばれた");
         };
         let rendered = render_code_block_html(
             ss,
@@ -237,31 +234,34 @@ impl RenderState {
         self.table = None;
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
     pub(super) fn start_table_head(&mut self) {
-        if let Some(table) = &mut self.table {
-            table.in_head = true;
-        }
-    }
-
-    pub(super) fn finish_table_head(&mut self) {
-        if let Some(table) = &mut self.table {
-            table.in_head = false;
-        }
-    }
-
-    pub(super) fn reset_table_row(&mut self) {
-        if let Some(table) = &mut self.table {
-            table.cell_index = 0;
-        }
-    }
-
-    pub(super) fn table_cell_start_tag(&mut self) -> String {
-        debug_assert!(
-            self.table.is_some(),
-            "table_cell_start_tag called without active table"
-        );
         let Some(table) = &mut self.table else {
-            return "<td>".to_string();
+            unreachable!("start_table_head: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.in_head = true;
+    }
+
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    pub(super) fn finish_table_head(&mut self) {
+        let Some(table) = &mut self.table else {
+            unreachable!("finish_table_head: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.in_head = false;
+    }
+
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    pub(super) fn reset_table_row(&mut self) {
+        let Some(table) = &mut self.table else {
+            unreachable!("reset_table_row: アクティブなテーブルがない状態で呼ばれた");
+        };
+        table.cell_index = 0;
+    }
+
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
+    pub(super) fn table_cell_start_tag(&mut self) -> String {
+        let Some(table) = &mut self.table else {
+            unreachable!("table_cell_start_tag: アクティブなテーブルがない状態で呼ばれた");
         };
         let align_class = table
             .alignments
@@ -276,17 +276,12 @@ impl RenderState {
         }
     }
 
+    /// アクティブなテーブルがある状態でのみ呼ぶ。
     pub(super) fn table_cell_end_tag(&self) -> &'static str {
-        debug_assert!(
-            self.table.is_some(),
-            "table_cell_end_tag called without active table"
-        );
-        if self
-            .table
-            .as_ref()
-            .map(|table| table.in_head)
-            .unwrap_or(false)
-        {
+        let Some(table) = &self.table else {
+            unreachable!("table_cell_end_tag: アクティブなテーブルがない状態で呼ばれた");
+        };
+        if table.in_head {
             "</th>\n"
         } else {
             "</td>\n"
@@ -308,8 +303,8 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "finish_code_block called without active code block")]
-    fn test_finish_code_blockは開始なしならdebug_assertで検出する() {
+    #[should_panic(expected = "アクティブなコードブロック")]
+    fn test_finish_code_blockは開始なしならpanicする() {
         let mut state = RenderState::new();
         let syntax_set = SyntaxSet::load_defaults_newlines();
 
@@ -317,16 +312,40 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "table_cell_start_tag called without active table")]
-    fn test_table_cell_start_tagはtable開始なしならdebug_assertで検出する() {
+    #[should_panic(expected = "アクティブなテーブル")]
+    fn test_start_table_headはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.start_table_head();
+    }
+
+    #[test]
+    #[should_panic(expected = "アクティブなテーブル")]
+    fn test_finish_table_headはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.finish_table_head();
+    }
+
+    #[test]
+    #[should_panic(expected = "アクティブなテーブル")]
+    fn test_reset_table_rowはtable開始なしならpanicする() {
+        let mut state = RenderState::new();
+
+        state.reset_table_row();
+    }
+
+    #[test]
+    #[should_panic(expected = "アクティブなテーブル")]
+    fn test_table_cell_start_tagはtable開始なしならpanicする() {
         let mut state = RenderState::new();
 
         let _ = state.table_cell_start_tag();
     }
 
     #[test]
-    #[should_panic(expected = "table_cell_end_tag called without active table")]
-    fn test_table_cell_end_tagはtable開始なしならdebug_assertで検出する() {
+    #[should_panic(expected = "アクティブなテーブル")]
+    fn test_table_cell_end_tagはtable開始なしならpanicする() {
         let state = RenderState::new();
 
         let _ = state.table_cell_end_tag();

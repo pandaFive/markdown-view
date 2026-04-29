@@ -431,8 +431,8 @@ fn test_画像alt内のsoftbreakとhardbreakは空白として扱う() {
     let hard_break =
         normalize_source_markup(render_markdown("![first  \nsecond](./pic.png)").as_str());
 
+    assert_eq!(soft_break, hard_break);
     assert!(soft_break.contains(r#"<img src="./pic.png" alt="first second" />"#));
-    assert!(hard_break.contains(r#"<img src="./pic.png" alt="first second" />"#));
 }
 
 #[test]
@@ -648,12 +648,15 @@ fn test_連続テーブルでalignmentが次のテーブルへ漏れない() {
 #[test]
 fn test_テーブルセル内画像はtableとimage状態を混同しない() {
     let md = r#"| media |
-|---|
+|:---|
 | ![logo](./logo.png "caption") |"#;
     let html = normalize_source_markup(render_markdown(md).as_str());
 
     assert!(html.contains("<table>"));
-    assert!(html.contains(r#"<td><img src="./logo.png" alt="logo" title="caption" /></td>"#));
+    assert!(html.contains(r#"<th class="align-left">media</th>"#));
+    assert!(html.contains(
+        r#"<td class="align-left"><img src="./logo.png" alt="logo" title="caption" /></td>"#
+    ));
     assert!(html.contains("</table>"));
 }
 
