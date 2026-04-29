@@ -22,7 +22,9 @@ pub use security::html_escape;
 
 /// サニタイズ済みHTMLを表すnewtype
 ///
-/// `render_markdown` / `generate_toc` が主たる生成経路。
+/// `renderer` モジュールツリー内の XSS 不変条件を満たす経路からのみ構築する。
+/// 具体的には raw HTML / inline HTML を破棄し、テキストと属性値を `html_escape` し、
+/// URL を用途別 policy で sanitize した HTML だけを包む。
 /// コンストラクタは `pub(in crate::renderer)` とし、
 /// `renderer`モジュールツリー内でのみ構築可能にする。
 /// 生文字列の混入を型で防止する。
@@ -50,13 +52,14 @@ impl SanitizedHtml {
 /// - GFM拡張（テーブル、タスクリスト、取消線）対応
 /// - コードブロックはsyntectでクラスベースハイライト
 /// - 見出しにはスラッグIDを付与
+/// - 行追跡用の `data-source-*` / `data-line-block*` 属性を常に付与
 /// - raw HTMLは完全に除去される（XSS防止のため出力に含めない）
 pub fn render_markdown(input: &str) -> SanitizedHtml {
     if input.is_empty() {
         return SanitizedHtml::from_sanitized_html(String::new());
     }
 
-    render::Renderer::new(input, render::RenderOptions::default()).render()
+    render::Renderer::render(input)
 }
 
 fn syntax_set() -> &'static SyntaxSet {

@@ -95,7 +95,12 @@ impl RenderState {
         self.heading_html.push(' ');
     }
 
-    pub(super) fn push_heading_safe_html(&mut self, html: &str) {
+    /// 見出し内へ、組み立て済みのHTML断片を追加する。
+    ///
+    /// 許容する断片は、静的タグ、`html_escape` / URL sanitize 済みの `format!` 結果、
+    /// または `finish_image` が返すエスケープ済み `<img>` に限る。
+    /// 生テキストは `push_heading_escaped_text_html` を使う。
+    pub(super) fn push_heading_rendered_html_fragment(&mut self, html: &str) {
         self.heading_html.push_str(html);
     }
 
@@ -155,18 +160,12 @@ impl RenderState {
         })
     }
 
-    pub(super) fn finish_code_block(
-        &mut self,
-        ss: &SyntaxSet,
-        line_attrs: String,
-        syntax_highlighting: bool,
-    ) {
+    pub(super) fn finish_code_block(&mut self, ss: &SyntaxSet, line_attrs: String) {
         let rendered = render_code_block_html(
             ss,
             self.code_block_lang.as_deref(),
             &self.code_block_content,
             &line_attrs,
-            syntax_highlighting,
         );
         self.push_html(&rendered);
 

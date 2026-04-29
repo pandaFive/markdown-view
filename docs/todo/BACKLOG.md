@@ -33,6 +33,12 @@
   - 理由: いずれも今回の helper 化で再利用面積が広がった既存課題。個別 spec の意図と違う要素・古い WebSocket handler・未削除メモが silent に残ると、E2E が clean-slate 前提を満たさないまま偽陽性化しうる
   - 由来: E2E 共通ヘルパー抽出 PR レビュー (2026-04-29、pre-existing)
 
+- [ ] `render_markdown` 責務分割後の silent failure 観測性強化
+  - ファイル: `src/renderer/{render,state,highlight}.rs`
+  - 内容: `heading_line_attrs` / `code_block_line_attrs` / `finish_heading` の `None` 経路、未処理 Markdown event ログ、コードハイライト fallback の観測性を整理する
+  - 理由: 責務分割 PR では挙動互換を優先して silent fallback を温存した。次PRで debug_assert / tracing / fallback marker の要否をまとめて判断し、見出し・コードブロック・未処理 event の静かな退行を検知しやすくする
+  - 由来: render_markdown 責務分割 PR レビュー (2026-04-29)
+
 ## P3: 長期改善・低緊急
 
 - [ ] インラインブラウザJS の TS 化
@@ -58,9 +64,10 @@
 ## Done
 
 - [x] `render_markdown` の責務分割
-  - ファイル: `src/renderer/{mod,render,state,line,security,highlight,toc}.rs`, `tests/renderer_test.rs`
-  - 内容: `render_markdown` の公開契約を維持したまま、イベントディスパッチ、状態管理、行番号属性、URL sanitize、コードハイライトを renderer 内部モジュールへ分割した
-  - 完了根拠: `render_markdown` 境界テスト追加、`cargo test --all-targets --all-features`、`./verify.sh`
+  - ファイル: `src/renderer/{mod,render,state,line,security,highlight}.rs`, `tests/renderer_test.rs`
+  - 確認対象: `src/renderer/toc.rs`
+  - 内容: `render_markdown` の公開契約を維持したまま、イベントディスパッチ、状態管理、行番号属性、URL sanitize、コードハイライトを renderer 内部モジュールへ分割した。Post-review で未使用の内部 `RenderOptions` は削除し、行追跡とハイライトの既定経路へ一本化した
+  - 完了根拠: 2026-04-29 実装時点で `render_markdown` 境界テスト追加、`cargo test --all-targets --all-features`、`./verify.sh` が pass と報告済み
   - 由来: PR #59 探索 (2026-04-18)
 
 - [x] E2E 共通ヘルパーを `tests/e2e/helpers.ts` に抽出

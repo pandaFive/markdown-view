@@ -10,18 +10,15 @@ pub(super) fn render_code_block_html(
     language: Option<&str>,
     code: &str,
     line_attrs: &str,
-    syntax_highlighting: bool,
 ) -> String {
     if let Some(lang) = language {
-        if syntax_highlighting {
-            if let Some(highlighted) = highlighted_code_html(syntax_set, lang, code) {
-                return format!(
-                    "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
-                    line_attrs,
-                    html_escape(lang),
-                    highlighted
-                );
-            }
+        if let Some(highlighted) = highlighted_code_html(syntax_set, lang, code) {
+            return format!(
+                "<pre class=\"code-block\"{}><code class=\"syn-code language-{}\">{}</code></pre>\n",
+                line_attrs,
+                html_escape(lang),
+                highlighted
+            );
         }
 
         return format!(

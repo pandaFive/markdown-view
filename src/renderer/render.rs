@@ -9,56 +9,39 @@ use super::security::{html_escape, sanitize_link_href};
 use super::state::RenderState;
 use super::{generate_unique_id, markdown_options, slugify, syntax_set, SanitizedHtml};
 
-pub(super) struct RenderOptions {
-    track_source_lines: bool,
-    syntax_highlighting: bool,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self {
-            track_source_lines: true,
-            syntax_highlighting: true,
-        }
-    }
-}
-
 struct RenderContext {
     line_lookup: LineLookup,
     syntax_set: &'static SyntaxSet,
     id_counts: HashMap<String, usize>,
-    options: RenderOptions,
 }
 
-pub(super) struct Renderer<'a> {
-    input: &'a str,
+pub(super) struct Renderer {
     context: RenderContext,
     state: RenderState,
 }
 
-impl<'a> Renderer<'a> {
-    pub(super) fn new(input: &'a str, options: RenderOptions) -> Self {
+impl Renderer {
+    pub(super) fn render(input: &str) -> SanitizedHtml {
+        let mut renderer = Self::new(input);
+        let parser = Parser::new_ext(input, markdown_options()).into_offset_iter();
+        for (event, range) in parser {
+            renderer.dispatch_event(event, range);
+        }
+        SanitizedHtml::from_sanitized_html(renderer.state.into_html())
+    }
+
+    fn new(input: &str) -> Self {
         Self {
-            input,
             context: RenderContext {
                 line_lookup: LineLookup::new(input),
                 syntax_set: syntax_set(),
                 id_counts: HashMap::new(),
-                options,
             },
             state: RenderState::new(),
         }
     }
 
-    pub(super) fn render(mut self) -> SanitizedHtml {
-        let parser = Parser::new_ext(self.input, markdown_options()).into_offset_iter();
-        for (event, range) in parser {
-            self.dispatch_event(event, range);
-        }
-        SanitizedHtml::from_sanitized_html(self.state.into_html())
-    }
-
-    fn dispatch_event(&mut self, event: Event<'a>, range: Range<usize>) {
+    fn dispatch_event<'a>(&mut self, event: Event<'a>, range: Range<usize>) {
         match event {
             Event::Start(tag) => self.handle_start(tag, range),
             Event::End(tag) => self.handle_end(tag, range),
@@ -78,7 +61,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn handle_start(&mut self, tag: Tag<'a>, range: Range<usize>) {
+    fn handle_start<'a>(&mut self, tag: Tag<'a>, range: Range<usize>) {
         match tag {
             Tag::CodeBlock(kind) => self.handle_code_block_start(kind, range),
             Tag::Heading { level, .. } => self.handle_heading_start(level as u8, range),
@@ -171,6 +154,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// pulldown_cmark::Event::Html / Event::InlineHtml をまとめて破棄する（XSS防止）。
     fn handle_html(&mut self) {
         // raw HTMLイベントは出力せず破棄する（XSS防止）
     }
@@ -215,7 +199,7 @@ impl<'a> Renderer<'a> {
 
     fn handle_code_block_start(
         &mut self,
-        kind: pulldown_cmark::CodeBlockKind<'a>,
+        kind: pulldown_cmark::CodeBlockKind<'_>,
         range: Range<usize>,
     ) {
         self.state.start_code_block(kind, range);
@@ -223,11 +207,8 @@ impl<'a> Renderer<'a> {
 
     fn handle_code_block_end(&mut self, range: Range<usize>) {
         let line_attrs = self.code_block_line_attrs(&range);
-        self.state.finish_code_block(
-            self.context.syntax_set,
-            line_attrs,
-            self.context.options.syntax_highlighting,
-        );
+        self.state
+            .finish_code_block(self.context.syntax_set, line_attrs);
     }
 
     fn handle_heading_start(&mut self, level: u8, range: Range<usize>) {
@@ -250,7 +231,7 @@ impl<'a> Renderer<'a> {
     fn handle_image_end(&mut self) {
         if let Some(image_html) = self.state.finish_image() {
             if self.state.in_heading() {
-                self.state.push_heading_safe_html(&image_html);
+                self.state.push_heading_rendered_html_fragment(&image_html);
             } else {
                 self.state.push_html(&image_html);
             }
@@ -397,33 +378,21 @@ impl<'a> Renderer<'a> {
 
     fn push_rendered_inline(&mut self, html: &str) {
         if self.state.in_heading() {
-            self.state.push_heading_safe_html(html);
+            self.state.push_heading_rendered_html_fragment(html);
         } else {
             self.state.push_html(html);
         }
     }
 
     fn source_line_attrs(&self, range: &Range<usize>) -> String {
-        if self.context.options.track_source_lines {
-            source_line_attrs(&self.context.line_lookup, range)
-        } else {
-            String::new()
-        }
+        source_line_attrs(&self.context.line_lookup, range)
     }
 
     fn block_line_attrs(&self, range: &Range<usize>) -> String {
-        if self.context.options.track_source_lines {
-            block_line_attrs(&self.context.line_lookup, range)
-        } else {
-            String::new()
-        }
+        block_line_attrs(&self.context.line_lookup, range)
     }
 
     fn heading_line_attrs(&self) -> String {
-        if !self.context.options.track_source_lines {
-            return String::new();
-        }
-
         self.state
             .heading_range()
             .map(|range| {
@@ -433,38 +402,11 @@ impl<'a> Renderer<'a> {
     }
 
     fn code_block_line_attrs(&self, end_range: &Range<usize>) -> String {
-        if !self.context.options.track_source_lines {
-            return String::new();
-        }
-
         self.state
             .code_block_full_range(end_range)
             .map(|range| {
                 line_block_marker_with(source_line_attrs(&self.context.line_lookup, &range))
             })
             .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_track_source_lines_falseは全ての行属性を出力しない() {
-        let markdown = "# Heading\n\nparagraph `code`\n\n```rust\nfn main() {}\n```";
-        let html = Renderer::new(
-            markdown,
-            RenderOptions {
-                track_source_lines: false,
-                syntax_highlighting: true,
-            },
-        )
-        .render();
-        let html = html.as_str();
-
-        assert!(!html.contains("data-source-start-line"));
-        assert!(!html.contains("data-source-end-line"));
-        assert!(!html.contains("data-line-block"));
     }
 }

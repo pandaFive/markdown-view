@@ -1,6 +1,10 @@
 # render_markdown Responsibility Split Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Implementation Status:** Completed on 2026-04-29. This file is a historical execution artifact, not an active plan. Do not re-run unchecked steps from this document; use it only as implementation history.
+>
+> **For historical context:** The original agentic instruction was to use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax because they record the original execution plan.
+>
+> **Post-review correction:** The final implementation removed `RenderOptions` and the unused `syntax_highlighting` option. Original snippets below that mention those names are superseded by the final code path: `render_markdown(input)` delegates to `Renderer::render(input)`, and code highlighting always attempts syntect highlighting before falling back to escaped plain text.
 
 **Goal:** `render_markdown` の公開契約と出力を維持したまま、renderer 内部を `RenderOptions` / `RenderContext` / `Renderer` / `RenderState` と補助モジュールへ分割する。
 
@@ -54,7 +58,7 @@ fn test_render_markdown_複合入力の公開api出力を固定する() {
     assert!(html_str.contains(r#"<th class="align-left">"#));
     assert!(html_str.contains(r#"<th class="align-right">"#));
     assert!(html_str.contains("A &amp; B"));
-    assert!(html_str.contains(r#"<code data-source-start-line="6" data-source-end-line="6">code</code>"#));
+    assert!(html_str.contains(r#"<code data-source-start-line="7" data-source-end-line="7">code</code>"#));
     assert!(html_str.contains(r#"<code class="syn-code language-unknown-lang">&lt;a&gt;"#));
     assert!(!html_str.contains("https://example.com/pic.png"));
     assert!(!html_str.contains("<a>\n"));
@@ -1196,7 +1200,8 @@ Add a Done entry under `## Done`:
 
 ```markdown
 - [x] `render_markdown` の責務分割
-  - ファイル: `src/renderer/{mod,render,state,line,security,highlight,toc}.rs`, `tests/renderer_test.rs`
+  - ファイル: `src/renderer/{mod,render,state,line,security,highlight}.rs`, `tests/renderer_test.rs`
+  - 確認対象: `src/renderer/toc.rs`
   - 内容: `render_markdown` の公開契約を維持したまま、イベントディスパッチ、状態管理、行番号属性、URL sanitize、コードハイライトを renderer 内部モジュールへ分割した
   - 完了根拠: `render_markdown` 境界テスト追加、`cargo test --all-targets --all-features`、`./verify.sh`
   - 由来: PR #59 探索 (2026-04-18)

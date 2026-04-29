@@ -508,24 +508,117 @@ fn test_見出し内インライン装飾が見出し要素内に収まる() {
 fn test_render_markdown_複合入力の公開api出力を固定する() {
     let md = "# Title `x`\n\n[link](https://example.com) ![img](https://example.com/pic.png)\n\n| L | R |\n|:--|--:|\n| A & B | `code` |\n\n```unknown-lang\n<a>\n```";
     let html = render_markdown(md);
-    let html_str = html.as_str();
 
-    assert!(html_str.contains(
-        r#"<h1 id="title-x" data-line-block data-source-start-line="1" data-source-end-line="1">"#
-    ));
-    assert!(
-        html_str.contains(r#"<code data-source-start-line="1" data-source-end-line="1">x</code>"#)
+    assert_eq!(
+        html.as_str(),
+        concat!(
+            r#"<h1 id="title-x" data-line-block data-source-start-line="1" data-source-end-line="1"><span data-source-start-line="1" data-source-end-line="1">Title </span><code data-source-start-line="1" data-source-end-line="1">x</code></h1>"#,
+            "\n",
+            r##"<p data-line-block data-line-block-start="3" data-line-block-end="3"><a href="https://example.com"><span data-source-start-line="3" data-source-end-line="3">link</span></a><span data-source-start-line="3" data-source-end-line="3"> </span><img src="#" alt="img" /></p>"##,
+            "\n",
+            r#"<table data-line-block data-line-block-start="5" data-line-block-end="7">"#,
+            "\n",
+            "<thead>\n",
+            r#"<th class="align-left"><span data-source-start-line="5" data-source-end-line="5">L</span></th>"#,
+            "\n",
+            r#"<th class="align-right"><span data-source-start-line="5" data-source-end-line="5">R</span></th>"#,
+            "\n",
+            "</thead>\n",
+            "<tr>\n",
+            r#"<td class="align-left"><span data-source-start-line="7" data-source-end-line="7">A &amp; B</span></td>"#,
+            "\n",
+            r#"<td class="align-right"><code data-source-start-line="7" data-source-end-line="7">code</code></td>"#,
+            "\n",
+            "</tr>\n",
+            "</table>\n",
+            r#"<pre class="code-block" data-line-block data-source-start-line="9" data-source-end-line="11"><code class="syn-code language-unknown-lang">&lt;a&gt;"#,
+            "\n",
+            "</code></pre>\n",
+        )
     );
-    assert!(html_str.contains(r#"<a href="https://example.com">"#));
-    assert!(html_str.contains(r##"<img src="#" alt="img" />"##));
-    assert!(html_str.contains(r#"<th class="align-left">"#));
-    assert!(html_str.contains(r#"<th class="align-right">"#));
-    assert!(html_str.contains("A &amp; B"));
-    assert!(html_str
-        .contains(r#"<code data-source-start-line="7" data-source-end-line="7">code</code>"#));
-    assert!(html_str.contains(r#"<code class="syn-code language-unknown-lang">&lt;a&gt;"#));
-    assert!(!html_str.contains("https://example.com/pic.png"));
-    assert!(!html_str.contains("<a>\n"));
+}
+
+#[test]
+fn test_render_markdown_主要event_dispatchの出力を固定する() {
+    let md = "> **strong** *em* ~~del~~  \n> soft\n\n---\n\n3. three\n4. four\n\n- item\n- [x] done\n- [ ] todo";
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert_eq!(
+        html,
+        concat!(
+            "<blockquote>\n",
+            "<p><strong>strong</strong> <em>em</em> <del>del</del><br />\n",
+            "soft</p>\n",
+            "</blockquote>\n",
+            "<hr />\n",
+            r#"<ol start="3">"#,
+            "\n",
+            "<li>three</li>\n",
+            "<li>four</li>\n",
+            "</ol>\n",
+            "<ul>\n",
+            "<li>item</li>\n",
+            r#"<li><input type="checkbox" checked="" disabled="" /> done</li>"#,
+            "\n",
+            r#"<li><input type="checkbox" disabled="" /> todo</li>"#,
+            "\n",
+            "</ul>\n",
+        )
+    );
+}
+
+#[test]
+fn test_画像titleと画像内リンクはimg属性とaltに閉じる() {
+    let md = r#"![logo [site](https://example.com)](./pic.png "caption")"#;
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains(r#"<img src="./pic.png" alt="logo site" title="caption" />"#));
+    assert!(!html.contains("<a href="));
+    assert!(!html.contains("https://example.com"));
+}
+
+#[test]
+fn test_リンク付き画像はa要素でimgを包む() {
+    let md = r#"[![logo](./pic.png "caption")](https://example.com)"#;
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert_eq!(
+        html,
+        r#"<p><a href="https://example.com"><img src="./pic.png" alt="logo" title="caption" /></a></p>
+"#
+    );
+}
+
+#[test]
+fn test_重複見出しidはrender_markdown経由でも連番になる() {
+    let html = normalize_source_markup(render_markdown("# Hello\n# Hello\n# Hello").as_str());
+
+    assert_eq!(
+        html,
+        concat!(
+            r#"<h1 id="hello">Hello</h1>"#,
+            "\n",
+            r#"<h1 id="hello-1">Hello</h1>"#,
+            "\n",
+            r#"<h1 id="hello-2">Hello</h1>"#,
+            "\n",
+        )
+    );
+}
+
+#[test]
+fn test_連続テーブルでalignmentが次のテーブルへ漏れない() {
+    let md = "| L | R |\n|:--|--:|\n| a | b |\n\n| C | D |\n|---|---|\n| c | d |";
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains(r#"<th class="align-left">L</th>"#));
+    assert!(html.contains(r#"<th class="align-right">R</th>"#));
+    assert!(html.contains("<th>C</th>"));
+    assert!(html.contains("<th>D</th>"));
+    assert!(!html.contains(r#"<th class="align-left">C</th>"#));
+    assert!(!html.contains(r#"<th class="align-right">D</th>"#));
+    assert!(!html.contains(r#"<td class="align-left">c</td>"#));
+    assert!(!html.contains(r#"<td class="align-right">d</td>"#));
 }
 
 #[test]

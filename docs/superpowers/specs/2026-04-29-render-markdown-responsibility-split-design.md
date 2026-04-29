@@ -11,25 +11,25 @@
 - `pub fn render_markdown(input: &str) -> SanitizedHtml` の公開契約を維持する。
 - `render_markdown` 本体をイベントディスパッチ中心に寄せる。
 - heading / code block / table / image / link などのフェーズ別処理を `Renderer` / `RenderState` の責務へ分ける。
-- `RenderOptions` と `RenderContext` を内部 API として導入し、将来の拡張口を用意する。
+- `RenderContext` を内部 API として導入し、入力から導ける共有依存を `Renderer` 側へ集約する。
 - セキュリティ境界を明確にし、raw HTML 破棄、HTMLエスケープ、URL policy、`SanitizedHtml` 構築権限を維持する。
 
 ## 非ゴール
 
 - Markdown 出力仕様を変更しない。
 - `render_markdown` を `Result` 返却に変更しない。
-- `RenderOptions` を公開 API として安定化しない。
+- renderer 内部の設定口を不要に増やさない。
 - E2E 挙動やブラウザ側 JavaScript の仕様を変更しない。
 - pulldown-cmark 以外の Markdown parser へ差し替えない。
 
 ## アーキテクチャ
 
-`render_markdown(input)` は空入力なら現行通り空の `SanitizedHtml` を返す。それ以外は `RenderOptions::default()` と `Renderer::new(input, options)` を作り、`renderer.render()` に委譲する。
+`render_markdown(input)` は空入力なら現行通り空の `SanitizedHtml` を返す。それ以外は `Renderer::render(input)` に委譲する。
 
 `src/renderer/` は次の粒度へ分ける。
 
 - `mod.rs`: 公開 API の再エクスポート、`SanitizedHtml`、`render_markdown`、`markdown_options`、syntax theme 系。
-- `render.rs`: `Renderer` / `RenderOptions` / `RenderContext` とイベントディスパッチ。
+- `render.rs`: `Renderer` / `RenderContext` とイベントディスパッチ。
 - `state.rs`: `RenderState` と HTML バッファ、heading / code block / image / table の一時状態。
 - `line.rs`: `LineLookup`、`source_line_attrs`、`block_line_attrs`。
 - `security.rs`: `html_escape`、URL sanitize、`UrlPolicy`。
@@ -39,11 +39,11 @@
 
 ## コンポーネント
 
-`RenderOptions` は内部向け設定として始める。初期値は現行挙動と同じで、`track_source_lines: true`、`syntax_highlighting: true` を想定する。公開範囲は非公開または `pub(crate)` に留める。
-
 `RenderContext` は入力から導ける共有依存を持つ。具体的には `LineLookup`、`SyntaxSet` 参照、heading ID 用の `id_counts` を持つ。
 
-`RenderState` は HTML バッファと transient state の所有者とする。heading の plain text / HTML、code block の言語・本文・range、image の src/title/alt、table の alignments/head/cell index を集約する。ただし URL sanitize や syntax highlight の判断は持たせず、必要な値を受けて安全な HTML 断片を push する役割に寄せる。
+`RenderState` は HTML バッファと transient state の所有者とする。heading の plain text / HTML、code block の言語・本文・range、image の src/title/alt、table の alignments/head/cell index を集約する。URL policy や行番号の判断は `Renderer` / `RenderContext` 側に置き、`RenderState` は `security` / `highlight` helper を呼び出して安全な HTML 断片を組み立て、バッファへ蓄積する。
+
+Post-review の実装では、未使用だった内部 `RenderOptions` と `syntax_highlighting` フラグを削除した。行追跡属性は常時出力し、コードハイライトは常に syntect を試行して、失敗時だけ escaped plain text へフォールバックする。
 
 `security.rs` は link と image の URL policy を分ける。link は `http`、`https`、`mailto`、`tel` とローカル参照を許可し、image はローカル参照のみ許可する。protocol-relative URL は引き続き拒否する。
 
@@ -55,7 +55,7 @@
 
 heading 内では text/code/link/emphasis/strong/del/br/image のうち、現行と同じものだけ `heading_html` に蓄積する。heading ID は `heading_plain_text` から `slugify` と `generate_unique_id` で生成する。画像 alt は text/code/soft break を集め、画像 URL は `sanitize_image_src` を通して `<img>` にする。
 
-code block は start range と end range を合わせて line attrs を作る。syntax highlighting が成功すれば classed HTML を出し、失敗または無効なら escaped plain text を出す。
+code block は start range と end range を合わせて line attrs を作る。syntax highlighting が成功すれば classed HTML を出し、失敗すれば escaped plain text を出す。
 
 table は alignments と cell index を state に保持し、head/body の `<th>` / `<td>` と alignment class を現行通り出力する。
 
