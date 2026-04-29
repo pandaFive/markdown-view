@@ -417,8 +417,12 @@ fn push_rendered_inline(html: &str, state: &mut RenderState) {
 }
 
 fn heading_line_attrs(line_lookup: &LineLookup, state: &RenderState) -> String {
-    state
-        .heading_range()
+    let range = state.heading_range();
+    debug_assert!(
+        range.is_some(),
+        "heading_line_attrs: アクティブな見出しがない状態で呼ばれた"
+    );
+    range
         .map(|range| line_block_marker_with(source_line_attrs(line_lookup, range)))
         .unwrap_or_default()
 }
@@ -428,8 +432,35 @@ fn code_block_line_attrs(
     line_lookup: &LineLookup,
     state: &RenderState,
 ) -> String {
-    state
-        .code_block_full_range(end_range)
+    let range = state.code_block_full_range(end_range);
+    debug_assert!(
+        range.is_some(),
+        "code_block_line_attrs: アクティブなコードブロックがない状態で呼ばれた"
+    );
+    range
         .map(|range| line_block_marker_with(source_line_attrs(line_lookup, &range)))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "heading_line_attrs: アクティブな見出し")]
+    fn test_heading_line_attrsは見出し開始なしならdebug_assertで検知する() {
+        let line_lookup = LineLookup::new("# title");
+        let state = RenderState::new();
+
+        let _ = heading_line_attrs(&line_lookup, &state);
+    }
+
+    #[test]
+    #[should_panic(expected = "code_block_line_attrs: アクティブなコードブロック")]
+    fn test_code_block_line_attrsはコードブロック開始なしならdebug_assertで検知する() {
+        let line_lookup = LineLookup::new("```rust\nfn main() {}\n```");
+        let state = RenderState::new();
+
+        let _ = code_block_line_attrs(&(0..0), &line_lookup, &state);
+    }
 }
