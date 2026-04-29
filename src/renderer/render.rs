@@ -134,18 +134,12 @@ fn log_ignored_markdown_event(event: &Event<'_>) -> IgnoredMarkdownEventKind {
 }
 
 fn log_ignored_markdown_start_tag(tag: &Tag<'_>) -> IgnoredMarkdownEventKind {
-    tracing::debug!(
-        "[markdown-view] 未処理のMarkdown開始タグを無視: {:?}",
-        tag
-    );
+    tracing::debug!("[markdown-view] 未処理のMarkdown開始タグを無視: {:?}", tag);
     IgnoredMarkdownEventKind::StartTag
 }
 
 fn log_ignored_markdown_end_tag(tag: &TagEnd) -> IgnoredMarkdownEventKind {
-    tracing::debug!(
-        "[markdown-view] 未処理のMarkdown終了タグを無視: {:?}",
-        tag
-    );
+    tracing::debug!("[markdown-view] 未処理のMarkdown終了タグを無視: {:?}", tag);
     IgnoredMarkdownEventKind::EndTag
 }
 
