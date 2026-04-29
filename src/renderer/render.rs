@@ -466,7 +466,6 @@ fn code_block_line_attrs(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(debug_assertions)]
     use super::*;
 
     #[test]
