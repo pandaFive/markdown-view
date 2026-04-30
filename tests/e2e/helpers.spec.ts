@@ -85,6 +85,20 @@ test('WebSocket dispatchはstale bridgeを失敗させる', async ({ page }) => 
   })).rejects.toThrow(/WebSocket test harness bridge is stale/);
 });
 
+test('WebSocket harnessは同じ接続の再安定化でも実handlerを保持する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+  await stabilizeWebSocketHarness(page);
+
+  await dispatchWsMessage(page, {
+    content: '<h1 id="readme">README</h1><p>double stabilize update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect(page.locator('#content')).toContainText('double stabilize update');
+});
+
 test('WebSocket harnessは再接続後に再安定化すればdispatchできる', async ({ page }) => {
   await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
   await page.reload();

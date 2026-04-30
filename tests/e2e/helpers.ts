@@ -230,8 +230,11 @@ export async function stabilizeWebSocketHarness(page: Page) {
         throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
       }
     };
+    const alreadyBridged = window.__bridgedWs === lastWs && window.__realWsOnmessage;
     window.__bridgedWs = lastWs;
-    window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    if (!alreadyBridged) {
+      window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    }
     lastWs.onmessage = function() {};
     window.__dispatchWsMessage = (payload) => {
       assertFreshBridge();
