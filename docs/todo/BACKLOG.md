@@ -9,23 +9,7 @@
 
 ## P2: 保守性・局所回帰検知
 
-- [ ] `augmentHashWithTrailingLineHint` ELEMENT_NODE sibling の直接回帰テスト
-  - ファイル: `tests/e2e/memo_jump.spec.ts`
-  - 内容: `document.createElement('span')` で `L15` を内包したノードを `link.nextSibling` に置き、`augmentHashWithTrailingLineHint(link, '#section-b')` が `#section-b:L15` を返すことを直接検証する
-  - 理由: `src/template/assets/js/content.js` のドックコメントは、renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応すると説明している。実装は `TEXT_NODE` と `ELEMENT_NODE` の双方で `textContent` を見るが、現行テストは text node 経路中心で、ELEMENT_NODE sibling の設計意図を直接固定していない
-  - 由来: PR #76 レビュー (2026-04-20)
-
-- [ ] TOC pending navigation 小揺らしテストの grace 内外分離
-  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
-  - 内容: `目次クリック直後の小揺らし中にactiveがBeta以外へ遷移しない` が、grace 失効後でも Beta 位置にいるため偽 PASS にならないよう、grace 内の pending 維持と grace 外の通常判定を分離して検証する
-  - 理由: 現行テストは可視的な active 点滅の検知には有効だが、grace 期間内であること自体を厳密には固定していない。専用テストとして切り出す方が責務が明確
-  - 由来: TOC pending navigation PR 再レビュー (2026-04-28)
-
-- [ ] `memo_jump.spec.ts` の Codex review ID コメント削除
-  - ファイル: `tests/e2e/memo_jump.spec.ts`
-  - 内容: `Codex review #4136142343` という外部 review system の ID 参照を除去し、回帰保護の対象である false-positive パターンの説明に置き換える
-  - 理由: ID は Codex 側でアーカイブされると参照不能。テストコメントは外部 ID ではなく、壊したくない仕様と入力パターンを説明する方が保守しやすい
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20、既存 PR #76 持ち込み課題)
+現時点で未完了項目なし。
 
 ## P3: 長期改善・低緊急
 
@@ -50,6 +34,24 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] `augmentHashWithTrailingLineHint` ELEMENT_NODE sibling の直接回帰テスト
+  - ファイル: `tests/e2e/memo_jump.spec.ts`
+  - 内容: `document.createElement('span')` で `L15` を内包したノードを `link.nextSibling` に置き、`augmentHashWithTrailingLineHint(link, '#section-b')` が `#section-b:L15` を返すことを直接検証した
+  - 完了根拠: `7185d24 test: ELEMENT_NODE sibling の hash 補完を固定 (#102)`、現行 `tests/e2e/memo_jump.spec.ts` の `augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent から行番号を補完する`
+  - 由来: PR #76 レビュー (2026-04-20)
+
+- [x] TOC pending navigation 小揺らしテストの grace 内外分離
+  - ファイル: `tests/e2e/text_selection_defer.spec.ts`
+  - 内容: slack 内では pending active を維持し、slack 外では通常判定へ戻る境界を分離して検証した
+  - 完了根拠: `ff0fbe8 test: TOC pending navigation境界を固定 (#103)`、現行 `tests/e2e/text_selection_defer.spec.ts` の `目次クリック後のslack内スクロールではpending activeを維持し、slack外では通常判定へ戻る`
+  - 由来: TOC pending navigation PR 再レビュー (2026-04-28)
+
+- [x] `memo_jump.spec.ts` の Codex review ID コメント削除
+  - ファイル: `tests/e2e/memo_jump.spec.ts`
+  - 内容: 外部 review system の ID 参照を残さず、回帰保護の対象である false-positive パターンの説明へ置き換え済み
+  - 完了根拠: 現行 `tests/e2e/memo_jump.spec.ts` に `Codex review #4136142343` が存在せず、false-positive 系の仕様説明コメントがテスト内に残っている
+  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20、既存 PR #76 持ち込み課題)
 
 - [x] E2E 共通ヘルパーの silent false-positive 経路を狭める
   - ファイル: `tests/e2e/helpers.ts`, `tests/e2e/helpers.spec.ts`, `tests/e2e/globals.d.ts`, `tests/e2e/memo_jump.spec.ts`

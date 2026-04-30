@@ -120,21 +120,40 @@ npm run test:e2e                 # E2E テスト実行（Playwright、ブラウ�
 
 ### アーキテクチャ
 
+主要な分割境界は `src/server/`、`src/renderer/`、`src/template/` です。
+
 ```
-main.rs  ── CLI引数パース → バリデーション → サーバー起動
-  │
-  ├── cli.rs        CLIオプション定義（clap derive）
-  ├── server.rs     公開ファサード（モジュール再エクスポート）
-  │   ├── state.rs      サーバー状態とモード判定（AppState, AppMode, CanonicalPath）
-  │   ├── routes.rs     axumルーター、HTTP/WebSocketハンドラ
-  │   ├── files.rs      ファイル探索、検証、読み込み、描画
-  │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
-  │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型、ファイルサイズ定数
-  │   └── websocket.rs  WebSocketセッション管理、変更通知ブロードキャスト
-  ├── renderer.rs   Markdown→HTML変換（pulldown-cmark + syntectハイライト）
-  ├── toc.rs        Markdown→目次HTML生成
-  ├── template.rs   HTMLテンプレート（CSS/JS埋め込み、UpdateMessage型）
-  └── watcher.rs    ファイル監視（notify + debouncer → tokioブリッジ）
+src/
+  main.rs            CLI起動、サーバー初期化、ブラウザ起動
+  lib.rs             ライブラリ公開境界
+  cli.rs             clap による CLI オプション定義
+  watcher/           notify + debouncer から tokio へ変更通知を橋渡し
+  server.rs          server モジュールの公開ファサード
+  server/
+    state.rs         AppState / AppMode / CanonicalPath
+    routes.rs        axum ルーター、HTTP API、WebSocket upgrade
+    session.rs       WebSocket セッションと close code 送信
+    broadcast.rs     ファイル変更通知の broadcast message 構築
+    watch.rs         watcher からの変更イベント処理
+    guards.rs        Host / Origin 検証、CSP / セキュリティヘッダー
+    messages.rs      API / WebSocket メッセージ型、ファイルサイズ上限
+    log_path.rs      ログ出力用パスの相対化
+    files/
+      catalog.rs     ディレクトリ内 Markdown 一覧
+      content.rs     Markdown 読み込みと HTML / TOC 生成
+      resolve.rs     パス解決と traversal 防止
+      search.rs      ファイル検索
+      memo*.rs       メモ sidecar の保存、名前生成、ファイル I/O
+  renderer/          Markdown -> HTML 変換
+    render.rs        pulldown-cmark event の描画
+    state.rs         レンダリング状態
+    line.rs          ソース行属性
+    security.rs      URL / HTML sanitize
+    highlight.rs     syntect によるコードハイライト
+    toc.rs           Markdown -> 目次 HTML
+  template/          HTML ページ、UpdateMessage、ファイルツリー、埋め込み assets
+    assets/js/       ブラウザ側の更新、選択、メモ、サイドバー、WebSocket
+    assets/css/      ページ / サイドバー / メモ / オーバーレイの CSS
 ```
 
 ### データフロー
