@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
-import { resetStandardFixtures, selectParagraphText } from './helpers';
+import { openMemoTab, resetStandardFixtures, selectParagraphText } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
@@ -78,4 +78,33 @@ test('メモ読み込み失敗中は引用挿入から保存しない', async ({
   await expect(page.locator('#memo-editor')).toHaveValue('');
   await expect.poll(() => putCount, { timeout: 500 }).toBe(0);
   await expect(await fs.readFile(memoPath)).toEqual(unreadableMemo);
+});
+
+test('メモ保存応答がload_errorを含んでも編集中の内容を消さない', async ({ page }) => {
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: '',
+          html: '<p>broken memo</p>',
+          load_error: 'メモを読み込めませんでした。編集を無効化しました。'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  const memoEditor = page.locator('#memo-editor');
+  await memoEditor.fill('local draft that must remain');
+
+  await expect(page.locator('#memo-save-status')).toContainText('編集を無効化');
+  await expect(memoEditor).toHaveValue('local draft that must remain');
+  await expect(memoEditor).toBeDisabled();
 });

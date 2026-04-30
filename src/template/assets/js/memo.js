@@ -71,16 +71,17 @@ function updateMemoPreview(data) {
 function applyMemoData(data, options) {
   if (!appContext.elements.memoEditorEl || !appContext.elements.memoPreviewEl || !data) return true;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
-  if (shouldUpdateEditor) {
-    updateMemoEditor(data.raw || '', !!(options && options.preserveSelection));
-  }
-  updateMemoPreview(data);
   if (data.load_error) {
     cancelMemoAutosave();
+    updateMemoPreview(data);
     setMemoEditorDisabled(true);
     setMemoSaveStatus('error', data.load_error);
     return false;
   }
+  if (shouldUpdateEditor) {
+    updateMemoEditor(data.raw || '', !!(options && options.preserveSelection));
+  }
+  updateMemoPreview(data);
   setMemoEditorDisabled(false);
   return true;
 }
@@ -188,6 +189,7 @@ function loadMemo(file, ownerGeneration) {
         ownerGeneration: ownerGeneration,
         currentGeneration: appContext.fetch.generation
       });
+      clearStaleMemoLoadingStatus(requestGeneration);
       return;
     }
     if (requestGeneration !== appContext.memo.loadGeneration) {
@@ -209,6 +211,7 @@ function loadMemo(file, ownerGeneration) {
         ownerGeneration: ownerGeneration,
         currentGeneration: appContext.fetch.generation
       });
+      clearStaleMemoLoadingStatus(requestGeneration);
       return;
     }
     if (requestGeneration !== appContext.memo.loadGeneration) {
@@ -221,6 +224,12 @@ function loadMemo(file, ownerGeneration) {
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });
+}
+
+function clearStaleMemoLoadingStatus(requestGeneration) {
+  if (requestGeneration !== appContext.memo.loadGeneration) return;
+  if (!appContext.elements.memoSaveStatusEl || appContext.elements.memoSaveStatusEl.dataset.state !== 'loading') return;
+  setMemoSaveStatus('saved', '保存済み');
 }
 
 function cancelMemoAutosave() {

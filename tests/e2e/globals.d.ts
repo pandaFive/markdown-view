@@ -6,6 +6,16 @@ declare global {
       content: string;
       toc: string;
     };
+    type UpdateMessage = Partial<UpdateContentPayload> & {
+      file?: string;
+      refresh?: boolean;
+      memo_refresh?: boolean;
+      memo_file?: string;
+      type?: string;
+      raw?: string;
+      html?: string;
+      load_error?: string;
+    };
     type UpdateContentOptions = {
       scrollMode?: 'preserve' | 'reset' | 'none';
       anchorHash?: string;
@@ -25,6 +35,7 @@ declare global {
     __MV_E2E__?: boolean;
     __lastWs?: MvE2E.TestWebSocketInstance;
     __bridgedWs?: MvE2E.TestWebSocketInstance;
+    __parseErrorWs?: MvE2E.TestWebSocketInstance;
     __realWsOnmessage?: (ev: { data: string }) => void;
     __dispatchWsMessage?: (payload: unknown) => void;
     __markPendingCalls?: number;
@@ -38,7 +49,7 @@ declare global {
       augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
       markPendingTocNavigation(id: string): void;
       moveDocumentSearch(direction: number): void;
-      scheduleBufferedLiveUpdate(data: MvE2E.UpdateContentPayload): void;
+      scheduleBufferedLiveUpdate(data: MvE2E.UpdateMessage): void;
       selectFile(file: string, pushHistory?: boolean, options?: MvE2E.UpdateContentOptions): void;
       setCurrentFileForTest(file: string): void;
       setDirModeForTest(value: boolean): void;

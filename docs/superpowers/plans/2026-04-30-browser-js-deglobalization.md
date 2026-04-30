@@ -51,6 +51,7 @@ The main alternative is an IIFE closure that wraps the concatenated bundle and k
 - Do not add top-level reads of `appContext` to files that are loaded before `bootstrap.js`; current `inline_script.rs` order already loads `bootstrap.js` first, so event listeners and later boot code may reference `appContext`.
 - Use `ctx*` names for injected context parameters and keep legacy top-level globals unprefixed only until their removal step.
 - Keep state in `ctx` when multiple feature files need to read or mutate it, or when E2E hooks must inspect or set it. Keep state inside a controller closure only when it is owned by that controller and external code needs only a narrow method surface. That is why selection/content deferral state moves to `ctx.state`, while WebSocket buffer internals stay private behind `ctx.websocket.scheduleBufferedLiveUpdate`, `ctx.websocket.discardBufferedLiveUpdate`, and `ctx.websocket.rememberAppliedLiveUpdate`.
+- See **Self-Review Notes** for the final implementation note: Tasks 2-7 did not fully apply `ctx` parameter injection to every helper; the final bundle instead uses one private IIFE-scoped `appContext` root and reserves explicit controller closure state for WebSocket-owned internals.
 - Inline script CSP hashes are derived from `inline_js()` in `src/template/assets.rs`; any JS text change updates the runtime hash automatically. Each JS-changing task still runs `cargo test --all-targets --all-features` or `./verify.sh` so CSP integration tests catch hash/header regressions.
 - Each migration task ends with the same pattern: `rg` for legacy names, targeted E2E or full verification, then a focused commit. The task sections repeat exact commands so an implementer can execute tasks independently.
 
@@ -63,14 +64,14 @@ The main alternative is an IIFE closure that wraps the concatenated bundle and k
 
 - [ ] **Step 1: Add a context factory beside the existing globals**
 
-Add this near the top of `bootstrap.js`, after `MAX_FILE_SIZE_MB`:
+Add this near the top of `bootstrap.js`, using the template placeholder as the single source for the configured file-size limit:
 
 ```js
 function createAppContext(doc) {
   var html = doc.documentElement;
   return {
     config: {
-      maxFileSizeMb: MAX_FILE_SIZE_MB,
+      maxFileSizeMb: __MAX_FILE_SIZE_MB__,
       isDirMode: html.getAttribute('data-dir-mode') === 'true'
     },
     state: {
@@ -967,6 +968,9 @@ function installMarkdownViewTestHooks(ctx) {
     },
     get currentFile() {
       return ctx.state.currentFile;
+    },
+    get lastAppliedContent() {
+      return ctx.state.lastAppliedContent;
     }
   };
 }
@@ -981,11 +985,15 @@ Replace direct global declarations in `tests/e2e/globals.d.ts` with a single hoo
 ```ts
 declare global {
   namespace MvE2E {
-    type UpdateMessage = UpdateContentPayload & {
+    type UpdateMessage = Partial<UpdateContentPayload> & {
       file?: string;
       refresh?: boolean;
       memo_refresh?: boolean;
       memo_file?: string;
+      type?: string;
+      raw?: string;
+      html?: string;
+      load_error?: string;
     };
   }
 
@@ -1001,9 +1009,10 @@ declare global {
       setCurrentFileForTest(file: string): void;
       setDirModeForTest(value: boolean): void;
       setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
-      updateContent(data: MvE2E.UpdateMessage, options?: MvE2E.UpdateContentOptions): void;
+      updateContent(data: MvE2E.UpdateContentPayload, options?: MvE2E.UpdateContentOptions): void;
       readonly isDirMode: boolean;
       readonly currentFile: string;
+      readonly lastAppliedContent: string | null;
     };
   }
 }
@@ -1357,4 +1366,4 @@ git commit -m "refactor: ブラウザJSの起動スコープを閉じる"
 - Each task keeps the application runnable after completion.
 - Temporary globals are allowed only as compatibility bridges and are removed or narrowed by Task 10.
 - The highest-risk areas are text selection deferral, memo autosave generation counters, and directory navigation history; each has targeted E2E verification.
-- Implementation note: Tasks 2-7 intentionally stopped short of full `ctx` parameter injection for every helper. The final implementation wraps the concatenated bundle in an IIFE and keeps one private `appContext` root inside that closure, while using a controller closure only for WebSocket-owned buffer/reconnect state. This diverges from the original "make every dependency visible at each function boundary" direction, but keeps the no-build inline script smaller, avoids a very large call-site churn across 1000+ lines of browser JavaScript, and still satisfies the security-facing goal: production no longer exposes app state or internal helper functions on `window`. Future module extraction should revisit explicit dependency injection at the new module boundaries rather than retrofitting every current helper in place.
+- Implementation note: Tasks 2-7 intentionally stopped short of full `ctx` parameter injection for every helper. The final implementation wraps the concatenated bundle in an IIFE and keeps one private `appContext` root inside that closure, while using a controller closure only for WebSocket-owned buffer/reconnect state. This diverges from the original "make every dependency visible at each function boundary" direction, but keeps the no-build inline script smaller, avoids a very large call-site churn across 1000+ lines of browser JavaScript, and still satisfies the security-facing goal: production no longer exposes app state or internal helper functions on `window`. Future module extraction should revisit explicit dependency injection at the new module boundaries rather than retrofitting every current helper in place. The final implementation also removed the standalone `MAX_FILE_SIZE_MB` runtime variable and reads the template placeholder through `appContext.config.maxFileSizeMb`.

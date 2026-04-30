@@ -78,6 +78,7 @@ function createWebSocketController(ctx, deps) {
 
     socket.onopen = function() {
       socketReconnectAttempts = 0;
+      hideWsParseErrorBanner();
       setLiveStatus('live');
     };
 

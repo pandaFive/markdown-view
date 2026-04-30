@@ -219,6 +219,7 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続経路�
       throw new Error('WebSocket test harness is not initialized');
     }
     const originalClose = lastWs.close.bind(lastWs);
+    window.__parseErrorWs = lastWs;
     window.__wsCloseCalls = 0;
     lastWs.close = function(...args: Parameters<WebSocket['close']>) {
       window.__wsCloseCalls = (window.__wsCloseCalls ?? 0) + 1;
@@ -238,4 +239,9 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続経路�
     liveState: 'error'
   }));
   expect(parseResult.bannerText).toContain('不正なJSON');
+
+  await expect.poll(() => page.locator('#live-status').getAttribute('data-state')).toBe('retry');
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
+  });
 });
