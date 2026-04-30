@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use tokio::sync::broadcast;
 
-    use crate::server::files::RouteTargetKind;
+    use crate::server::files::{MockMemoFs, Op, RouteTargetKind};
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
 
@@ -257,6 +257,37 @@ mod tests {
 
         assert_eq!(memo_request.kind(), RouteTargetKind::ApiMemo);
         assert_eq!(memo_request.query_file(), Some("docs/guide.md"));
+    }
+
+    #[test]
+    fn test_memo_message_file_ディレクトリではrelative_pathを使う() {
+        let target = ResolvedTarget::for_test(
+            std::path::PathBuf::from("/workspace/docs/guide.md"),
+            Some(vec!["docs/guide.md".to_string()]),
+            Some("docs/guide.md".to_string()),
+        );
+
+        assert_eq!(memo_message_file(&target), "docs/guide.md");
+    }
+
+    #[test]
+    fn test_memo_message_file_単一ファイルではfile_nameにフォールバックする() {
+        let target =
+            ResolvedTarget::for_test(std::path::PathBuf::from("/workspace/note.md"), None, None);
+
+        assert_eq!(memo_message_file(&target), "note.md");
+    }
+
+    #[test]
+    fn test_memo_message_file_file_nameなしではdisplayにフォールバックする() {
+        #[cfg(windows)]
+        let path = std::path::PathBuf::from(r"C:\");
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from("/");
+        let expected = path.display().to_string();
+        let target = ResolvedTarget::for_test(path, None, None);
+
+        assert_eq!(memo_message_file(&target), expected);
     }
 
     #[tokio::test]
@@ -324,6 +355,45 @@ mod tests {
             page.memo.load_error(),
             Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
         );
+    }
+
+    #[tokio::test]
+    async fn test_load_pageとload_memoはメモread失敗時の非対称仕様を保持する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        let sidecar_path = dir.path().join(".README.md.memo.md");
+        std::fs::write(&sidecar_path, "memo body").unwrap();
+        let memo_fs = MockMemoFs::new();
+        memo_fs.fail_at(
+            Op::Read,
+            &sidecar_path,
+            std::io::ErrorKind::PermissionDenied,
+        );
+        let state = create_directory_state(dir.path()).with_memo_fs(memo_fs);
+
+        let page = load_page(
+            &state,
+            PageRequest {
+                file: Some("README.md"),
+            },
+        )
+        .await
+        .expect("index描画ではメモ読み込み失敗をフォールバックする");
+        assert_eq!(page.memo.raw(), "");
+        assert_eq!(
+            page.memo.load_error(),
+            Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
+        );
+
+        let error = load_memo(
+            &state,
+            MemoRequest {
+                file: Some("README.md"),
+            },
+        )
+        .await
+        .expect_err("api/memoではメモ読み込み失敗をエラーとして返す");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

@@ -36,6 +36,15 @@ impl ResolvedTarget {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::server) fn for_test(
+        file_path: PathBuf,
+        file_list: Option<Vec<String>>,
+        relative_path: Option<String>,
+    ) -> Self {
+        Self::new(file_path, file_list, relative_path)
+    }
+
     pub(in crate::server) fn file_path(&self) -> &Path {
         &self.file_path
     }

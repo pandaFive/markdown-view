@@ -407,6 +407,59 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_atomicは同一パス並行保存でもtmpを残さず完全な最終内容にする() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("initial memo should be written");
+        let fs = Arc::new(TokioMemoFs);
+        let mut handles = Vec::new();
+
+        for index in 0..16 {
+            let fs = Arc::clone(&fs);
+            let path = path.clone();
+            let content = format!("parallel-memo-{index:02}-{}", "x".repeat(index + 1));
+            handles.push(tokio::spawn(async move {
+                let before_rename = |_: &Path, _: &Path| Ok(());
+                fs.write_atomic(&path, content.as_bytes(), &before_rename)
+                    .await
+                    .expect("parallel atomic write should succeed");
+                content.into_bytes()
+            }));
+        }
+
+        let mut expected_contents = Vec::new();
+        for handle in handles {
+            expected_contents.push(handle.await.expect("parallel task should finish"));
+        }
+        let final_content = tokio::fs::read(&path)
+            .await
+            .expect("final memo should be readable");
+        assert!(
+            expected_contents
+                .iter()
+                .any(|content| content == &final_content),
+            "final memo should be one complete concurrent write"
+        );
+
+        let mut entries = tokio::fs::read_dir(workspace.path())
+            .await
+            .expect("workspace entries should be readable");
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .expect("workspace entry should be readable")
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.contains(".tmp."),
+                "atomic tmp file should not remain: {name}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn write_atomicはbefore_rename失敗時にtmpを削除して元内容を残す() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
