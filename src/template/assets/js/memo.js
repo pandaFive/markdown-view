@@ -23,6 +23,10 @@ function setMemoEditorDisabled(disabled) {
   memoEditorEl.disabled = !!disabled;
 }
 
+function isMemoEditorDisabled() {
+  return !!(memoEditorEl && memoEditorEl.disabled);
+}
+
 function rememberMemoCaret() {
   if (!memoEditorEl) return;
   memoCaretStart = typeof memoEditorEl.selectionStart === 'number'
@@ -72,6 +76,7 @@ function applyMemoData(data, options) {
   }
   updateMemoPreview(data);
   if (data.load_error) {
+    cancelMemoAutosave();
     setMemoEditorDisabled(true);
     setMemoSaveStatus('error', data.load_error);
     return false;
@@ -202,7 +207,7 @@ function cancelMemoAutosave() {
 }
 
 function scheduleMemoSave(immediate) {
-  if (!memoEditorEl) return;
+  if (!memoEditorEl || isMemoEditorDisabled()) return;
   cancelMemoAutosave();
   setMemoSaveStatus('dirty', '未保存');
   if (immediate) {
@@ -213,7 +218,10 @@ function scheduleMemoSave(immediate) {
 }
 
 function saveMemoNow(targetFileOverride, rawOverride) {
-  if (!memoEditorEl) return;
+  if (!memoEditorEl || isMemoEditorDisabled()) {
+    cancelMemoAutosave();
+    return;
+  }
   cancelMemoAutosave();
   var raw = rawOverride !== undefined ? rawOverride : memoEditorEl.value;
   var requestGeneration = ++memoSaveGeneration;
@@ -262,7 +270,7 @@ function saveMemoNow(targetFileOverride, rawOverride) {
 }
 
 function flushPendingMemoSave() {
-  if (!memoEditorEl || !memoSaveTimer) return;
+  if (!memoEditorEl || isMemoEditorDisabled() || !memoSaveTimer) return;
   saveMemoNow(getMemoTargetFile(), memoEditorEl.value);
 }
 
@@ -390,7 +398,7 @@ function buildQuoteMarkdownFromSelection() {
 }
 
 function insertTextIntoMemo(text) {
-  if (!memoEditorEl) return;
+  if (!memoEditorEl || isMemoEditorDisabled()) return false;
   var currentValue = memoEditorEl.value;
   var start = typeof memoCaretStart === 'number' ? memoCaretStart : currentValue.length;
   var end = typeof memoCaretEnd === 'number' ? memoCaretEnd : start;
@@ -402,6 +410,7 @@ function insertTextIntoMemo(text) {
   memoCaretEnd = memoCaretStart;
   memoEditorEl.focus();
   memoEditorEl.setSelectionRange(memoCaretStart, memoCaretEnd);
+  return true;
 }
 
 function isSelectionInsideContent(selection) {
@@ -468,7 +477,10 @@ if (quoteSelectionActionEl) {
       return;
     }
     activateSidebarTab('memo');
-    insertTextIntoMemo(markdown);
+    if (!insertTextIntoMemo(markdown)) {
+      hideQuoteSelectionAction();
+      return;
+    }
     hideQuoteSelectionAction();
     scheduleMemoSave(true);
   });
