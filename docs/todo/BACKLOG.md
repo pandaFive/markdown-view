@@ -27,12 +27,6 @@
   - 理由: ID は Codex 側でアーカイブされると参照不能。テストコメントは外部 ID ではなく、壊したくない仕様と入力パターンを説明する方が保守しやすい
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20、既存 PR #76 持ち込み課題)
 
-- [ ] E2E 共通ヘルパーの silent false-positive 経路を狭める
-  - ファイル: `tests/e2e/helpers.ts`
-  - 内容: `selectParagraphText` の部分一致・最初のヒット採用を明示的に失敗させる選択肢、`fs.rm(..., { force: true })` の権限/EBUSY 系エラー検知、`stabilizeWebSocketHarness` の再接続検知または既存 bridge 残存時の fail-fast を検討する
-  - 理由: いずれも今回の helper 化で再利用面積が広がった既存課題。個別 spec の意図と違う要素・古い WebSocket handler・未削除メモが silent に残ると、E2E が clean-slate 前提を満たさないまま偽陽性化しうる
-  - 由来: E2E 共通ヘルパー抽出 PR レビュー (2026-04-29、pre-existing)
-
 ## P3: 長期改善・低緊急
 
 - [ ] インラインブラウザJS の TS 化
@@ -56,6 +50,12 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] E2E 共通ヘルパーの silent false-positive 経路を狭める
+  - ファイル: `tests/e2e/helpers.ts`, `tests/e2e/helpers.spec.ts`, `tests/e2e/globals.d.ts`, `tests/e2e/memo_jump.spec.ts`
+  - 内容: `selectParagraphText` を既定で完全一致かつ一意一致にし、部分一致を明示オプションへ移した。fixture cleanup は memo artifact と `.markdown-view` の削除後残存を検知し、WebSocket dispatch helper は stale bridge を fail-fast にした
+  - 完了根拠: `npm run typecheck`、`npx playwright test tests/e2e/helpers.spec.ts tests/e2e/memo_quote.spec.ts tests/e2e/memo_jump.spec.ts tests/e2e/text_selection_defer.spec.ts tests/e2e/document_search.spec.ts tests/e2e/memo_sync.spec.ts tests/e2e/markdown_links.spec.ts`、`./verify.sh` が pass
+  - 由来: E2E 共通ヘルパー抽出 PR レビュー (2026-04-29、pre-existing)
 
 - [x] `render_markdown` 責務分割後の silent failure 観測性強化
   - ファイル: `src/renderer/{render,state,highlight}.rs`, `tests/renderer_test.rs`
