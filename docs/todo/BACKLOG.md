@@ -9,9 +9,121 @@
 
 ## P2: 保守性・局所回帰検知
 
-現時点で未完了項目なし。
+- [ ] CLAUDE.md のアーキテクチャ記述を現在の実装構成に揃える
+  - ファイル: `CLAUDE.md`
+  - 現状: CLAUDE.md は `server/files.rs` / `watcher.rs` / `template/mod.rs` を単一ファイル前提で記載しているが、実装は `src/server/files/{catalog,content,memo,memo_fs,memo_sidecar,resolve,search,test_support,tests}.rs`、`src/watcher/{runtime,strategy,error}.rs`、`src/server/{log_path,watch}.rs`、`src/renderer/{state,security,line,highlight,render}.rs`、`src/template/assets/{css,js}/` まで細分化済み。さらに「見出しパースが 2 回」と書かれているが `search` 経由で 3 回目が走る
+  - 対応: モジュール構成図と 2 回パースの記述を実装に追従。「CSS/JS 完全埋め込み」の文言は維持しつつ内部構造（`include_str!` 経由のサブモジュール化）を補足
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] プロダクト定義を Markdown previewer から Markdown workspace へ明文化する
+  - ファイル: `README.md`, `CLAUDE.md`, `Cargo.toml`, `docs/todo/TODO.md`
+  - 現状: `markdown-view` はメモ、引用、横断検索、ファイルツリー、読書補助 UI を含む Markdown 専用 workspace として育っているが、説明文には「軽量・高速 Markdown プレビューア」など previewer 寄りの表現が残る。そのため外部レビューでメモ機能が scope creep と誤読されやすい
+  - 対応: README/Cargo description/開発ガイドの文言を「Markdown workspace」前提へ揃え、メモ・引用・検索を中核機能として位置付ける。純プレビュー化や `--no-memo` は現時点の非目標として明記する
+  - 由来: Unix 哲学レビュー再検討 (2026-04-30)
+
+- [ ] 未知言語コードブロックの silent fallback に警告ログを追加
+  - ファイル: `src/renderer/highlight.rs` L14-50, `tests/renderer_test.rs` L346
+  - 現状: `find_syntax_by_token().or_else(find_syntax_by_extension())?` が None を返すと `plain_code_block_html` で `class="language-{lang}"` だけ付与する fallback が走るが、ユーザーに「ハイライトが効いていない」ことを知らせる経路がない。`tests/renderer_test.rs:346` `test_未知言語コードブロックはフォールバック描画される` で仕様固定済み
+  - 対応: 初回フォールバック時に `tracing::debug!` 程度のログを 1 回だけ出す（同じ言語名の繰り返しは抑制）。CLI 起動時に「対応シンタックス一覧」コマンドで利用可能言語を確認できるドキュメント追加も検討
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
+  - ファイル: `src/renderer/mod.rs` L91-108, `src/template/assets.rs` L42-61
+  - 現状: `syntax_theme_css` 失敗時に `highlight_disabled_notice_css()`（`body::before` グローバル CSS）を返し、`combined_css` に連結される。CSP ハッシュは fallback ベースで再計算されるため整合性は保たれるが、Markdown 側で `body::before` を期待する CSS が無いという暗黙前提がドキュメントに無い
+  - 対応: `body::before` 衝突を許容しない旨を doc コメントに明記。または fallback CSS のセレクタを `.markdown-view-fallback-notice` 等の局所スコープに変更する
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] assets バンドルの sentinel 衝突回避テストを追加
+  - ファイル: `src/template/assets/css_bundle.rs` L19, `src/template/assets/inline_script.rs` L17-22
+  - 現状: `TEMPLATE.replace("__DARK_THEME_VARS__", ...)` / `replace("__MAX_FILE_SIZE_MB__", ...)` のプレースホルダーは sentinel 衝突に脆弱。`include_str!` した CSS/JS 内に同文字列が無いことを保証するテストが無い
+  - 対応: `#[cfg(test)] mod tests` で「include 対象ソースに sentinel 文字列が含まれない」アサートを追加。`MAX_FILE_SIZE / 1024 / 1024` の整数除算で 11MB → 10MB 表示の丸め事故が起きないかも境界テスト
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
+  - ファイル: `src/watcher/runtime.rs` L19/L72/L111-127
+  - 現状: `mpsc::channel(WATCHER_MESSAGE_BUFFER=32)` が満杯時、`FileChanged` も `Error` も同じ `try_send` 経路で破棄される。`WatchError::Init` / `ThreadPanic` を破棄するとフォアグラウンドが「監視が止まった理由」を失う
+  - 対応: イベント種別で優先度を分け、`Error` 系は `blocking_send` に切り替えるか、別チャネルに分離する。または `try_send` 失敗時に `tracing::error!` で SLA を上げる
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
+  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content.js`, `src/template/assets/js/memo.js`, `README.md`
+  - 現状: Rust 側は `SanitizedHtml` newtype、raw HTML 破棄、URL policy、CSP hash で XSS 境界を作っている。一方ブラウザ側は `contentEl.innerHTML = safeData.content` / `memoPreviewEl.innerHTML = data.html` を使うため、境界の正しさは「サーバー生成 HTML だけが入る」という暗黙契約に依存している
+  - 対応: renderer の信頼境界、HTTP/WS JSON の `content`/`toc`/`html` フィールド、JS 側の `innerHTML` 使用許可条件を短い設計メモにまとめる。E2E hook やテスト用 expose が production 経路で任意 HTML を流し込まないことも確認項目に含める
+  - 由来: Unix 哲学レビュー (2026-04-30)
 
 ## P3: 長期改善・低緊急
+
+- [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
+  - ファイル: `src/server/state.rs` L18-24/L112/L132
+  - 現状: `CanonicalPath::try_from_path` で `canonicalize` した直後に `is_file()`/`is_dir()` で判定するが、両者の間に rename/unlink される race window がある。実害は起動時の `AppMode::new_*` のみで影響は小さい
+  - 対応: `metadata` を一度取得してから `is_file`/`is_dir` を判定し、race window を縮める。`AppModeBuildError` のメッセージも metadata 起点に整理
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `log_path::canonicalize_status` の毎回 syscall を削減する
+  - ファイル: `src/server/log_path.rs` L52-65
+  - 現状: ログ出力ごとに `path` と `base` を canonicalize する。warn/error 時のみ呼ばれるが、ログ storm 状況下では I/O が増える
+  - 対応: `base` の canonicalize 結果を起動時に一度だけ算出してキャッシュし、ログ経路では path 側のみ canonicalize する。または `OnceLock` で base を保持
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `/api/search` のクエリ長ガードを routes.rs 側に追加する
+  - ファイル: `src/server/routes.rs` L298-318, `src/server/files/search.rs`
+  - 現状: クエリ `q` を長さチェックせずに `search_directory` に渡す。極端に長い `q`（例: 1MB）が tracing にそのまま流れると無視できないコストになる
+  - 対応: 1KB 程度の長さガードを `routes.rs` 側に追加し、超過時は 400 を返す。`search.rs` 内部にも防御を残す（depth in defense）
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `read_route_memo` の二重サイズチェックを単一化する
+  - ファイル: `src/server/files/memo.rs` L455-481, `src/server/files/content.rs` L298-311
+  - 現状: `fs.read_with_limit` が `MAX_FILE_SIZE+1` で `take` し超過時に `MemoReadError::TooLarge` を返すのに、`memo.rs:476-481` が読み込み完了後に `bytes.len() as u64 > MAX_FILE_SIZE` を再度チェックしている
+  - 対応: `read_with_limit` の契約を doc コメントで明示し、呼び出し側の重複チェックを削除
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
+  - ファイル: `src/server/messages.rs` L46-56, `src/server/session.rs` L80-93
+  - 現状: `serde_json::to_string(update)` の失敗は実質不可能だが、`session.rs` 側でエラー処理を持つ。Update メッセージ用の最小サイズ fallback (`{"content":"","toc":""}` 等) を返す `to_json_or_empty` 経路が無い
+  - 対応: `BroadcastMessage::Update` の `to_json` に明示 fallback を追加。観測性として `tracing::error!` を残す
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `data-memo-file` 属性を None 時にスキップする
+  - ファイル: `src/template/page.rs` L43/L47, `src/template/message.rs` L9-11
+  - 現状: `params.memo.file().unwrap_or_default()` で常に `data-memo-file=""`（空文字）を出力する。`UpdateMessage` の `#[serde(skip_serializing_if = "Option::is_none")]` と非対称
+  - 対応: `data-memo-file` も None 時に属性ごとスキップする経路に変更し、bootstrap.js 側を「属性無し ⇒ memo 無し」と扱うよう揃える
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `render_markdown` と `extract_headings` の早期 return 非対称を解消する
+  - ファイル: `src/renderer/mod.rs` L57-63/L150
+  - 現状: `render_markdown` は `input.is_empty()` で空 `SanitizedHtml` を返すが、`extract_headings` には対応する早期 return がない（`generate_toc` 側で空文字に落とすので結果は同じ）
+  - 対応: `extract_headings` 側にも同様の早期 return を入れて API ペアの一貫性を揃える
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `CanonicalPathError` などの内部利用型を `pub(crate)` に絞る
+  - ファイル: `src/server.rs` L13-19
+  - 現状: `CanonicalPath` のみ `pub(crate)` で他は `pub` だが、`CanonicalPathError` も外部から触る経路がない
+  - 対応: 公開不要な型を `pub(crate)` に絞り、lib API surface を最小化
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] サイドバーの "Documents" 文字列を i18n または日本語化
+  - ファイル: `src/server/routes.rs` L33-41 (`sidebar_directory_name`)
+  - 現状: `unwrap_or("Documents")` で英語固定。日本語 UI でも同名が出る
+  - 対応: 日本語デフォルト（"ドキュメント"）にするか、ディレクトリ名取得失敗時のフォールバック挙動をコメントで明示
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `tokio::select!` の cancel-safe 性をコメントで明記する
+  - ファイル: `src/server/session.rs` L54-132
+  - 現状: `socket.recv()` と `rx.recv()` を `tokio::select!` で競わせているが、両者が cancel safe である根拠コメントが無い。将来の改修で cancel-unsafe な future を入れる事故リスク
+  - 対応: 各 branch の future が cancel safe であることを doc コメントで明記し、新規 branch 追加時のチェックリストを残す
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `RouteTargetKind::include_file_list` を match 完全列挙に変更する
+  - ファイル: `src/server/files/resolve.rs` L104-106
+  - 現状: `matches!(self.kind, RouteTargetKind::Page)` で Page のみ true。新 variant 追加時に file_list を含めるかが暗黙判断になる
+  - 対応: `match self.kind { Page => true, ApiContent | ApiMemo => false }` に変更し、新 variant 追加時に必ずコンパイルエラーで気付くようにする
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
+  - ファイル: `src/watcher/runtime.rs` L149-215/L243-247
+  - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
+  - 対応: panic 経路で `init_tx` がまだ Some なら `WatchError::thread_panic(...)` を init 結果として送る
+  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [ ] インラインブラウザJS の TS 化
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`
