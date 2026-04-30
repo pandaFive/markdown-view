@@ -1587,6 +1587,38 @@ async fn test_save_route_memo_sidecar書込不可で500を返す() {
 }
 
 #[tokio::test]
+async fn test_save_route_memo_atomic_rename失敗で500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::AtomicRename,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("atomic rename failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
 async fn test_save_route_memo_create_dir_all失敗で500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace

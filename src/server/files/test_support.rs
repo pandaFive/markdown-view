@@ -164,36 +164,45 @@ impl MemoFs for MockMemoFs {
             return Err(MemoWriteError::Io(io::Error::from(kind)));
         }
 
-        self.inner
-            .write_atomic(path, content, &|final_path, tmp_path| {
-                self.operations
-                    .lock()
-                    .expect("operations mutex poisoned")
-                    .push(OpEvent::WriteAtomic(final_path.to_path_buf()));
-                self.atomic_write_observer
-                    .lock()
-                    .expect("atomic write observer mutex poisoned")
-                    .push((final_path.to_path_buf(), content.to_vec()));
+        let tmp_path = path.with_extension("memo-atomic-test-tmp");
+        match tokio::fs::remove_file(&tmp_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MemoWriteError::Io(error)),
+        }
 
-                before_rename(final_path, tmp_path)?;
+        if let Err(error) = tokio::fs::write(&tmp_path, content).await {
+            return Err(MemoWriteError::Io(error));
+        }
+        self.operations
+            .lock()
+            .expect("operations mutex poisoned")
+            .push(OpEvent::WriteAtomic(path.to_path_buf()));
+        self.atomic_write_observer
+            .lock()
+            .expect("atomic write observer mutex poisoned")
+            .push((path.to_path_buf(), content.to_vec()));
 
-                self.operations
-                    .lock()
-                    .expect("operations mutex poisoned")
-                    .push(OpEvent::AtomicRename(final_path.to_path_buf()));
-                if self.lookup_failure(Op::AtomicRename, final_path).is_some() {
-                    return Err(super::memo_fs::MemoBeforeRenameError::new(
-                        "mock atomic rename failure",
-                    ));
-                }
+        if let Err(error) = before_rename(path, &tmp_path) {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoWriteError::BeforeRename(error));
+        }
 
-                Ok(())
-            })
-            .await
-            .map_err(|error| match error {
-                MemoWriteError::Io(error) => MemoWriteError::Io(error),
-                MemoWriteError::BeforeRename(error) => MemoWriteError::BeforeRename(error),
-            })
+        if let Some(kind) = self.lookup_failure(Op::AtomicRename, path) {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoWriteError::Io(io::Error::from(kind)));
+        }
+
+        if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoWriteError::Io(error));
+        }
+
+        self.operations
+            .lock()
+            .expect("operations mutex poisoned")
+            .push(OpEvent::AtomicRename(path.to_path_buf()));
+        Ok(())
     }
 
     async fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -311,7 +320,7 @@ mod tests {
         ));
         assert!(matches!(
             rename_err,
-            MemoWriteError::BeforeRename(error) if error.user_message() == "mock atomic rename failure"
+            MemoWriteError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists
         ));
         assert_eq!(
             memo_fs.atomic_writes().await,
@@ -319,10 +328,7 @@ mod tests {
         );
         assert_eq!(
             memo_fs.operations().await,
-            vec![
-                OpEvent::WriteAtomic(rename_path.clone()),
-                OpEvent::AtomicRename(rename_path),
-            ]
+            vec![OpEvent::WriteAtomic(rename_path)]
         );
     }
 }
