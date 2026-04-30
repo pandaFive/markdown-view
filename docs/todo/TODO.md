@@ -4,13 +4,13 @@
 
 ## High Priority
 
-- [ ] メモ書き込みを `tmp + rename` で原子化する
+- [x] メモ書き込みを `tmp + rename` で原子化する
   - ファイル: `src/server/files/memo_fs.rs`, `src/server/files/memo.rs`
   - 現状: `MemoFs::write` が `tokio::fs::write`（内部 truncate+write）で、`memo_fs.rs:41` のコメントが「atomic は要求しない」と明文化している。書き込み途中の電源断・クラッシュでメモが空 or 部分書き込みで破損する。また `ensure_safe_memo_path()` の symlink 検査と実 write の間に TOCTOU window が残る
   - 対応: 同一ディレクトリ内 `.{name}.memo.md.tmp` に `create_new` 相当で書き出してから `rename` で差し替えるパターンに変更。tmp 作成・rename 直前の親ディレクトリ symlink 再検証、tmp 残存時の安全な cleanup、既存 `MockMemoFs` の同セマンティクス模倣をテストで固定する
   - 理由: ユーザーが手書きしたメモを失うクラスのリスクであり、未信頼 workspace や同期ディレクトリでは symlink race のセキュリティ境界にもなる。CLAUDE.md「個人使用前提でも互換性破壊は major」の警戒水準に該当
 
-- [ ] `delete_route_memo` を all-or-nothing 化する
+- [x] `delete_route_memo` を all-or-nothing 化する
   - ファイル: `src/server/files/memo.rs` L80-100, `src/server/files/tests.rs` L975
   - 現状: primary sidecar 削除→compat sidecar 必須削除→legacy 必須削除を順次実行し、(2)/(3) で `PermissionDenied` 等が出ると 500 を返すが (1) は既に成功している。テスト `test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す` がこの中間状態を意図仕様として固定している
   - 対応: 削除順を「全候補の存在確認 → primary を最後に削除」に変更するか、primary 失敗時のみ 500、compat/legacy 失敗は warn ログ + 200 にする。既存テストの仕様も修正
