@@ -186,11 +186,11 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
   await page.evaluate(() => {
     window.__lastWs = {
       onmessage: function(ev: MessageEvent) {
-        const updateContent = window.updateContent;
-        if (!updateContent) {
-          throw new Error('window.updateContent is not exposed for E2E');
+        const hooks = window.markdownViewTestHooks;
+        if (!hooks) {
+          throw new Error('window.markdownViewTestHooks is not exposed for E2E');
         }
-        updateContent(JSON.parse(ev.data as string));
+        hooks.updateContent(JSON.parse(ev.data as string));
       },
       close: function() {},
       send: function() {},

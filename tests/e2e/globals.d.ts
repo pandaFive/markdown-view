@@ -31,18 +31,21 @@ declare global {
     __tocActiveChanges?: string[];
     __stopTocObserver?: () => void;
     __clickObservations?: Record<string, MvE2E.ClickObservation>;
-    markPendingTocNavigation?: (id: string) => void;
-    // E2E フラグ有効時だけ expose されるテスト hook であり production API ではない。
-    updateContent?: (data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions) => void;
-    // E2E から参照している browser bundle 内部 hook であり production API ではない。
-    scheduleBufferedLiveUpdate: (data: MvE2E.UpdateContentPayload) => void;
+    markdownViewTestHooks: {
+      activateSidebarTab(target: string): void;
+      applyDocumentSearchQuery(query: string): void;
+      augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
+      markPendingTocNavigation(id: string): void;
+      moveDocumentSearch(direction: number): void;
+      scheduleBufferedLiveUpdate(data: MvE2E.UpdateContentPayload): void;
+      selectFile(file: string, pushHistory?: boolean, options?: MvE2E.UpdateContentOptions): void;
+      setCurrentFileForTest(file: string): void;
+      setDirModeForTest(value: boolean): void;
+      setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
+      updateContent(data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions): void;
+      readonly isDirMode: boolean;
+      readonly currentFile: string;
+      readonly lastAppliedContent: string | null;
+    };
   }
-
-  var isDirMode: boolean;
-  var currentFile: string;
-  function activateSidebarTab(tab: string): void;
-  function applyDocumentSearchQuery(value: string): void;
-  function moveDocumentSearch(direction: number): void;
-  function selectFile(file: string, pushHistory?: boolean, options?: MvE2E.UpdateContentOptions): void;
-  function augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
 }

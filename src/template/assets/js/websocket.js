@@ -2,22 +2,6 @@ var WS_RECONNECT_BASE = 1000;
 var WS_RECONNECT_MAX_DELAY = 30000;
 var WS_RECONNECT_MAX_ATTEMPTS = 20;
 var WS_UPDATE_COALESCE_MS = 120;
-var ws = null;
-var reconnectAttempts = 0;
-var pendingWsUpdate = null;
-var pendingWsUpdateSignature = '';
-var pendingWsUpdateTimer = null;
-var lastAppliedUpdateSignature = '';
-
-function discardBufferedLiveUpdate() {
-  if (pendingWsUpdateTimer) {
-    window.clearTimeout(pendingWsUpdateTimer);
-    pendingWsUpdateTimer = null;
-  }
-  pendingWsUpdate = null;
-  pendingWsUpdateSignature = '';
-}
-
 function buildUpdateSignature(data) {
   return JSON.stringify({
     content: data.content !== undefined ? data.content : null,
@@ -27,132 +11,157 @@ function buildUpdateSignature(data) {
   });
 }
 
-function rememberAppliedLiveUpdate(data) {
-  lastAppliedUpdateSignature = buildUpdateSignature(data);
-}
+function createWebSocketController(ctx, deps) {
+  var socket = null;
+  var socketReconnectAttempts = 0;
+  var pendingWsUpdate = null;
+  var pendingWsUpdateSignature = '';
+  var pendingWsUpdateTimer = null;
+  var lastAppliedUpdateSignature = '';
 
-function flushBufferedLiveUpdate() {
-  pendingWsUpdateTimer = null;
-  var data = pendingWsUpdate;
-  pendingWsUpdate = null;
-  pendingWsUpdateSignature = '';
-  if (!data) return;
-
-  // テキスト選択中はDOM更新を延期して選択破壊を防止
-  // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
-  if (isTextSelected()) {
-    if (!pendingUpdate || !pendingUpdate.refresh) {
-      pendingUpdate = data;
+  function discardBufferedLiveUpdate() {
+    if (pendingWsUpdateTimer) {
+      window.clearTimeout(pendingWsUpdateTimer);
+      pendingWsUpdateTimer = null;
     }
+    pendingWsUpdate = null;
+    pendingWsUpdateSignature = '';
+  }
+
+  function rememberAppliedLiveUpdate(data) {
+    lastAppliedUpdateSignature = buildUpdateSignature(data);
+  }
+
+  function flushBufferedLiveUpdate() {
+    pendingWsUpdateTimer = null;
+    var data = pendingWsUpdate;
+    pendingWsUpdate = null;
+    pendingWsUpdateSignature = '';
+    if (!data) return;
+
+    // テキスト選択中はDOM更新を延期して選択破壊を防止
+    // 複数回受信した場合は最新の更新のみ保持（最新状態が常に正しいため）
+    if (isTextSelected()) {
+      if (!ctx.state.pendingUpdate || !ctx.state.pendingUpdate.refresh) {
+        ctx.state.pendingUpdate = data;
+      }
+      hideWsServerErrorBanner();
+      hideFileFetchErrorBanner();
+      ensurePendingUpdateTimer();
+      return;
+    }
+
+    deps.updateContent(data);
     hideWsServerErrorBanner();
     hideFileFetchErrorBanner();
-    ensurePendingUpdateTimer();
-    return;
-  }
-
-  updateContent(data);
-  hideWsServerErrorBanner();
-  hideFileFetchErrorBanner();
-  setLiveStatus('live');
-}
-
-function scheduleBufferedLiveUpdate(data) {
-  var signature = buildUpdateSignature(data);
-  if (signature === lastAppliedUpdateSignature || signature === pendingWsUpdateSignature) {
-    return;
-  }
-
-  pendingWsUpdate = data;
-  pendingWsUpdateSignature = signature;
-
-  if (pendingWsUpdateTimer) return;
-  pendingWsUpdateTimer = window.setTimeout(function() {
-    flushBufferedLiveUpdate();
-  }, WS_UPDATE_COALESCE_MS);
-}
-
-function connectWS() {
-  var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(protocol + '//' + location.host + '/ws');
-
-  ws.onopen = function() {
-    reconnectAttempts = 0;
     setLiveStatus('live');
-  };
-
-  ws.onmessage = function(event) {
-    var data;
-    try {
-      data = JSON.parse(event.data);
-    } catch (e) {
-      console.error('[markdown-view] JSONパースエラー:', e);
-      showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
-      setLiveStatus('error');
-      return;
-    }
-    hideWsParseErrorBanner();
-    if (data.error) {
-      console.error('[markdown-view] サーバーエラー:', data.error);
-      showWsServerErrorBanner(data.error);
-      setLiveStatus('error');
-      return;
-    }
-    if (isMemoUpdateMessage(data)) {
-      if (applyRemoteMemoUpdate(data)) {
-        hideWsServerErrorBanner();
-        hideFileFetchErrorBanner();
-      }
-      setLiveStatus('live');
-      return;
-    }
-    if (isMemoRefreshMessage(data)) {
-      if (queueRemoteMemoReload(data)) {
-        hideWsServerErrorBanner();
-        hideFileFetchErrorBanner();
-      }
-    }
-    if (data.refresh && isDirMode && currentFile) {
-      if (isTextSelected()) {
-        discardBufferedLiveUpdate();
-        pendingUpdate = { refresh: true, file: currentFile };
-        ensurePendingUpdateTimer();
-        return;
-      }
-      selectFile(currentFile, false);
-      return;
-    }
-    if (isDirMode && data.file) {
-      if (data.file !== currentFile) {
-        if (currentDocumentSearchQuery && typeof scheduleDirectorySearch === 'function') {
-          scheduleDirectorySearch(currentDocumentSearchQuery);
-        }
-        return;
-      }
-    }
-    scheduleBufferedLiveUpdate(data);
-  };
-
-  ws.onclose = function() {
-    setLiveStatus('retry');
-    scheduleReconnect();
-  };
-
-  ws.onerror = function(event) {
-    console.error('[markdown-view] WebSocketエラー:', event);
-    setLiveStatus('error');
-    ws.close();
-  };
-}
-
-function scheduleReconnect() {
-  if (reconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
-    console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
-    showDisconnectBanner();
-    return;
   }
-  var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, reconnectAttempts), WS_RECONNECT_MAX_DELAY);
-  reconnectAttempts++;
-  setTimeout(connectWS, delay);
+
+  function scheduleBufferedLiveUpdate(data) {
+    var signature = buildUpdateSignature(data);
+    if (signature === lastAppliedUpdateSignature || signature === pendingWsUpdateSignature) {
+      return;
+    }
+
+    pendingWsUpdate = data;
+    pendingWsUpdateSignature = signature;
+
+    if (pendingWsUpdateTimer) return;
+    pendingWsUpdateTimer = window.setTimeout(function() {
+      flushBufferedLiveUpdate();
+    }, WS_UPDATE_COALESCE_MS);
+  }
+
+  function connect() {
+    var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    socket = new WebSocket(protocol + '//' + location.host + '/ws');
+
+    socket.onopen = function() {
+      socketReconnectAttempts = 0;
+      setLiveStatus('live');
+    };
+
+    socket.onmessage = function(event) {
+      var data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        console.error('[markdown-view] JSONパースエラー:', e);
+        showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
+        setLiveStatus('error');
+        return;
+      }
+      hideWsParseErrorBanner();
+      if (data.error) {
+        console.error('[markdown-view] サーバーエラー:', data.error);
+        showWsServerErrorBanner(data.error);
+        setLiveStatus('error');
+        return;
+      }
+      if (isMemoUpdateMessage(data)) {
+        if (deps.applyRemoteMemoUpdate(data)) {
+          hideWsServerErrorBanner();
+          hideFileFetchErrorBanner();
+        }
+        setLiveStatus('live');
+        return;
+      }
+      if (isMemoRefreshMessage(data)) {
+        if (deps.queueRemoteMemoReload(data)) {
+          hideWsServerErrorBanner();
+          hideFileFetchErrorBanner();
+        }
+      }
+      if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {
+        if (isTextSelected()) {
+          discardBufferedLiveUpdate();
+          ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };
+          ensurePendingUpdateTimer();
+          return;
+        }
+        deps.selectFile(ctx.state.currentFile, false);
+        return;
+      }
+      if (ctx.config.isDirMode && data.file) {
+        if (data.file !== ctx.state.currentFile) {
+          if (ctx.search.currentDocumentQuery && typeof scheduleDirectorySearch === 'function') {
+            scheduleDirectorySearch(ctx.search.currentDocumentQuery);
+          }
+          return;
+        }
+      }
+      scheduleBufferedLiveUpdate(data);
+    };
+
+    socket.onclose = function() {
+      setLiveStatus('retry');
+      scheduleReconnect();
+    };
+
+    socket.onerror = function(event) {
+      console.error('[markdown-view] WebSocketエラー:', event);
+      setLiveStatus('error');
+      socket.close();
+    };
+  }
+
+  function scheduleReconnect() {
+    if (socketReconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
+      console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
+      showDisconnectBanner();
+      return;
+    }
+    var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, socketReconnectAttempts), WS_RECONNECT_MAX_DELAY);
+    socketReconnectAttempts++;
+    setTimeout(connect, delay);
+  }
+
+  return {
+    connect: connect,
+    discardBufferedLiveUpdate: discardBufferedLiveUpdate,
+    rememberAppliedLiveUpdate: rememberAppliedLiveUpdate,
+    scheduleBufferedLiveUpdate: scheduleBufferedLiveUpdate
+  };
 }
 
 function showDisconnectBanner() {

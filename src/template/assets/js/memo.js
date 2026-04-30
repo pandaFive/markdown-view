@@ -1,75 +1,75 @@
 function getMemoRequestUrl(file) {
-  if (isDirMode && file) {
+  if (appContext.config.isDirMode && file) {
     return '/api/memo?file=' + encodeURIComponent(file);
   }
   return '/api/memo';
 }
 
 function getMemoTargetFile(file) {
-  if (isDirMode) {
-    return file || currentFile || '';
+  if (appContext.config.isDirMode) {
+    return file || appContext.state.currentFile || '';
   }
   return '';
 }
 
 function setMemoSaveStatus(state, text) {
-  if (!memoSaveStatusEl) return;
-  memoSaveStatusEl.dataset.state = state;
-  memoSaveStatusEl.textContent = text;
+  if (!appContext.elements.memoSaveStatusEl) return;
+  appContext.elements.memoSaveStatusEl.dataset.state = state;
+  appContext.elements.memoSaveStatusEl.textContent = text;
 }
 
 function setMemoEditorDisabled(disabled) {
-  if (!memoEditorEl) return;
-  memoEditorEl.disabled = !!disabled;
+  if (!appContext.elements.memoEditorEl) return;
+  appContext.elements.memoEditorEl.disabled = !!disabled;
 }
 
 function isMemoEditorDisabled() {
-  return !!(memoEditorEl && memoEditorEl.disabled);
+  return !!(appContext.elements.memoEditorEl && appContext.elements.memoEditorEl.disabled);
 }
 
 function rememberMemoCaret() {
-  if (!memoEditorEl) return;
-  memoCaretStart = typeof memoEditorEl.selectionStart === 'number'
-    ? memoEditorEl.selectionStart
-    : memoEditorEl.value.length;
-  memoCaretEnd = typeof memoEditorEl.selectionEnd === 'number'
-    ? memoEditorEl.selectionEnd
-    : memoCaretStart;
+  if (!appContext.elements.memoEditorEl) return;
+  appContext.memo.caretStart = typeof appContext.elements.memoEditorEl.selectionStart === 'number'
+    ? appContext.elements.memoEditorEl.selectionStart
+    : appContext.elements.memoEditorEl.value.length;
+  appContext.memo.caretEnd = typeof appContext.elements.memoEditorEl.selectionEnd === 'number'
+    ? appContext.elements.memoEditorEl.selectionEnd
+    : appContext.memo.caretStart;
 }
 
 function snapshotMemoSelection() {
-  if (!memoEditorEl) return null;
+  if (!appContext.elements.memoEditorEl) return null;
   return {
-    start: typeof memoEditorEl.selectionStart === 'number' ? memoEditorEl.selectionStart : 0,
-    end: typeof memoEditorEl.selectionEnd === 'number' ? memoEditorEl.selectionEnd : 0,
-    isFocused: document.activeElement === memoEditorEl
+    start: typeof appContext.elements.memoEditorEl.selectionStart === 'number' ? appContext.elements.memoEditorEl.selectionStart : 0,
+    end: typeof appContext.elements.memoEditorEl.selectionEnd === 'number' ? appContext.elements.memoEditorEl.selectionEnd : 0,
+    isFocused: document.activeElement === appContext.elements.memoEditorEl
   };
 }
 
 function restoreMemoSelection(selection) {
-  if (!memoEditorEl || !selection || !selection.isFocused) return;
-  var valueLength = memoEditorEl.value.length;
+  if (!appContext.elements.memoEditorEl || !selection || !selection.isFocused) return;
+  var valueLength = appContext.elements.memoEditorEl.value.length;
   var start = Math.min(selection.start, valueLength);
   var end = Math.min(selection.end, valueLength);
-  memoEditorEl.focus();
-  memoEditorEl.setSelectionRange(start, end);
+  appContext.elements.memoEditorEl.focus();
+  appContext.elements.memoEditorEl.setSelectionRange(start, end);
 }
 
 function updateMemoEditor(raw, preserveSelection) {
-  if (!memoEditorEl) return;
+  if (!appContext.elements.memoEditorEl) return;
   var selection = preserveSelection ? snapshotMemoSelection() : null;
-  memoEditorEl.value = raw || '';
+  appContext.elements.memoEditorEl.value = raw || '';
   restoreMemoSelection(selection);
   rememberMemoCaret();
 }
 
 function updateMemoPreview(data) {
-  if (!memoPreviewEl || !data) return;
-  memoPreviewEl.innerHTML = data.html || '';
+  if (!appContext.elements.memoPreviewEl || !data) return;
+  appContext.elements.memoPreviewEl.innerHTML = data.html || '';
 }
 
 function applyMemoData(data, options) {
-  if (!memoEditorEl || !memoPreviewEl || !data) return true;
+  if (!appContext.elements.memoEditorEl || !appContext.elements.memoPreviewEl || !data) return true;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
   if (shouldUpdateEditor) {
     updateMemoEditor(data.raw || '', !!(options && options.preserveSelection));
@@ -97,13 +97,13 @@ function isMemoRefreshMessage(data) {
 }
 
 function getMemoRemoteUpdateBlockReason() {
-  if (!memoEditorEl) return 'none';
-  if (memoSaveTimer) return 'dirty';
-  if (memoSaveStatusEl) {
-    var state = memoSaveStatusEl.dataset.state;
+  if (!appContext.elements.memoEditorEl) return 'none';
+  if (appContext.memo.saveTimer) return 'dirty';
+  if (appContext.elements.memoSaveStatusEl) {
+    var state = appContext.elements.memoSaveStatusEl.dataset.state;
     if (state === 'dirty' || state === 'saving' || state === 'loading') return state;
   }
-  if (document.activeElement === memoEditorEl) return 'focus';
+  if (document.activeElement === appContext.elements.memoEditorEl) return 'focus';
   return 'none';
 }
 
@@ -112,34 +112,34 @@ function isMemoRemoteUpdateBlocked() {
 }
 
 function flushPendingMemoReloadIfSafe() {
-  if (pendingMemoReload === null) return false;
-  if (isDirMode && pendingMemoReload !== currentFile) {
-    pendingMemoReload = null;
+  if (appContext.memo.pendingReload === null) return false;
+  if (appContext.config.isDirMode && appContext.memo.pendingReload !== appContext.state.currentFile) {
+    appContext.memo.pendingReload = null;
     return false;
   }
   if (getMemoRemoteUpdateBlockReason() !== 'none') {
     return false;
   }
 
-  var file = pendingMemoReload;
-  pendingMemoReload = null;
-  loadMemo(file, fetchGeneration);
+  var file = appContext.memo.pendingReload;
+  appContext.memo.pendingReload = null;
+  loadMemo(file, appContext.fetch.generation);
   return true;
 }
 
 function applyRemoteMemoUpdate(data) {
   if (!isMemoUpdateMessage(data)) return false;
-  if (isDirMode && data.file !== currentFile) return false;
+  if (appContext.config.isDirMode && data.file !== appContext.state.currentFile) return false;
 
-  pendingMemoReload = data.file;
+  appContext.memo.pendingReload = data.file;
   return flushPendingMemoReloadIfSafe();
 }
 
 function queueRemoteMemoReload(data) {
-  if (!memoEditorEl || !isMemoRefreshMessage(data)) return false;
+  if (!appContext.elements.memoEditorEl || !isMemoRefreshMessage(data)) return false;
   var file = data.memo_file || data.file || getMemoTargetFile();
-  if (isDirMode && file !== currentFile) return false;
-  pendingMemoReload = file;
+  if (appContext.config.isDirMode && file !== appContext.state.currentFile) return false;
+  appContext.memo.pendingReload = file;
   return flushPendingMemoReloadIfSafe();
 }
 
@@ -175,16 +175,16 @@ function getMemoErrorMessage(err) {
 }
 
 function loadMemo(file, ownerGeneration) {
-  if (!memoEditorEl) return Promise.resolve();
-  var requestGeneration = ++memoLoadGeneration;
+  if (!appContext.elements.memoEditorEl) return Promise.resolve();
+  var requestGeneration = ++appContext.memo.loadGeneration;
   setMemoSaveStatus('loading', '読込中');
   return fetch(getMemoRequestUrl(file), {
     headers: { 'Accept': 'application/json' }
   })
   .then(parseJsonResponse)
   .then(function(data) {
-    if (ownerGeneration !== undefined && ownerGeneration !== fetchGeneration) return;
-    if (requestGeneration !== memoLoadGeneration) return;
+    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) return;
+    if (requestGeneration !== appContext.memo.loadGeneration) return;
     if (applyMemoData(data) !== false) {
       setMemoSaveStatus('saved', '保存済み');
     }
@@ -192,39 +192,39 @@ function loadMemo(file, ownerGeneration) {
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ取得エラー:', err);
-    if (ownerGeneration !== undefined && ownerGeneration !== fetchGeneration) return;
-    if (requestGeneration !== memoLoadGeneration) return;
+    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) return;
+    if (requestGeneration !== appContext.memo.loadGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });
 }
 
 function cancelMemoAutosave() {
-  if (memoSaveTimer) {
-    clearTimeout(memoSaveTimer);
-    memoSaveTimer = null;
+  if (appContext.memo.saveTimer) {
+    clearTimeout(appContext.memo.saveTimer);
+    appContext.memo.saveTimer = null;
   }
 }
 
 function scheduleMemoSave(immediate) {
-  if (!memoEditorEl || isMemoEditorDisabled()) return;
+  if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) return;
   cancelMemoAutosave();
   setMemoSaveStatus('dirty', '未保存');
   if (immediate) {
     saveMemoNow();
     return;
   }
-  memoSaveTimer = setTimeout(saveMemoNow, 500);
+  appContext.memo.saveTimer = setTimeout(saveMemoNow, 500);
 }
 
 function saveMemoNow(targetFileOverride, rawOverride) {
-  if (!memoEditorEl || isMemoEditorDisabled()) {
+  if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) {
     cancelMemoAutosave();
     return;
   }
   cancelMemoAutosave();
-  var raw = rawOverride !== undefined ? rawOverride : memoEditorEl.value;
-  var requestGeneration = ++memoSaveGeneration;
+  var raw = rawOverride !== undefined ? rawOverride : appContext.elements.memoEditorEl.value;
+  var requestGeneration = ++appContext.memo.saveGeneration;
   var targetFile = targetFileOverride !== undefined
     ? targetFileOverride
     : getMemoTargetFile();
@@ -243,9 +243,9 @@ function saveMemoNow(targetFileOverride, rawOverride) {
   })
   .then(parseJsonResponse)
   .then(function(data) {
-    if (requestGeneration !== memoSaveGeneration) return;
-    if (!memoEditorEl) return;
-    if (targetFileOverride === undefined && memoEditorEl.value !== raw) {
+    if (requestGeneration !== appContext.memo.saveGeneration) return;
+    if (!appContext.elements.memoEditorEl) return;
+    if (targetFileOverride === undefined && appContext.elements.memoEditorEl.value !== raw) {
       setMemoSaveStatus('dirty', '未保存');
       return;
     }
@@ -263,15 +263,15 @@ function saveMemoNow(targetFileOverride, rawOverride) {
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ保存エラー:', err);
-    if (requestGeneration !== memoSaveGeneration) return;
+    if (requestGeneration !== appContext.memo.saveGeneration) return;
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });
 }
 
 function flushPendingMemoSave() {
-  if (!memoEditorEl || isMemoEditorDisabled() || !memoSaveTimer) return;
-  saveMemoNow(getMemoTargetFile(), memoEditorEl.value);
+  if (!appContext.elements.memoEditorEl || isMemoEditorDisabled() || !appContext.memo.saveTimer) return;
+  saveMemoNow(getMemoTargetFile(), appContext.elements.memoEditorEl.value);
 }
 
 function escapeMarkdownLinkLabel(text) {
@@ -298,12 +298,12 @@ function formatLineLabel(range) {
 }
 
 function getHeadingForRange(range) {
-  if (!contentRoot || !range) return null;
+  if (!appContext.elements.contentRoot || !range) return null;
   var startNode = range.startContainer.nodeType === Node.ELEMENT_NODE
     ? range.startContainer
     : range.startContainer.parentElement;
   if (!startNode) return null;
-  var headings = contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  var headings = appContext.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
   var lastHeading = null;
   headings.forEach(function(heading) {
     if (!heading.id) return;
@@ -320,8 +320,8 @@ function getHeadingForRange(range) {
 }
 
 function getSelectionLineRange(range) {
-  if (!contentRoot || !range) return null;
-  var nodes = contentRoot.querySelectorAll('[data-source-start-line]');
+  if (!appContext.elements.contentRoot || !range) return null;
+  var nodes = appContext.elements.contentRoot.querySelectorAll('[data-source-start-line]');
   var start = null;
   var end = null;
   nodes.forEach(function(node) {
@@ -346,10 +346,10 @@ function getSelectionLineRange(range) {
 function buildQuoteSource(range) {
   var heading = getHeadingForRange(range);
   var lineRange = getSelectionLineRange(range);
-  var fileLabel = currentFile || (contentRoot ? contentRoot.getAttribute('data-title') : 'document');
+  var fileLabel = appContext.state.currentFile || (appContext.elements.contentRoot ? appContext.elements.contentRoot.getAttribute('data-title') : 'document');
   var sourceLabel = fileLabel;
-  var href = isDirMode && currentFile
-    ? '?file=' + encodeURIComponent(currentFile)
+  var href = appContext.config.isDirMode && appContext.state.currentFile
+    ? '?file=' + encodeURIComponent(appContext.state.currentFile)
     : location.pathname;
 
   if (heading) {
@@ -398,49 +398,49 @@ function buildQuoteMarkdownFromSelection() {
 }
 
 function insertTextIntoMemo(text) {
-  if (!memoEditorEl || isMemoEditorDisabled()) return false;
-  var currentValue = memoEditorEl.value;
-  var start = typeof memoCaretStart === 'number' ? memoCaretStart : currentValue.length;
-  var end = typeof memoCaretEnd === 'number' ? memoCaretEnd : start;
+  if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) return false;
+  var currentValue = appContext.elements.memoEditorEl.value;
+  var start = typeof appContext.memo.caretStart === 'number' ? appContext.memo.caretStart : currentValue.length;
+  var end = typeof appContext.memo.caretEnd === 'number' ? appContext.memo.caretEnd : start;
   var prefix = start > 0 && !/\n\n$/.test(currentValue.slice(0, start)) ? '\n\n' : '';
   var suffix = end < currentValue.length && !/^\n/.test(currentValue.slice(end)) ? '\n' : '';
   var insertion = prefix + text + suffix;
-  memoEditorEl.value = currentValue.slice(0, start) + insertion + currentValue.slice(end);
-  memoCaretStart = start + insertion.length;
-  memoCaretEnd = memoCaretStart;
-  memoEditorEl.focus();
-  memoEditorEl.setSelectionRange(memoCaretStart, memoCaretEnd);
+  appContext.elements.memoEditorEl.value = currentValue.slice(0, start) + insertion + currentValue.slice(end);
+  appContext.memo.caretStart = start + insertion.length;
+  appContext.memo.caretEnd = appContext.memo.caretStart;
+  appContext.elements.memoEditorEl.focus();
+  appContext.elements.memoEditorEl.setSelectionRange(appContext.memo.caretStart, appContext.memo.caretEnd);
   return true;
 }
 
 function isSelectionInsideContent(selection) {
-  if (!selection || selection.rangeCount === 0 || !contentRoot) return false;
+  if (!selection || selection.rangeCount === 0 || !appContext.elements.contentRoot) return false;
   var range = selection.getRangeAt(0);
   var ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
     ? range.commonAncestorContainer
     : range.commonAncestorContainer.parentElement;
-  return !!ancestor && contentRoot.contains(ancestor);
+  return !!ancestor && appContext.elements.contentRoot.contains(ancestor);
 }
 
 function positionQuoteSelectionAction(range) {
-  if (!quoteSelectionActionEl || !range) return;
+  if (!appContext.elements.quoteSelectionActionEl || !range) return;
   var rect = range.getBoundingClientRect();
   if (!rect || (!rect.width && !rect.height)) {
     hideQuoteSelectionAction();
     return;
   }
-  quoteSelectionActionEl.hidden = false;
-  quoteSelectionActionEl.style.top = (window.scrollY + rect.bottom + 10) + 'px';
-  quoteSelectionActionEl.style.left = (window.scrollX + rect.left + Math.max(rect.width / 2, 16)) + 'px';
+  appContext.elements.quoteSelectionActionEl.hidden = false;
+  appContext.elements.quoteSelectionActionEl.style.top = (window.scrollY + rect.bottom + 10) + 'px';
+  appContext.elements.quoteSelectionActionEl.style.left = (window.scrollX + rect.left + Math.max(rect.width / 2, 16)) + 'px';
 }
 
 function hideQuoteSelectionAction() {
-  if (!quoteSelectionActionEl) return;
-  quoteSelectionActionEl.hidden = true;
+  if (!appContext.elements.quoteSelectionActionEl) return;
+  appContext.elements.quoteSelectionActionEl.hidden = true;
 }
 
 function refreshQuoteSelectionAction() {
-  if (!quoteSelectionActionEl) return;
+  if (!appContext.elements.quoteSelectionActionEl) return;
   var selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !isSelectionInsideContent(selection)) {
     hideQuoteSelectionAction();
@@ -453,41 +453,43 @@ function refreshQuoteSelectionAction() {
   positionQuoteSelectionAction(selection.getRangeAt(0));
 }
 
-if (memoEditorEl) {
-  ['click', 'keyup', 'select'].forEach(function(eventName) {
-    memoEditorEl.addEventListener(eventName, rememberMemoCaret);
-  });
-  memoEditorEl.addEventListener('blur', function() {
-    flushPendingMemoReloadIfSafe();
-  });
-  memoEditorEl.addEventListener('input', function() {
-    rememberMemoCaret();
-    scheduleMemoSave(false);
-  });
-}
+function setupMemoInteractions() {
+  if (appContext.elements.memoEditorEl) {
+    ['click', 'keyup', 'select'].forEach(function(eventName) {
+      appContext.elements.memoEditorEl.addEventListener(eventName, rememberMemoCaret);
+    });
+    appContext.elements.memoEditorEl.addEventListener('blur', function() {
+      flushPendingMemoReloadIfSafe();
+    });
+    appContext.elements.memoEditorEl.addEventListener('input', function() {
+      rememberMemoCaret();
+      scheduleMemoSave(false);
+    });
+  }
 
-if (quoteSelectionActionEl) {
-  quoteSelectionActionEl.addEventListener('mousedown', function(event) {
-    event.preventDefault();
-  });
-  quoteSelectionActionEl.addEventListener('click', function() {
-    var markdown = buildQuoteMarkdownFromSelection();
-    if (!markdown) {
+  if (appContext.elements.quoteSelectionActionEl) {
+    appContext.elements.quoteSelectionActionEl.addEventListener('mousedown', function(event) {
+      event.preventDefault();
+    });
+    appContext.elements.quoteSelectionActionEl.addEventListener('click', function() {
+      var markdown = buildQuoteMarkdownFromSelection();
+      if (!markdown) {
+        hideQuoteSelectionAction();
+        return;
+      }
+      activateSidebarTab('memo');
+      if (!insertTextIntoMemo(markdown)) {
+        hideQuoteSelectionAction();
+        return;
+      }
       hideQuoteSelectionAction();
-      return;
-    }
-    activateSidebarTab('memo');
-    if (!insertTextIntoMemo(markdown)) {
-      hideQuoteSelectionAction();
-      return;
-    }
-    hideQuoteSelectionAction();
-    scheduleMemoSave(true);
-  });
-}
+      scheduleMemoSave(true);
+    });
+  }
 
-document.addEventListener('selectionchange', function() {
-  requestAnimationFrame(refreshQuoteSelectionAction);
-});
-window.addEventListener('scroll', hideQuoteSelectionAction, { passive: true });
-window.addEventListener('resize', hideQuoteSelectionAction);
+  document.addEventListener('selectionchange', function() {
+    requestAnimationFrame(refreshQuoteSelectionAction);
+  });
+  window.addEventListener('scroll', hideQuoteSelectionAction, { passive: true });
+  window.addEventListener('resize', hideQuoteSelectionAction);
+}

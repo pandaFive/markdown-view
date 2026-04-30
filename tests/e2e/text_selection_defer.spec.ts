@@ -71,7 +71,7 @@ async function loadBottomHeadingFixture(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await resetStandardFixtures();
-  await page.addInitScript(installTestWebSocketHarness, { shorten30sTimeouts: true });
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true, shorten30sTimeouts: true });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
   await stabilizeWebSocketHarness(page);
@@ -107,7 +107,7 @@ test('ファイル遷移時は保留更新をクリアし、新しいファイ�
   });
 
   await page.evaluate(() => {
-    selectFile('notes.md');
+    window.markdownViewTestHooks.selectFile('notes.md');
   });
   await expect(page.locator('#content')).toContainText('Notes body');
 
@@ -436,14 +436,13 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
 
   await page.evaluate(() => {
     window.__markPendingCalls = 0;
-    const original = window.markPendingTocNavigation;
-    if (!original) {
-      throw new Error('markPendingTocNavigation is not exposed for E2E');
+    const hooks = window.markdownViewTestHooks;
+    if (!hooks) {
+      throw new Error('markdownViewTestHooks is not exposed for E2E');
     }
-    window.markPendingTocNavigation = function(id) {
+    hooks.setMarkPendingTocNavigationObserverForTest(() => {
       window.__markPendingCalls = (window.__markPendingCalls ?? 0) + 1;
-      return original.call(this, id);
-    };
+    });
   });
 
   const payload = await page.evaluate(() => {

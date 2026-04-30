@@ -322,11 +322,11 @@ export async function updateContent(
   opts?: MvE2E.UpdateContentOptions
 ) {
   await page.evaluate(({ payload, options }) => {
-    const updateContent = window.updateContent;
-    if (!updateContent) {
-      throw new Error('window.updateContent is not exposed for E2E');
+    const hooks = window.markdownViewTestHooks;
+    if (!hooks) {
+      throw new Error('window.markdownViewTestHooks is not exposed for E2E');
     }
-    updateContent(payload, options);
+    hooks.updateContent(payload, options);
   }, { payload: data, options: opts });
 }
 
@@ -336,14 +336,11 @@ export async function updateContentAndActivateToc(
   opts?: MvE2E.UpdateContentOptions
 ) {
   await page.evaluate(({ payload, options }) => {
-    const updateContent = window.updateContent;
-    if (!updateContent) {
-      throw new Error('window.updateContent is not exposed for E2E');
+    const hooks = window.markdownViewTestHooks;
+    if (!hooks) {
+      throw new Error('window.markdownViewTestHooks is not exposed for E2E');
     }
-    if (typeof activateSidebarTab !== 'function') {
-      throw new Error('activateSidebarTab is not exposed for E2E');
-    }
-    updateContent(payload, options);
-    activateSidebarTab('toc');
+    hooks.updateContent(payload, options);
+    hooks.activateSidebarTab('toc');
   }, { payload: data, options: opts });
 }

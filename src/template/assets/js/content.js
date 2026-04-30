@@ -1,18 +1,18 @@
 function setLiveStatus(state) {
-  if (!liveStatusEl) return;
-  liveStatusEl.textContent = LIVE_STATUS_LABELS[state] || state;
-  liveStatusEl.dataset.state = state;
+  if (!appContext.elements.liveStatusEl) return;
+  appContext.elements.liveStatusEl.textContent = appContext.labels.liveStatus[state] || state;
+  appContext.elements.liveStatusEl.dataset.state = state;
 }
 
 function updateDocumentStats() {
-  if (!contentRoot) return;
-  var headings = contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6').length;
-  var text = (contentRoot.textContent || '').replace(/\s+/g, '');
-  if (docHeadingCountEl) {
-    docHeadingCountEl.textContent = '見出し ' + headings;
+  if (!appContext.elements.contentRoot) return;
+  var headings = appContext.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6').length;
+  var text = (appContext.elements.contentRoot.textContent || '').replace(/\s+/g, '');
+  if (appContext.elements.docHeadingCountEl) {
+    appContext.elements.docHeadingCountEl.textContent = '見出し ' + headings;
   }
-  if (docCharCountEl) {
-    docCharCountEl.textContent = '文字 ' + text.length;
+  if (appContext.elements.docCharCountEl) {
+    appContext.elements.docCharCountEl.textContent = '文字 ' + text.length;
   }
 }
 
@@ -20,19 +20,19 @@ function updateReadingProgress() {
   var scrollTop = window.scrollY || window.pageYOffset;
   var maxScroll = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
   var progress = Math.min(100, Math.max(0, (scrollTop / maxScroll) * 100));
-  if (readingProgressBar) {
-    readingProgressBar.style.width = progress + '%';
+  if (appContext.elements.readingProgressBar) {
+    appContext.elements.readingProgressBar.style.width = progress + '%';
   }
-  if (backToTop) {
-    backToTop.classList.toggle('visible', scrollTop > 360);
+  if (appContext.elements.backToTop) {
+    appContext.elements.backToTop.classList.toggle('visible', scrollTop > 360);
   }
 }
 
 function syncDocumentChrome(file) {
-  var title = file ? file.split('/').pop() : (contentRoot ? contentRoot.getAttribute('data-title') : '');
+  var title = file ? file.split('/').pop() : (appContext.elements.contentRoot ? appContext.elements.contentRoot.getAttribute('data-title') : '');
   if (!title) title = 'markdown-view';
-  if (documentTitleEl) {
-    documentTitleEl.textContent = title;
+  if (appContext.elements.documentTitleEl) {
+    appContext.elements.documentTitleEl.textContent = title;
   }
   document.title = title + ' - markdown-view';
 }
@@ -79,7 +79,7 @@ function resolveFileQueryHref(href) {
   if (url.pathname !== location.pathname) return null;
   if (!url.hash) return null;
 
-  if (isDirMode) {
+  if (appContext.config.isDirMode) {
     var fileParam = url.searchParams.get('file');
     if (fileParam && /\.md$/i.test(fileParam)) {
       return { file: fileParam, hash: url.hash };
@@ -87,14 +87,14 @@ function resolveFileQueryHref(href) {
     return null;
   }
   // 単一ファイルモード: 同一path+hash形式のリンクは現在ファイル内ジャンプとして扱う
-  if (currentFile) {
-    return { file: currentFile, hash: url.hash };
+  if (appContext.state.currentFile) {
+    return { file: appContext.state.currentFile, hash: url.hash };
   }
   return null;
 }
 
 function resolveMarkdownLinkTarget(href) {
-  if (!isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
+  if (!appContext.config.isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
     return null;
   }
   if (href.startsWith('//') || isExternalSchemeHref(href)) {
@@ -106,8 +106,8 @@ function resolveMarkdownLinkTarget(href) {
   var resolvedUrl;
   var relativePath;
 
-  if (currentFile && currentFile.indexOf('/') !== -1) {
-    currentDir = currentFile.slice(0, currentFile.lastIndexOf('/') + 1);
+  if (appContext.state.currentFile && appContext.state.currentFile.indexOf('/') !== -1) {
+    currentDir = appContext.state.currentFile.slice(0, appContext.state.currentFile.lastIndexOf('/') + 1);
   }
 
   try {
@@ -200,8 +200,8 @@ function augmentHashWithTrailingLineHint(link, hash) {
 
 function scrollToLineRange(targetLine, behavior) {
   // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
-  if (!contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
-  var blocks = contentRoot.querySelectorAll('[data-line-block]');
+  if (!appContext.elements.contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
+  var blocks = appContext.elements.contentRoot.querySelectorAll('[data-line-block]');
   // 候補から「最狭マッチ（最深containment）」を選ぶ。
   // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、<li> を選ばないと
   // コンテナ先頭にスクロールしてしまうため (PR #73 codex-bot レビュー指摘)
@@ -343,9 +343,9 @@ function handleCopyClick(button, text, baseLabel) {
 }
 
 function enhanceContentInteractions() {
-  if (!contentRoot) return;
+  if (!appContext.elements.contentRoot) return;
 
-  var headings = contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  var headings = appContext.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
   headings.forEach(function(heading) {
     if (!heading.id || heading.querySelector('.heading-anchor')) return;
     var button = document.createElement('button');
@@ -361,7 +361,7 @@ function enhanceContentInteractions() {
     heading.appendChild(button);
   });
 
-  var blocks = contentRoot.querySelectorAll('pre.code-block');
+  var blocks = appContext.elements.contentRoot.querySelectorAll('pre.code-block');
   blocks.forEach(function(block) {
     if (block.querySelector('.code-copy')) return;
     var code = block.querySelector('code');
@@ -393,7 +393,7 @@ function handleInternalLinkClick(event) {
   // 旧形式メモ互換（リンク外 `L5-L7` を hash fragment に取り込む）
   target.hash = augmentHashWithTrailingLineHint(link, target.hash);
 
-  if (target.file === currentFile) {
+  if (target.file === appContext.state.currentFile) {
     event.preventDefault();
     if (target.hash) {
       if (applyContentAnchorNavigation(target.hash, false)) {
@@ -401,7 +401,7 @@ function handleInternalLinkClick(event) {
       }
       console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
     }
-    setFileParam(currentFile, false, '');
+    setFileParam(appContext.state.currentFile, false, '');
     restoreContentNavigationFromLocation();
     return;
   }
@@ -416,13 +416,13 @@ function handleInternalLinkClick(event) {
 }
 
 function setupContentLinkNavigation() {
-  if (!contentRoot) return;
-  contentRoot.addEventListener('click', handleInternalLinkClick);
+  if (!appContext.elements.contentRoot) return;
+  appContext.elements.contentRoot.addEventListener('click', handleInternalLinkClick);
 }
 
 function setupMemoLinkNavigation() {
-  if (!memoPreviewEl) return;
-  memoPreviewEl.addEventListener('click', handleInternalLinkClick);
+  if (!appContext.elements.memoPreviewEl) return;
+  appContext.elements.memoPreviewEl.addEventListener('click', handleInternalLinkClick);
 }
 
 function setupFilterableList(options) {
@@ -467,49 +467,49 @@ function createDocumentSearchEmptyState(message) {
 
 function formatDirectorySearchSummary() {
   var baseText;
-  if (!currentDocumentSearchQuery) {
+  if (!appContext.search.currentDocumentQuery) {
     baseText = '0 件';
-  } else if (currentDirectorySearchLoading) {
+  } else if (appContext.search.currentDirectoryLoading) {
     baseText = '検索中...';
-  } else if (currentDirectorySearchError) {
+  } else if (appContext.search.currentDirectoryError) {
     baseText = 'エラー';
-  } else if (!currentDirectorySearchResults.length) {
+  } else if (!appContext.search.currentDirectoryResults.length) {
     baseText = '0 件';
-  } else if (currentDirectorySearchIndex >= 0) {
-    baseText = (currentDirectorySearchIndex + 1) + ' / ' + currentDirectorySearchResults.length + ' 件';
+  } else if (appContext.search.currentDirectoryIndex >= 0) {
+    baseText = (appContext.search.currentDirectoryIndex + 1) + ' / ' + appContext.search.currentDirectoryResults.length + ' 件';
   } else {
-    baseText = '0 / ' + currentDirectorySearchResults.length + ' 件';
+    baseText = '0 / ' + appContext.search.currentDirectoryResults.length + ' 件';
   }
 
-  if (currentDirectorySearchSkippedFiles > 0) {
-    return baseText + '（' + currentDirectorySearchSkippedFiles + '件スキップ）';
+  if (appContext.search.currentDirectorySkippedFiles > 0) {
+    return baseText + '（' + appContext.search.currentDirectorySkippedFiles + '件スキップ）';
   }
   return baseText;
 }
 
 function updateDocumentSearchSummary() {
-  if (!documentSearchSummaryEl) return;
-  if (isDirMode) {
-    documentSearchSummaryEl.textContent = formatDirectorySearchSummary();
+  if (!appContext.elements.documentSearchSummaryEl) return;
+  if (appContext.config.isDirMode) {
+    appContext.elements.documentSearchSummaryEl.textContent = formatDirectorySearchSummary();
     return;
   }
-  if (!documentSearchMatches.length) {
-    documentSearchSummaryEl.textContent = '0 件';
+  if (!appContext.search.documentMatches.length) {
+    appContext.elements.documentSearchSummaryEl.textContent = '0 件';
     return;
   }
-  documentSearchSummaryEl.textContent = (currentDocumentSearchIndex + 1) + ' / ' + documentSearchMatches.length + ' 件';
+  appContext.elements.documentSearchSummaryEl.textContent = (appContext.search.currentDocumentIndex + 1) + ' / ' + appContext.search.documentMatches.length + ' 件';
 }
 
 function clearDocumentSearchHighlights() {
-  if (!contentRoot) return;
-  contentRoot.querySelectorAll('mark.document-search-match').forEach(function(mark) {
+  if (!appContext.elements.contentRoot) return;
+  appContext.elements.contentRoot.querySelectorAll('mark.document-search-match').forEach(function(mark) {
     var parent = mark.parentNode;
     if (!parent) return;
     parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
     parent.normalize();
   });
-  documentSearchMatches = [];
-  currentDocumentSearchIndex = -1;
+  appContext.search.documentMatches = [];
+  appContext.search.currentDocumentIndex = -1;
   updateDocumentSearchSummary();
   renderDocumentSearchResults();
 }
@@ -623,9 +623,9 @@ function buildDocumentSearchContext(blockEntries, blockIndex, matchStart, matchE
 }
 
 function getDocumentSearchBlocks() {
-  if (!contentRoot) return [];
+  if (!appContext.elements.contentRoot) return [];
   return Array.prototype.filter.call(
-    contentRoot.querySelectorAll(DOCUMENT_SEARCH_BLOCK_SELECTOR),
+    appContext.elements.contentRoot.querySelectorAll(DOCUMENT_SEARCH_BLOCK_SELECTOR),
     function(block) {
       return !block.parentElement || !block.parentElement.closest(DOCUMENT_SEARCH_BLOCK_SELECTOR);
     }
@@ -704,22 +704,22 @@ function renderDocumentSearchResultContext(container, text, query, variant) {
 }
 
 function renderDocumentSearchResults() {
-  if (!documentSearchResultsEl) return;
-  if (isDirMode) {
+  if (!appContext.elements.documentSearchResultsEl) return;
+  if (appContext.config.isDirMode) {
     renderDirectorySearchResults();
     return;
   }
-  var preservedScrollTop = documentSearchResultsEl.scrollTop;
-  documentSearchResultsEl.innerHTML = '';
+  var preservedScrollTop = appContext.elements.documentSearchResultsEl.scrollTop;
+  appContext.elements.documentSearchResultsEl.innerHTML = '';
 
-  if (!currentDocumentSearchQuery) return;
+  if (!appContext.search.currentDocumentQuery) return;
 
-  if (!documentSearchMatches.length) {
-    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('一致する文が見つかりません。'));
+  if (!appContext.search.documentMatches.length) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('一致する文が見つかりません。'));
     return;
   }
 
-  documentSearchMatches.forEach(function(match, index) {
+  appContext.search.documentMatches.forEach(function(match, index) {
     var button = document.createElement('button');
     var indexBadge = document.createElement('span');
     var body = document.createElement('span');
@@ -727,8 +727,8 @@ function renderDocumentSearchResults() {
     button.type = 'button';
     button.className = 'document-search-result';
     button.dataset.matchIndex = String(index);
-    button.classList.toggle('active', index === currentDocumentSearchIndex);
-    button.setAttribute('aria-current', index === currentDocumentSearchIndex ? 'true' : 'false');
+    button.classList.toggle('active', index === appContext.search.currentDocumentIndex);
+    button.setAttribute('aria-current', index === appContext.search.currentDocumentIndex ? 'true' : 'false');
     button.addEventListener('click', function() {
       setCurrentDocumentSearchMatch(index);
     });
@@ -737,40 +737,40 @@ function renderDocumentSearchResults() {
     indexBadge.textContent = String(index + 1).padStart(2, '0');
 
     body.className = 'document-search-result-body';
-    renderDocumentSearchResultContext(body, match.context.before, currentDocumentSearchQuery, 'before');
-    renderDocumentSearchResultContext(body, match.context.current, currentDocumentSearchQuery, 'current');
-    renderDocumentSearchResultContext(body, match.context.after, currentDocumentSearchQuery, 'after');
+    renderDocumentSearchResultContext(body, match.context.before, appContext.search.currentDocumentQuery, 'before');
+    renderDocumentSearchResultContext(body, match.context.current, appContext.search.currentDocumentQuery, 'current');
+    renderDocumentSearchResultContext(body, match.context.after, appContext.search.currentDocumentQuery, 'after');
 
     button.appendChild(indexBadge);
     button.appendChild(body);
-    documentSearchResultsEl.appendChild(button);
+    appContext.elements.documentSearchResultsEl.appendChild(button);
   });
 
-  documentSearchResultsEl.scrollTop = preservedScrollTop;
+  appContext.elements.documentSearchResultsEl.scrollTop = preservedScrollTop;
 }
 
 function renderDirectorySearchResults() {
-  var preservedScrollTop = documentSearchResultsEl.scrollTop;
-  documentSearchResultsEl.innerHTML = '';
+  var preservedScrollTop = appContext.elements.documentSearchResultsEl.scrollTop;
+  appContext.elements.documentSearchResultsEl.innerHTML = '';
 
-  if (!currentDocumentSearchQuery) return;
+  if (!appContext.search.currentDocumentQuery) return;
 
-  if (currentDirectorySearchLoading) {
-    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリを検索しています。'));
+  if (appContext.search.currentDirectoryLoading) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリを検索しています。'));
     return;
   }
 
-  if (currentDirectorySearchError) {
-    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState(currentDirectorySearchError));
+  if (appContext.search.currentDirectoryError) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState(appContext.search.currentDirectoryError));
     return;
   }
 
-  if (!currentDirectorySearchResults.length) {
-    documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
+  if (!appContext.search.currentDirectoryResults.length) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
     return;
   }
 
-  currentDirectorySearchResults.forEach(function(result, index) {
+  appContext.search.currentDirectoryResults.forEach(function(result, index) {
     var button = document.createElement('button');
     var indexBadge = document.createElement('span');
     var body = document.createElement('span');
@@ -779,8 +779,8 @@ function renderDirectorySearchResults() {
     button.type = 'button';
     button.className = 'document-search-result';
     button.dataset.resultIndex = String(index);
-    button.classList.toggle('active', index === currentDirectorySearchIndex);
-    button.setAttribute('aria-current', index === currentDirectorySearchIndex ? 'true' : 'false');
+    button.classList.toggle('active', index === appContext.search.currentDirectoryIndex);
+    button.setAttribute('aria-current', index === appContext.search.currentDirectoryIndex ? 'true' : 'false');
     button.addEventListener('click', function() {
       openDirectorySearchResult(index);
     });
@@ -792,16 +792,16 @@ function renderDirectorySearchResults() {
     path.className = 'document-search-result-path';
     path.textContent = result.file;
     body.appendChild(path);
-    renderDocumentSearchResultContext(body, result.before, currentDocumentSearchQuery, 'before');
-    renderDocumentSearchResultContext(body, result.current, currentDocumentSearchQuery, 'current');
-    renderDocumentSearchResultContext(body, result.after, currentDocumentSearchQuery, 'after');
+    renderDocumentSearchResultContext(body, result.before, appContext.search.currentDocumentQuery, 'before');
+    renderDocumentSearchResultContext(body, result.current, appContext.search.currentDocumentQuery, 'current');
+    renderDocumentSearchResultContext(body, result.after, appContext.search.currentDocumentQuery, 'after');
 
     button.appendChild(indexBadge);
     button.appendChild(body);
-    documentSearchResultsEl.appendChild(button);
+    appContext.elements.documentSearchResultsEl.appendChild(button);
   });
 
-  documentSearchResultsEl.scrollTop = preservedScrollTop;
+  appContext.elements.documentSearchResultsEl.scrollTop = preservedScrollTop;
 }
 
 function renderDirectorySearchUi() {
@@ -810,55 +810,55 @@ function renderDirectorySearchUi() {
 }
 
 function applyPendingDirectorySearchNavigation() {
-  if (!isDirMode || !pendingDirectorySearchNavigation) return;
-  if (pendingDirectorySearchNavigation.file !== currentFile) return;
-  if (pendingDirectorySearchNavigation.query !== currentDocumentSearchQuery) {
-    pendingDirectorySearchNavigation = null;
+  if (!appContext.config.isDirMode || !appContext.search.pendingDirectoryNavigation) return;
+  if (appContext.search.pendingDirectoryNavigation.file !== appContext.state.currentFile) return;
+  if (appContext.search.pendingDirectoryNavigation.query !== appContext.search.currentDocumentQuery) {
+    appContext.search.pendingDirectoryNavigation = null;
     return;
   }
-  if (documentSearchMatches.length) {
+  if (appContext.search.documentMatches.length) {
     setCurrentDocumentSearchMatch(
-      Math.min(pendingDirectorySearchNavigation.fileMatchIndex, documentSearchMatches.length - 1)
+      Math.min(appContext.search.pendingDirectoryNavigation.fileMatchIndex, appContext.search.documentMatches.length - 1)
     );
   }
-  currentDirectorySearchIndex = pendingDirectorySearchNavigation.resultIndex;
-  pendingDirectorySearchNavigation = null;
+  appContext.search.currentDirectoryIndex = appContext.search.pendingDirectoryNavigation.resultIndex;
+  appContext.search.pendingDirectoryNavigation = null;
 }
 
 function scheduleDirectorySearch(query) {
-  if (documentSearchDebounceTimer) {
-    clearTimeout(documentSearchDebounceTimer);
+  if (appContext.search.documentDebounceTimer) {
+    clearTimeout(appContext.search.documentDebounceTimer);
   }
-  documentSearchDebounceTimer = setTimeout(function() {
-    documentSearchDebounceTimer = null;
+  appContext.search.documentDebounceTimer = setTimeout(function() {
+    appContext.search.documentDebounceTimer = null;
     runDirectorySearch(query);
   }, 300);
 }
 
 function getPreferredDirectorySearchSelection() {
-  if (pendingDirectorySearchNavigation) {
+  if (appContext.search.pendingDirectoryNavigation) {
     return {
-      file: pendingDirectorySearchNavigation.file,
-      fileMatchIndex: pendingDirectorySearchNavigation.fileMatchIndex
+      file: appContext.search.pendingDirectoryNavigation.file,
+      fileMatchIndex: appContext.search.pendingDirectoryNavigation.fileMatchIndex
     };
   }
   if (
-    currentDirectorySearchIndex >= 0 &&
-    currentDirectorySearchIndex < currentDirectorySearchResults.length
+    appContext.search.currentDirectoryIndex >= 0 &&
+    appContext.search.currentDirectoryIndex < appContext.search.currentDirectoryResults.length
   ) {
     return {
-      file: currentDirectorySearchResults[currentDirectorySearchIndex].file,
-      fileMatchIndex: currentDirectorySearchResults[currentDirectorySearchIndex].file_match_index
+      file: appContext.search.currentDirectoryResults[appContext.search.currentDirectoryIndex].file,
+      fileMatchIndex: appContext.search.currentDirectoryResults[appContext.search.currentDirectoryIndex].file_match_index
     };
   }
   if (
-    currentFile &&
-    currentDocumentSearchIndex >= 0 &&
-    currentDocumentSearchIndex < documentSearchMatches.length
+    appContext.state.currentFile &&
+    appContext.search.currentDocumentIndex >= 0 &&
+    appContext.search.currentDocumentIndex < appContext.search.documentMatches.length
   ) {
     return {
-      file: currentFile,
-      fileMatchIndex: currentDocumentSearchIndex
+      file: appContext.state.currentFile,
+      fileMatchIndex: appContext.search.currentDocumentIndex
     };
   }
   return null;
@@ -877,14 +877,14 @@ function resolveDirectorySearchIndex(results, preferredSelection) {
     if (index !== -1) return index;
   }
   if (
-    currentFile &&
-    currentDocumentSearchIndex >= 0 &&
-    currentDocumentSearchIndex < documentSearchMatches.length
+    appContext.state.currentFile &&
+    appContext.search.currentDocumentIndex >= 0 &&
+    appContext.search.currentDocumentIndex < appContext.search.documentMatches.length
   ) {
     index = results.findIndex(function(result) {
       return (
-        result.file === currentFile &&
-        result.file_match_index === currentDocumentSearchIndex
+        result.file === appContext.state.currentFile &&
+        result.file_match_index === appContext.search.currentDocumentIndex
       );
     });
     if (index !== -1) return index;
@@ -893,13 +893,13 @@ function resolveDirectorySearchIndex(results, preferredSelection) {
 }
 
 function runDirectorySearch(query) {
-  var generation = ++documentSearchFetchGeneration;
+  var generation = ++appContext.search.documentFetchGeneration;
   var preferredSelection = getPreferredDirectorySearchSelection();
-  currentDirectorySearchLoading = true;
-  currentDirectorySearchError = '';
-  currentDirectorySearchResults = [];
-  currentDirectorySearchIndex = -1;
-  currentDirectorySearchSkippedFiles = 0;
+  appContext.search.currentDirectoryLoading = true;
+  appContext.search.currentDirectoryError = '';
+  appContext.search.currentDirectoryResults = [];
+  appContext.search.currentDirectoryIndex = -1;
+  appContext.search.currentDirectorySkippedFiles = 0;
   renderDirectorySearchUi();
 
   fetch('/api/search?q=' + encodeURIComponent(query), {
@@ -913,47 +913,47 @@ function runDirectorySearch(query) {
     });
   })
   .then(function(data) {
-    if (generation !== documentSearchFetchGeneration) return;
-    if ((data.query || '') !== currentDocumentSearchQuery) return;
-    currentDirectorySearchLoading = false;
-    currentDirectorySearchError = '';
-    currentDirectorySearchResults = Array.isArray(data.results) ? data.results : [];
-    currentDirectorySearchSkippedFiles = Number(data.skipped_files || 0);
-    currentDirectorySearchIndex = resolveDirectorySearchIndex(
-      currentDirectorySearchResults,
+    if (generation !== appContext.search.documentFetchGeneration) return;
+    if ((data.query || '') !== appContext.search.currentDocumentQuery) return;
+    appContext.search.currentDirectoryLoading = false;
+    appContext.search.currentDirectoryError = '';
+    appContext.search.currentDirectoryResults = Array.isArray(data.results) ? data.results : [];
+    appContext.search.currentDirectorySkippedFiles = Number(data.skipped_files || 0);
+    appContext.search.currentDirectoryIndex = resolveDirectorySearchIndex(
+      appContext.search.currentDirectoryResults,
       preferredSelection
     );
     renderDirectorySearchUi();
   })
   .catch(function(err) {
-    if (generation !== documentSearchFetchGeneration) return;
-    if (query !== currentDocumentSearchQuery) return;
-    currentDirectorySearchLoading = false;
-    currentDirectorySearchResults = [];
-    currentDirectorySearchIndex = -1;
-    currentDirectorySearchSkippedFiles = 0;
-    currentDirectorySearchError = getFileFetchErrorMessage(err);
+    if (generation !== appContext.search.documentFetchGeneration) return;
+    if (query !== appContext.search.currentDocumentQuery) return;
+    appContext.search.currentDirectoryLoading = false;
+    appContext.search.currentDirectoryResults = [];
+    appContext.search.currentDirectoryIndex = -1;
+    appContext.search.currentDirectorySkippedFiles = 0;
+    appContext.search.currentDirectoryError = getFileFetchErrorMessage(err);
     console.error('[markdown-view] ディレクトリ検索エラー:', err);
     renderDirectorySearchUi();
   });
 }
 
 function openDirectorySearchResult(index) {
-  if (!currentDirectorySearchResults.length) return;
-  var normalizedIndex = (index + currentDirectorySearchResults.length) % currentDirectorySearchResults.length;
-  var result = currentDirectorySearchResults[normalizedIndex];
-  var previousResultIndex = currentDirectorySearchIndex;
-  currentDirectorySearchIndex = normalizedIndex;
-  pendingDirectorySearchNavigation = {
+  if (!appContext.search.currentDirectoryResults.length) return;
+  var normalizedIndex = (index + appContext.search.currentDirectoryResults.length) % appContext.search.currentDirectoryResults.length;
+  var result = appContext.search.currentDirectoryResults[normalizedIndex];
+  var previousResultIndex = appContext.search.currentDirectoryIndex;
+  appContext.search.currentDirectoryIndex = normalizedIndex;
+  appContext.search.pendingDirectoryNavigation = {
     file: result.file,
-    query: currentDocumentSearchQuery,
+    query: appContext.search.currentDocumentQuery,
     fileMatchIndex: result.file_match_index,
     resultIndex: normalizedIndex,
     previousResultIndex: previousResultIndex
   };
   renderDirectorySearchUi();
 
-  if (result.file === currentFile) {
+  if (result.file === appContext.state.currentFile) {
     applyPendingDirectorySearchNavigation();
     renderDirectorySearchUi();
     return;
@@ -966,7 +966,7 @@ function openDirectorySearchResult(index) {
 }
 
 function applyDocumentSearchHighlights(query) {
-  if (!contentRoot) return;
+  if (!appContext.elements.contentRoot) return;
   clearDocumentSearchHighlights();
   if (!query) return;
 
@@ -992,10 +992,10 @@ function applyDocumentSearchHighlights(query) {
         blockText.nodes,
         matchIndex,
         matchIndex + normalizedQuery.length,
-        documentSearchMatches.length
+        appContext.search.documentMatches.length
       );
       if (marks.length) {
-        documentSearchMatches.push({
+        appContext.search.documentMatches.push({
           marks: marks,
           context: buildDocumentSearchContext(
             blockEntries,
@@ -1010,7 +1010,7 @@ function applyDocumentSearchHighlights(query) {
     }
   });
 
-  if (documentSearchMatches.length) {
+  if (appContext.search.documentMatches.length) {
     setCurrentDocumentSearchMatch(0, false);
   } else {
     updateDocumentSearchSummary();
@@ -1019,22 +1019,22 @@ function applyDocumentSearchHighlights(query) {
 }
 
 function setCurrentDocumentSearchMatch(index, scrollIntoView) {
-  if (!documentSearchMatches.length) {
-    currentDocumentSearchIndex = -1;
+  if (!appContext.search.documentMatches.length) {
+    appContext.search.currentDocumentIndex = -1;
     updateDocumentSearchSummary();
     return;
   }
-  if (currentDocumentSearchIndex >= 0 && documentSearchMatches[currentDocumentSearchIndex]) {
-    documentSearchMatches[currentDocumentSearchIndex].marks.forEach(function(mark) {
+  if (appContext.search.currentDocumentIndex >= 0 && appContext.search.documentMatches[appContext.search.currentDocumentIndex]) {
+    appContext.search.documentMatches[appContext.search.currentDocumentIndex].marks.forEach(function(mark) {
       mark.classList.remove('current');
     });
   }
-  currentDocumentSearchIndex = (index + documentSearchMatches.length) % documentSearchMatches.length;
-  documentSearchMatches[currentDocumentSearchIndex].marks.forEach(function(mark) {
+  appContext.search.currentDocumentIndex = (index + appContext.search.documentMatches.length) % appContext.search.documentMatches.length;
+  appContext.search.documentMatches[appContext.search.currentDocumentIndex].marks.forEach(function(mark) {
     mark.classList.add('current');
   });
   if (scrollIntoView !== false) {
-    documentSearchMatches[currentDocumentSearchIndex].marks[0].scrollIntoView({
+    appContext.search.documentMatches[appContext.search.currentDocumentIndex].marks[0].scrollIntoView({
       block: 'center',
       behavior: 'smooth'
     });
@@ -1044,86 +1044,86 @@ function setCurrentDocumentSearchMatch(index, scrollIntoView) {
 }
 
 function moveDocumentSearch(step) {
-  if (isDirMode) {
-    if (!currentDirectorySearchResults.length) return;
-    if (currentDirectorySearchIndex < 0) {
-      openDirectorySearchResult(step > 0 ? 0 : currentDirectorySearchResults.length - 1);
+  if (appContext.config.isDirMode) {
+    if (!appContext.search.currentDirectoryResults.length) return;
+    if (appContext.search.currentDirectoryIndex < 0) {
+      openDirectorySearchResult(step > 0 ? 0 : appContext.search.currentDirectoryResults.length - 1);
       return;
     }
-    openDirectorySearchResult(currentDirectorySearchIndex + step);
+    openDirectorySearchResult(appContext.search.currentDirectoryIndex + step);
     return;
   }
-  if (!documentSearchMatches.length) return;
-  setCurrentDocumentSearchMatch(currentDocumentSearchIndex + step);
+  if (!appContext.search.documentMatches.length) return;
+  setCurrentDocumentSearchMatch(appContext.search.currentDocumentIndex + step);
 }
 
 function applyDocumentSearchQuery(query) {
-  currentDocumentSearchQuery = (query || '').trim();
-  if (isDirMode) {
-    applyDocumentSearchHighlights(currentDocumentSearchQuery);
-    pendingDirectorySearchNavigation = null;
-    if (!currentDocumentSearchQuery) {
-      if (documentSearchDebounceTimer) {
-        clearTimeout(documentSearchDebounceTimer);
-        documentSearchDebounceTimer = null;
+  appContext.search.currentDocumentQuery = (query || '').trim();
+  if (appContext.config.isDirMode) {
+    applyDocumentSearchHighlights(appContext.search.currentDocumentQuery);
+    appContext.search.pendingDirectoryNavigation = null;
+    if (!appContext.search.currentDocumentQuery) {
+      if (appContext.search.documentDebounceTimer) {
+        clearTimeout(appContext.search.documentDebounceTimer);
+        appContext.search.documentDebounceTimer = null;
       }
-      documentSearchFetchGeneration += 1;
-      currentDirectorySearchResults = [];
-      currentDirectorySearchIndex = -1;
-      currentDirectorySearchSkippedFiles = 0;
-      currentDirectorySearchLoading = false;
-      currentDirectorySearchError = '';
+      appContext.search.documentFetchGeneration += 1;
+      appContext.search.currentDirectoryResults = [];
+      appContext.search.currentDirectoryIndex = -1;
+      appContext.search.currentDirectorySkippedFiles = 0;
+      appContext.search.currentDirectoryLoading = false;
+      appContext.search.currentDirectoryError = '';
       renderDirectorySearchUi();
       return;
     }
-    currentDirectorySearchResults = [];
-    currentDirectorySearchIndex = -1;
-    currentDirectorySearchSkippedFiles = 0;
-    currentDirectorySearchLoading = true;
-    currentDirectorySearchError = '';
-    scheduleDirectorySearch(currentDocumentSearchQuery);
+    appContext.search.currentDirectoryResults = [];
+    appContext.search.currentDirectoryIndex = -1;
+    appContext.search.currentDirectorySkippedFiles = 0;
+    appContext.search.currentDirectoryLoading = true;
+    appContext.search.currentDirectoryError = '';
+    scheduleDirectorySearch(appContext.search.currentDocumentQuery);
     renderDirectorySearchUi();
     return;
   }
-  applyDocumentSearchHighlights(currentDocumentSearchQuery);
+  applyDocumentSearchHighlights(appContext.search.currentDocumentQuery);
 }
 
 function clearDocumentSearchQuery() {
-  if (documentSearchInputEl) {
-    documentSearchInputEl.value = '';
+  if (appContext.elements.documentSearchInputEl) {
+    appContext.elements.documentSearchInputEl.value = '';
   }
-  if (documentSearchDebounceTimer) {
-    clearTimeout(documentSearchDebounceTimer);
-    documentSearchDebounceTimer = null;
+  if (appContext.search.documentDebounceTimer) {
+    clearTimeout(appContext.search.documentDebounceTimer);
+    appContext.search.documentDebounceTimer = null;
   }
-  documentSearchFetchGeneration += 1;
-  currentDocumentSearchQuery = '';
-  pendingDirectorySearchNavigation = null;
-  currentDirectorySearchResults = [];
-  currentDirectorySearchIndex = -1;
-  currentDirectorySearchSkippedFiles = 0;
-  currentDirectorySearchLoading = false;
-  currentDirectorySearchError = '';
+  appContext.search.documentFetchGeneration += 1;
+  appContext.search.currentDocumentQuery = '';
+  appContext.search.pendingDirectoryNavigation = null;
+  appContext.search.currentDirectoryResults = [];
+  appContext.search.currentDirectoryIndex = -1;
+  appContext.search.currentDirectorySkippedFiles = 0;
+  appContext.search.currentDirectoryLoading = false;
+  appContext.search.currentDirectoryError = '';
   clearDocumentSearchHighlights();
-  if (isDirMode) {
+  if (appContext.config.isDirMode) {
     renderDirectorySearchUi();
   }
 }
 
 function syncDocumentSearchAfterContentUpdate(options) {
   options = options || {};
-  if (!documentSearchInputEl) return;
-  if (isDirMode) {
-    currentDocumentSearchQuery = (documentSearchInputEl.value || '').trim();
-    applyDocumentSearchHighlights(currentDocumentSearchQuery);
+  if (!appContext.elements.documentSearchInputEl) return;
+  if (appContext.config.isDirMode) {
+    appContext.search.currentDocumentQuery = (appContext.elements.documentSearchInputEl.value || '').trim();
+    applyDocumentSearchHighlights(appContext.search.currentDocumentQuery);
     applyPendingDirectorySearchNavigation();
-    if (currentDocumentSearchQuery && options.requeryDirectorySearch !== false) {
-      scheduleDirectorySearch(currentDocumentSearchQuery);
+    if (appContext.search.currentDocumentQuery && options.requeryDirectorySearch !== false) {
+      scheduleDirectorySearch(appContext.search.currentDocumentQuery);
     }
     renderDirectorySearchUi();
     return;
   }
-  applyDocumentSearchQuery(documentSearchInputEl.value);
+  applyDocumentSearchQuery(appContext.elements.documentSearchInputEl.value);
 }
 
 function openDocumentSearch() {
@@ -1134,20 +1134,20 @@ function openDocumentSearch() {
   if (sidebarEl) {
     sidebarEl.classList.add('open');
   }
-  if (documentSearchInputEl) {
-    documentSearchInputEl.focus();
-    documentSearchInputEl.select();
+  if (appContext.elements.documentSearchInputEl) {
+    appContext.elements.documentSearchInputEl.focus();
+    appContext.elements.documentSearchInputEl.select();
   }
 }
 
 function setupDocumentSearch() {
-  if (!documentSearchInputEl) return;
+  if (!appContext.elements.documentSearchInputEl) return;
 
-  documentSearchInputEl.addEventListener('input', function() {
-    applyDocumentSearchQuery(documentSearchInputEl.value);
+  appContext.elements.documentSearchInputEl.addEventListener('input', function() {
+    applyDocumentSearchQuery(appContext.elements.documentSearchInputEl.value);
   });
 
-  documentSearchInputEl.addEventListener('keydown', function(event) {
+  appContext.elements.documentSearchInputEl.addEventListener('keydown', function(event) {
     if (event.key === 'Enter') {
       event.preventDefault();
       moveDocumentSearch(event.shiftKey ? -1 : 1);
@@ -1155,28 +1155,28 @@ function setupDocumentSearch() {
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      if (documentSearchInputEl.value) {
+      if (appContext.elements.documentSearchInputEl.value) {
         clearDocumentSearchQuery();
       } else {
-        documentSearchInputEl.blur();
+        appContext.elements.documentSearchInputEl.blur();
       }
     }
   });
 
-  if (documentSearchPrevEl) {
-    documentSearchPrevEl.addEventListener('click', function() {
+  if (appContext.elements.documentSearchPrevEl) {
+    appContext.elements.documentSearchPrevEl.addEventListener('click', function() {
       moveDocumentSearch(-1);
     });
   }
-  if (documentSearchNextEl) {
-    documentSearchNextEl.addEventListener('click', function() {
+  if (appContext.elements.documentSearchNextEl) {
+    appContext.elements.documentSearchNextEl.addEventListener('click', function() {
       moveDocumentSearch(1);
     });
   }
-  if (documentSearchClearEl) {
-    documentSearchClearEl.addEventListener('click', function() {
+  if (appContext.elements.documentSearchClearEl) {
+    appContext.elements.documentSearchClearEl.addEventListener('click', function() {
       clearDocumentSearchQuery();
-      documentSearchInputEl.focus();
+      appContext.elements.documentSearchInputEl.focus();
     });
   }
 
@@ -1192,25 +1192,25 @@ function setupDocumentSearch() {
 }
 
 function applyPendingUpdate() {
-  if (!pendingUpdate) return;
-  if (pendingUpdateTimer) {
-    clearTimeout(pendingUpdateTimer);
-    pendingUpdateTimer = null;
+  if (!appContext.state.pendingUpdate) return;
+  if (appContext.state.pendingUpdateTimer) {
+    clearTimeout(appContext.state.pendingUpdateTimer);
+    appContext.state.pendingUpdateTimer = null;
   }
-  if (pendingUpdate.refresh) {
-    var refreshFile = pendingUpdate.file;
-    pendingUpdate = null;
-    if (isDirMode && refreshFile) {
+  if (appContext.state.pendingUpdate.refresh) {
+    var refreshFile = appContext.state.pendingUpdate.file;
+    appContext.state.pendingUpdate = null;
+    if (appContext.config.isDirMode && refreshFile) {
       selectFile(refreshFile, false);
     }
     return;
   }
-  if (isDirMode && pendingUpdate.file && pendingUpdate.file !== currentFile) {
-    pendingUpdate = null;
+  if (appContext.config.isDirMode && appContext.state.pendingUpdate.file && appContext.state.pendingUpdate.file !== appContext.state.currentFile) {
+    appContext.state.pendingUpdate = null;
     return;
   }
-  var data = pendingUpdate;
-  pendingUpdate = null;
+  var data = appContext.state.pendingUpdate;
+  appContext.state.pendingUpdate = null;
   updateContent(data);
   hideWsServerErrorBanner();
   hideFileFetchErrorBanner();
@@ -1245,23 +1245,23 @@ let updateContent = function updateContent(data, options) {
     });
   }
 
-  if (pendingUpdateTimer) {
-    clearTimeout(pendingUpdateTimer);
-    pendingUpdateTimer = null;
+  if (appContext.state.pendingUpdateTimer) {
+    clearTimeout(appContext.state.pendingUpdateTimer);
+    appContext.state.pendingUpdateTimer = null;
   }
-  pendingUpdate = null;
+  appContext.state.pendingUpdate = null;
   var scrollY = window.scrollY;
   var scrollMode = options.scrollMode || 'preserve';
   var preservedActiveTocId = typeof getCurrentActiveTocId === 'function' ? getCurrentActiveTocId() : '';
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
-  // 比較対象は contentEl の現在 HTML ではなく lastAppliedContent (キャッシュ変数)。
+  // 比較対象は contentEl の現在 HTML ではなく appContext.state.lastAppliedContent (キャッシュ変数)。
   // enhanceContentInteractions が描画後に DOM を改変するため DOM 比較は常に mismatch する。
-  // 詳細は bootstrap.js の lastAppliedContent 宣言コメント参照。
-  if (typeof safeData.content === 'string' && safeData.content !== lastAppliedContent) {
+  // 詳細は bootstrap.js の appContext.state.lastAppliedContent 宣言コメント参照。
+  if (typeof safeData.content === 'string' && safeData.content !== appContext.state.lastAppliedContent) {
     contentEl.innerHTML = safeData.content;
-    lastAppliedContent = safeData.content;
+    appContext.state.lastAppliedContent = safeData.content;
   }
   if (typeof safeData.toc === 'string' && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(safeData.toc)) {
     tocEl.innerHTML = safeData.toc;
@@ -1304,7 +1304,7 @@ let updateContent = function updateContent(data, options) {
   });
 
   updateDocumentStats();
-  syncDocumentChrome(currentFile);
+  syncDocumentChrome(appContext.state.currentFile);
   enhanceContentInteractions();
   if (typeof syncDocumentSearchAfterContentUpdate === 'function') {
     syncDocumentSearchAfterContentUpdate(options);
@@ -1313,17 +1313,7 @@ let updateContent = function updateContent(data, options) {
   if (typeof hideQuoteSelectionAction === 'function') {
     hideQuoteSelectionAction();
   }
-  if (!hasContractViolation && typeof rememberAppliedLiveUpdate === 'function') {
-    rememberAppliedLiveUpdate(safeData);
+  if (!hasContractViolation && appContext.websocket) {
+    appContext.websocket.rememberAppliedLiveUpdate(safeData);
   }
 };
-
-setupDocumentSearch();
-setupContentLinkNavigation();
-setupMemoLinkNavigation();
-
-// テスト専用 expose。production では window に公開しない。
-// E2E は page.addInitScript で window.__MV_E2E__ = true を事前注入する。
-if (window.__MV_E2E__ === true) {
-  window.updateContent = updateContent;
-}

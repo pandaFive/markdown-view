@@ -514,11 +514,14 @@ mod tests {
         });
 
         assert!(html.contains("function ensurePendingUpdateTimer()"));
-        assert!(html.contains("if (data.refresh && isDirMode && currentFile) {"));
+        assert!(
+            html.contains("if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {")
+        );
         assert!(html.contains("if (isTextSelected()) {"));
-        assert!(html.contains("pendingUpdate = { refresh: true, file: currentFile };"));
+        assert!(html
+            .contains("ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };"));
         assert!(html.contains("ensurePendingUpdateTimer();"));
-        assert!(html.contains("if (pendingUpdate.refresh) {"));
+        assert!(html.contains("if (appContext.state.pendingUpdate.refresh) {"));
         assert!(html.contains("selectFile(refreshFile, false);"));
     }
 
@@ -547,14 +550,14 @@ mod tests {
         assert!(html.contains("function isMemoRefreshMessage(data)"));
         assert!(html.contains("function applyRemoteMemoUpdate(data)"));
         assert!(html.contains("function queueRemoteMemoReload(data)"));
-        assert!(html.contains("var pendingMemoReload = null;"));
+        assert!(html.contains("pendingReload: null"));
         assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
-        assert!(html.contains("if (pendingMemoReload === null) return false;"));
+        assert!(html.contains("if (appContext.memo.pendingReload === null) return false;"));
         assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
-        assert!(html.contains("if (applyRemoteMemoUpdate(data)) {"));
+        assert!(html.contains("if (deps.applyRemoteMemoUpdate(data)) {"));
         assert!(html.contains("if (isMemoRefreshMessage(data)) {"));
-        assert!(html.contains("if (queueRemoteMemoReload(data)) {"));
-        assert!(html.contains("loadMemo(file, fetchGeneration);"));
+        assert!(html.contains("if (deps.queueRemoteMemoReload(data)) {"));
+        assert!(html.contains("loadMemo(file, appContext.fetch.generation);"));
     }
 
     #[test]
@@ -579,7 +582,7 @@ mod tests {
         });
 
         assert!(html.contains("function getMemoRemoteUpdateBlockReason()"));
-        assert!(html.contains("pendingMemoReload = data.file;"));
+        assert!(html.contains("appContext.memo.pendingReload = data.file;"));
         assert!(html.contains("return flushPendingMemoReloadIfSafe();"));
     }
 
@@ -622,7 +625,7 @@ mod tests {
             sidebar: SidebarParams::SingleFile,
         });
 
-        assert!(html.contains("var LIVE_STATUS_LABELS = {"));
+        assert!(html.contains("liveStatus: {"));
         assert!(html.contains("function setLiveStatus(state) {"));
         assert!(!html.contains("function setLiveStatus(state, label) {"));
     }
