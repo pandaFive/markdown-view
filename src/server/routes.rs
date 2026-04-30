@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use super::files::{list_markdown_files, search_directory, SearchResponse, MAX_FILE_SIZE};
+use super::files::{SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
 };
@@ -20,9 +20,6 @@ use super::service::{
 use super::session::handle_socket;
 use super::state::AppState;
 use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
-
-#[cfg(test)]
-use super::files::{resolve_route_target, ResolvedTarget, RouteTargetRequest};
 
 // メモ本文の保存上限は save_route_memo 側の MAX_FILE_SIZE で判定する。
 // ここは JSON envelope と string escape を含む HTTP body の上限。
@@ -95,35 +92,6 @@ fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
             file_list,
             current_file: current_file.as_deref(),
         },
-    }
-}
-
-#[derive(Debug)]
-#[cfg(test)]
-struct RouteContext<'a> {
-    _state: &'a Arc<AppState>,
-    _target: ResolvedTarget,
-    request: RouteTargetRequest<'a>,
-}
-
-#[cfg(test)]
-impl<'a> RouteContext<'a> {
-    fn resolve(
-        state: &'a Arc<AppState>,
-        headers: &HeaderMap,
-        request: RouteTargetRequest<'a>,
-    ) -> Result<Self, ApiError> {
-        ensure_allowed_request_host(headers)?;
-        let target = resolve_route_target(state, request)?;
-        Ok(Self {
-            _state: state,
-            _target: target,
-            request,
-        })
-    }
-
-    fn memo_request(&self) -> RouteTargetRequest<'a> {
-        RouteTargetRequest::api_memo(self.request.query_file())
     }
 }
 
@@ -214,19 +182,7 @@ async fn api_files_handler(
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
     ensure_allowed_request_host(&headers)?;
-
-    if let Some(base) = state.mode().directory() {
-        let files = list_markdown_files(base).map_err(|e| {
-            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ファイル一覧の取得に失敗しました",
-            )
-        })?;
-        Ok(Json(files))
-    } else {
-        Ok(Json(vec![]))
-    }
+    Ok(Json(service::list_files(&state)?))
 }
 
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
@@ -236,25 +192,7 @@ async fn api_search_handler(
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     ensure_allowed_request_host(&headers)?;
-
-    let query = query.q.unwrap_or_default();
-    let Some(base_dir) = state.mode().directory() else {
-        return Ok(Json(SearchResponse {
-            query: query.trim().to_string(),
-            results: Vec::new(),
-            searched_files: 0,
-            skipped_files: 0,
-        }));
-    };
-
-    let response = search_directory(base_dir, &query).await.map_err(|error| {
-        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ディレクトリ検索に失敗しました",
-        )
-    })?;
-
+    let response = service::search(&state, query.q.unwrap_or_default()).await?;
     Ok(Json(response))
 }
 
@@ -272,58 +210,4 @@ async fn ws_handler(
             .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::broadcast;
-
-    use super::super::files::RouteTargetKind;
-
-    fn create_directory_state(base_dir: &std::path::Path) -> Arc<AppState> {
-        let (tx, _rx) = broadcast::channel(16);
-        Arc::new(AppState::new(
-            super::super::state::AppMode::new_directory(base_dir).unwrap(),
-            false,
-            None,
-            tx,
-        ))
-    }
-
-    #[test]
-    fn test_route_context_pageからmemoリクエストを派生できる() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
-        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
-        std::fs::write(dir.path().join("docs/guide.md"), "# Guide").unwrap();
-        let state = create_directory_state(dir.path());
-        let mut headers = HeaderMap::new();
-        headers.insert("Host", "127.0.0.1:3000".parse().unwrap());
-
-        let context = RouteContext::resolve(
-            &state,
-            &headers,
-            RouteTargetRequest::page(Some("docs/guide.md")),
-        )
-        .unwrap();
-
-        let memo_request = context.memo_request();
-        assert_eq!(memo_request.kind(), RouteTargetKind::ApiMemo);
-        assert_eq!(memo_request.query_file(), Some("docs/guide.md"));
-    }
-
-    #[test]
-    fn test_route_context_不正hostを拒否する() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
-        let state = create_directory_state(dir.path());
-        let mut headers = HeaderMap::new();
-        headers.insert("Host", "evil.example:3000".parse().unwrap());
-
-        let error = RouteContext::resolve(&state, &headers, RouteTargetRequest::page(None))
-            .expect_err("不正なHostヘッダは拒否されるべき");
-
-        assert_eq!(error.0, StatusCode::FORBIDDEN);
-    }
 }

@@ -1,7 +1,10 @@
+use axum::http::StatusCode;
+
 use super::files::{
-    load_route_memo, load_route_update, resolve_route_target, save_route_memo, ResolvedTarget,
-    RouteTargetRequest,
+    list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse,
 };
+use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
 use super::state::AppState;
 use crate::template::{MemoResponse, MemoUpdateMessage, UpdateMessage};
@@ -140,6 +143,39 @@ pub(super) async fn save_memo(
     Ok(memo)
 }
 
+pub(super) fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
+    if let Some(base) = state.mode().directory() {
+        list_markdown_files(base).map_err(|error| {
+            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ファイル一覧の取得に失敗しました",
+            )
+        })
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
+    let Some(base_dir) = state.mode().directory() else {
+        return Ok(SearchResponse {
+            query: query.trim().to_string(),
+            results: Vec::new(),
+            searched_files: 0,
+            skipped_files: 0,
+        });
+    };
+
+    search_directory(base_dir, &query).await.map_err(|error| {
+        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ディレクトリ検索に失敗しました",
+        )
+    })
+}
+
 fn broadcast_saved_memo(state: &AppState, file: String) {
     if state.tx().receiver_count() == 0 {
         return;
@@ -168,6 +204,7 @@ mod tests {
     use super::*;
     use tokio::sync::broadcast;
 
+    use crate::server::files::RouteTargetKind;
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
 
@@ -207,6 +244,16 @@ mod tests {
     #[test]
     fn test_sidebar_view_single_fileを作れる() {
         assert_eq!(SidebarView::single_file(), SidebarView::SingleFile);
+    }
+
+    #[test]
+    fn test_route_target_request_pageからmemoリクエストを派生できる() {
+        let request = RouteTargetRequest::page(Some("docs/guide.md"));
+
+        let memo_request = RouteTargetRequest::api_memo(request.query_file());
+
+        assert_eq!(memo_request.kind(), RouteTargetKind::ApiMemo);
+        assert_eq!(memo_request.query_file(), Some("docs/guide.md"));
     }
 
     #[tokio::test]
@@ -361,5 +408,64 @@ mod tests {
 
         assert_eq!(error.0, axum::http::StatusCode::NOT_FOUND);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_list_files_ディレクトリモードではmarkdown一覧を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        std::fs::write(dir.path().join("note.txt"), "not markdown").unwrap();
+        std::fs::create_dir_all(dir.path().join("guide")).unwrap();
+        std::fs::write(dir.path().join("guide/setup.md"), "# Setup").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let files = list_files(&state).unwrap();
+
+        assert_eq!(
+            files,
+            vec!["README.md".to_string(), "guide/setup.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_list_files_単一ファイルモードでは空配列を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, "# Note").unwrap();
+        let state = create_single_file_state(&file_path);
+
+        let files = list_files(&state).unwrap();
+
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードでは検索結果を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, " needle ".to_string()).await.unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 2);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "README.md");
+    }
+
+    #[tokio::test]
+    async fn test_search_単一ファイルモードでは空結果を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, "# Note\n\nneedle").unwrap();
+        let state = create_single_file_state(&file_path);
+
+        let response = search(&state, "needle".to_string()).await.unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(response.results.is_empty());
     }
 }
