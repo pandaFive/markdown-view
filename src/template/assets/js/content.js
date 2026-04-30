@@ -254,7 +254,7 @@ function applyContentAnchorNavigation(hash, replace) {
 
   // 行範囲があれば優先（より詳細な位置へジャンプ）
   if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start, scrollBehavior)) {
-    if (parsed.headingId && typeof markPendingTocNavigation === 'function') {
+    if (parsed.headingId) {
       markPendingTocNavigation(parsed.headingId);
     }
     setLocationHash(hash, replace);
@@ -265,9 +265,7 @@ function applyContentAnchorNavigation(hash, replace) {
   if (parsed.headingId) {
     var targetEl = document.getElementById(parsed.headingId);
     if (!targetEl) return false;
-    if (typeof markPendingTocNavigation === 'function') {
-      markPendingTocNavigation(parsed.headingId);
-    }
+    markPendingTocNavigation(parsed.headingId);
     setLocationHash(hash, replace);
     targetEl.scrollIntoView({ block: 'start', behavior: scrollBehavior });
     return true;
@@ -288,12 +286,8 @@ function restoreContentNavigationFromLocation() {
     }
 
     window.scrollTo(0, 0);
-    if (typeof clearPendingTocNavigation === 'function') {
-      clearPendingTocNavigation();
-    }
-    if (typeof restoreActiveTocHeading === 'function') {
-      restoreActiveTocHeading('');
-    }
+    clearPendingTocNavigation();
+    restoreActiveTocHeading('');
   });
 }
 
@@ -1127,9 +1121,7 @@ function syncDocumentSearchAfterContentUpdate(options) {
 }
 
 function openDocumentSearch() {
-  if (typeof activateSidebarTab === 'function') {
-    activateSidebarTab('toc');
-  }
+  activateSidebarTab('toc');
   var sidebarEl = document.getElementById('sidebar');
   if (sidebarEl) {
     sidebarEl.classList.add('open');
@@ -1252,7 +1244,7 @@ let updateContent = function updateContent(data, options) {
   appContext.state.pendingUpdate = null;
   var scrollY = window.scrollY;
   var scrollMode = options.scrollMode || 'preserve';
-  var preservedActiveTocId = typeof getCurrentActiveTocId === 'function' ? getCurrentActiveTocId() : '';
+  var preservedActiveTocId = getCurrentActiveTocId();
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
@@ -1267,12 +1259,8 @@ let updateContent = function updateContent(data, options) {
     tocEl.innerHTML = safeData.toc;
   }
 
-  if (typeof setupTocTracking === 'function') {
-    setupTocTracking();
-  }
-  if (typeof suppressTocTrackingFor === 'function') {
-    suppressTocTrackingFor(120);
-  }
+  setupTocTracking();
+  suppressTocTrackingFor(120);
 
   requestAnimationFrame(function() {
     var currentScrollY = window.scrollY || window.pageYOffset;
@@ -1292,27 +1280,19 @@ let updateContent = function updateContent(data, options) {
         if (options.clearHashOnMiss !== false) {
           setLocationHash('', true);
         }
-        if (typeof clearPendingTocNavigation === 'function') {
-          clearPendingTocNavigation();
-        }
+        clearPendingTocNavigation();
       }
     }
     updateReadingProgress();
-    if (typeof restoreActiveTocHeading === 'function') {
-      restoreActiveTocHeading(preservedActiveTocId);
-    }
+    restoreActiveTocHeading(preservedActiveTocId);
   });
 
   updateDocumentStats();
   syncDocumentChrome(appContext.state.currentFile);
   enhanceContentInteractions();
-  if (typeof syncDocumentSearchAfterContentUpdate === 'function') {
-    syncDocumentSearchAfterContentUpdate(options);
-  }
+  syncDocumentSearchAfterContentUpdate(options);
   setupTocFilter();
-  if (typeof hideQuoteSelectionAction === 'function') {
-    hideQuoteSelectionAction();
-  }
+  hideQuoteSelectionAction();
   if (!hasContractViolation && appContext.websocket) {
     appContext.websocket.rememberAppliedLiveUpdate(safeData);
   }

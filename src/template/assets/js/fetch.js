@@ -46,7 +46,7 @@ function getFileFetchErrorMessage(err) {
       case 404:
         return '指定したファイルが見つかりません。';
       case 413:
-        return 'ファイルサイズが上限（' + MAX_FILE_SIZE_MB + 'MB）を超えています。';
+        return 'ファイルサイズが上限（' + appContext.config.maxFileSizeMb + 'MB）を超えています。';
       case 500:
         return 'サーバー内部エラーが発生しました。';
       default:
@@ -76,9 +76,7 @@ function selectFile(file, pushHistory, options) {
     clearTimeout(appContext.state.pendingUpdateTimer);
     appContext.state.pendingUpdateTimer = null;
   }
-  if (typeof flushPendingMemoSave === 'function') {
-    flushPendingMemoSave();
-  }
+  flushPendingMemoSave();
   appContext.state.currentFile = file;
   if (pushHistory) setFileParam(file, false, options.historyHash);
   updateFileListActive(file);
@@ -96,7 +94,7 @@ function selectFile(file, pushHistory, options) {
   .then(function(data) {
     hideFileFetchErrorBanner();
     if (gen !== appContext.fetch.generation) return;
-    if (!appContext.config.isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
+    if (!appContext.config.isDirMode && previousFile && previousFile !== file) {
       clearDocumentSearchQuery();
     }
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
@@ -115,9 +113,7 @@ function selectFile(file, pushHistory, options) {
       updateFileListActive(appContext.state.currentFile);
     }
     syncDocumentChrome(appContext.state.currentFile);
-    if (typeof loadMemo === 'function') {
-      loadMemo(appContext.state.currentFile, gen);
-    }
+    loadMemo(appContext.state.currentFile, gen);
     setLiveStatus('live');
   })
   .catch(function(err) {
@@ -130,16 +126,12 @@ function selectFile(file, pushHistory, options) {
     ) {
       appContext.search.currentDirectoryIndex = appContext.search.pendingDirectoryNavigation.previousResultIndex;
       appContext.search.pendingDirectoryNavigation = null;
-      if (typeof renderDirectorySearchUi === 'function') {
-        renderDirectorySearchUi();
-      }
+      renderDirectorySearchUi();
     }
     appContext.state.currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory, previousHash);
-    if (typeof loadMemo === 'function') {
-      loadMemo(previousFile, gen);
-    }
+    loadMemo(previousFile, gen);
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     setLiveStatus('error');
   });

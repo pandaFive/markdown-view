@@ -28,6 +28,7 @@ declare global {
     __realWsOnmessage?: (ev: { data: string }) => void;
     __dispatchWsMessage?: (payload: unknown) => void;
     __markPendingCalls?: number;
+    __wsCloseCalls?: number;
     __tocActiveChanges?: string[];
     __stopTocObserver?: () => void;
     __clickObservations?: Record<string, MvE2E.ClickObservation>;

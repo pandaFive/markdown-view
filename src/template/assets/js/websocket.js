@@ -89,6 +89,7 @@ function createWebSocketController(ctx, deps) {
         console.error('[markdown-view] JSONパースエラー:', e);
         showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
         setLiveStatus('error');
+        socket.close();
         return;
       }
       hideWsParseErrorBanner();
@@ -113,6 +114,13 @@ function createWebSocketController(ctx, deps) {
         }
       }
       if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {
+        if (data.file && data.file !== ctx.state.currentFile) {
+          console.warn('[markdown-view] 現在のファイルと異なる refresh 通知を無視しました。', {
+            currentFile: ctx.state.currentFile,
+            messageFile: data.file
+          });
+          return;
+        }
         if (isTextSelected()) {
           discardBufferedLiveUpdate();
           ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };
@@ -124,7 +132,7 @@ function createWebSocketController(ctx, deps) {
       }
       if (ctx.config.isDirMode && data.file) {
         if (data.file !== ctx.state.currentFile) {
-          if (ctx.search.currentDocumentQuery && typeof scheduleDirectorySearch === 'function') {
+          if (ctx.search.currentDocumentQuery) {
             scheduleDirectorySearch(ctx.search.currentDocumentQuery);
           }
           return;

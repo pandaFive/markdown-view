@@ -1,5 +1,4 @@
 'use strict';
-var MAX_FILE_SIZE_MB = __MAX_FILE_SIZE_MB__;
 
 function createAppContext(doc) {
   var html = doc.documentElement;
@@ -8,11 +7,17 @@ function createAppContext(doc) {
 
   return {
     config: {
-      maxFileSizeMb: MAX_FILE_SIZE_MB,
+      maxFileSizeMb: __MAX_FILE_SIZE_MB__,
       isDirMode: html.getAttribute('data-dir-mode') === 'true'
     },
     state: {
       currentFile: html.getAttribute('data-current-file') || '',
+      // updateContent の no-op 判定キャッシュ。
+      // 初期化部が enhanceContentInteractions() で heading-anchor / code-copy ボタンを
+      // #content に追記するため、SSR 時点の contentRoot.innerHTML は WS 経由 data.content
+      // と必ず乖離する（副次的にブラウザの HTML 正規化差もある）。DOM ではなく最後に
+      // 適用した data.content 文字列を比較対象にすることで、初回 broadcast 以降の
+      // .jump-highlight 等の一時 DOM 状態を不要に壊さない。
       lastAppliedContent: null,
       pendingUpdate: null,
       pendingUpdateTimer: null,

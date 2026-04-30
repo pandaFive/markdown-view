@@ -36,6 +36,9 @@ function isTextSelected() {
 
 function ensurePendingUpdateTimer() {
   if (!appContext.state.pendingUpdateTimer) {
+    // 選択状態が長時間維持されると live update が永久に止まるため、30秒で強制適用する。
+    // 主目的は、マウスドラッグ中の innerHTML 更新でブラウザ選択が破壊されるのを避けつつ、
+    // 選択解除イベントを取りこぼした場合でも live 表示へ戻すこと。
     appContext.state.pendingUpdateTimer = setTimeout(function() {
       appContext.state.pendingUpdateTimer = null;
       applyPendingUpdate();

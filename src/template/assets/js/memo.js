@@ -159,7 +159,7 @@ function getMemoErrorMessage(err) {
       case 404:
         return 'メモ対象のファイルが見つかりません。';
       case 413:
-        return 'メモサイズが上限（' + MAX_FILE_SIZE_MB + 'MB）を超えています。';
+        return 'メモサイズが上限（' + appContext.config.maxFileSizeMb + 'MB）を超えています。';
       case 422:
         return 'メモはUTF-8テキストで保存してください。';
       case 500:
@@ -183,8 +183,20 @@ function loadMemo(file, ownerGeneration) {
   })
   .then(parseJsonResponse)
   .then(function(data) {
-    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) return;
-    if (requestGeneration !== appContext.memo.loadGeneration) return;
+    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) {
+      console.warn('[markdown-view] 古いメモ読込レスポンスを破棄しました。', {
+        ownerGeneration: ownerGeneration,
+        currentGeneration: appContext.fetch.generation
+      });
+      return;
+    }
+    if (requestGeneration !== appContext.memo.loadGeneration) {
+      console.warn('[markdown-view] 後続のメモ読込があるため古いレスポンスを破棄しました。', {
+        requestGeneration: requestGeneration,
+        currentGeneration: appContext.memo.loadGeneration
+      });
+      return;
+    }
     if (applyMemoData(data) !== false) {
       setMemoSaveStatus('saved', '保存済み');
     }
@@ -192,8 +204,20 @@ function loadMemo(file, ownerGeneration) {
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ取得エラー:', err);
-    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) return;
-    if (requestGeneration !== appContext.memo.loadGeneration) return;
+    if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) {
+      console.warn('[markdown-view] 古いメモ読込エラーを破棄しました。', {
+        ownerGeneration: ownerGeneration,
+        currentGeneration: appContext.fetch.generation
+      });
+      return;
+    }
+    if (requestGeneration !== appContext.memo.loadGeneration) {
+      console.warn('[markdown-view] 後続のメモ読込があるため古いエラーを破棄しました。', {
+        requestGeneration: requestGeneration,
+        currentGeneration: appContext.memo.loadGeneration
+      });
+      return;
+    }
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });
@@ -243,8 +267,17 @@ function saveMemoNow(targetFileOverride, rawOverride) {
   })
   .then(parseJsonResponse)
   .then(function(data) {
-    if (requestGeneration !== appContext.memo.saveGeneration) return;
-    if (!appContext.elements.memoEditorEl) return;
+    if (requestGeneration !== appContext.memo.saveGeneration) {
+      console.warn('[markdown-view] 後続のメモ保存があるため古いレスポンスを破棄しました。', {
+        requestGeneration: requestGeneration,
+        currentGeneration: appContext.memo.saveGeneration
+      });
+      return;
+    }
+    if (!appContext.elements.memoEditorEl) {
+      console.warn('[markdown-view] メモエディタが見つからないため保存レスポンスを反映できません。');
+      return;
+    }
     if (targetFileOverride === undefined && appContext.elements.memoEditorEl.value !== raw) {
       setMemoSaveStatus('dirty', '未保存');
       return;
@@ -263,7 +296,13 @@ function saveMemoNow(targetFileOverride, rawOverride) {
   })
   .catch(function(err) {
     console.error('[markdown-view] メモ保存エラー:', err);
-    if (requestGeneration !== appContext.memo.saveGeneration) return;
+    if (requestGeneration !== appContext.memo.saveGeneration) {
+      console.warn('[markdown-view] 後続のメモ保存があるため古いエラーを破棄しました。', {
+        requestGeneration: requestGeneration,
+        currentGeneration: appContext.memo.saveGeneration
+      });
+      return;
+    }
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });

@@ -132,9 +132,7 @@ function setupDirectoryHistoryNavigation() {
       return;
     }
 
-    if (typeof restoreContentNavigationFromLocation === 'function') {
-      restoreContentNavigationFromLocation();
-    }
+    restoreContentNavigationFromLocation();
   });
 }
 

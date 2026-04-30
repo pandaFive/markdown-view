@@ -206,3 +206,36 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
 
   await expect(page.locator('#content')).toContainText('reconnected update');
 });
+
+test('WebSocketが不正JSONを受信したら接続を閉じて再接続経路に入る', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  const parseResult = await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    const realWsOnmessage = window.__realWsOnmessage;
+    if (!lastWs || !realWsOnmessage) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const originalClose = lastWs.close.bind(lastWs);
+    window.__wsCloseCalls = 0;
+    lastWs.close = function(...args: Parameters<WebSocket['close']>) {
+      window.__wsCloseCalls = (window.__wsCloseCalls ?? 0) + 1;
+      return originalClose(...args);
+    };
+
+    realWsOnmessage({ data: '{invalid json' });
+    return {
+      closeCalls: window.__wsCloseCalls ?? 0,
+      liveState: document.getElementById('live-status')?.dataset.state ?? '',
+      bannerText: document.getElementById('ws-parse-error-banner')?.textContent ?? ''
+    };
+  });
+
+  expect(parseResult).toEqual(expect.objectContaining({
+    closeCalls: 1,
+    liveState: 'error'
+  }));
+  expect(parseResult.bannerText).toContain('不正なJSON');
+});
