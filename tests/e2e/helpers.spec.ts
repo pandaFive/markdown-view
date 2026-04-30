@@ -84,3 +84,33 @@ test('WebSocket dispatchはstale bridgeを失敗させる', async ({ page }) => 
     toc: '<ul><li><a href="#readme">README</a></li></ul>'
   })).rejects.toThrow(/WebSocket test harness bridge is stale/);
 });
+
+test('WebSocket harnessは再接続後に再安定化すればdispatchできる', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const NativeWebSocket = Object.getPrototypeOf(window.__lastWs!).constructor as typeof WebSocket;
+    window.__lastWs = {
+      onmessage: function(ev: MessageEvent) {
+        const updateContent = window.updateContent;
+        if (!updateContent) {
+          throw new Error('window.updateContent is not exposed for E2E');
+        }
+        updateContent(JSON.parse(ev.data as string));
+      },
+      close: function() {},
+      send: function() {},
+      readyState: NativeWebSocket.OPEN
+    } as unknown as MvE2E.TestWebSocketInstance;
+  });
+
+  await stabilizeWebSocketHarness(page);
+  await dispatchWsMessage(page, {
+    content: '<h1 id="readme">README</h1><p>reconnected update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect(page.locator('#content')).toContainText('reconnected update');
+});

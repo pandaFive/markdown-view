@@ -225,9 +225,16 @@ export async function stabilizeWebSocketHarness(page: Page) {
     }
     // __dispatchWsMessage は MessageEvent を生成せず { data: string } を直接渡すため、
     // E2E ハーネス内では onmessage の契約をテスト用の狭い型へ bridge する。
+    const assertFreshBridge = () => {
+      if (window.__bridgedWs !== window.__lastWs) {
+        throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+      }
+    };
+    window.__bridgedWs = lastWs;
     window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
     lastWs.onmessage = function() {};
     window.__dispatchWsMessage = (payload) => {
+      assertFreshBridge();
       const realWsOnmessage = window.__realWsOnmessage;
       if (!realWsOnmessage) {
         throw new Error('WebSocket test harness message handler is not initialized');
@@ -239,6 +246,9 @@ export async function stabilizeWebSocketHarness(page: Page) {
 
 export async function dispatchWsMessage(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
@@ -252,6 +262,9 @@ export async function dispatchWsMessage(page: Page, payload: unknown) {
 // この helper の後に dispatchWsMessage を続けて呼ぶ用途では使わない。
 export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
@@ -269,6 +282,9 @@ export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload
 
 export async function dispatchWsMessages(page: Page, payloads: unknown[]) {
   await page.evaluate((messagePayloads) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
