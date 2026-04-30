@@ -483,6 +483,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_heading_line_attrsはrelease_fallbackで空属性を返す() {
+        let line_lookup = LineLookup::new("# title");
+        let state = RenderState::new();
+
+        assert_eq!(heading_line_attrs(&line_lookup, &state), "");
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_code_block_line_attrsはrelease_fallbackで空属性を返す() {
+        let line_lookup = LineLookup::new("```rust\nfn main() {}\n```");
+        let state = RenderState::new();
+
+        assert_eq!(code_block_line_attrs(&(0..0), &line_lookup, &state), "");
+    }
+
+    #[test]
     fn test_未処理markdown_eventは観測対象として分類される() {
         let event = Event::InlineMath(pulldown_cmark::CowStr::from("x"));
 

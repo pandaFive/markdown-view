@@ -358,6 +358,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_finish_headingはrelease_fallbackでnoneを返す() {
+        let mut state = RenderState::new();
+
+        assert!(state
+            .finish_heading("heading".to_string(), String::new())
+            .is_none());
+    }
+
+    #[test]
     #[should_panic(expected = "finish_code_block: アクティブなコードブロック")]
     fn test_finish_code_blockは開始なしならpanicする() {
         let mut state = RenderState::new();
