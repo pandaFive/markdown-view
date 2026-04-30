@@ -51,12 +51,6 @@ pub(crate) enum MemoWriteError {
     BeforeRename(MemoBeforeRenameError),
 }
 
-impl From<io::Error> for MemoWriteError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
 impl From<MemoBeforeRenameError> for MemoWriteError {
     fn from(error: MemoBeforeRenameError) -> Self {
         Self::BeforeRename(error)
@@ -148,16 +142,19 @@ async fn write_atomic_with_counter(
     before_rename: &BeforeRenameCheck<'_>,
     counter: u64,
 ) -> Result<(), MemoWriteError> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "memo path must have a parent directory",
-        )
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memo path must have a parent directory",
+            )
+        })
+        .map_err(MemoWriteError::Io)?;
 
     let mut last_already_exists = None;
     for attempt in 0..ATOMIC_TMP_ATTEMPTS {
-        let tmp_path = atomic_tmp_path(path, counter, attempt)?;
+        let tmp_path = atomic_tmp_path(path, counter, attempt).map_err(MemoWriteError::Io)?;
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -223,7 +220,7 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
     let file = match tokio::fs::OpenOptions::new().read(true).open(parent).await {
         Ok(file) => file,
         Err(error) => {
-            tracing::warn!(
+            tracing::error!(
                 "[markdown-view] メモ保存後の親ディレクトリopenに失敗しました: {}",
                 error
             );
@@ -232,7 +229,8 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
     };
 
     if let Err(error) = file.sync_all().await {
-        tracing::warn!(
+        // rename成功後は応答を巻き戻せないためbest-effortだが、クラッシュ耐性の劣化としてerrorで残す。
+        tracing::error!(
             "[markdown-view] メモ保存後の親ディレクトリsyncに失敗しました: {}",
             error
         );
@@ -284,10 +282,8 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
     })
     .await
     .map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("memo atomic replace task failed: {error}"),
-        )
+        tracing::error!("[markdown-view] メモatomic replace task failed: {}", error);
+        io::Error::other(format!("memo atomic replace task failed: {error}"))
     })?
 }
 

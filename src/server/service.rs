@@ -94,7 +94,10 @@ pub(super) async fn load_page(
                 target.file_label(),
                 error
             );
-                MemoResponse::empty(target.relative_path().map(ToOwned::to_owned))
+                MemoResponse::empty_with_load_error(
+                    target.relative_path().map(ToOwned::to_owned),
+                    "メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。",
+                )
             }
         };
     let sidebar = match target.file_list() {
@@ -317,6 +320,10 @@ mod tests {
 
         assert_eq!(page.memo.raw(), "");
         assert_eq!(page.memo.file(), Some("README.md"));
+        assert_eq!(
+            page.memo.load_error(),
+            Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
+        );
     }
 
     #[tokio::test]

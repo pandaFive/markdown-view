@@ -305,6 +305,9 @@ async fn test_indexページ取得_壊れたメモがあっても本文表示は
     let body = resp.text().await.unwrap();
     assert!(body.contains("Body"));
     assert!(body.contains("id=\"memo-editor\""));
+    assert!(body.contains("data-state=\"error\""));
+    assert!(body.contains("編集を無効化しました"));
+    assert!(body.contains("disabled"));
 }
 
 #[tokio::test]

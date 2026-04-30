@@ -13,8 +13,8 @@
 - [x] `delete_route_memo` を all-or-nothing 化する
   - ファイル: `src/server/files/memo.rs` L80-100, `src/server/files/tests.rs` L975
   - 現状: primary sidecar 削除→compat sidecar 必須削除→legacy 必須削除を順次実行し、(2)/(3) で `PermissionDenied` 等が出ると 500 を返すが (1) は既に成功している。テスト `test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す` がこの中間状態を意図仕様として固定している
-  - 対応: 削除順を「全候補の存在確認 → primary を最後に削除」に変更するか、primary 失敗時のみ 500、compat/legacy 失敗は warn ログ + 200 にする。既存テストの仕様も修正
-  - 理由: 「失敗レスポンスを受けたが primary は消えている」状態でクライアントが再試行すると挙動が変わる。原子性の最小担保
+  - 対応: 削除順を「全候補の存在確認 → compat/legacy → primary」に変更し、compat/legacy の I/O エラーは 500 として primary を残す。warn ログ + 200 にすると、残った fallback メモが次回読み込みで復活し「空保存したのにメモが戻る」ため採用しない
+  - 理由: 「失敗レスポンスを受けたが primary は消えている」状態でクライアントが再試行すると挙動が変わる。primary を残すことで読み込み優先順位の整合性を保つ
 
 - [ ] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
   - ファイル: `src/renderer/render.rs` L250-260, `src/renderer/mod.rs` L150-214, `src/renderer/toc.rs`

@@ -81,7 +81,7 @@
 8. `tokio::fs::rename(tmp, path)` で差し替える。
 9. 親ディレクトリ sync を best-effort で試行する。
 
-親ディレクトリ sync は Unix ではディレクトリ open + `sync_all` を試す。プラットフォーム差や permission 差で失敗し得るため、失敗は warn ログに留める。少なくともファイル内容の部分書き込み防止は rename で担保する。
+親ディレクトリ sync は Unix ではディレクトリ open + `sync_all` を試す。プラットフォーム差や permission 差で失敗し得るため、処理自体は best-effort に留める。ただしクラッシュ時の永続性が弱まる運用上重要な劣化なので、失敗は error ログに残す。少なくともファイル内容の部分書き込み防止は rename で担保する。
 
 ### 3.4 tmp 名
 
@@ -151,6 +151,8 @@ save_route_memo
 | compat / legacy | その他 I/O エラー | 500 |
 | primary sidecar | `Ok(())` or `NotFound` | 200 |
 | primary sidecar | その他 I/O エラー | 500 |
+
+compat / legacy の I/O エラーを warn + 200 に落とす案は採用しない。primary sidecar を削除済みとして 200 を返すと、残った compat / legacy が次回読み込みで復活し、「空保存したのにメモが戻る」状態になるためである。500 を返して primary sidecar を残すほうが、ユーザーに失敗を観測させつつ読み込み優先順位の整合性を保てる。
 
 ## 6. テスト設計
 

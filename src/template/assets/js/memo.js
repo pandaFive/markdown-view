@@ -18,6 +18,11 @@ function setMemoSaveStatus(state, text) {
   memoSaveStatusEl.textContent = text;
 }
 
+function setMemoEditorDisabled(disabled) {
+  if (!memoEditorEl) return;
+  memoEditorEl.disabled = !!disabled;
+}
+
 function rememberMemoCaret() {
   if (!memoEditorEl) return;
   memoCaretStart = typeof memoEditorEl.selectionStart === 'number'
@@ -60,12 +65,19 @@ function updateMemoPreview(data) {
 }
 
 function applyMemoData(data, options) {
-  if (!memoEditorEl || !memoPreviewEl || !data) return;
+  if (!memoEditorEl || !memoPreviewEl || !data) return true;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
   if (shouldUpdateEditor) {
     updateMemoEditor(data.raw || '', !!(options && options.preserveSelection));
   }
   updateMemoPreview(data);
+  if (data.load_error) {
+    setMemoEditorDisabled(true);
+    setMemoSaveStatus('error', data.load_error);
+    return false;
+  }
+  setMemoEditorDisabled(false);
+  return true;
 }
 
 function isMemoUpdateMessage(data) {
@@ -168,8 +180,9 @@ function loadMemo(file, ownerGeneration) {
   .then(function(data) {
     if (ownerGeneration !== undefined && ownerGeneration !== fetchGeneration) return;
     if (requestGeneration !== memoLoadGeneration) return;
-    applyMemoData(data);
-    setMemoSaveStatus('saved', '保存済み');
+    if (applyMemoData(data) !== false) {
+      setMemoSaveStatus('saved', '保存済み');
+    }
     flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
@@ -232,7 +245,9 @@ function saveMemoNow(targetFileOverride, rawOverride) {
       if ((data.raw || '') === raw) {
         updateMemoPreview(data);
       } else {
-        applyMemoData(data, { preserveSelection: true });
+        if (applyMemoData(data, { preserveSelection: true }) === false) {
+          return;
+        }
       }
     }
     setMemoSaveStatus('saved', '保存済み');

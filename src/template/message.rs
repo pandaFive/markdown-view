@@ -46,18 +46,33 @@ pub struct MemoResponse {
     /// ディレクトリモード時の対象ファイル相対パス（単一ファイルモードはNone）
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
+    /// メモ読み込み失敗時の利用者向けメッセージ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    load_error: Option<String>,
 }
 
 impl MemoResponse {
     /// メモ応答を生成する。HTML は内部で raw から描画され、整合性が保証される。
     pub fn from_raw(raw: String, file: Option<String>) -> Self {
         let html = render_markdown(&raw);
-        Self { raw, html, file }
+        Self {
+            raw,
+            html,
+            file,
+            load_error: None,
+        }
     }
 
     /// 空メモ応答を生成する
     pub fn empty(file: Option<String>) -> Self {
         Self::from_raw(String::new(), file)
+    }
+
+    /// 読み込み失敗を明示する空メモ応答を生成する。
+    pub fn empty_with_load_error(file: Option<String>, message: impl Into<String>) -> Self {
+        let mut response = Self::empty(file);
+        response.load_error = Some(message.into());
+        response
     }
 
     /// 生のメモ文字列を返す
@@ -73,6 +88,11 @@ impl MemoResponse {
     /// ディレクトリモード時の対象ファイル相対パスを返す
     pub fn file(&self) -> Option<&str> {
         self.file.as_deref()
+    }
+
+    /// メモ読み込み失敗時の利用者向けメッセージを返す
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
     }
 }
 
@@ -137,6 +157,20 @@ mod tests {
 
         let memo_none = MemoResponse::from_raw(String::new(), None);
         assert_eq!(memo_none.file(), None);
+    }
+
+    #[test]
+    fn test_memo_response_load_errorは直列化される() {
+        let memo = MemoResponse::empty_with_load_error(
+            Some("docs/guide.md".to_string()),
+            "メモ読み込み失敗",
+        );
+
+        assert_eq!(memo.raw(), "");
+        assert_eq!(memo.file(), Some("docs/guide.md"));
+        assert_eq!(memo.load_error(), Some("メモ読み込み失敗"));
+        let value = serde_json::to_value(memo).unwrap();
+        assert_eq!(value["load_error"], "メモ読み込み失敗");
     }
 
     #[test]

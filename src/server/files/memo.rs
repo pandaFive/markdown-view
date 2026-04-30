@@ -462,6 +462,7 @@ fn ensure_safe_memo_rename_paths(
         ));
     }
 
+    // HTTP用ApiErrorはMemoFs境界へ出せないため、rename直前検査では利用者向け理由だけを写す。
     ensure_safe_memo_path(final_path, state, target, request).map_err(|_| {
         MemoBeforeRenameError::new("メモ保存先にシンボリックリンクが含まれているため操作できません")
     })?;
@@ -480,7 +481,14 @@ fn first_symlink_component(base_dir: &Path, target: &Path) -> Option<PathBuf> {
             Ok(metadata) if metadata.file_type().is_symlink() => return Some(current),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] メモパス要素のsymlink検査に失敗したため安全側で拒否します ({}): {}",
+                    sanitize_path_for_logging(&current, base_dir),
+                    error
+                );
+                return Some(current);
+            }
         }
     }
     None
@@ -600,5 +608,20 @@ fn memo_read_error_to_api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "メモサイズが上限（10MB）を超えています",
         ),
+    }
+}
+
+#[cfg(test)]
+mod symlink_component_tests {
+    use super::first_symlink_component;
+
+    #[test]
+    fn test_first_symlink_component_メタデータエラーは安全側で拒否する() {
+        let dir = tempfile::tempdir().expect("tempdirを作成できる");
+        let blocking_file = dir.path().join("blocked");
+        std::fs::write(&blocking_file, b"not a directory").expect("検査用ファイルを作成できる");
+        let target = blocking_file.join("memo.md");
+
+        assert_eq!(first_symlink_component(dir.path(), &target), Some(target));
     }
 }

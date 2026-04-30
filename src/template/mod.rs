@@ -660,6 +660,31 @@ mod tests {
     }
 
     #[test]
+    fn test_メモ読み込み失敗時はエラー表示して編集を無効化する() {
+        let content = test_content();
+        let toc = test_toc();
+        let memo =
+            MemoResponse::empty_with_load_error(Some("README.md".to_string()), "メモ読み込み失敗");
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(html.contains("data-state=\"error\""));
+        assert!(html.contains("メモ読み込み失敗"));
+        assert!(html.contains("id=\"memo-editor\""));
+        assert!(html.contains("disabled"));
+        assert!(html.contains("data.load_error"));
+        assert!(html.contains("setMemoEditorDisabled(true)"));
+    }
+
+    #[test]
     fn test_memo_response_fileフィールドが直列化される() {
         let memo = MemoResponse::from_raw("memo".to_string(), Some("docs/guide.md".to_string()));
         let value = serde_json::to_value(memo).unwrap();
