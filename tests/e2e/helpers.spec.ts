@@ -4,6 +4,8 @@ import { test, expect } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
 import {
   dispatchWsMessage,
+  dispatchWsMessageAndDisableRealHandler,
+  dispatchWsMessages,
   resetStandardFixtures,
   selectParagraphText,
   stabilizeWebSocketHarness,
@@ -53,6 +55,16 @@ test('selectParagraphTextは複数候補の部分一致を曖昧として失敗�
     .rejects.toThrow(/ambiguous text match: duplicate target \(2 matches\)/);
 });
 
+test('selectParagraphTextは完全一致でも複数候補を曖昧として失敗させる', async ({ page }) => {
+  await updateContent(page, {
+    content: '<h1 id="readme">README</h1><p>repeated target</p><p>repeated target</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect(selectParagraphText(page, 'repeated target'))
+    .rejects.toThrow(/ambiguous text match: repeated target \(2 matches\)/);
+});
+
 test('resetStandardFixturesはmemo artifactと設定ディレクトリを削除する', async () => {
   await fs.writeFile(path.join(fixtureDir, '.README.md.memo.md'), 'stale memo');
   await fs.mkdir(path.join(fixtureDir, '.markdown-view'), { recursive: true });
@@ -64,22 +76,89 @@ test('resetStandardFixturesはmemo artifactと設定ディレクトリを削除�
   await expect(fs.access(path.join(fixtureDir, '.markdown-view'))).rejects.toThrow();
 });
 
+test('resetStandardFixturesはcleanupMemoArtifacts falseならartifact検査も行わない', async () => {
+  await fs.writeFile(path.join(fixtureDir, '.README.md.memo.md'), 'kept memo');
+  await fs.mkdir(path.join(fixtureDir, '.markdown-view'), { recursive: true });
+  await fs.writeFile(path.join(fixtureDir, '.markdown-view', 'state.json'), '{}');
+
+  await resetStandardFixtures({ cleanupMemoArtifacts: false });
+
+  await expect(fs.access(path.join(fixtureDir, '.README.md.memo.md'))).resolves.toBeUndefined();
+  await expect(fs.access(path.join(fixtureDir, '.markdown-view'))).resolves.toBeUndefined();
+});
+
+test('resetStandardFixturesは削除失敗時に対象パスを含むエラーを返す', async () => {
+  test.skip(process.platform === 'win32', 'POSIX permission semantics are required for this fixture cleanup test');
+
+  const markdownViewPath = path.join(fixtureDir, '.markdown-view');
+  await fs.mkdir(markdownViewPath, { recursive: true });
+  await fs.writeFile(path.join(markdownViewPath, 'state.json'), '{}');
+  await fs.chmod(markdownViewPath, 0o500);
+
+  try {
+    await expect(resetStandardFixtures())
+      .rejects.toThrow(/fixture cleanup failed for \.markdown-view/);
+  } finally {
+    await fs.chmod(markdownViewPath, 0o700).catch(() => {});
+    await fs.rm(markdownViewPath, { recursive: true, force: true });
+  }
+});
+
 test('WebSocket dispatchはstale bridgeを失敗させる', async ({ page }) => {
   await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
   await page.reload();
   await stabilizeWebSocketHarness(page);
 
   await page.evaluate(() => {
-    const NativeWebSocket = Object.getPrototypeOf(window.__lastWs!).constructor as typeof WebSocket;
     window.__lastWs = {
       onmessage: function() {},
       close: function() {},
       send: function() {},
-      readyState: NativeWebSocket.OPEN
+      readyState: WebSocket.OPEN
     } as unknown as MvE2E.TestWebSocketInstance;
   });
 
   await expect(dispatchWsMessage(page, {
+    content: '<h1 id="readme">README</h1><p>stale update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  })).rejects.toThrow(/WebSocket test harness bridge is stale/);
+});
+
+test('WebSocket連続dispatchはstale bridgeを失敗させる', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    window.__lastWs = {
+      onmessage: function() {},
+      close: function() {},
+      send: function() {},
+      readyState: WebSocket.OPEN
+    } as unknown as MvE2E.TestWebSocketInstance;
+  });
+
+  await expect(dispatchWsMessages(page, [{
+    content: '<h1 id="readme">README</h1><p>stale update</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  }])).rejects.toThrow(/WebSocket test harness bridge is stale/);
+});
+
+test('WebSocket handler無効化付きdispatchはstale bridgeを失敗させる', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    window.__lastWs = {
+      onmessage: function() {},
+      close: function() {},
+      send: function() {},
+      readyState: WebSocket.OPEN
+    } as unknown as MvE2E.TestWebSocketInstance;
+  });
+
+  await expect(dispatchWsMessageAndDisableRealHandler(page, {
     content: '<h1 id="readme">README</h1><p>stale update</p>',
     toc: '<ul><li><a href="#readme">README</a></li></ul>'
   })).rejects.toThrow(/WebSocket test harness bridge is stale/);
@@ -105,7 +184,6 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
   await stabilizeWebSocketHarness(page);
 
   await page.evaluate(() => {
-    const NativeWebSocket = Object.getPrototypeOf(window.__lastWs!).constructor as typeof WebSocket;
     window.__lastWs = {
       onmessage: function(ev: MessageEvent) {
         const updateContent = window.updateContent;
@@ -116,7 +194,7 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
       },
       close: function() {},
       send: function() {},
-      readyState: NativeWebSocket.OPEN
+      readyState: WebSocket.OPEN
     } as unknown as MvE2E.TestWebSocketInstance;
   });
 

@@ -75,7 +75,7 @@ WebSocket helper は stabilize 時に bridge 対象の WebSocket を記録し、
 - `window.__realWsOnmessage`: bridge 対象から退避した message handler
 - `window.__dispatchWsMessage`: bridge 対象へ payload を渡す dispatcher
 
-stabilize 実行時に既存 bridge が残っている場合は、同じ `__lastWs` に紐づくものか確認する。別の WebSocket に紐づく bridge が残っていれば、古い handler 残存として失敗させる。再接続後に fake payload を流す必要がある spec は、再接続後の `__lastWs` に対して改めて `stabilizeWebSocketHarness` を呼ぶ。
+stabilize 実行時に既存 bridge が残っている場合は、現在の `__lastWs` へ明示的に張り直す。同じ `__lastWs` に対する再実行では退避済みの実 handler を保持し、別の `__lastWs` に変わっている場合は新しい handler を退避して bridge 対象を更新する。再接続後に fake payload を流す必要がある spec は、再接続後の `__lastWs` に対して改めて `stabilizeWebSocketHarness` を呼ぶ。
 
 `dispatchWsMessage` と `dispatchWsMessages` は、dispatch 前に `window.__bridgedWs === window.__lastWs` を確認する。一致しない場合は `WebSocket test harness bridge is stale` のような明示エラーで失敗する。
 

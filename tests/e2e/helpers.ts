@@ -32,6 +32,19 @@ async function assertMemoArtifactsRemoved() {
   }
 }
 
+async function removeFixtureArtifact(artifactPath: string, options: { recursive?: boolean } = {}) {
+  try {
+    const rmOptions = options.recursive === undefined
+      ? { force: true }
+      : { force: true, recursive: options.recursive };
+    await fs.rm(artifactPath, rmOptions);
+  } catch (error) {
+    const relativePath = path.relative(fixtureDir, artifactPath);
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
+    throw new Error(`fixture cleanup failed for ${relativePath}: ${code}`, { cause: error });
+  }
+}
+
 export type ResetStandardFixturesOptions = {
   cleanupMemoArtifacts?: boolean;
 };
@@ -40,9 +53,9 @@ export async function resetStandardFixtures(options: ResetStandardFixturesOption
   // 既定で memo artifact を掃除し、前テスト残骸の混入を防ぐ。温存したい spec だけ false で opt-out する。
   if (options.cleanupMemoArtifacts ?? true) {
     await Promise.all(
-      (await memoArtifactPaths()).map((memoPath) => fs.rm(memoPath, { force: true }))
+      (await memoArtifactPaths()).map((memoPath) => removeFixtureArtifact(memoPath))
     );
-    await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
+    await removeFixtureArtifact(path.join(fixtureDir, '.markdown-view'), { recursive: true });
     await assertMemoArtifactsRemoved();
   }
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
