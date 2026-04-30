@@ -17,6 +17,7 @@ use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
 };
 use super::messages::{ApiError, BroadcastMessage};
+use super::service::{self, PageRequest, SidebarView};
 use super::session::handle_socket;
 use super::state::AppState;
 use crate::template::{
@@ -29,16 +30,6 @@ use crate::template::{
 // 制御文字など 2 倍を超えて膨らむ極端な JSON 入力は body limit 側で拒否され得る。
 // 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
-
-fn sidebar_directory_name(state: &AppState) -> &str {
-    state
-        .mode()
-        .directory()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Documents")
-}
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -90,6 +81,21 @@ struct SearchQuery {
 struct MemoSaveRequest {
     file: Option<String>,
     raw: String,
+}
+
+fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
+    match sidebar {
+        SidebarView::SingleFile => SidebarParams::SingleFile,
+        SidebarView::Directory {
+            directory_name,
+            file_list,
+            current_file,
+        } => SidebarParams::Directory {
+            directory_name,
+            file_list,
+            current_file: current_file.as_deref(),
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -159,29 +165,6 @@ impl<'a> RouteContext<'a> {
             })
             .unwrap_or_else(|| self.target.file_path().display().to_string())
     }
-
-    fn title(&self) -> &str {
-        self.target
-            .file_path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("markdown-view")
-    }
-
-    fn sidebar(&self) -> SidebarParams<'_> {
-        match self.target.file_list() {
-            Some(files) => SidebarParams::Directory {
-                directory_name: sidebar_directory_name(self.state),
-                file_list: files,
-                current_file: self.target.relative_path(),
-            },
-            None => SidebarParams::SingleFile,
-        }
-    }
-
-    fn target(&self) -> &ResolvedTarget {
-        &self.target
-    }
 }
 
 /// GET / : 初期HTMLページを返す
@@ -190,32 +173,23 @@ async fn index_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let page = service::load_page(
         &state,
-        &headers,
-        RouteTargetRequest::page(query.file.as_deref()),
-    )?;
-    let update = context.load_update().await?;
-    let memo = match context.load_memo().await {
-        Ok(memo) => memo,
-        Err(error) => {
-            tracing::warn!(
-                "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
-                context.target().file_label(),
-                error
-            );
-            MemoResponse::empty(context.target().relative_path().map(ToOwned::to_owned))
-        }
-    };
+        PageRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Html(render_page(RenderPageParams {
-        title: context.title(),
-        content: update.content(),
-        toc: update.toc(),
-        memo: &memo,
+        title: &page.title,
+        content: page.update.content(),
+        toc: page.update.toc(),
+        memo: &page.memo,
         dark_mode: state.dark_mode(),
         syntax_css: state.syntax_css(),
-        sidebar: context.sidebar(),
+        sidebar: sidebar_params(&page.sidebar),
     })))
 }
 
