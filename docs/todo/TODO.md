@@ -138,7 +138,7 @@
   - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
   - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
 
-- [ ] `RouteContext` を HTTP adapter と application service に分割する
+- [x] `RouteContext` を HTTP adapter と application service に分割する
   - ファイル: `src/server/routes.rs`, `src/server/files/{resolve,content,memo}.rs`
   - 現状: `RouteContext` が Host 検証、対象解決、本文ロード、メモロード/保存、サイドバー構築、memo broadcast 用 file label 生成まで抱えている。ルート層が HTTP 変換だけでなくアプリケーション手順の調停役にもなっており、新規 API 追加時に責務の置き場所が曖昧になる
   - 対応: Host 検証は middleware 化し、`RouteContext` は request DTO から service input を作る薄い adapter へ縮小する。本文/メモ/サイドバー/broadcast label は application service 側の小さな関数に分離し、HTTP handler は `Result<Json<_>, ApiError>` への変換に集中させる
