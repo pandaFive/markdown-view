@@ -276,12 +276,11 @@ impl MemoFs for TokioMemoFs {
         let mut last_already_exists = None;
         for attempt in 0..ATOMIC_TMP_ATTEMPTS {
             let tmp_path = atomic_tmp_path(path, attempt)?;
-            let mut tmp_file = match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)
-                .await
-            {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut tmp_file = match options.open(&tmp_path).await {
                 Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     last_already_exists = Some(error);
@@ -346,6 +345,8 @@ impl MemoFs for TokioMemoFs {
 mod tests {
     #[cfg(windows)]
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     #[cfg(windows)]
     use std::os::windows::ffi::OsStringExt;
     use std::sync::{Arc, Mutex};
@@ -437,6 +438,77 @@ mod tests {
         assert!(
             !tmp_path.exists(),
             "tmp path should be cleaned after before_rename failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_atomicはtmpを所有者のみ読み書き可能で作成する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let observed_mode = Arc::new(Mutex::new(None));
+        let observed_mode_for_check = Arc::clone(&observed_mode);
+
+        TokioMemoFs
+            .write_atomic(&path, b"secret", &move |_, tmp_path| {
+                let mode = std::fs::metadata(tmp_path)
+                    .expect("tmp metadata should be readable")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                *observed_mode_for_check
+                    .lock()
+                    .expect("observed mode mutex should not be poisoned") = Some(mode);
+                Ok(())
+            })
+            .await
+            .expect("atomic write should succeed");
+
+        assert_eq!(
+            observed_mode
+                .lock()
+                .expect("observed mode mutex should not be poisoned")
+                .expect("tmp mode should be observed"),
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn write_atomicはtmp衝突がattempt上限まで続くと失敗する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("initial memo should be written");
+
+        for counter in 0..128 {
+            for attempt in 0..ATOMIC_TMP_ATTEMPTS {
+                ATOMIC_TMP_COUNTER.store(counter, Ordering::Relaxed);
+                let tmp_path = atomic_tmp_path(&path, attempt).expect("tmp path should build");
+                tokio::fs::write(tmp_path, b"occupied")
+                    .await
+                    .expect("occupied tmp should be written");
+            }
+        }
+        ATOMIC_TMP_COUNTER.store(0, Ordering::Relaxed);
+
+        let err = TokioMemoFs
+            .write_atomic(&path, b"new", &|_, _| Ok(()))
+            .await
+            .expect_err("occupied tmp attempts should exhaust");
+        ATOMIC_TMP_COUNTER.store(1_000_000, Ordering::Relaxed);
+
+        match err {
+            MemoWriteError::Io(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            }
+            MemoWriteError::BeforeRename(error) => {
+                panic!("unexpected before_rename error: {}", error.user_message());
+            }
+        }
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"old"
         );
     }
 
