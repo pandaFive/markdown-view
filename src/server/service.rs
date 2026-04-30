@@ -1,23 +1,29 @@
 use crate::template::MemoResponse;
 use crate::template::UpdateMessage;
 
+// 後続タスクでservice配線するまで一時的に未使用になるスケルトン。
+#[allow(dead_code)]
 pub(super) struct PageRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+#[allow(dead_code)]
 pub(super) struct ContentRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+#[allow(dead_code)]
 pub(super) struct MemoRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+#[allow(dead_code)]
 pub(super) struct SaveMemoRequest<'a> {
     pub file: Option<&'a str>,
     pub raw: String,
 }
 
+#[allow(dead_code)]
 pub(super) struct PageView {
     pub title: String,
     pub update: UpdateMessage,
@@ -26,6 +32,7 @@ pub(super) struct PageView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(super) enum SidebarView {
     SingleFile,
     Directory {
@@ -35,6 +42,7 @@ pub(super) enum SidebarView {
     },
 }
 
+#[allow(dead_code)]
 impl SidebarView {
     fn single_file() -> Self {
         Self::SingleFile
