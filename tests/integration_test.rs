@@ -102,6 +102,38 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_apiメモ_保存成功後にtmpファイルが残らない() {
+    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": "atomic memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 200);
+    assert_eq!(
+        tokio::fs::read_to_string(tmp_dir.path().join(".test.md.memo.md"))
+            .await
+            .unwrap(),
+        "atomic memo"
+    );
+
+    let mut entries = tokio::fs::read_dir(tmp_dir.path()).await.unwrap();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.contains(".tmp."),
+            "atomic temp file should be cleaned up: {name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_apiメモ_保存成功時にmemo_updateをbroadcastする() {
     let (state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
