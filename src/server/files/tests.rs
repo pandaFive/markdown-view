@@ -19,7 +19,7 @@ use super::memo_fs::{
 };
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
-use super::test_support::{make_test_app_state, MockMemoFs, Op, TempWorkspace};
+use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
 
@@ -1052,8 +1052,7 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返�
     workspace
         .write_file(Path::new("README.md"), "# README")
         .expect("target markdown should be written");
-    let sidecar_path = workspace.path().join(".README.md.memo.md");
-    workspace
+    let sidecar_path = workspace
         .write_file(Path::new(".README.md.memo.md"), "memo")
         .expect("sidecar memo should be written");
     let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
@@ -1083,7 +1082,7 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返�
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
-    assert!(!sidecar_path.exists());
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
     assert!(legacy_path.exists());
 }
 
@@ -1094,7 +1093,7 @@ async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返�
     let file_path = workspace
         .write_md(Path::new("a\\b.md"), "# separator shaped")
         .expect("target markdown should be written");
-    workspace
+    let sidecar_path = workspace
         .write_file(Path::new(".a_b.md.memo.md"), "memo")
         .expect("sidecar memo should be written");
     let compat_sidecar_path = workspace
@@ -1123,6 +1122,7 @@ async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返�
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
     assert!(compat_sidecar_path.exists());
 }
 
@@ -1935,6 +1935,43 @@ async fn test_save_route_memo_空保存_sidecarが既にない場合は冪等的
     assert_eq!(memo.raw(), "");
     assert_eq!(memo.html().as_str(), "");
     assert!(!sidecar_path.exists());
+}
+
+#[tokio::test]
+async fn test_save_route_memo_空保存はprimary_sidecarを最後に削除する() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy")
+        .expect("legacy memo should be written");
+
+    let memo_fs = MockMemoFs::new();
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs.clone());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("blank save should delete all memo files");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(
+        memo_fs.operations().await,
+        vec![
+            OpEvent::RemoveFile(legacy_path),
+            OpEvent::RemoveFile(sidecar_path),
+        ]
+    );
 }
 
 #[tokio::test]

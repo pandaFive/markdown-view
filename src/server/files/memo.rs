@@ -94,14 +94,15 @@ async fn delete_route_memo(
     fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+
+    cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
+    cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
+
     match fs.remove_file(&memo_paths.sidecar).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_api_error(target, request, "削除", error)),
     }
-
-    cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
-    cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
 
     Ok(MemoResponse::empty(
         target.relative_path().map(ToOwned::to_owned),
