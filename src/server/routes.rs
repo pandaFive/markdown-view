@@ -9,19 +9,17 @@ use axum::routing::get;
 use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use super::files::{
-    list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_SIZE,
-};
+use super::files::{SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
 };
-use super::messages::{ApiError, BroadcastMessage};
+use super::messages::ApiError;
+use super::service::{
+    self, ContentRequest, MemoRequest, PageRequest, SaveMemoRequest, SidebarView,
+};
 use super::session::handle_socket;
 use super::state::AppState;
-use crate::template::{
-    render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage,
-};
+use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
 
 // メモ本文の保存上限は save_route_memo 側の MAX_FILE_SIZE で判定する。
 // ここは JSON envelope と string escape を含む HTTP body の上限。
@@ -29,16 +27,6 @@ use crate::template::{
 // 制御文字など 2 倍を超えて膨らむ極端な JSON 入力は body limit 側で拒否され得る。
 // 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
-
-fn sidebar_directory_name(state: &AppState) -> &str {
-    state
-        .mode()
-        .directory()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Documents")
-}
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -92,95 +80,18 @@ struct MemoSaveRequest {
     raw: String,
 }
 
-#[derive(Debug)]
-struct RouteContext<'a> {
-    state: &'a Arc<AppState>,
-    target: ResolvedTarget,
-    request: RouteTargetRequest<'a>,
-}
-
-impl<'a> RouteContext<'a> {
-    fn ensure_allowed(headers: &HeaderMap) -> Result<(), ApiError> {
-        ensure_allowed_request_host(headers)
-    }
-
-    fn resolve(
-        state: &'a Arc<AppState>,
-        headers: &HeaderMap,
-        request: RouteTargetRequest<'a>,
-    ) -> Result<Self, ApiError> {
-        Self::ensure_allowed(headers)?;
-        let target = resolve_route_target(state, request)?;
-        Ok(Self {
-            state,
-            target,
-            request,
-        })
-    }
-
-    async fn load_update(&self) -> Result<UpdateMessage, ApiError> {
-        load_route_update(&self.target, self.request).await
-    }
-
-    async fn load_memo(&self) -> Result<MemoResponse, ApiError> {
-        load_route_memo(self.state, &self.target, self.memo_request()).await
-    }
-
-    async fn save_memo(&self, raw: String) -> Result<MemoResponse, ApiError> {
-        save_route_memo(self.state, &self.target, raw, self.memo_request()).await
-    }
-
-    fn broadcast_saved_memo(&self) {
-        if self.state.tx().receiver_count() == 0 {
-            return;
-        }
-
-        let _ = self
-            .state
-            .tx()
-            .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(
-                self.memo_message_file(),
-            )));
-    }
-
-    fn memo_request(&self) -> RouteTargetRequest<'a> {
-        RouteTargetRequest::api_memo(self.request.query_file())
-    }
-
-    fn memo_message_file(&self) -> String {
-        self.target
-            .relative_path()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                self.target
-                    .file_path()
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| self.target.file_path().display().to_string())
-    }
-
-    fn title(&self) -> &str {
-        self.target
-            .file_path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("markdown-view")
-    }
-
-    fn sidebar(&self) -> SidebarParams<'_> {
-        match self.target.file_list() {
-            Some(files) => SidebarParams::Directory {
-                directory_name: sidebar_directory_name(self.state),
-                file_list: files,
-                current_file: self.target.relative_path(),
-            },
-            None => SidebarParams::SingleFile,
-        }
-    }
-
-    fn target(&self) -> &ResolvedTarget {
-        &self.target
+fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
+    match sidebar {
+        SidebarView::SingleFile => SidebarParams::SingleFile,
+        SidebarView::Directory {
+            directory_name,
+            file_list,
+            current_file,
+        } => SidebarParams::Directory {
+            directory_name,
+            file_list,
+            current_file: current_file.as_deref(),
+        },
     }
 }
 
@@ -190,32 +101,23 @@ async fn index_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let page = service::load_page(
         &state,
-        &headers,
-        RouteTargetRequest::page(query.file.as_deref()),
-    )?;
-    let update = context.load_update().await?;
-    let memo = match context.load_memo().await {
-        Ok(memo) => memo,
-        Err(error) => {
-            tracing::warn!(
-                "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
-                context.target().file_label(),
-                error
-            );
-            MemoResponse::empty(context.target().relative_path().map(ToOwned::to_owned))
-        }
-    };
+        PageRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Html(render_page(RenderPageParams {
-        title: context.title(),
-        content: update.content(),
-        toc: update.toc(),
-        memo: &memo,
+        title: &page.title,
+        content: page.update.content(),
+        toc: page.update.toc(),
+        memo: &page.memo,
         dark_mode: state.dark_mode(),
         syntax_css: state.syntax_css(),
-        sidebar: context.sidebar(),
+        sidebar: sidebar_params(&page.sidebar),
     })))
 }
 
@@ -225,12 +127,14 @@ async fn api_content_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let update = service::load_content(
         &state,
-        &headers,
-        RouteTargetRequest::api_content(query.file.as_deref()),
-    )?;
-    let update = context.load_update().await?;
+        ContentRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Json(update))
 }
@@ -241,12 +145,14 @@ async fn api_memo_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let memo = service::load_memo(
         &state,
-        &headers,
-        RouteTargetRequest::api_memo(query.file.as_deref()),
-    )?;
-    let memo = context.load_memo().await?;
+        MemoRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Json(memo))
 }
@@ -257,13 +163,15 @@ async fn api_memo_save_handler(
     headers: HeaderMap,
     Json(payload): Json<MemoSaveRequest>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let memo = service::save_memo(
         &state,
-        &headers,
-        RouteTargetRequest::api_memo(payload.file.as_deref()),
-    )?;
-    let memo = context.save_memo(payload.raw).await?;
-    context.broadcast_saved_memo();
+        SaveMemoRequest {
+            file: payload.file.as_deref(),
+            raw: payload.raw,
+        },
+    )
+    .await?;
 
     Ok(Json(memo))
 }
@@ -273,20 +181,8 @@ async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    RouteContext::ensure_allowed(&headers)?;
-
-    if let Some(base) = state.mode().directory() {
-        let files = list_markdown_files(base).map_err(|e| {
-            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", e);
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ファイル一覧の取得に失敗しました",
-            )
-        })?;
-        Ok(Json(files))
-    } else {
-        Ok(Json(vec![]))
-    }
+    ensure_allowed_request_host(&headers)?;
+    Ok(Json(service::list_files(&state)?))
 }
 
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
@@ -295,26 +191,8 @@ async fn api_search_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    RouteContext::ensure_allowed(&headers)?;
-
-    let query = query.q.unwrap_or_default();
-    let Some(base_dir) = state.mode().directory() else {
-        return Ok(Json(SearchResponse {
-            query: query.trim().to_string(),
-            results: Vec::new(),
-            searched_files: 0,
-            skipped_files: 0,
-        }));
-    };
-
-    let response = search_directory(base_dir, &query).await.map_err(|error| {
-        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ディレクトリ検索に失敗しました",
-        )
-    })?;
-
+    ensure_allowed_request_host(&headers)?;
+    let response = service::search(&state, query.q.unwrap_or_default()).await?;
     Ok(Json(response))
 }
 
@@ -332,58 +210,4 @@ async fn ws_handler(
             .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::broadcast;
-
-    use super::super::files::RouteTargetKind;
-
-    fn create_directory_state(base_dir: &std::path::Path) -> Arc<AppState> {
-        let (tx, _rx) = broadcast::channel(16);
-        Arc::new(AppState::new(
-            super::super::state::AppMode::new_directory(base_dir).unwrap(),
-            false,
-            None,
-            tx,
-        ))
-    }
-
-    #[test]
-    fn test_route_context_pageからmemoリクエストを派生できる() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
-        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
-        std::fs::write(dir.path().join("docs/guide.md"), "# Guide").unwrap();
-        let state = create_directory_state(dir.path());
-        let mut headers = HeaderMap::new();
-        headers.insert("Host", "127.0.0.1:3000".parse().unwrap());
-
-        let context = RouteContext::resolve(
-            &state,
-            &headers,
-            RouteTargetRequest::page(Some("docs/guide.md")),
-        )
-        .unwrap();
-
-        let memo_request = context.memo_request();
-        assert_eq!(memo_request.kind(), RouteTargetKind::ApiMemo);
-        assert_eq!(memo_request.query_file(), Some("docs/guide.md"));
-    }
-
-    #[test]
-    fn test_route_context_不正hostを拒否する() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "# README").unwrap();
-        let state = create_directory_state(dir.path());
-        let mut headers = HeaderMap::new();
-        headers.insert("Host", "evil.example:3000".parse().unwrap());
-
-        let error = RouteContext::resolve(&state, &headers, RouteTargetRequest::page(None))
-            .expect_err("不正なHostヘッダは拒否されるべき");
-
-        assert_eq!(error.0, StatusCode::FORBIDDEN);
-    }
 }

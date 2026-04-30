@@ -243,17 +243,25 @@ fn render_document_search(is_directory_mode: bool) -> String {
 }
 
 fn render_memo_panel(memo: &MemoResponse) -> String {
+    let (status_state, status_text, textarea_attrs) = match memo.load_error() {
+        Some(error) => (
+            "error",
+            html_escape(error),
+            " disabled aria-disabled=\"true\"",
+        ),
+        None => ("saved", "保存済み".to_string(), ""),
+    };
     format!(
         r##"    <div class="memo-layout">
       <div class="memo-toolbar">
         <div>
           <h3>Research Notes</h3>
         </div>
-        <span id="memo-save-status" class="memo-save-status" data-state="saved">保存済み</span>
+        <span id="memo-save-status" class="memo-save-status" data-state="{status_state}">{status_text}</span>
       </div>
       <label class="memo-field">
         <span>メモ本文</span>
-        <textarea id="memo-editor" placeholder="気づきや引用メモを残す">{memo_raw}</textarea>
+        <textarea id="memo-editor" placeholder="気づきや引用メモを残す"{textarea_attrs}>{memo_raw}</textarea>
       </label>
       <div class="memo-preview-shell">
         <div class="memo-preview-header">
@@ -262,6 +270,9 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
         <div id="memo-preview" class="memo-preview">{memo_html}</div>
       </div>
     </div>"##,
+        status_state = status_state,
+        status_text = status_text,
+        textarea_attrs = textarea_attrs,
         memo_raw = html_escape(memo.raw()),
         memo_html = memo.html().as_str(),
     )

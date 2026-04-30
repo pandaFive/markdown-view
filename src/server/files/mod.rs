@@ -31,3 +31,5 @@ pub(in crate::server) use self::search::{search_directory, SearchResponse};
 
 #[cfg(test)]
 pub(in crate::server) use self::resolve::RouteTargetKind;
+#[cfg(test)]
+pub(in crate::server) use self::test_support::{MockMemoFs, Op};

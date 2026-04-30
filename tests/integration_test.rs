@@ -305,6 +305,9 @@ async fn test_indexページ取得_壊れたメモがあっても本文表示は
     let body = resp.text().await.unwrap();
     assert!(body.contains("Body"));
     assert!(body.contains("id=\"memo-editor\""));
+    assert!(body.contains("data-state=\"error\""));
+    assert!(body.contains("編集を無効化しました"));
+    assert!(body.contains("disabled"));
 }
 
 #[tokio::test]
@@ -589,6 +592,45 @@ async fn test_httpは許可されないhostを拒否する() {
         let json: serde_json::Value = resp.json().await.unwrap();
         assert!(json["error"].as_str().is_some());
     }
+}
+
+#[tokio::test]
+async fn test_apiメモ_getは不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo GET").await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    let resp = client
+        .get(format!("http://{}/api/memo", addr))
+        .header("Host", &attack_host)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["error"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_apiメモ_putは不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    let resp = client
+        .put(format!("http://{}/api/memo", addr))
+        .header("Host", &attack_host)
+        .json(&serde_json::json!({
+            "raw": "blocked memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["error"].as_str().is_some());
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! メモ保存・読み込みで使用するファイルシステム抽象。
 //!
-//! 本番では [`TokioMemoFs`] が `tokio::fs::*` を呼び出す薄いラッパーとして動作する。
+//! 本番では [`TokioMemoFs`] が通常の非同期ファイル操作に加え、
+//! OS 固有 API を含む atomic replace と親ディレクトリ sync を担当する。
 //! テストでは `MockMemoFs`（`test_support` モジュール）を注入し、
 //! 特定パスの I/O エラーを決定論的に再現する。
 
@@ -51,12 +52,6 @@ pub(crate) enum MemoWriteError {
     BeforeRename(MemoBeforeRenameError),
 }
 
-impl From<io::Error> for MemoWriteError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
 impl From<MemoBeforeRenameError> for MemoWriteError {
     fn from(error: MemoBeforeRenameError) -> Self {
         Self::BeforeRename(error)
@@ -67,6 +62,8 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
 ///
 /// 第1引数は最終保存先、第2引数は同一ディレクトリ内に作成済みの tmp パス。
 /// `Err` を返すと tmp は削除され、最終保存先は置換されない。
+/// 呼び出し側は、final/tmp の親ディレクトリ一致と symlink component 不在など、
+/// rename 直前に再確認すべき保存先不変条件をここで検査する。
 pub(crate) type BeforeRenameCheck<'a> =
     dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync + 'a;
 
@@ -95,8 +92,9 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// バイト列を同一ディレクトリ内 tmp へ書き込み、rename で最終パスへ差し替える。
     ///
     /// tmp は `create_new` で作成し、書き込み・flush・sync 後、rename 直前に
-    /// `before_rename(final_path, tmp_path)` を呼ぶ。rename 前の失敗では tmp を
-    /// best effort で削除し、最終保存先の既存内容を保持する。
+    /// `before_rename(final_path, tmp_path)` を呼ぶ。tmp 作成から rename までの失敗、
+    /// および rename 自体の失敗では tmp を best effort で削除し、最終保存先の
+    /// 既存内容を保持する。
     async fn write_atomic(
         &self,
         path: &Path,
@@ -148,16 +146,19 @@ async fn write_atomic_with_counter(
     before_rename: &BeforeRenameCheck<'_>,
     counter: u64,
 ) -> Result<(), MemoWriteError> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "memo path must have a parent directory",
-        )
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memo path must have a parent directory",
+            )
+        })
+        .map_err(MemoWriteError::Io)?;
 
     let mut last_already_exists = None;
     for attempt in 0..ATOMIC_TMP_ATTEMPTS {
-        let tmp_path = atomic_tmp_path(path, counter, attempt)?;
+        let tmp_path = atomic_tmp_path(path, counter, attempt).map_err(MemoWriteError::Io)?;
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -223,7 +224,7 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
     let file = match tokio::fs::OpenOptions::new().read(true).open(parent).await {
         Ok(file) => file,
         Err(error) => {
-            tracing::warn!(
+            tracing::error!(
                 "[markdown-view] メモ保存後の親ディレクトリopenに失敗しました: {}",
                 error
             );
@@ -232,7 +233,8 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
     };
 
     if let Err(error) = file.sync_all().await {
-        tracing::warn!(
+        // rename成功後は応答を巻き戻せないためbest-effortだが、クラッシュ耐性の劣化としてerrorで残す。
+        tracing::error!(
             "[markdown-view] メモ保存後の親ディレクトリsyncに失敗しました: {}",
             error
         );
@@ -284,10 +286,8 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
     })
     .await
     .map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("memo atomic replace task failed: {error}"),
-        )
+        tracing::error!("[markdown-view] メモatomic replace task failed: {}", error);
+        io::Error::other(format!("memo atomic replace task failed: {error}"))
     })?
 }
 
@@ -405,6 +405,59 @@ mod tests {
             !tmp_path.exists(),
             "tmp path should disappear after successful rename"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_atomicは同一パス並行保存でもtmpを残さず完全な最終内容にする() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("initial memo should be written");
+        let fs = Arc::new(TokioMemoFs);
+        let mut handles = Vec::new();
+
+        for index in 0..16 {
+            let fs = Arc::clone(&fs);
+            let path = path.clone();
+            let content = format!("parallel-memo-{index:02}-{}", "x".repeat(index + 1));
+            handles.push(tokio::spawn(async move {
+                let before_rename = |_: &Path, _: &Path| Ok(());
+                fs.write_atomic(&path, content.as_bytes(), &before_rename)
+                    .await
+                    .expect("parallel atomic write should succeed");
+                content.into_bytes()
+            }));
+        }
+
+        let mut expected_contents = Vec::new();
+        for handle in handles {
+            expected_contents.push(handle.await.expect("parallel task should finish"));
+        }
+        let final_content = tokio::fs::read(&path)
+            .await
+            .expect("final memo should be readable");
+        assert!(
+            expected_contents
+                .iter()
+                .any(|content| content == &final_content),
+            "final memo should be one complete concurrent write"
+        );
+
+        let mut entries = tokio::fs::read_dir(workspace.path())
+            .await
+            .expect("workspace entries should be readable");
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .expect("workspace entry should be readable")
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.contains(".tmp."),
+                "atomic tmp file should not remain: {name}"
+            );
+        }
     }
 
     #[tokio::test]

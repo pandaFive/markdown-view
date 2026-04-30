@@ -1,5 +1,9 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { resetStandardFixtures, selectParagraphText } from './helpers';
+
+const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
 test.beforeEach(async ({ page }) => {
   await resetStandardFixtures();
@@ -39,4 +43,39 @@ test('ファイルごとに別メモが読み込まれる', async ({ page }) => 
   await page.locator('#quote-selection-action').click();
   await expect(page.locator('#memo-editor')).toHaveValue(/> Notes body/);
   await expect(page.locator('#memo-editor')).toHaveValue(/出典: \[notes\.md > Notes \(L3\)\]\(\?file=notes\.md#notes:L3\)/);
+});
+
+test('メモ読み込み失敗中は引用挿入から保存しない', async ({ page }) => {
+  await resetStandardFixtures();
+  const memoPath = path.join(fixtureDir, '.README.md.memo.md');
+  const unreadableMemo = Buffer.from([0xff, 0xfe, 0xfd]);
+  await fs.writeFile(memoPath, unreadableMemo);
+  let putCount = 0;
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() === 'PUT') {
+      putCount += 1;
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'unexpected memo save' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await expect(page.locator('#memo-editor')).toBeDisabled();
+  await expect(page.locator('#memo-save-status')).toContainText('編集を無効化');
+
+  await selectParagraphText(page, 'Initial README content');
+  const quoteButton = page.locator('#quote-selection-action');
+  await expect(quoteButton).toBeVisible();
+  await quoteButton.click();
+
+  await expect(page.locator('#panel-memo.active')).toBeVisible();
+  await expect(page.locator('#memo-editor')).toHaveValue('');
+  await expect.poll(() => putCount, { timeout: 500 }).toBe(0);
+  await expect(await fs.readFile(memoPath)).toEqual(unreadableMemo);
 });
