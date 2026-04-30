@@ -6,12 +6,18 @@
 
 use std::fs::Metadata;
 use std::io;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 
@@ -167,6 +173,56 @@ async fn cleanup_tmp_best_effort(tmp_path: &Path) {
     }
 }
 
+#[cfg(not(windows))]
+async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
+    tokio::fs::rename(tmp_path, path).await
+}
+
+#[cfg(windows)]
+async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
+    let tmp_path = path_to_wide_null(tmp_path)?;
+    let path = path_to_wide_null(path)?;
+
+    tokio::task::spawn_blocking(move || {
+        // SAFETY: 両パスはNUL終端済みで、interior NULを拒否したバッファとしてこの呼び出し中は生存する。
+        let result = unsafe {
+            MoveFileExW(
+                tmp_path.as_ptr(),
+                path.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("memo atomic replace task failed: {error}"),
+        )
+    })?
+}
+
+#[cfg(windows)]
+fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide = Vec::new();
+    for unit in path.as_os_str().encode_wide() {
+        if unit == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains an interior nul byte",
+            ));
+        }
+        wide.push(unit);
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
 #[async_trait]
 impl MemoFs for TokioMemoFs {
     async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
@@ -245,7 +301,7 @@ impl MemoFs for TokioMemoFs {
                 return Err(MemoWriteError::BeforeRename(error));
             }
 
-            if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+            if let Err(error) = atomic_replace(&tmp_path, path).await {
                 cleanup_tmp_best_effort(&tmp_path).await;
                 return Err(MemoWriteError::Io(error));
             }
@@ -271,6 +327,10 @@ impl MemoFs for TokioMemoFs {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::ffi::OsString;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -361,5 +421,65 @@ mod tests {
             !tmp_path.exists(),
             "tmp path should be cleaned after before_rename failure"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn atomic_replaceはwindowsで既存ファイルを置換する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("existing memo should be written");
+        tokio::fs::write(&tmp_path, b"new")
+            .await
+            .expect("tmp memo should be written");
+
+        atomic_replace(&tmp_path, &path)
+            .await
+            .expect("atomic replace should overwrite existing file on Windows");
+
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"new"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "tmp path should disappear after successful replace"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn atomic_replaceはwindowsで新規ファイルへ移動できる() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        tokio::fs::write(&tmp_path, b"new")
+            .await
+            .expect("tmp memo should be written");
+
+        atomic_replace(&tmp_path, &path)
+            .await
+            .expect("atomic replace should create final file on Windows");
+
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"new"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "tmp path should disappear after successful replace"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_to_wide_nullはinterior_nulを拒否する() {
+        let path = PathBuf::from(OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]));
+        let error = path_to_wide_null(&path).expect_err("interior nul should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }
