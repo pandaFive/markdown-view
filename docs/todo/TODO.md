@@ -134,14 +134,14 @@
 
 - [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
-  - 現状: HTTP は `RouteContext::ensure_allowed()` または handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
+  - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
   - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
   - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
 
 - [x] `RouteContext` を HTTP adapter と application service に分割する
   - ファイル: `src/server/routes.rs`, `src/server/files/{resolve,content,memo}.rs`
-  - 現状: `RouteContext` が Host 検証、対象解決、本文ロード、メモロード/保存、サイドバー構築、memo broadcast 用 file label 生成まで抱えている。ルート層が HTTP 変換だけでなくアプリケーション手順の調停役にもなっており、新規 API 追加時に責務の置き場所が曖昧になる
-  - 対応: Host 検証は middleware 化し、`RouteContext` は request DTO から service input を作る薄い adapter へ縮小する。本文/メモ/サイドバー/broadcast label は application service 側の小さな関数に分離し、HTTP handler は `Result<Json<_>, ApiError>` への変換に集中させる
+  - 実装前: `RouteContext` が Host 検証、対象解決、本文ロード、メモロード/保存、サイドバー構築、memo broadcast 用 file label 生成まで抱えていた。ルート層が HTTP 変換だけでなくアプリケーション手順の調停役にもなっており、新規 API 追加時に責務の置き場所が曖昧だった
+  - 対応: `RouteContext` を削除し、本文/メモ/サイドバー/broadcast label/files/search の orchestration を application service 側の小さな関数へ分離した。HTTP handler は Host 検証、extractor、`Result<Json<_>, ApiError>` / `Html` への変換に集中させた
   - 理由: Unix 哲学の「一つのことをうまくやる」に反し始めている境界。セキュリティ検証の守り忘れと、ルート層の肥大化による変更局所性低下を同時に下げる
 
 - [ ] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
