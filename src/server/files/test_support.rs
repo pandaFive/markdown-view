@@ -14,7 +14,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::server::messages::BroadcastMessage;
 use crate::server::state::{AppMode, AppState};
 
-use super::memo_fs::{MemoFs, MemoReadError, TokioMemoFs};
+use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
 
 /// tempdir ベースのテスト用ワークスペース。
 pub(crate) struct TempWorkspace {
@@ -66,7 +66,16 @@ pub(crate) enum Op {
     Read,
     CreateDirAll,
     Write,
+    WriteAtomic,
+    AtomicRename,
     RemoveFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpEvent {
+    WriteAtomic(PathBuf),
+    AtomicRename(PathBuf),
+    RemoveFile(PathBuf),
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +83,8 @@ pub(crate) struct MockMemoFs {
     inner: TokioMemoFs,
     failures: Mutex<HashMap<(Op, PathBuf), io::ErrorKind>>,
     write_observer: AsyncMutex<Vec<(PathBuf, Vec<u8>)>>,
+    atomic_write_observer: AsyncMutex<Vec<(PathBuf, Vec<u8>)>>,
+    operations: AsyncMutex<Vec<OpEvent>>,
 }
 
 impl MockMemoFs {
@@ -91,6 +102,14 @@ impl MockMemoFs {
 
     pub async fn writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
         self.write_observer.lock().await.clone()
+    }
+
+    pub async fn atomic_writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        self.atomic_write_observer.lock().await.clone()
+    }
+
+    pub async fn operations(&self) -> Vec<OpEvent> {
+        self.operations.lock().await.clone()
     }
 
     fn lookup_failure(&self, op: Op, path: &Path) -> Option<io::ErrorKind> {
@@ -148,11 +167,53 @@ impl MemoFs for MockMemoFs {
         self.inner.write(path, content).await
     }
 
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_rename: &BeforeRenameCheck,
+    ) -> Result<(), MemoWriteError> {
+        if let Some(kind) = self.lookup_failure(Op::WriteAtomic, path) {
+            return Err(MemoWriteError::Io(io::Error::from(kind)));
+        }
+
+        let tmp_path = path.with_extension("memo-atomic-test-tmp");
+        before_rename(path, &tmp_path).map_err(MemoWriteError::BeforeRename)?;
+
+        if let Some(kind) = self.lookup_failure(Op::AtomicRename, path) {
+            return Err(MemoWriteError::Io(io::Error::from(kind)));
+        }
+
+        self.operations
+            .lock()
+            .await
+            .push(OpEvent::WriteAtomic(path.to_path_buf()));
+        self.atomic_write_observer
+            .lock()
+            .await
+            .push((path.to_path_buf(), content.to_vec()));
+        self.operations
+            .lock()
+            .await
+            .push(OpEvent::AtomicRename(path.to_path_buf()));
+        self.inner
+            .write_atomic(path, content, &|_, _| Ok(()))
+            .await
+            .map_err(|error| match error {
+                MemoWriteError::Io(error) => MemoWriteError::Io(error),
+                MemoWriteError::BeforeRename(error) => MemoWriteError::BeforeRename(error),
+            })
+    }
+
     async fn remove_file(&self, path: &Path) -> io::Result<()> {
         if let Some(kind) = self.lookup_failure(Op::RemoveFile, path) {
             return Err(io::Error::from(kind));
         }
 
+        self.operations
+            .lock()
+            .await
+            .push(OpEvent::RemoveFile(path.to_path_buf()));
         self.inner.remove_file(path).await
     }
 }
@@ -187,5 +248,85 @@ mod tests {
             .expect_err("parent dir path should be rejected");
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn mock_memo_fsはatomic_writeとremove_fileの操作順を記録する() {
+        let workspace = TempWorkspace::new().expect("workspace should be created");
+        let memo_path = workspace
+            .write_md(Path::new("memo.md"), "old")
+            .expect("memo should be written");
+        let memo_fs = MockMemoFs::new();
+        let memo_path_for_check = memo_path.clone();
+
+        memo_fs
+            .write_atomic(&memo_path, b"new", &move |final_path, tmp_path| {
+                assert_eq!(final_path, memo_path_for_check.as_path());
+                assert_eq!(
+                    tmp_path,
+                    memo_path_for_check
+                        .with_extension("memo-atomic-test-tmp")
+                        .as_path()
+                );
+                Ok(())
+            })
+            .await
+            .expect("atomic write should succeed");
+        memo_fs
+            .remove_file(&memo_path)
+            .await
+            .expect("remove file should succeed");
+
+        assert_eq!(
+            memo_fs.atomic_writes().await,
+            vec![(memo_path.clone(), b"new".to_vec())]
+        );
+        assert_eq!(
+            memo_fs.operations().await,
+            vec![
+                OpEvent::WriteAtomic(memo_path.clone()),
+                OpEvent::AtomicRename(memo_path.clone()),
+                OpEvent::RemoveFile(memo_path),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_memo_fsはatomic_writeとrename失敗を注入できる() {
+        let workspace = TempWorkspace::new().expect("workspace should be created");
+        let write_path = workspace
+            .write_md(Path::new("write.md"), "old")
+            .expect("memo should be written");
+        let rename_path = workspace
+            .write_md(Path::new("rename.md"), "old")
+            .expect("memo should be written");
+        let memo_fs = MockMemoFs::new();
+
+        memo_fs.fail_at(
+            Op::WriteAtomic,
+            &write_path,
+            io::ErrorKind::PermissionDenied,
+        );
+        memo_fs.fail_at(Op::AtomicRename, &rename_path, io::ErrorKind::AlreadyExists);
+
+        let write_err = memo_fs
+            .write_atomic(&write_path, b"new", &|_, _| Ok(()))
+            .await
+            .expect_err("write_atomic failure should be injected");
+        let rename_err = memo_fs
+            .write_atomic(&rename_path, b"new", &|_, _| Ok(()))
+            .await
+            .expect_err("atomic rename failure should be injected");
+
+        assert!(matches!(
+            write_err,
+            MemoWriteError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert!(matches!(
+            rename_err,
+            MemoWriteError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert!(memo_fs.atomic_writes().await.is_empty());
+        assert!(memo_fs.operations().await.is_empty());
     }
 }
