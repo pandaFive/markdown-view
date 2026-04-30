@@ -1,6 +1,7 @@
 # RouteContext の HTTP adapter / application service 分割設計
 
 - 作成日: 2026-04-30
+- Status: IMPLEMENTED
 - 対象 TODO: `docs/todo/TODO.md` Medium Priority「`RouteContext` を HTTP adapter と application service に分割する」
 - 主対象: `src/server/routes.rs`
 - 関連対象: `src/server/files/{resolve,content,memo,search,catalog}.rs`, `src/server/guards.rs`, `src/server/state.rs`

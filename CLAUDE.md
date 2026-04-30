@@ -42,8 +42,16 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
   ├── cli.rs        CLIオプション定義（clap derive）
   ├── server.rs     公開ファサード（モジュール再エクスポート）
   │   ├── state.rs      サーバー状態とモード判定（AppState, AppMode, CanonicalPath）
-  │   ├── routes.rs     axumルーター、HTTP/WebSocketハンドラ
-  │   ├── files.rs      ファイル探索、検証、読み込み、描画、ファイルサイズ定数
+  │   ├── routes.rs     axumルーター、HTTP/WebSocketハンドラ（HTTP adapter）
+  │   ├── service.rs    ページ/本文/メモ/検索の application service
+  │   ├── files/        ファイル探索、検証、読み込み、メモ保存、検索
+  │   │   ├── catalog.rs    Markdown一覧探索
+  │   │   ├── content.rs    Markdown読み込みとUpdateMessage生成
+  │   │   ├── memo.rs       メモ読み書き、sidecar移行、削除契約
+  │   │   ├── memo_fs.rs    メモI/O抽象とatomic保存実装
+  │   │   ├── memo_sidecar.rs sidecar名生成の不変条件
+  │   │   ├── resolve.rs    ルート対象ファイル解決
+  │   │   └── search.rs     ディレクトリ検索
   │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
   │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型
   │   ├── broadcast.rs  変更通知ブロードキャスト、監視イベント転送
@@ -62,15 +70,20 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ### データフロー
 
-1. **初期表示**: HTTP GET `/` → `read_and_render_file` → `render_page`（フルHTML）
+1. **初期表示**: HTTP GET `/` → `service::load_page` → `load_route_update` / `load_route_memo` → `render_page`（フルHTML）
 2. **ライブリロード**: notify検知 → `notify_update` → broadcast channel → WebSocket → クライアントJS
-3. **API**: GET `/api/content` → JSON（`UpdateMessage { content, toc }`）
+3. **API**: GET `/api/content` → `service::load_content` → JSON（`UpdateMessage { content, toc }`）
+4. **メモAPI**: GET/PUT `/api/memo` → `service::load_memo` / `service::save_memo` → `MemoResponse`
 
 ### 重要な設計判断
 
 - **127.0.0.1のみバインド** + Host/Originヘッダー検証でDNS Rebinding防止
 - **raw HTML完全除去**: pulldown-cmarkの`Event::Html`/`Event::InlineHtml`を破棄してXSS防止
-- **TOCTOU対策**: `read_markdown_with_limit`で二段階サイズチェック（metadata + take）
+- **HTTP adapter / application service分離**: `routes.rs` はHost検証・extractor・HTTP応答変換に寄せ、対象解決以降の手順は `service.rs` に置く
+- **TOCTOU対策**: `read_bytes_with_limit`で二段階サイズチェック（metadata + take）
+- **メモatomic保存**: 同一ディレクトリ内tmpへ `create_new` + `write_all` + `flush` + `sync_data` 後、renameで最終sidecarへ差し替える
+- **メモ保存先再検証**: rename直前にfinal/tmpの親ディレクトリ一致とsymlink component不在を再検証し、差し替えraceを検出する
+- **親ディレクトリsync**: rename後の親ディレクトリsyncはbest-effort。失敗しても応答は巻き戻せないため、クラッシュ耐性劣化として `error!` ログに残す
 - **CSS/JS完全埋め込み**: 外部ファイル不要、単一HTMLで完結
 - **notifyはstd::thread**: notifyがsync APIのため、mpscチャネルでtokioにブリッジ
 - **見出しパースが2回実行される**: `slugify`/`generate_unique_id`/`extract_headings`は共有済みだが、`render_markdown`と`generate_toc`で別々にpulldown-cmarkパースが走る（既知のトレードオフ）
@@ -92,7 +105,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - `tests/integration_test.rs` — HTTP/WebSocket統合テスト（実サーバー起動）
 - `src/server/guards.rs` 内テスト — Host/Origin検証ユニットテスト
 - `src/server/state.rs` 内テスト — AppMode構築・バリデーション
-- `src/server/files.rs` 内テスト — ファイル解決、トラバーサル防止、サイズ制限
+- `src/server/files/` 内テスト — ファイル解決、トラバーサル防止、サイズ制限、メモI/O
 - `src/server/messages.rs` 内テスト — BroadcastMessage直列化
 - `src/server/broadcast.rs` 内テスト — notify_update、遅延回復
 - `tests/e2e/*.spec.ts` — Playwright E2Eテスト（TypeScript strict、`npm run test:e2e`で実行）

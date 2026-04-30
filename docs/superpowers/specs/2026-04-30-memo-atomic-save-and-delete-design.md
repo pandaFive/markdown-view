@@ -3,6 +3,7 @@
 - 対象: `src/server/files/memo_fs.rs`, `src/server/files/memo.rs`, `src/server/files/test_support.rs`, `src/server/files/tests.rs`
 - 関連 TODO: `docs/todo/TODO.md` High Priority「メモ書き込みを `tmp + rename` で原子化する」「`delete_route_memo` を all-or-nothing 化する」
 - 作成日: 2026-04-30
+- Status: IMPLEMENTED
 
 ## 1. 概要
 
