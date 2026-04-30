@@ -1532,7 +1532,7 @@ async fn test_save_route_memo_単一ファイルモードでpermission_deniedな
 
     let memo_fs = MockMemoFs::new();
     memo_fs.fail_at(
-        Op::Write,
+        Op::WriteAtomic,
         &sidecar_path,
         std::io::ErrorKind::PermissionDenied,
     );
@@ -1564,7 +1564,7 @@ async fn test_save_route_memo_sidecar書込不可で500を返す() {
 
     let memo_fs = MockMemoFs::new();
     memo_fs.fail_at(
-        Op::Write,
+        Op::WriteAtomic,
         &sidecar_path,
         std::io::ErrorKind::PermissionDenied,
     );
@@ -1628,7 +1628,7 @@ async fn test_save_route_memo_disk_full系IO失敗で500を返す() {
     let sidecar_path = workspace.path().join(".note.md.memo.md");
 
     let memo_fs = MockMemoFs::new();
-    memo_fs.fail_at(Op::Write, &sidecar_path, std::io::ErrorKind::Other);
+    memo_fs.fail_at(Op::WriteAtomic, &sidecar_path, std::io::ErrorKind::Other);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
@@ -1681,7 +1681,7 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
 
     assert_eq!(saved.raw(), "new memo");
     assert_eq!(
-        memo_fs.writes().await,
+        memo_fs.atomic_writes().await,
         vec![(new_sidecar_path.clone(), b"new memo".to_vec())]
     );
     assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");

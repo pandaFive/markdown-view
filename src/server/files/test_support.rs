@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::server::messages::BroadcastMessage;
 use crate::server::state::{AppMode, AppState};
@@ -65,7 +64,6 @@ pub(crate) enum Op {
     Metadata,
     Read,
     CreateDirAll,
-    Write,
     WriteAtomic,
     AtomicRename,
     RemoveFile,
@@ -82,9 +80,8 @@ pub(crate) enum OpEvent {
 pub(crate) struct MockMemoFs {
     inner: TokioMemoFs,
     failures: Mutex<HashMap<(Op, PathBuf), io::ErrorKind>>,
-    write_observer: AsyncMutex<Vec<(PathBuf, Vec<u8>)>>,
-    atomic_write_observer: AsyncMutex<Vec<(PathBuf, Vec<u8>)>>,
-    operations: AsyncMutex<Vec<OpEvent>>,
+    atomic_write_observer: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+    operations: Mutex<Vec<OpEvent>>,
 }
 
 impl MockMemoFs {
@@ -100,16 +97,18 @@ impl MockMemoFs {
         self
     }
 
-    pub async fn writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
-        self.write_observer.lock().await.clone()
-    }
-
     pub async fn atomic_writes(&self) -> Vec<(PathBuf, Vec<u8>)> {
-        self.atomic_write_observer.lock().await.clone()
+        self.atomic_write_observer
+            .lock()
+            .expect("atomic write observer mutex poisoned")
+            .clone()
     }
 
     pub async fn operations(&self) -> Vec<OpEvent> {
-        self.operations.lock().await.clone()
+        self.operations
+            .lock()
+            .expect("operations mutex poisoned")
+            .clone()
     }
 
     fn lookup_failure(&self, op: Op, path: &Path) -> Option<io::ErrorKind> {
@@ -155,49 +154,41 @@ impl MemoFs for MockMemoFs {
         self.inner.create_dir_all(path).await
     }
 
-    async fn write(&self, path: &Path, content: &[u8]) -> io::Result<()> {
-        if let Some(kind) = self.lookup_failure(Op::Write, path) {
-            return Err(io::Error::from(kind));
-        }
-
-        self.write_observer
-            .lock()
-            .await
-            .push((path.to_path_buf(), content.to_vec()));
-        self.inner.write(path, content).await
-    }
-
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck,
+        before_rename: &BeforeRenameCheck<'_>,
     ) -> Result<(), MemoWriteError> {
         if let Some(kind) = self.lookup_failure(Op::WriteAtomic, path) {
             return Err(MemoWriteError::Io(io::Error::from(kind)));
         }
 
-        let tmp_path = path.with_extension("memo-atomic-test-tmp");
-        before_rename(path, &tmp_path).map_err(MemoWriteError::BeforeRename)?;
-
-        if let Some(kind) = self.lookup_failure(Op::AtomicRename, path) {
-            return Err(MemoWriteError::Io(io::Error::from(kind)));
-        }
-
-        self.operations
-            .lock()
-            .await
-            .push(OpEvent::WriteAtomic(path.to_path_buf()));
-        self.atomic_write_observer
-            .lock()
-            .await
-            .push((path.to_path_buf(), content.to_vec()));
-        self.operations
-            .lock()
-            .await
-            .push(OpEvent::AtomicRename(path.to_path_buf()));
         self.inner
-            .write_atomic(path, content, &|_, _| Ok(()))
+            .write_atomic(path, content, &|final_path, tmp_path| {
+                self.operations
+                    .lock()
+                    .expect("operations mutex poisoned")
+                    .push(OpEvent::WriteAtomic(final_path.to_path_buf()));
+                self.atomic_write_observer
+                    .lock()
+                    .expect("atomic write observer mutex poisoned")
+                    .push((final_path.to_path_buf(), content.to_vec()));
+
+                before_rename(final_path, tmp_path)?;
+
+                self.operations
+                    .lock()
+                    .expect("operations mutex poisoned")
+                    .push(OpEvent::AtomicRename(final_path.to_path_buf()));
+                if self.lookup_failure(Op::AtomicRename, final_path).is_some() {
+                    return Err(super::memo_fs::MemoBeforeRenameError::new(
+                        "mock atomic rename failure",
+                    ));
+                }
+
+                Ok(())
+            })
             .await
             .map_err(|error| match error {
                 MemoWriteError::Io(error) => MemoWriteError::Io(error),
@@ -212,7 +203,7 @@ impl MemoFs for MockMemoFs {
 
         self.operations
             .lock()
-            .await
+            .expect("operations mutex poisoned")
             .push(OpEvent::RemoveFile(path.to_path_buf()));
         self.inner.remove_file(path).await
     }
@@ -262,12 +253,8 @@ mod tests {
         memo_fs
             .write_atomic(&memo_path, b"new", &move |final_path, tmp_path| {
                 assert_eq!(final_path, memo_path_for_check.as_path());
-                assert_eq!(
-                    tmp_path,
-                    memo_path_for_check
-                        .with_extension("memo-atomic-test-tmp")
-                        .as_path()
-                );
+                assert_eq!(tmp_path.parent(), final_path.parent());
+                assert!(tmp_path.exists(), "tmp file should exist before rename");
                 Ok(())
             })
             .await
@@ -324,9 +311,18 @@ mod tests {
         ));
         assert!(matches!(
             rename_err,
-            MemoWriteError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists
+            MemoWriteError::BeforeRename(error) if error.user_message() == "mock atomic rename failure"
         ));
-        assert!(memo_fs.atomic_writes().await.is_empty());
-        assert!(memo_fs.operations().await.is_empty());
+        assert_eq!(
+            memo_fs.atomic_writes().await,
+            vec![(rename_path.clone(), b"new".to_vec())]
+        );
+        assert_eq!(
+            memo_fs.operations().await,
+            vec![
+                OpEvent::WriteAtomic(rename_path.clone()),
+                OpEvent::AtomicRename(rename_path),
+            ]
+        );
     }
 }

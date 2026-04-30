@@ -57,8 +57,8 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
     }
 }
 
-pub(crate) type BeforeRenameCheck =
-    dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync;
+pub(crate) type BeforeRenameCheck<'a> =
+    dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync + 'a;
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TMP_ATTEMPTS: u8 = 8;
@@ -82,15 +82,12 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// 親ディレクトリを再帰的に作成（既存ならエラーを返さない）
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
 
-    /// バイト列書き込み（atomic は要求しない）
-    async fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()>;
-
     /// バイト列を同一ディレクトリ内 tmp へ書き込み、rename で最終パスへ差し替える。
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck,
+        before_rename: &BeforeRenameCheck<'_>,
     ) -> Result<(), MemoWriteError>;
 
     /// ファイル削除。`NotFound` を含むエラーは透過する（呼び出し側で吸収）。
@@ -157,9 +154,13 @@ async fn cleanup_tmp_best_effort(tmp_path: &Path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
+            let tmp_name = tmp_path
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_else(|| "<unknown>".into());
             tracing::warn!(
                 "[markdown-view] メモ一時ファイルcleanup失敗を無視します ({}): {}",
-                tmp_path.display(),
+                tmp_name,
                 error
             );
         }
@@ -195,15 +196,11 @@ impl MemoFs for TokioMemoFs {
         tokio::fs::create_dir_all(path).await
     }
 
-    async fn write(&self, path: &Path, content: &[u8]) -> std::io::Result<()> {
-        tokio::fs::write(path, content).await
-    }
-
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck,
+        before_rename: &BeforeRenameCheck<'_>,
     ) -> Result<(), MemoWriteError> {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
