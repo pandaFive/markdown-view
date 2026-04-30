@@ -5,7 +5,11 @@
 
 ## P1: リスク低減・検証基盤
 
-現時点で未完了項目なし。
+- [ ] Windows メモ原子保存のエラー処理と retry 条件を細分化する
+  - ファイル: `src/server/files/memo_fs.rs`
+  - 現状: Windows の `MoveFileExW` 呼び出しは `spawn_blocking` 経由だが、`JoinError` は `ErrorKind::Other` に潰している。また tmp 作成 retry は `AlreadyExists` のみを対象にしており、Windows の共有違反・削除保留・ウイルス対策ソフトによる一時ロックを retry しない
+  - 対応: `JoinError::is_panic()` / `is_cancelled()` を分けて `tracing::error!` に残す。Windows では `raw_os_error()` で sharing violation / delete pending 相当を判定し、短い retry 対象に含める。Windows CI または `cargo check --target x86_64-pc-windows-gnu` が通る環境で検証する
+  - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
 
 ## P2: 保守性・局所回帰検知
 

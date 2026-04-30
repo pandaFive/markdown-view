@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
@@ -11,9 +12,12 @@ use tokio::sync::broadcast;
 use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
+#[cfg(unix)]
+use super::memo_fs::MemoBeforeRenameError;
+use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::revalidate_single_file_target;
-use super::test_support::{make_test_app_state, MockMemoFs, Op, TempWorkspace};
+use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
 
@@ -24,6 +28,128 @@ fn assert_plain_sidecar_filename(name: &str) {
         path.file_name().and_then(|file_name| file_name.to_str()),
         Some(name)
     );
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct SymlinkBeforeRenameMemoFs {
+    inner: TokioMemoFs,
+    link_target: PathBuf,
+}
+
+#[cfg(unix)]
+impl SymlinkBeforeRenameMemoFs {
+    fn new(link_target: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            link_target,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct MismatchedTmpParentMemoFs {
+    inner: TokioMemoFs,
+}
+
+impl MismatchedTmpParentMemoFs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { inner: TokioMemoFs })
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoFs for MismatchedTmpParentMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        _content: &[u8],
+        before_rename: &BeforeRenameCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        let tmp_path = path
+            .parent()
+            .expect("memo path should have a parent")
+            .join(".other-tmp-dir")
+            .join("memo.tmp");
+        match before_rename(path, &tmp_path) {
+            Ok(()) => Err(MemoWriteError::Io(std::io::Error::other(
+                "mismatched tmp parent should be rejected before rename",
+            ))),
+            Err(error) => Err(MemoWriteError::BeforeRename(error)),
+        }
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for SymlinkBeforeRenameMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_rename: &BeforeRenameCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        let link_target = self.link_target.clone();
+        self.inner
+            .write_atomic(path, content, &move |final_path, tmp_path| {
+                match std::fs::remove_file(final_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(MemoBeforeRenameError::new(format!(
+                            "テスト用メモ差し替えに失敗しました: {error}"
+                        )));
+                    }
+                }
+                symlink(&link_target, final_path).map_err(|error| {
+                    MemoBeforeRenameError::new(format!(
+                        "テスト用メモsymlink作成に失敗しました: {error}"
+                    ))
+                })?;
+                before_rename(final_path, tmp_path)
+            })
+            .await
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(path).await
+    }
 }
 
 #[test]
@@ -843,6 +969,63 @@ async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ�
 }
 
 #[tokio::test]
+async fn test_save_route_memo_tmp親不一致は内部状態エラーを返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, MismatchedTmpParentMemoFs::new());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("mismatched tmp parent should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存の内部状態が不正なため操作を中止しました"
+    );
+}
+
+#[tokio::test]
+async fn test_save_route_memo_10mb超過はatomic_write前に拒否する() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let memo_fs = MockMemoFs::new();
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs.clone());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let oversized = "a".repeat((MAX_FILE_SIZE as usize) + 1);
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        oversized,
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("oversized memo should be rejected");
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモサイズが上限（10MB）を超えています");
+    assert!(
+        memo_fs.atomic_writes().await.is_empty(),
+        "oversized memo should be rejected before atomic write"
+    );
+}
+
+#[tokio::test]
 async fn test_load_route_memo_旧パスのみ存在する場合はそのまま読み込む() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("README.md"), "# README").unwrap();
@@ -977,8 +1160,7 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返�
     workspace
         .write_file(Path::new("README.md"), "# README")
         .expect("target markdown should be written");
-    let sidecar_path = workspace.path().join(".README.md.memo.md");
-    workspace
+    let sidecar_path = workspace
         .write_file(Path::new(".README.md.memo.md"), "memo")
         .expect("sidecar memo should be written");
     let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
@@ -1008,7 +1190,7 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返�
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
-    assert!(!sidecar_path.exists());
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
     assert!(legacy_path.exists());
 }
 
@@ -1019,7 +1201,7 @@ async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返�
     let file_path = workspace
         .write_md(Path::new("a\\b.md"), "# separator shaped")
         .expect("target markdown should be written");
-    workspace
+    let sidecar_path = workspace
         .write_file(Path::new(".a_b.md.memo.md"), "memo")
         .expect("sidecar memo should be written");
     let compat_sidecar_path = workspace
@@ -1048,6 +1230,7 @@ async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返�
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
     assert!(compat_sidecar_path.exists());
 }
 
@@ -1532,7 +1715,7 @@ async fn test_save_route_memo_単一ファイルモードでpermission_deniedな
 
     let memo_fs = MockMemoFs::new();
     memo_fs.fail_at(
-        Op::Write,
+        Op::WriteAtomic,
         &sidecar_path,
         std::io::ErrorKind::PermissionDenied,
     );
@@ -1564,7 +1747,7 @@ async fn test_save_route_memo_sidecar書込不可で500を返す() {
 
     let memo_fs = MockMemoFs::new();
     memo_fs.fail_at(
-        Op::Write,
+        Op::WriteAtomic,
         &sidecar_path,
         std::io::ErrorKind::PermissionDenied,
     );
@@ -1584,6 +1767,125 @@ async fn test_save_route_memo_sidecar書込不可で500を返す() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[tokio::test]
+async fn test_save_route_memo_atomic_rename失敗時は既存メモを保持する() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::AtomicRename,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("atomic rename failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert_eq!(
+        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        "old memo"
+    );
+}
+
+#[tokio::test]
+async fn test_save_route_memo_atomic_write失敗時は既存メモを保持する() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+
+    let memo_fs = MockMemoFs::new();
+    memo_fs.fail_at(
+        Op::WriteAtomic,
+        &sidecar_path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("atomic write failure should not fall back");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert_eq!(
+        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        "old memo"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わると403を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+    let outside_dir = tempfile::tempdir().expect("outside dir should be created");
+    let outside_memo = outside_dir.path().join("outside.md");
+    std::fs::write(&outside_memo, "outside memo").expect("outside memo should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, SymlinkBeforeRenameMemoFs::new(outside_memo.clone()));
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("rename precheck should reject symlink replacement");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+    assert!(
+        std::fs::symlink_metadata(&sidecar_path)
+            .expect("replaced sidecar should still exist")
+            .file_type()
+            .is_symlink(),
+        "test hook should replace the sidecar immediately before rename"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_memo).expect("outside memo should remain readable"),
+        "outside memo"
+    );
 }
 
 #[tokio::test]
@@ -1628,7 +1930,7 @@ async fn test_save_route_memo_disk_full系IO失敗で500を返す() {
     let sidecar_path = workspace.path().join(".note.md.memo.md");
 
     let memo_fs = MockMemoFs::new();
-    memo_fs.fail_at(Op::Write, &sidecar_path, std::io::ErrorKind::Other);
+    memo_fs.fail_at(Op::WriteAtomic, &sidecar_path, std::io::ErrorKind::Other);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
@@ -1681,7 +1983,7 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
 
     assert_eq!(saved.raw(), "new memo");
     assert_eq!(
-        memo_fs.writes().await,
+        memo_fs.atomic_writes().await,
         vec![(new_sidecar_path.clone(), b"new memo".to_vec())]
     );
     assert_eq!(fs::read_to_string(&new_sidecar_path).unwrap(), "new memo");
@@ -1744,6 +2046,43 @@ async fn test_save_route_memo_空保存_sidecarが既にない場合は冪等的
 }
 
 #[tokio::test]
+async fn test_save_route_memo_空保存はprimary_sidecarを最後に削除する() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "sidecar")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace
+        .write_file(Path::new(".markdown-view/memos/note.md"), "legacy")
+        .expect("legacy memo should be written");
+
+    let memo_fs = MockMemoFs::new();
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs.clone());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        " ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("blank save should delete all memo files");
+
+    assert_eq!(memo.raw(), "");
+    assert_eq!(
+        memo_fs.operations().await,
+        vec![
+            OpEvent::RemoveFile(legacy_path),
+            OpEvent::RemoveFile(sidecar_path),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_save_route_memo_空保存_sidecar削除失敗は500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
@@ -1775,6 +2114,10 @@ async fn test_save_route_memo_空保存_sidecar削除失敗は500を返す() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+    assert!(
+        sidecar_path.exists(),
+        "primary sidecar should remain when its deletion fails"
+    );
 }
 
 #[tokio::test]

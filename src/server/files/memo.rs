@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use axum::http::StatusCode;
 
 use super::content::MAX_FILE_SIZE;
-use super::memo_fs::{MemoFs, MemoReadError};
+use super::memo_fs::{
+    BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError, MemoWriteError,
+};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
 use super::RouteTargetRequest;
@@ -64,9 +66,16 @@ pub(in crate::server) async fn save_route_memo(
             .await
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
-    fs.write(memo_path, raw.as_bytes())
-        .await
-        .map_err(|error| io_api_error(target, request, "保存", error))?;
+    let before_rename = |final_path: &Path, tmp_path: &Path| {
+        ensure_safe_memo_rename_paths(final_path, tmp_path, state, target, request)
+    };
+    fs.write_atomic(
+        memo_path,
+        raw.as_bytes(),
+        &before_rename as &BeforeRenameCheck<'_>,
+    )
+    .await
+    .map_err(|error| memo_write_error_to_api_error(target, request, error))?;
 
     cleanup_compat_sidecar_best_effort(state, target, request, &memo_paths, fs).await;
     cleanup_legacy_memo_best_effort(state, target, request, &memo_paths.legacy, fs).await;
@@ -85,14 +94,15 @@ async fn delete_route_memo(
     fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+
+    cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
+    cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
+
     match fs.remove_file(&memo_paths.sidecar).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_api_error(target, request, "削除", error)),
     }
-
-    cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
-    cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
 
     Ok(MemoResponse::empty(
         target.relative_path().map(ToOwned::to_owned),
@@ -431,6 +441,36 @@ fn ensure_safe_memo_path(
     Ok(())
 }
 
+fn ensure_safe_memo_rename_paths(
+    final_path: &Path,
+    tmp_path: &Path,
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<(), MemoBeforeRenameError> {
+    let base_dir = state.mode().base_dir();
+    if final_path.parent() != tmp_path.parent() {
+        tracing::warn!(
+            "[markdown-view] {}メモ一時ファイルが保存先と同一ディレクトリではないため拒否 ({}): {} -> {}",
+            request.read_error_log_label(),
+            target.file_label(),
+            sanitize_path_for_logging(final_path, base_dir),
+            sanitize_path_for_logging(tmp_path, base_dir)
+        );
+        return Err(MemoBeforeRenameError::new(
+            "メモ保存の内部状態が不正なため操作を中止しました",
+        ));
+    }
+
+    ensure_safe_memo_path(final_path, state, target, request).map_err(|_| {
+        MemoBeforeRenameError::new("メモ保存先にシンボリックリンクが含まれているため操作できません")
+    })?;
+    ensure_safe_memo_path(tmp_path, state, target, request).map_err(|_| {
+        MemoBeforeRenameError::new("メモ保存先にシンボリックリンクが含まれているため操作できません")
+    })?;
+    Ok(())
+}
+
 fn first_symlink_component(base_dir: &Path, target: &Path) -> Option<PathBuf> {
     let relative = target.strip_prefix(base_dir).ok()?;
     let mut current = base_dir.to_path_buf();
@@ -491,6 +531,25 @@ async fn read_memo_file_if_present(
             "メモはUTF-8テキストである必要があります",
         )
     })
+}
+
+fn memo_write_error_to_api_error(
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    error: MemoWriteError,
+) -> ApiError {
+    match error {
+        MemoWriteError::Io(error) => io_api_error(target, request, "保存", error),
+        MemoWriteError::BeforeRename(error) => {
+            tracing::warn!(
+                "[markdown-view] {}メモrename直前検証エラー ({}): {}",
+                request.read_error_log_label(),
+                target.file_label(),
+                error.user_message()
+            );
+            json_error(StatusCode::FORBIDDEN, error.user_message())
+        }
+    }
 }
 
 fn io_api_error(
