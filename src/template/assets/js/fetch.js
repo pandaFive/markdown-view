@@ -131,6 +131,7 @@ function selectFile(file, pushHistory, options) {
     appContext.state.currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory, previousHash);
+    // 失敗した遷移の generation で旧ファイルのメモを読み直し、後続遷移があれば loadMemo 側で破棄する。
     loadMemo(previousFile, gen);
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     setLiveStatus('error');

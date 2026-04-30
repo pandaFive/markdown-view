@@ -108,3 +108,36 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
   await expect(memoEditor).toHaveValue('local draft that must remain');
   await expect(memoEditor).toBeDisabled();
 });
+
+test('メモ保存応答のraw欠落では編集中の内容を消さない', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          html: '<p>server preview without raw</p>'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  const memoEditor = page.locator('#memo-editor');
+  await memoEditor.fill('local draft that must remain');
+
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+  await expect(memoEditor).toHaveValue('local draft that must remain');
+  await expect.poll(() => warnings.some((text) => text.includes('raw を含まないメモ応答'))).toBe(true);
+});

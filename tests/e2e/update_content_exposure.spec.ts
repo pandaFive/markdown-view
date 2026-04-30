@@ -3,14 +3,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const jsAssetDir = path.join(__dirname, '..', '..', 'src', 'template', 'assets', 'js');
+function extractInternalGlobalNames(source: string) {
+  return Array.from(source.matchAll(/^(?:(?:async\s+)?function\*?\s+|class\s+|(?:var|let|const)\s+)([A-Za-z_$][\w$]*)/gm))
+    .map((match) => match[1])
+    .filter((name): name is string => typeof name === 'string');
+}
+
 const internalGlobalNames = Array.from(new Set(
   fs.readdirSync(jsAssetDir)
     .filter((fileName) => fileName.endsWith('.js'))
     .flatMap((fileName) => {
       const source = fs.readFileSync(path.join(jsAssetDir, fileName), 'utf8');
-      return Array.from(source.matchAll(/^(?:function|var|let|const)\s+([A-Za-z_$][\w$]*)/gm))
-        .map((match) => match[1])
-        .filter((name): name is string => typeof name === 'string');
+      return extractInternalGlobalNames(source);
     })
 )).sort();
 
@@ -18,9 +22,37 @@ async function ownWindowPropertyNames(page: import('@playwright/test').Page) {
   return page.evaluate(() => Object.getOwnPropertyNames(window).sort());
 }
 
+test('内部グローバル名抽出は将来のトップレベル構文も対象にする', async () => {
+  expect(extractInternalGlobalNames([
+    'class FutureController {}',
+    'async function loadFuture() {}',
+    'function* iterateFuture() {}',
+    'const existingConst = 1;',
+    'let existingLet = 1;',
+    'var existingVar = 1;',
+    'function existingFunction() {}'
+  ].join('\n'))).toEqual([
+    'FutureController',
+    'loadFuture',
+    'iterateFuture',
+    'existingConst',
+    'existingLet',
+    'existingVar',
+    'existingFunction'
+  ]);
+});
+
 test('production実行では内部APIを公開しない', async ({ page }) => {
-  await page.goto('about:blank');
+  await page.route('**/__window-baseline', async (route) => {
+    await route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><meta charset="utf-8"><title>baseline</title>'
+    });
+  });
+  await page.goto('/__window-baseline');
   const baseline = new Set(await ownWindowPropertyNames(page));
+  await page.unroute('**/__window-baseline');
+
   await page.goto('/');
   const exposed = await page.evaluate((names) => {
     const win = window as unknown as Record<string, unknown>;
@@ -28,8 +60,7 @@ test('production実行では内部APIを公開しない', async ({ page }) => {
   }, internalGlobalNames);
   expect(exposed).toEqual([]);
   const addedWindowProps = (await ownWindowPropertyNames(page)).filter((name) => !baseline.has(name));
-  const leakedInternalProps = addedWindowProps.filter((name) => internalGlobalNames.includes(name));
-  expect(leakedInternalProps).toEqual([]);
+  expect(addedWindowProps).toEqual([]);
   await expect(page.evaluate(() => typeof window.markdownViewTestHooks)).resolves.toBe('undefined');
 });
 
@@ -70,6 +101,19 @@ test('E2Eフラグがtrueなら単一テストフックだけ公開する', asyn
     setDirModeForTest: 'function',
     setMarkPendingTocNavigationObserverForTest: 'function',
     updateContent: 'function'
+  });
+  const hookState = await page.evaluate(() => {
+    const hooks = window.markdownViewTestHooks;
+    return {
+      isDirModeType: typeof hooks.isDirMode,
+      currentFileType: typeof hooks.currentFile,
+      lastAppliedContentType: hooks.lastAppliedContent === null ? 'null' : typeof hooks.lastAppliedContent
+    };
+  });
+  expect(hookState).toEqual({
+    isDirModeType: 'boolean',
+    currentFileType: 'string',
+    lastAppliedContentType: 'null'
   });
 });
 

@@ -49,6 +49,7 @@ function createAppContext(doc) {
     memo: {
       loadGeneration: 0,
       saveGeneration: 0,
+      pendingSaveGenerations: [],
       saveTimer: null,
       caretStart: memoCaret,
       caretEnd: memoCaret,

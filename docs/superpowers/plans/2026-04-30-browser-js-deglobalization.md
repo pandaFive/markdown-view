@@ -51,7 +51,7 @@ The main alternative is an IIFE closure that wraps the concatenated bundle and k
 - Do not add top-level reads of `appContext` to files that are loaded before `bootstrap.js`; current `inline_script.rs` order already loads `bootstrap.js` first, so event listeners and later boot code may reference `appContext`.
 - Use `ctx*` names for injected context parameters and keep legacy top-level globals unprefixed only until their removal step.
 - Keep state in `ctx` when multiple feature files need to read or mutate it, or when E2E hooks must inspect or set it. Keep state inside a controller closure only when it is owned by that controller and external code needs only a narrow method surface. That is why selection/content deferral state moves to `ctx.state`, while WebSocket buffer internals stay private behind `ctx.websocket.scheduleBufferedLiveUpdate`, `ctx.websocket.discardBufferedLiveUpdate`, and `ctx.websocket.rememberAppliedLiveUpdate`.
-- See **Self-Review Notes** for the final implementation note: Tasks 2-7 did not fully apply `ctx` parameter injection to every helper; the final bundle instead uses one private IIFE-scoped `appContext` root and reserves explicit controller closure state for WebSocket-owned internals.
+- Note: the rules above describe the original migration direction; the final implementation intentionally diverges. See **Self-Review Notes**: Tasks 2-7 did not fully apply `ctx` parameter injection to every helper, and the final bundle instead uses one private IIFE-scoped `appContext` root while reserving explicit controller closure state for WebSocket-owned internals.
 - Inline script CSP hashes are derived from `inline_js()` in `src/template/assets.rs`; any JS text change updates the runtime hash automatically. Each JS-changing task still runs `cargo test --all-targets --all-features` or `./verify.sh` so CSP integration tests catch hash/header regressions.
 - Each migration task ends with the same pattern: `rg` for legacy names, targeted E2E or full verification, then a focused commit. The task sections repeat exact commands so an implementer can execute tasks independently.
 
@@ -991,6 +991,7 @@ declare global {
       memo_refresh?: boolean;
       memo_file?: string;
       type?: string;
+      error?: string;
       raw?: string;
       html?: string;
       load_error?: string;
@@ -1009,7 +1010,7 @@ declare global {
       setCurrentFileForTest(file: string): void;
       setDirModeForTest(value: boolean): void;
       setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
-      updateContent(data: MvE2E.UpdateContentPayload, options?: MvE2E.UpdateContentOptions): void;
+      updateContent(data: MvE2E.UpdateMessage, opts?: MvE2E.UpdateContentOptions): void;
       readonly isDirMode: boolean;
       readonly currentFile: string;
       readonly lastAppliedContent: string | null;

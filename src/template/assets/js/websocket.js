@@ -11,6 +11,7 @@ function buildUpdateSignature(data) {
   });
 }
 
+// WebSocket の再接続・buffer 状態は他機能から直接参照しないため、appContext へ広げず controller closure に閉じる。
 function createWebSocketController(ctx, deps) {
   var socket = null;
   var socketReconnectAttempts = 0;
@@ -78,7 +79,9 @@ function createWebSocketController(ctx, deps) {
 
     socket.onopen = function() {
       socketReconnectAttempts = 0;
+      // 接続成功は WebSocket 経路の一時エラーからの復旧点なので、WS バナーだけを解除する。
       hideWsParseErrorBanner();
+      hideWsServerErrorBanner();
       setLiveStatus('live');
     };
 
@@ -116,6 +119,7 @@ function createWebSocketController(ctx, deps) {
       }
       if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {
         if (data.file && data.file !== ctx.state.currentFile) {
+          // ディレクトリモードでは他ファイルの変更通知も同じWSへ届くため、現在表示中でない refresh は無視する。
           console.warn('[markdown-view] 現在のファイルと異なる refresh 通知を無視しました。', {
             currentFile: ctx.state.currentFile,
             messageFile: data.file

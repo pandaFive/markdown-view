@@ -12,6 +12,7 @@ declare global {
       memo_refresh?: boolean;
       memo_file?: string;
       type?: string;
+      error?: string;
       raw?: string;
       html?: string;
       load_error?: string;
@@ -36,6 +37,7 @@ declare global {
     __lastWs?: MvE2E.TestWebSocketInstance;
     __bridgedWs?: MvE2E.TestWebSocketInstance;
     __parseErrorWs?: MvE2E.TestWebSocketInstance;
+    __serverErrorWs?: MvE2E.TestWebSocketInstance;
     __realWsOnmessage?: (ev: { data: string }) => void;
     __dispatchWsMessage?: (payload: unknown) => void;
     __markPendingCalls?: number;
@@ -54,7 +56,7 @@ declare global {
       setCurrentFileForTest(file: string): void;
       setDirModeForTest(value: boolean): void;
       setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
-      updateContent(data: MvE2E.UpdateContentPayload, opts?: MvE2E.UpdateContentOptions): void;
+      updateContent(data: MvE2E.UpdateMessage, opts?: MvE2E.UpdateContentOptions): void;
       readonly isDirMode: boolean;
       readonly currentFile: string;
       readonly lastAppliedContent: string | null;
