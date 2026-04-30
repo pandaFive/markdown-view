@@ -23,22 +23,60 @@ export async function resetStandardFixtures(options: ResetStandardFixturesOption
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
 
-export async function selectParagraphText(page: Page, text: string) {
-  await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
-    let node = null;
+export type SelectParagraphTextOptions = {
+  match?: 'exact' | 'contains';
+};
+
+export async function selectParagraphText(
+  page: Page,
+  text: string,
+  options: SelectParagraphTextOptions = {}
+) {
+  await page.evaluate(({ targetText, match }) => {
+    const content = document.getElementById('content');
+    if (!content) {
+      throw new Error('content root not found');
+    }
+
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    const matches: Text[] = [];
+    let node: Node | null = null;
     while ((node = walker.nextNode())) {
-      if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection()!;
-        const range = document.createRange();
-        range.selectNodeContents(node.parentElement!);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
+      const nodeText = node.textContent;
+      if (!nodeText) {
+        continue;
+      }
+      const isMatch = match === 'contains' ? nodeText.includes(targetText) : nodeText === targetText;
+      if (isMatch) {
+        matches.push(node as Text);
       }
     }
-    throw new Error(`text not found: ${targetText}`);
-  }, text);
+
+    if (matches.length === 0) {
+      throw new Error(`text not found: ${targetText}`);
+    }
+    if (matches.length > 1) {
+      throw new Error(`ambiguous text match: ${targetText} (${matches.length} matches)`);
+    }
+
+    const matchedNode = matches[0];
+    if (!matchedNode) {
+      throw new Error(`text not found: ${targetText}`);
+    }
+    const parent = matchedNode.parentElement;
+    if (!parent) {
+      throw new Error(`text match has no parent element: ${targetText}`);
+    }
+
+    const selection = window.getSelection();
+    if (!selection) {
+      throw new Error('window selection is not available');
+    }
+    const range = document.createRange();
+    range.selectNodeContents(parent);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, { targetText: text, match: options.match ?? 'exact' });
 }
 
 export async function clearSelection(page: Page) {
