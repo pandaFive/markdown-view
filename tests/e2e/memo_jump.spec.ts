@@ -83,7 +83,7 @@ test('メモ出典クリックで本文の対応ブロックへスクロール�
   });
 
   // 1. 中盤の段落を選択して引用追加 → メモタブが activate される
-  await selectParagraphText(page, 'TARGET BLOCK');
+  await selectParagraphText(page, 'TARGET BLOCK', { match: 'contains' });
   const quoteButton = page.locator('#quote-selection-action');
   await expect(quoteButton).toBeVisible();
   await quoteButton.click();

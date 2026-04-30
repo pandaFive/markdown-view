@@ -24,6 +24,7 @@ declare global {
   interface Window {
     __MV_E2E__?: boolean;
     __lastWs?: MvE2E.TestWebSocketInstance;
+    __bridgedWs?: MvE2E.TestWebSocketInstance;
     __realWsOnmessage?: (ev: { data: string }) => void;
     __dispatchWsMessage?: (payload: unknown) => void;
     __markPendingCalls?: number;

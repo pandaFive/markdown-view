@@ -6,6 +6,45 @@ const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
 const notesPath = path.join(fixtureDir, 'notes.md');
 
+async function memoArtifactPaths() {
+  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
+    .map((entry) => path.join(fixtureDir, entry.name));
+}
+
+async function assertMemoArtifactsRemoved() {
+  const leftovers = await memoArtifactPaths();
+  const markdownViewPath = path.join(fixtureDir, '.markdown-view');
+  try {
+    await fs.access(markdownViewPath);
+    leftovers.push(markdownViewPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  if (leftovers.length > 0) {
+    const relativeLeftovers = leftovers.map((entry) => path.relative(fixtureDir, entry)).join(', ');
+    throw new Error(`fixture cleanup left stale artifacts: ${relativeLeftovers}`);
+  }
+}
+
+async function removeFixtureArtifact(artifactPath: string, options: { recursive?: boolean } = {}) {
+  try {
+    const rmOptions = options.recursive === undefined
+      ? { force: true }
+      : { force: true, recursive: options.recursive };
+    await fs.rm(artifactPath, rmOptions);
+  } catch (error) {
+    const relativePath = path.relative(fixtureDir, artifactPath);
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
+    throw new Error(`fixture cleanup failed for ${relativePath}: ${code}`, { cause: error });
+  }
+}
+
 export type ResetStandardFixturesOptions = {
   cleanupMemoArtifacts?: boolean;
 };
@@ -13,32 +52,70 @@ export type ResetStandardFixturesOptions = {
 export async function resetStandardFixtures(options: ResetStandardFixturesOptions = {}) {
   // 既定で memo artifact を掃除し、前テスト残骸の混入を防ぐ。温存したい spec だけ false で opt-out する。
   if (options.cleanupMemoArtifacts ?? true) {
-    const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
-    await Promise.all(entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
-      .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
-    await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
+    await Promise.all(
+      (await memoArtifactPaths()).map((memoPath) => removeFixtureArtifact(memoPath))
+    );
+    await removeFixtureArtifact(path.join(fixtureDir, '.markdown-view'), { recursive: true });
+    await assertMemoArtifactsRemoved();
   }
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
 }
 
-export async function selectParagraphText(page: Page, text: string) {
-  await page.evaluate((targetText) => {
-    const walker = document.createTreeWalker(document.getElementById('content')!, NodeFilter.SHOW_TEXT);
-    let node = null;
+export type SelectParagraphTextOptions = {
+  match?: 'exact' | 'contains';
+};
+
+export async function selectParagraphText(
+  page: Page,
+  text: string,
+  options: SelectParagraphTextOptions = {}
+) {
+  await page.evaluate(({ targetText, match }) => {
+    const content = document.getElementById('content');
+    if (!content) {
+      throw new Error('content root not found');
+    }
+
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    const matches: Text[] = [];
+    let node: Node | null = null;
     while ((node = walker.nextNode())) {
-      if (node.textContent && node.textContent.includes(targetText)) {
-        const selection = window.getSelection()!;
-        const range = document.createRange();
-        range.selectNodeContents(node.parentElement!);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
+      const nodeText = node.textContent;
+      if (!nodeText) {
+        continue;
+      }
+      const isMatch = match === 'contains' ? nodeText.includes(targetText) : nodeText === targetText;
+      if (isMatch) {
+        matches.push(node as Text);
       }
     }
-    throw new Error(`text not found: ${targetText}`);
-  }, text);
+
+    if (matches.length === 0) {
+      throw new Error(`text not found: ${targetText}`);
+    }
+    if (matches.length > 1) {
+      throw new Error(`ambiguous text match: ${targetText} (${matches.length} matches)`);
+    }
+
+    const matchedNode = matches[0];
+    if (!matchedNode) {
+      throw new Error(`text not found: ${targetText}`);
+    }
+    const parent = matchedNode.parentElement;
+    if (!parent) {
+      throw new Error(`text match has no parent element: ${targetText}`);
+    }
+
+    const selection = window.getSelection();
+    if (!selection) {
+      throw new Error('window selection is not available');
+    }
+    const range = document.createRange();
+    range.selectNodeContents(parent);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, { targetText: text, match: options.match ?? 'exact' });
 }
 
 export async function clearSelection(page: Page) {
@@ -161,9 +238,19 @@ export async function stabilizeWebSocketHarness(page: Page) {
     }
     // __dispatchWsMessage は MessageEvent を生成せず { data: string } を直接渡すため、
     // E2E ハーネス内では onmessage の契約をテスト用の狭い型へ bridge する。
-    window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    const assertFreshBridge = () => {
+      if (window.__bridgedWs !== window.__lastWs) {
+        throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+      }
+    };
+    const alreadyBridged = window.__bridgedWs === lastWs && window.__realWsOnmessage;
+    window.__bridgedWs = lastWs;
+    if (!alreadyBridged) {
+      window.__realWsOnmessage = lastWs.onmessage as unknown as (ev: { data: string }) => void;
+    }
     lastWs.onmessage = function() {};
     window.__dispatchWsMessage = (payload) => {
+      assertFreshBridge();
       const realWsOnmessage = window.__realWsOnmessage;
       if (!realWsOnmessage) {
         throw new Error('WebSocket test harness message handler is not initialized');
@@ -175,6 +262,9 @@ export async function stabilizeWebSocketHarness(page: Page) {
 
 export async function dispatchWsMessage(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
@@ -188,6 +278,9 @@ export async function dispatchWsMessage(page: Page, payload: unknown) {
 // この helper の後に dispatchWsMessage を続けて呼ぶ用途では使わない。
 export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload: unknown) {
   await page.evaluate((messagePayload) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
@@ -205,6 +298,9 @@ export async function dispatchWsMessageAndDisableRealHandler(page: Page, payload
 
 export async function dispatchWsMessages(page: Page, payloads: unknown[]) {
   await page.evaluate((messagePayloads) => {
+    if (window.__bridgedWs !== window.__lastWs) {
+      throw new Error('WebSocket test harness bridge is stale; call stabilizeWebSocketHarness after reconnect');
+    }
     const dispatchMessage = window.__dispatchWsMessage;
     if (!dispatchMessage) {
       throw new Error('WebSocket test harness dispatcher is not initialized');
