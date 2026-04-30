@@ -140,36 +140,20 @@ fn startup_flow() -> FlowNode {
     FlowNode::group(
         "起動フロー",
         vec![
-            FlowNode::step("ログ初期化", "src/main.rs", Some("init_logging")),
-            FlowNode::step("CLI引数解析", "src/cli.rs", Some("Args::parse")),
-            FlowNode::step("パス検証", "src/main.rs", Some("main")),
+            FlowNode::step("ログ初期化", "src/main.rs", None),
+            FlowNode::step("CLI引数解析", "src/cli.rs", None),
+            FlowNode::step("パス検証", "src/main.rs", None),
             FlowNode::group(
                 "モード判定",
                 vec![
-                    FlowNode::step(
-                        "単一ファイルモード",
-                        "src/server/state.rs",
-                        Some("AppMode::new_single_file"),
-                    ),
-                    FlowNode::step(
-                        "ディレクトリモード",
-                        "src/server/state.rs",
-                        Some("AppMode::new_directory"),
-                    ),
+                    FlowNode::step("単一ファイルモード", "src/server/state.rs", None),
+                    FlowNode::step("ディレクトリモード", "src/server/state.rs", None),
                 ],
             ),
-            FlowNode::step("テーマ検証", "src/renderer/mod.rs", Some("validate_theme")),
-            FlowNode::step("AppState作成", "src/server/state.rs", Some("AppState::new")),
-            FlowNode::step(
-                "監視サービス開始",
-                "src/server/watch.rs",
-                Some("WatchService::start"),
-            ),
-            FlowNode::step(
-                "localhostサーバーbind",
-                "src/main.rs",
-                Some("bind_preview_listener"),
-            ),
+            FlowNode::step("テーマ検証", "src/renderer/mod.rs", None),
+            FlowNode::step("AppState作成", "src/server/state.rs", None),
+            FlowNode::step("監視サービス開始", "src/server/watch.rs", None),
+            FlowNode::step("localhostサーバーbind", "src/main.rs", None),
             FlowNode::step(
                 "ルーター作成",
                 "src/server/routes.rs",
@@ -196,12 +180,8 @@ fn http_render_flow() -> FlowNode {
                 "src/renderer/mod.rs",
                 Some("render_markdown"),
             ),
-            FlowNode::step(
-                "Markdownイベント処理",
-                "src/renderer/render.rs",
-                Some("render"),
-            ),
-            FlowNode::step("TOC生成", "src/renderer/toc.rs", Some("generate_toc")),
+            FlowNode::step("Markdownイベント処理", "src/renderer/render.rs", None),
+            FlowNode::step("TOC生成", "src/renderer/toc.rs", None),
             FlowNode::step("ページHTML生成", "src/template/page.rs", None),
             FlowNode::step("HTTPレスポンス", "src/server/routes.rs", None),
         ],
@@ -221,7 +201,7 @@ fn watch_update_flow() -> FlowNode {
                 "src/renderer/mod.rs",
                 Some("render_markdown"),
             ),
-            FlowNode::step("TOC再生成", "src/renderer/toc.rs", Some("generate_toc")),
+            FlowNode::step("TOC再生成", "src/renderer/toc.rs", None),
             FlowNode::step(
                 "WebSocket broadcast",
                 "src/server/broadcast.rs",

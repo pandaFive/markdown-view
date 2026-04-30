@@ -1,5 +1,20 @@
 use markdown_view::architecture::{application_flow, FlowNode};
 
+fn docs_mermaid_block() -> String {
+    let docs = include_str!("../docs/architecture-flow.md");
+    let start_marker = "```mermaid\n";
+    let start = docs
+        .find(start_marker)
+        .expect("architecture-flow.md should contain a mermaid block")
+        + start_marker.len();
+    let rest = &docs[start..];
+    let end = rest
+        .find("\n```")
+        .expect("architecture-flow.md mermaid block should be closed");
+
+    format!("{}\n", &rest[..end])
+}
+
 #[test]
 fn test_処理フローastに主要4フローが含まれる() {
     let flow = application_flow();
@@ -19,22 +34,34 @@ fn test_処理フローastに主要4フローが含まれる() {
 #[test]
 fn test_処理フローastはモジュール参照を保持する() {
     let flow = application_flow();
-    let startup = flow
-        .find("起動フロー")
-        .expect("起動フロー node should exist");
+    let descendants = flow.descendants();
 
     assert!(
-        startup
-            .descendants()
+        descendants
             .iter()
             .any(|node| node.module() == Some("src/main.rs") && node.function() == Some("main")),
-        "起動フローは main.rs の main を参照する必要がある"
+        "起動境界は main.rs の main を参照する必要がある"
     );
     assert!(
-        flow.descendants().iter().any(|node| {
-            node.module() == Some("src/renderer/render.rs") && node.function() == Some("render")
+        descendants.iter().any(|node| {
+            node.module() == Some("src/server/routes.rs")
+                && node.function() == Some("create_router")
         }),
-        "レンダリング処理は renderer::render を参照する必要がある"
+        "HTTP境界は routes.rs の create_router を参照する必要がある"
+    );
+    assert!(
+        descendants.iter().any(|node| {
+            node.module() == Some("src/renderer/mod.rs")
+                && node.function() == Some("render_markdown")
+        }),
+        "Markdownレンダリング境界は renderer::mod.rs の render_markdown を参照する必要がある"
+    );
+    assert!(
+        descendants.iter().any(|node| {
+            node.module() == Some("src/server/broadcast.rs")
+                && node.function() == Some("notify_update")
+        }),
+        "更新通知境界は broadcast.rs の notify_update を参照する必要がある"
     );
 }
 
@@ -59,6 +86,11 @@ fn test_処理フローastをmermaidに変換できる() {
     assert!(mermaid.contains("[\"HTTPレンダリングフロー\"]"));
     assert!(mermaid.contains("[\"render_markdown\"]"));
     assert!(mermaid.contains("-->"));
+}
+
+#[test]
+fn test_docs_mermaidはarchitecture_ast出力と一致する() {
+    assert_eq!(docs_mermaid_block(), application_flow().to_mermaid());
 }
 
 #[test]
