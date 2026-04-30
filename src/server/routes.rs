@@ -9,20 +9,20 @@ use axum::routing::get;
 use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use super::files::{
-    list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_SIZE,
-};
+use super::files::{list_markdown_files, search_directory, SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
 };
-use super::messages::{ApiError, BroadcastMessage};
-use super::service::{self, PageRequest, SidebarView};
+use super::messages::ApiError;
+use super::service::{
+    self, ContentRequest, MemoRequest, PageRequest, SaveMemoRequest, SidebarView,
+};
 use super::session::handle_socket;
 use super::state::AppState;
-use crate::template::{
-    render_page, MemoResponse, MemoUpdateMessage, RenderPageParams, SidebarParams, UpdateMessage,
-};
+use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
+
+#[cfg(test)]
+use super::files::{resolve_route_target, ResolvedTarget, RouteTargetRequest};
 
 // メモ本文の保存上限は save_route_memo 側の MAX_FILE_SIZE で判定する。
 // ここは JSON envelope と string escape を含む HTTP body の上限。
@@ -99,71 +99,31 @@ fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct RouteContext<'a> {
-    state: &'a Arc<AppState>,
-    target: ResolvedTarget,
+    _state: &'a Arc<AppState>,
+    _target: ResolvedTarget,
     request: RouteTargetRequest<'a>,
 }
 
+#[cfg(test)]
 impl<'a> RouteContext<'a> {
-    fn ensure_allowed(headers: &HeaderMap) -> Result<(), ApiError> {
-        ensure_allowed_request_host(headers)
-    }
-
     fn resolve(
         state: &'a Arc<AppState>,
         headers: &HeaderMap,
         request: RouteTargetRequest<'a>,
     ) -> Result<Self, ApiError> {
-        Self::ensure_allowed(headers)?;
+        ensure_allowed_request_host(headers)?;
         let target = resolve_route_target(state, request)?;
         Ok(Self {
-            state,
-            target,
+            _state: state,
+            _target: target,
             request,
         })
     }
 
-    async fn load_update(&self) -> Result<UpdateMessage, ApiError> {
-        load_route_update(&self.target, self.request).await
-    }
-
-    async fn load_memo(&self) -> Result<MemoResponse, ApiError> {
-        load_route_memo(self.state, &self.target, self.memo_request()).await
-    }
-
-    async fn save_memo(&self, raw: String) -> Result<MemoResponse, ApiError> {
-        save_route_memo(self.state, &self.target, raw, self.memo_request()).await
-    }
-
-    fn broadcast_saved_memo(&self) {
-        if self.state.tx().receiver_count() == 0 {
-            return;
-        }
-
-        let _ = self
-            .state
-            .tx()
-            .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(
-                self.memo_message_file(),
-            )));
-    }
-
     fn memo_request(&self) -> RouteTargetRequest<'a> {
         RouteTargetRequest::api_memo(self.request.query_file())
-    }
-
-    fn memo_message_file(&self) -> String {
-        self.target
-            .relative_path()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                self.target
-                    .file_path()
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| self.target.file_path().display().to_string())
     }
 }
 
@@ -199,12 +159,14 @@ async fn api_content_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let update = service::load_content(
         &state,
-        &headers,
-        RouteTargetRequest::api_content(query.file.as_deref()),
-    )?;
-    let update = context.load_update().await?;
+        ContentRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Json(update))
 }
@@ -215,12 +177,14 @@ async fn api_memo_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let memo = service::load_memo(
         &state,
-        &headers,
-        RouteTargetRequest::api_memo(query.file.as_deref()),
-    )?;
-    let memo = context.load_memo().await?;
+        MemoRequest {
+            file: query.file.as_deref(),
+        },
+    )
+    .await?;
 
     Ok(Json(memo))
 }
@@ -231,13 +195,15 @@ async fn api_memo_save_handler(
     headers: HeaderMap,
     Json(payload): Json<MemoSaveRequest>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    let context = RouteContext::resolve(
+    ensure_allowed_request_host(&headers)?;
+    let memo = service::save_memo(
         &state,
-        &headers,
-        RouteTargetRequest::api_memo(payload.file.as_deref()),
-    )?;
-    let memo = context.save_memo(payload.raw).await?;
-    context.broadcast_saved_memo();
+        SaveMemoRequest {
+            file: payload.file.as_deref(),
+            raw: payload.raw,
+        },
+    )
+    .await?;
 
     Ok(Json(memo))
 }
@@ -247,7 +213,7 @@ async fn api_files_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    RouteContext::ensure_allowed(&headers)?;
+    ensure_allowed_request_host(&headers)?;
 
     if let Some(base) = state.mode().directory() {
         let files = list_markdown_files(base).map_err(|e| {
@@ -269,7 +235,7 @@ async fn api_search_handler(
     headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    RouteContext::ensure_allowed(&headers)?;
+    ensure_allowed_request_host(&headers)?;
 
     let query = query.q.unwrap_or_default();
     let Some(base_dir) = state.mode().directory() else {

@@ -1,24 +1,23 @@
-use super::files::{load_route_memo, load_route_update, resolve_route_target, RouteTargetRequest};
-use super::messages::ApiError;
+use super::files::{
+    load_route_memo, load_route_update, resolve_route_target, save_route_memo, ResolvedTarget,
+    RouteTargetRequest,
+};
+use super::messages::{ApiError, BroadcastMessage};
 use super::state::AppState;
-use crate::template::MemoResponse;
-use crate::template::UpdateMessage;
+use crate::template::{MemoResponse, MemoUpdateMessage, UpdateMessage};
 
 pub(super) struct PageRequest<'a> {
     pub file: Option<&'a str>,
 }
 
-#[allow(dead_code)]
 pub(super) struct ContentRequest<'a> {
     pub file: Option<&'a str>,
 }
 
-#[allow(dead_code)]
 pub(super) struct MemoRequest<'a> {
     pub file: Option<&'a str>,
 }
 
-#[allow(dead_code)]
 pub(super) struct SaveMemoRequest<'a> {
     pub file: Option<&'a str>,
     pub raw: String,
@@ -110,6 +109,58 @@ pub(super) async fn load_page(
         memo,
         sidebar,
     })
+}
+
+pub(super) async fn load_content(
+    state: &AppState,
+    request: ContentRequest<'_>,
+) -> Result<UpdateMessage, ApiError> {
+    let route_request = RouteTargetRequest::api_content(request.file);
+    let target = resolve_route_target(state, route_request)?;
+    load_route_update(&target, route_request).await
+}
+
+pub(super) async fn load_memo(
+    state: &AppState,
+    request: MemoRequest<'_>,
+) -> Result<MemoResponse, ApiError> {
+    let route_request = RouteTargetRequest::api_memo(request.file);
+    let target = resolve_route_target(state, route_request)?;
+    load_route_memo(state, &target, route_request).await
+}
+
+pub(super) async fn save_memo(
+    state: &AppState,
+    request: SaveMemoRequest<'_>,
+) -> Result<MemoResponse, ApiError> {
+    let route_request = RouteTargetRequest::api_memo(request.file);
+    let target = resolve_route_target(state, route_request)?;
+    let memo = save_route_memo(state, &target, request.raw, route_request).await?;
+    broadcast_saved_memo(state, memo_message_file(&target));
+    Ok(memo)
+}
+
+fn broadcast_saved_memo(state: &AppState, file: String) {
+    if state.tx().receiver_count() == 0 {
+        return;
+    }
+
+    let _ = state
+        .tx()
+        .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(file)));
+}
+
+fn memo_message_file(target: &ResolvedTarget) -> String {
+    target
+        .relative_path()
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            target
+                .file_path()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| target.file_path().display().to_string())
 }
 
 #[cfg(test)]
@@ -219,5 +270,96 @@ mod tests {
 
         assert_eq!(page.memo.raw(), "");
         assert_eq!(page.memo.file(), Some("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_load_content_指定ファイルのupdateを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        std::fs::write(dir.path().join("target.md"), "# Target").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let update = load_content(
+            &state,
+            ContentRequest {
+                file: Some("target.md"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(update.content().as_str().contains("Target"));
+        assert_eq!(update.file(), Some("target.md"));
+    }
+
+    #[tokio::test]
+    async fn test_load_memo_指定ファイルのmemoを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        std::fs::write(dir.path().join("target.md"), "# Target").unwrap();
+        std::fs::write(dir.path().join(".target.md.memo.md"), "memo body").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let memo = load_memo(
+            &state,
+            MemoRequest {
+                file: Some("target.md"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(memo.raw(), "memo body");
+        assert_eq!(memo.file(), Some("target.md"));
+    }
+
+    #[tokio::test]
+    async fn test_save_memo_成功時だけmemo_updateをbroadcastする() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
+        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let mut rx = state.tx().subscribe();
+
+        let memo = save_memo(
+            &state,
+            SaveMemoRequest {
+                file: Some("README.md"),
+                raw: "saved memo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(memo.raw(), "saved memo");
+        let message = rx
+            .try_recv()
+            .expect("保存成功時はmemo_updateが送信されるべき");
+        match message {
+            BroadcastMessage::MemoUpdate(update) => assert_eq!(update.file(), "README.md"),
+            other => panic!("unexpected broadcast: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_save_memo_失敗時はbroadcastしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
+        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let mut rx = state.tx().subscribe();
+
+        let error = save_memo(
+            &state,
+            SaveMemoRequest {
+                file: Some("../README.md"),
+                raw: "blocked".to_string(),
+            },
+        )
+        .await
+        .expect_err("不正パスは保存失敗になるべき");
+
+        assert_eq!(error.0, axum::http::StatusCode::NOT_FOUND);
+        assert!(rx.try_recv().is_err());
     }
 }
