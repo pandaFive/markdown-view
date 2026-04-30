@@ -112,7 +112,7 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Default)]
 pub(crate) struct TokioMemoFs;
 
-fn atomic_tmp_path(path: &Path, attempt: u8) -> io::Result<PathBuf> {
+fn atomic_tmp_path(path: &Path, counter: u64, attempt: u8) -> io::Result<PathBuf> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -126,7 +126,6 @@ fn atomic_tmp_path(path: &Path, attempt: u8) -> io::Result<PathBuf> {
         )
     })?;
 
-    let counter = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let suffix = format!(".tmp.{}.{}.{}", std::process::id(), counter, attempt);
     let base = file_name.to_string_lossy();
     let mut tmp_name = format!("{base}{suffix}");
@@ -141,6 +140,83 @@ fn atomic_tmp_path(path: &Path, attempt: u8) -> io::Result<PathBuf> {
     }
 
     Ok(parent.join(tmp_name))
+}
+
+async fn write_atomic_with_counter(
+    path: &Path,
+    content: &[u8],
+    before_rename: &BeforeRenameCheck<'_>,
+    counter: u64,
+) -> Result<(), MemoWriteError> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "memo path must have a parent directory",
+        )
+    })?;
+
+    let mut last_already_exists = None;
+    for attempt in 0..ATOMIC_TMP_ATTEMPTS {
+        let tmp_path = atomic_tmp_path(path, counter, attempt)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        // tmp 名は推測可能なため、緩い umask の共有環境でも rename 前に他者読み取りさせない。
+        options.mode(0o600);
+        let mut tmp_file = match options.open(&tmp_path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                last_already_exists = Some(error);
+                continue;
+            }
+            Err(error) => return Err(MemoWriteError::Io(error)),
+        };
+
+        if let Err(error) = tmp_file.write_all(content).await {
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(MemoWriteError::Io(error));
+        }
+        if let Err(error) = tmp_file.flush().await {
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(MemoWriteError::Io(error));
+        }
+        if let Err(error) = tmp_file.sync_data().await {
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(MemoWriteError::Io(error));
+        }
+        drop(tmp_file);
+
+        if let Err(error) = before_rename(path, &tmp_path) {
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(MemoWriteError::BeforeRename(error));
+        }
+
+        if let Err(error) = atomic_replace(&tmp_path, path).await {
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(MemoWriteError::Io(error));
+        }
+
+        sync_parent_dir_best_effort(parent).await;
+        return Ok(());
+    }
+
+    let error = last_already_exists.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "memo temporary file already exists",
+        )
+    });
+    let memo_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "<unknown>".into());
+    tracing::error!(
+        "[markdown-view] メモ一時ファイル名が{}回連続で衝突したため保存を中止します ({}): {}",
+        ATOMIC_TMP_ATTEMPTS,
+        memo_name,
+        error
+    );
+    Err(MemoWriteError::Io(error))
 }
 
 async fn sync_parent_dir_best_effort(parent: &Path) {
@@ -266,74 +342,8 @@ impl MemoFs for TokioMemoFs {
         content: &[u8],
         before_rename: &BeforeRenameCheck<'_>,
     ) -> Result<(), MemoWriteError> {
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "memo path must have a parent directory",
-            )
-        })?;
-
-        let mut last_already_exists = None;
-        for attempt in 0..ATOMIC_TMP_ATTEMPTS {
-            let tmp_path = atomic_tmp_path(path, attempt)?;
-            let mut options = tokio::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut tmp_file = match options.open(&tmp_path).await {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    last_already_exists = Some(error);
-                    continue;
-                }
-                Err(error) => return Err(MemoWriteError::Io(error)),
-            };
-
-            if let Err(error) = tmp_file.write_all(content).await {
-                cleanup_tmp_best_effort(&tmp_path).await;
-                return Err(MemoWriteError::Io(error));
-            }
-            if let Err(error) = tmp_file.flush().await {
-                cleanup_tmp_best_effort(&tmp_path).await;
-                return Err(MemoWriteError::Io(error));
-            }
-            if let Err(error) = tmp_file.sync_data().await {
-                cleanup_tmp_best_effort(&tmp_path).await;
-                return Err(MemoWriteError::Io(error));
-            }
-            drop(tmp_file);
-
-            if let Err(error) = before_rename(path, &tmp_path) {
-                cleanup_tmp_best_effort(&tmp_path).await;
-                return Err(MemoWriteError::BeforeRename(error));
-            }
-
-            if let Err(error) = atomic_replace(&tmp_path, path).await {
-                cleanup_tmp_best_effort(&tmp_path).await;
-                return Err(MemoWriteError::Io(error));
-            }
-
-            sync_parent_dir_best_effort(parent).await;
-            return Ok(());
-        }
-
-        let error = last_already_exists.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "memo temporary file already exists",
-            )
-        });
-        let memo_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy())
-            .unwrap_or_else(|| "<unknown>".into());
-        tracing::error!(
-            "[markdown-view] メモ一時ファイル名が{}回連続で衝突したため保存を中止します ({}): {}",
-            ATOMIC_TMP_ATTEMPTS,
-            memo_name,
-            error
-        );
-        Err(MemoWriteError::Io(error))
+        let counter = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        write_atomic_with_counter(path, content, before_rename, counter).await
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
@@ -481,22 +491,18 @@ mod tests {
             .await
             .expect("initial memo should be written");
 
-        for counter in 0..128 {
-            for attempt in 0..ATOMIC_TMP_ATTEMPTS {
-                ATOMIC_TMP_COUNTER.store(counter, Ordering::Relaxed);
-                let tmp_path = atomic_tmp_path(&path, attempt).expect("tmp path should build");
-                tokio::fs::write(tmp_path, b"occupied")
-                    .await
-                    .expect("occupied tmp should be written");
-            }
+        let counter = 0;
+        for attempt in 0..ATOMIC_TMP_ATTEMPTS {
+            let tmp_path = atomic_tmp_path(&path, counter, attempt).expect("tmp path should build");
+            tokio::fs::write(tmp_path, b"occupied")
+                .await
+                .expect("occupied tmp should be written");
         }
-        ATOMIC_TMP_COUNTER.store(0, Ordering::Relaxed);
 
-        let err = TokioMemoFs
-            .write_atomic(&path, b"new", &|_, _| Ok(()))
+        // counter 0 の全 attempt を占有し、retry 枯渇時も最終ファイルを壊さないことを固定する。
+        let err = write_atomic_with_counter(&path, b"new", &|_, _| Ok(()), counter)
             .await
             .expect_err("occupied tmp attempts should exhaust");
-        ATOMIC_TMP_COUNTER.store(1_000_000, Ordering::Relaxed);
 
         match err {
             MemoWriteError::Io(error) => {
