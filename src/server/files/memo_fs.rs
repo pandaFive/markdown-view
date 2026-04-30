@@ -63,6 +63,10 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
     }
 }
 
+/// tmp を最終パスへ置換する直前の検査フック。
+///
+/// 第1引数は最終保存先、第2引数は同一ディレクトリ内に作成済みの tmp パス。
+/// `Err` を返すと tmp は削除され、最終保存先は置換されない。
 pub(crate) type BeforeRenameCheck<'a> =
     dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync + 'a;
 
@@ -89,6 +93,10 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
 
     /// バイト列を同一ディレクトリ内 tmp へ書き込み、rename で最終パスへ差し替える。
+    ///
+    /// tmp は `create_new` で作成し、書き込み・flush・sync 後、rename 直前に
+    /// `before_rename(final_path, tmp_path)` を呼ぶ。rename 前の失敗では tmp を
+    /// best effort で削除し、最終保存先の既存内容を保持する。
     async fn write_atomic(
         &self,
         path: &Path,
@@ -310,14 +318,23 @@ impl MemoFs for TokioMemoFs {
             return Ok(());
         }
 
-        Err(MemoWriteError::Io(last_already_exists.unwrap_or_else(
-            || {
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "memo temporary file already exists",
-                )
-            },
-        )))
+        let error = last_already_exists.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "memo temporary file already exists",
+            )
+        });
+        let memo_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_else(|| "<unknown>".into());
+        tracing::error!(
+            "[markdown-view] メモ一時ファイル名が{}回連続で衝突したため保存を中止します ({}): {}",
+            ATOMIC_TMP_ATTEMPTS,
+            memo_name,
+            error
+        );
+        Err(MemoWriteError::Io(error))
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {

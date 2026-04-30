@@ -458,7 +458,7 @@ fn ensure_safe_memo_rename_paths(
             sanitize_path_for_logging(tmp_path, base_dir)
         );
         return Err(MemoBeforeRenameError::new(
-            "メモ保存先にシンボリックリンクが含まれているため操作できません",
+            "メモ保存の内部状態が不正なため操作を中止しました",
         ));
     }
 
