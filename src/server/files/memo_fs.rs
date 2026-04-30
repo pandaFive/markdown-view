@@ -1,6 +1,7 @@
 //! メモ保存・読み込みで使用するファイルシステム抽象。
 //!
-//! 本番では [`TokioMemoFs`] が `tokio::fs::*` を呼び出す薄いラッパーとして動作する。
+//! 本番では [`TokioMemoFs`] が通常の非同期ファイル操作に加え、
+//! OS 固有 API を含む atomic replace と親ディレクトリ sync を担当する。
 //! テストでは `MockMemoFs`（`test_support` モジュール）を注入し、
 //! 特定パスの I/O エラーを決定論的に再現する。
 
@@ -61,6 +62,8 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
 ///
 /// 第1引数は最終保存先、第2引数は同一ディレクトリ内に作成済みの tmp パス。
 /// `Err` を返すと tmp は削除され、最終保存先は置換されない。
+/// 呼び出し側は、final/tmp の親ディレクトリ一致と symlink component 不在など、
+/// rename 直前に再確認すべき保存先不変条件をここで検査する。
 pub(crate) type BeforeRenameCheck<'a> =
     dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync + 'a;
 
@@ -89,8 +92,9 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// バイト列を同一ディレクトリ内 tmp へ書き込み、rename で最終パスへ差し替える。
     ///
     /// tmp は `create_new` で作成し、書き込み・flush・sync 後、rename 直前に
-    /// `before_rename(final_path, tmp_path)` を呼ぶ。rename 前の失敗では tmp を
-    /// best effort で削除し、最終保存先の既存内容を保持する。
+    /// `before_rename(final_path, tmp_path)` を呼ぶ。tmp 作成から rename までの失敗、
+    /// および rename 自体の失敗では tmp を best effort で削除し、最終保存先の
+    /// 既存内容を保持する。
     async fn write_atomic(
         &self,
         path: &Path,

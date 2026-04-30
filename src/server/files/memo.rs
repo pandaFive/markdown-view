@@ -462,7 +462,7 @@ fn ensure_safe_memo_rename_paths(
         ));
     }
 
-    // HTTP用ApiErrorはMemoFs境界へ出せないため、rename直前検査では利用者向け理由だけを写す。
+    // HTTP用ApiErrorはMemoFs境界へ出せないため、rename直前検査では利用者向け理由を再作成する。
     ensure_safe_memo_path(final_path, state, target, request).map_err(|_| {
         MemoBeforeRenameError::new("メモ保存先にシンボリックリンクが含まれているため操作できません")
     })?;
