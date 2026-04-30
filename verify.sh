@@ -72,6 +72,7 @@ run_playwright_e2e() {
 run_step "フォーマットチェック" cargo fmt --all -- --check
 run_step "Lint (clippy)" cargo clippy --all-targets --all-features -- -D warnings
 run_step "テスト実行" cargo test --all-targets --all-features
+run_step "リリースビルドテスト実行" cargo test --all-targets --all-features --release
 run_step "E2E型チェック (tsc)" typecheck_e2e
 
 if [[ "$run_e2e" == true ]]; then

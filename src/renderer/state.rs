@@ -132,7 +132,15 @@ impl RenderState {
         });
     }
 
+    /// アクティブな見出しがある状態でのみ呼ぶ。
+    ///
+    /// debug/test では pulldown-cmark の `Start(Heading)` / `End(Heading)` 対応契約に
+    /// 反した呼び出しを検知する。release では既存互換の `None` fallback を維持する。
     pub(super) fn finish_heading(&mut self, id: String, heading_attrs: String) -> Option<String> {
+        debug_assert!(
+            self.heading.is_some(),
+            "finish_heading: アクティブな見出しがない状態で呼ばれた"
+        );
         let heading = self.heading.take()?;
         Some(format!(
             "<h{} id=\"{}\"{}>{}</h{}>\n",
@@ -339,6 +347,25 @@ fn table_align_class_attr(alignment: &Alignment) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "finish_heading: アクティブな見出し")]
+    fn test_finish_headingは開始なしならdebug_assertで検知する() {
+        let mut state = RenderState::new();
+
+        let _ = state.finish_heading("heading".to_string(), String::new());
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_finish_headingはrelease_fallbackでnoneを返す() {
+        let mut state = RenderState::new();
+
+        assert!(state
+            .finish_heading("heading".to_string(), String::new())
+            .is_none());
+    }
 
     #[test]
     #[should_panic(expected = "finish_code_block: アクティブなコードブロック")]

@@ -49,10 +49,7 @@ fn dispatch_event(
         Event::Rule => handle_rule(state),
         Event::TaskListMarker(checked) => handle_task_list_marker(checked, state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_event(&other);
         }
     }
 }
@@ -85,10 +82,7 @@ fn handle_start(
         Tag::TableRow => handle_table_row_start(state),
         Tag::TableCell => handle_table_cell_start(state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdown開始タグを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_start_tag(&other);
         }
     }
 }
@@ -119,12 +113,34 @@ fn handle_end(
         TagEnd::TableRow => handle_table_row_end(state),
         TagEnd::TableCell => handle_table_cell_end(state),
         other => {
-            tracing::debug!(
-                "[markdown-view] 未処理のMarkdown終了タグを無視: {:?}",
-                other
-            );
+            let _ = log_ignored_markdown_end_tag(&other);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IgnoredMarkdownEventKind {
+    Event,
+    StartTag,
+    EndTag,
+}
+
+fn log_ignored_markdown_event(event: &Event<'_>) -> IgnoredMarkdownEventKind {
+    tracing::debug!(
+        "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
+        event
+    );
+    IgnoredMarkdownEventKind::Event
+}
+
+fn log_ignored_markdown_start_tag(tag: &Tag<'_>) -> IgnoredMarkdownEventKind {
+    tracing::debug!("[markdown-view] 未処理のMarkdown開始タグを無視: {:?}", tag);
+    IgnoredMarkdownEventKind::StartTag
+}
+
+fn log_ignored_markdown_end_tag(tag: &TagEnd) -> IgnoredMarkdownEventKind {
+    tracing::debug!("[markdown-view] 未処理のMarkdown終了タグを無視: {:?}", tag);
+    IgnoredMarkdownEventKind::EndTag
 }
 
 fn handle_text(
@@ -417,8 +433,12 @@ fn push_rendered_inline(html: &str, state: &mut RenderState) {
 }
 
 fn heading_line_attrs(line_lookup: &LineLookup, state: &RenderState) -> String {
-    state
-        .heading_range()
+    let range = state.heading_range();
+    debug_assert!(
+        range.is_some(),
+        "heading_line_attrs: アクティブな見出しがない状態で呼ばれた"
+    );
+    range
         .map(|range| line_block_marker_with(source_line_attrs(line_lookup, range)))
         .unwrap_or_default()
 }
@@ -428,8 +448,81 @@ fn code_block_line_attrs(
     line_lookup: &LineLookup,
     state: &RenderState,
 ) -> String {
-    state
-        .code_block_full_range(end_range)
+    let range = state.code_block_full_range(end_range);
+    debug_assert!(
+        range.is_some(),
+        "code_block_line_attrs: アクティブなコードブロックがない状態で呼ばれた"
+    );
+    range
         .map(|range| line_block_marker_with(source_line_attrs(line_lookup, &range)))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "heading_line_attrs: アクティブな見出し")]
+    fn test_heading_line_attrsは見出し開始なしならdebug_assertで検知する() {
+        let line_lookup = LineLookup::new("# title");
+        let state = RenderState::new();
+
+        let _ = heading_line_attrs(&line_lookup, &state);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "code_block_line_attrs: アクティブなコードブロック")]
+    fn test_code_block_line_attrsはコードブロック開始なしならdebug_assertで検知する() {
+        let line_lookup = LineLookup::new("```rust\nfn main() {}\n```");
+        let state = RenderState::new();
+
+        let _ = code_block_line_attrs(&(0..0), &line_lookup, &state);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_heading_line_attrsはrelease_fallbackで空属性を返す() {
+        let line_lookup = LineLookup::new("# title");
+        let state = RenderState::new();
+
+        assert_eq!(heading_line_attrs(&line_lookup, &state), "");
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_code_block_line_attrsはrelease_fallbackで空属性を返す() {
+        let line_lookup = LineLookup::new("```rust\nfn main() {}\n```");
+        let state = RenderState::new();
+
+        assert_eq!(code_block_line_attrs(&(0..0), &line_lookup, &state), "");
+    }
+
+    #[test]
+    fn test_未処理markdown_eventは観測対象として分類される() {
+        let event = Event::InlineMath(pulldown_cmark::CowStr::from("x"));
+
+        assert_eq!(
+            log_ignored_markdown_event(&event),
+            IgnoredMarkdownEventKind::Event
+        );
+    }
+
+    #[test]
+    fn test_未処理markdown_start_tagは観測対象として分類される() {
+        assert_eq!(
+            log_ignored_markdown_start_tag(&Tag::HtmlBlock),
+            IgnoredMarkdownEventKind::StartTag
+        );
+    }
+
+    #[test]
+    fn test_未処理markdown_end_tagは観測対象として分類される() {
+        assert_eq!(
+            log_ignored_markdown_end_tag(&TagEnd::HtmlBlock),
+            IgnoredMarkdownEventKind::EndTag
+        );
+    }
 }

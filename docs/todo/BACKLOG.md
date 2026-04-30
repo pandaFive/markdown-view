@@ -33,12 +33,6 @@
   - 理由: いずれも今回の helper 化で再利用面積が広がった既存課題。個別 spec の意図と違う要素・古い WebSocket handler・未削除メモが silent に残ると、E2E が clean-slate 前提を満たさないまま偽陽性化しうる
   - 由来: E2E 共通ヘルパー抽出 PR レビュー (2026-04-29、pre-existing)
 
-- [ ] `render_markdown` 責務分割後の silent failure 観測性強化
-  - ファイル: `src/renderer/{render,state,highlight}.rs`
-  - 内容: `heading_line_attrs` / `code_block_line_attrs` / `finish_heading` の `None` 経路、未処理 Markdown event ログ、コードハイライト fallback の観測性を整理する
-  - 理由: 責務分割 PR では挙動互換を優先して silent fallback を温存した。次PRで debug_assert / tracing / fallback marker の要否をまとめて判断し、見出し・コードブロック・未処理 event の静かな退行を検知しやすくする
-  - 由来: render_markdown 責務分割 PR レビュー (2026-04-29)
-
 ## P3: 長期改善・低緊急
 
 - [ ] インラインブラウザJS の TS 化
@@ -62,6 +56,12 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] `render_markdown` 責務分割後の silent failure 観測性強化
+  - ファイル: `src/renderer/{render,state,highlight}.rs`, `tests/renderer_test.rs`
+  - 内容: `heading_line_attrs` / `code_block_line_attrs` / `finish_heading` の active state 前提を debug/test で検知する契約として固定し、未処理 Markdown event/tag の debug ログ経路と code block fallback HTML の escaped fallback を module test で保護した
+  - 完了根拠: `cargo test --all-targets --all-features` と `./verify.sh` が pass
+  - 由来: render_markdown 責務分割 PR レビュー (2026-04-29)
 
 - [x] `render_markdown` の責務分割
   - ファイル: `src/renderer/{mod,render,state,line,security,highlight}.rs`, `tests/renderer_test.rs`
