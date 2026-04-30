@@ -1,3 +1,4 @@
+pub mod architecture;
 pub mod cli;
 pub mod renderer;
 pub mod server;
