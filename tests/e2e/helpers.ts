@@ -6,6 +6,32 @@ const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 const readmePath = path.join(fixtureDir, 'README.md');
 const notesPath = path.join(fixtureDir, 'notes.md');
 
+async function memoArtifactPaths() {
+  const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
+    .map((entry) => path.join(fixtureDir, entry.name));
+}
+
+async function assertMemoArtifactsRemoved() {
+  const leftovers = await memoArtifactPaths();
+  const markdownViewPath = path.join(fixtureDir, '.markdown-view');
+  try {
+    await fs.access(markdownViewPath);
+    leftovers.push(markdownViewPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  if (leftovers.length > 0) {
+    const relativeLeftovers = leftovers.map((entry) => path.relative(fixtureDir, entry)).join(', ');
+    throw new Error(`fixture cleanup left stale artifacts: ${relativeLeftovers}`);
+  }
+}
+
 export type ResetStandardFixturesOptions = {
   cleanupMemoArtifacts?: boolean;
 };
@@ -13,11 +39,11 @@ export type ResetStandardFixturesOptions = {
 export async function resetStandardFixtures(options: ResetStandardFixturesOptions = {}) {
   // 既定で memo artifact を掃除し、前テスト残骸の混入を防ぐ。温存したい spec だけ false で opt-out する。
   if (options.cleanupMemoArtifacts ?? true) {
-    const entries = await fs.readdir(fixtureDir, { withFileTypes: true });
-    await Promise.all(entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.memo.md'))
-      .map((entry) => fs.rm(path.join(fixtureDir, entry.name), { force: true })));
+    await Promise.all(
+      (await memoArtifactPaths()).map((memoPath) => fs.rm(memoPath, { force: true }))
+    );
     await fs.rm(path.join(fixtureDir, '.markdown-view'), { recursive: true, force: true });
+    await assertMemoArtifactsRemoved();
   }
   await fs.writeFile(readmePath, '# README\n\nInitial README content\n');
   await fs.writeFile(notesPath, '# Notes\n\nNotes body\n');
