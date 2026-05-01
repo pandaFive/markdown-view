@@ -247,6 +247,31 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続しな�
   })).toBe(false);
 });
 
+test('WebSocket parse errorバナー表示中でも通常切断なら再接続する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const banner = document.createElement('div');
+    banner.id = 'ws-parse-error-banner';
+    banner.textContent = 'previous parse error';
+    document.body.appendChild(banner);
+    window.__parseErrorWs = lastWs;
+    lastWs.close();
+  });
+
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
+  });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#ws-parse-error-banner')).toHaveCount(0);
+});
+
 test('WebSocket再接続成功時にサーバーエラーバナーを解除する', async ({ page }) => {
   await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
   await page.reload();

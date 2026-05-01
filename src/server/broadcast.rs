@@ -68,13 +68,12 @@ pub(super) fn spawn_watch_event_forwarder(
 /// ファイル監視エラーをブロードキャストする
 ///
 /// `notify_update` では受信者がゼロの場合に早期リターンするが、エラー通知は
-/// 受信者の有無に関わらず送信する。受信者がゼロの場合、`send` の戻り値エラーは
-/// 意図的に無視する。
+/// 受信者の有無に関わらず送信を試みる。
 fn broadcast_error(state: &AppState, error: &WatchError) {
-    let _ = state.tx().send(BroadcastMessage::Error(format!(
-        "ファイル監視エラー: {}",
-        error.user_message()
-    )));
+    send_broadcast_message(
+        state.tx(),
+        BroadcastMessage::Error(format!("ファイル監視エラー: {}", error.user_message())),
+    );
 }
 
 #[cfg(test)]
@@ -97,6 +96,18 @@ mod tests {
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
         assert!(logs_contain("test error"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_broadcast_error_送信失敗はwarnログに残す() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(base_dir.path());
+
+        broadcast_error(&state, &WatchError::notify("watch failure"));
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("watch failure"));
     }
 
     #[tokio::test]

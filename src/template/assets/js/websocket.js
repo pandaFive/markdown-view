@@ -170,7 +170,6 @@ function createWebSocketController(ctx, deps) {
         suppressNextReconnect = false;
         return;
       }
-      if (document.getElementById('ws-parse-error-banner')) return;
       if (!document.getElementById('ws-parse-error-banner') && !document.getElementById('ws-server-error-banner')) {
         setLiveStatus('retry');
       }
