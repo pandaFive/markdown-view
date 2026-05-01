@@ -24,7 +24,7 @@
 
 `notify_update` の receiver=0 分岐に、エラーだけを観測する補助経路を追加する。
 
-receiver がいる場合は現行通り `build_change_broadcast_message(state, changed_file).await` の結果を `send_broadcast_message` に渡す。receiver が 0 の場合は新しい補助関数を呼び、ターゲット解決と軽量なファイル読込前検査だけを実行する。検証失敗、ファイル削除、metadata/open 失敗、サイズ超過のように本文読込前に分かる異常だけ warn ログに残す。補助関数の await 中に受信者が増えた場合は receiver 数を再確認し、通常の broadcast 経路へフォールバックする。
+receiver がいる場合は現行通り `build_change_broadcast_message(state, changed_file).await` の結果を `send_broadcast_message` に渡す。receiver が 0 の場合は新しい補助関数を呼び、ターゲット解決と軽量なファイル読込前検査だけを実行する。検証失敗、ファイル削除、metadata/open 失敗、サイズ超過のように本文読込前に分かる異常だけ warn ログに残す。補助関数の await 中に受信者が増えた場合は receiver 数を再確認し、通常の broadcast 経路へフォールバックする。この race フォールバックは外部から deterministically 注入しにくいため、仕様コメントで固定する。
 
 この方針により、通常更新の receiver=0 fast path は維持しつつ、運用上よく起きる削除・検証・サイズ系の異常が silent にならない。非 UTF-8 のように本文読込後にしか分からないエラーは、receiver=0 時の観測対象外とする。
 
@@ -70,9 +70,10 @@ receiver=0 用には、本文読込を避ける軽量ヘルパーを `src/server
 ## エラーハンドリング
 
 - 検証失敗の分類は `build_change_broadcast_message` の既存実装と同じ `resolve_change_target` の結果に従う。
-- 読込前検査の失敗は、既存の `ReadMarkdownError::Io` と `ReadMarkdownError::TooLarge` の user message に揃える。
+- 読込前検査の失敗は、既存 warn ログと同じく `ReadMarkdownError` の `Display` を使い、I/O エラーの underlying message を残す。
 - `ReadMarkdownError::NotUtf8` は本文読込後にしか分からないため receiver=0 時の観測対象外とする。
 - 受信者なしログは送信失敗ではないため、既存の `send_broadcast_message` の warn とは別文言にする。
+- race フォールバック時は、受信者なし経路の warn と通常 broadcast 経路の warn が同一イベントで二重に出る可能性を許容する。配送欠落を避けることを優先するため。
 - ログ文言はテストで固定できる短い日本語にする。例: `"[markdown-view] WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"`。
 
 ## テスト方針

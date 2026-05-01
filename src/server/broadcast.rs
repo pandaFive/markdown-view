@@ -18,7 +18,7 @@ use crate::watcher::{WatchError, WatchEvent};
 /// クライアント側でアクティブタブの更新判定に使用する。
 /// ファイル検証や読み込みに失敗した場合はエラーメッセージをbroadcastする。
 /// 受信者がゼロの場合は検証・読み込み前エラーだけをログに残す。
-/// ログ記録中に受信者が増えた場合は、通常のbroadcast経路を再試行する。
+/// ログ記録中に受信者が増えた場合は、通常のbroadcast経路にフォールバックする。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx().receiver_count() == 0 {
         log_change_error_without_receivers(state, changed_file).await;
@@ -85,7 +85,7 @@ pub(super) fn spawn_watch_event_forwarder(
 
 /// ファイル監視エラーをブロードキャストする
 ///
-/// `notify_update` の受信者なし経路は変更由来エラーをログに留めるが、
+/// `notify_update` の受信者なし経路は変更由来の読込前エラーをログに留めるが、
 /// 監視エラー通知は受信者の有無に関わらず送信を試みる。
 fn broadcast_error(state: &AppState, error: &WatchError) {
     send_broadcast_message(
@@ -339,6 +339,7 @@ mod tests {
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
         assert!(logs_contain("更新時読み込みエラー"));
+        assert!(!logs_contain("更新時ファイル検証失敗"));
         assert!(logs_contain("docs/guide.md"));
     }
 

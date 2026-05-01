@@ -247,7 +247,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
         Err(error) => Some(format!(
             "更新時読み込みエラー ({}): {}",
             target.file_label(),
-            error.user_message()
+            error
         )),
     }
 }
