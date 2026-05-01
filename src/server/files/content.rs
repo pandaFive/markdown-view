@@ -170,13 +170,7 @@ pub(in crate::server) async fn build_change_broadcast_message(
         ValidateRenderOutcome::NoTarget => None,
         ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
         ValidateRenderOutcome::ResolveFailed(error) => {
-            let file_label = state
-                .mode()
-                .single_file()
-                .map(file_display_name)
-                .unwrap_or_else(|| {
-                    sanitize_path_for_logging(changed_file, state.mode().base_dir()).into_owned()
-                });
+            let file_label = change_error_file_label(state, changed_file);
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
                 file_label,
@@ -199,6 +193,68 @@ pub(in crate::server) async fn build_change_broadcast_message(
                 error.user_message()
             )))
         }
+    }
+}
+
+/// 変更通知の検証失敗ログに使うファイル表示名を返す。
+fn change_error_file_label(state: &AppState, changed_file: &Path) -> String {
+    state
+        .mode()
+        .single_file()
+        .map(file_display_name)
+        .unwrap_or_else(|| {
+            sanitize_path_for_logging(changed_file, state.mode().base_dir()).into_owned()
+        })
+}
+
+/// 本文読込や描画の前に、存在・サイズ・open可否だけを確認する。
+async fn check_readable_before_render(file_path: &Path) -> Result<(), ReadMarkdownError> {
+    let metadata = tokio::fs::metadata(file_path)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
+    if !metadata.is_file() {
+        return Err(ReadMarkdownError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "通常ファイルではありません",
+        )));
+    }
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(ReadMarkdownError::TooLarge);
+    }
+
+    // 読み込み本体は避けつつ、権限やロックなどでopenできない状態を検出する。
+    let _file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
+    Ok(())
+}
+
+/// WebSocket受信者がいない変更イベントで、ローカルログに残すエラー文言を組み立てる。
+pub(in crate::server) async fn build_change_error_log_message_without_receivers(
+    state: &AppState,
+    changed_file: &Path,
+) -> Option<String> {
+    let resolve_result = resolve_change_target(state, changed_file);
+    let target = match resolve_result {
+        Ok(Some(target)) => target,
+        Ok(None) => return None,
+        Err(error) => {
+            let file_label = change_error_file_label(state, changed_file);
+            return Some(format!(
+                "更新時ファイル検証失敗 ({}): {}",
+                file_label, error
+            ));
+        }
+    };
+
+    match check_readable_before_render(target.file_path()).await {
+        Ok(()) => None,
+        Err(ReadMarkdownError::NotUtf8) => None,
+        Err(error) => Some(format!(
+            "更新時読み込みエラー ({}): {}",
+            target.file_label(),
+            error
+        )),
     }
 }
 
