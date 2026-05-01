@@ -102,6 +102,38 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 
 #[tokio::test]
+async fn test_apiメモ_put_raw欠落は422で拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 422);
+}
+
+#[tokio::test]
+async fn test_apiメモ_put_raw非文字列は422で拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let client = reqwest::Client::new();
+
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({
+            "raw": 123
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), 422);
+}
+
+#[tokio::test]
 async fn test_apiメモ_保存成功後にtmpファイルが残らない() {
     let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();

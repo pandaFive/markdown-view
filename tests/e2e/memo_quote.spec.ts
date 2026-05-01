@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
+import { installTestWebSocketHarness } from './browser/test-websocket';
 import { openMemoTab, resetStandardFixtures, selectParagraphText } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
@@ -140,4 +141,159 @@ test('メモ保存応答のraw欠落では編集中の内容を消さない', as
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
   await expect(memoEditor).toHaveValue('local draft that must remain');
   await expect.poll(() => warnings.some((text) => text.includes('raw を含まないメモ応答'))).toBe(true);
+});
+
+test('メモ保存応答のhtml欠落ではプレビューを空にしない', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  let putCount = 0;
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() === 'PUT') {
+      putCount += 1;
+      if (putCount === 1) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            raw: 'stable preview',
+            html: '<p>stable preview</p>'
+          })
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: 'new draft'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  const memoEditor = page.locator('#memo-editor');
+  await memoEditor.fill('stable preview');
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+  await expect(page.locator('#memo-preview')).toContainText('stable preview');
+
+  await memoEditor.fill('new draft');
+
+  await expect(page.locator('#memo-save-status')).toContainText('メモ応答が不正');
+  await expect(page.locator('#memo-preview')).toContainText('stable preview');
+  await expect.poll(() => warnings.some((text) => text.includes('html を含まないメモ応答'))).toBe(true);
+});
+
+test('古いメモ保存エラーが永続エラーなら後続保存後も表示する', async ({ page }) => {
+  let putCount = 0;
+  let releaseFirstFailure!: () => void;
+  const firstFailureReady = new Promise<void>((resolve) => {
+    releaseFirstFailure = resolve;
+  });
+  let firstRequestSeen!: () => void;
+  const firstRequestReady = new Promise<void>((resolve) => {
+    firstRequestSeen = resolve;
+  });
+  let secondRequestSeen!: () => void;
+  const secondRequestReady = new Promise<void>((resolve) => {
+    secondRequestSeen = resolve;
+  });
+
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.continue();
+      return;
+    }
+    putCount += 1;
+    if (putCount === 1) {
+      firstRequestSeen();
+      await firstFailureReady;
+      await route.fulfill({
+        status: 413,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'too large' })
+      });
+      return;
+    }
+    secondRequestSeen();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        raw: 'second draft',
+        html: '<p>second draft</p>'
+      })
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  const memoEditor = page.locator('#memo-editor');
+  await memoEditor.fill('oversized draft');
+  await firstRequestReady;
+
+  await memoEditor.fill('second draft');
+  await secondRequestReady;
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+
+  releaseFirstFailure();
+
+  await expect(page.locator('#memo-save-status')).toContainText('以前のメモ保存に失敗');
+  await expect(memoEditor).toHaveValue('second draft');
+});
+
+test('WebSocket切断中のメモ保存は同期待ちとして表示する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  let releaseSave!: () => void;
+  const saveReleaseReady = new Promise<void>((resolve) => {
+    releaseSave = resolve;
+  });
+  let saveRequestSeen!: () => void;
+  const saveRequestReady = new Promise<void>((resolve) => {
+    saveRequestSeen = resolve;
+  });
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.continue();
+      return;
+    }
+    saveRequestSeen();
+    await saveReleaseReady;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        raw: 'saved while websocket is reconnecting',
+        html: '<p>saved while websocket is reconnecting</p>'
+      })
+    });
+  });
+
+  await page.locator('#memo-editor').fill('saved while websocket is reconnecting');
+  await saveRequestReady;
+  await page.evaluate(() => {
+    const liveStatus = document.getElementById('live-status');
+    if (!liveStatus) {
+      throw new Error('live status is not initialized');
+    }
+    liveStatus.dataset.state = 'retry';
+  });
+  releaseSave();
+
+  await expect(page.locator('#memo-save-status')).toContainText('同期待ち');
 });

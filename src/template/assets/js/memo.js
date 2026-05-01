@@ -18,6 +18,20 @@ function setMemoSaveStatus(state, text) {
   appContext.elements.memoSaveStatusEl.textContent = text;
 }
 
+function setMemoSavedStatus() {
+  if (isLiveSyncDisconnected()) {
+    setMemoSaveStatus('error', '保存済み（同期待ち）');
+    return;
+  }
+  setMemoSaveStatus('saved', '保存済み');
+}
+
+function isLiveSyncDisconnected() {
+  if (!appContext.elements.liveStatusEl) return false;
+  var state = appContext.elements.liveStatusEl.dataset.state;
+  return state === 'retry' || state === 'offline' || state === 'error';
+}
+
 function setMemoEditorDisabled(disabled) {
   if (!appContext.elements.memoEditorEl) return;
   appContext.elements.memoEditorEl.disabled = !!disabled;
@@ -65,7 +79,14 @@ function updateMemoEditor(raw, preserveSelection) {
 
 function updateMemoPreview(data) {
   if (!appContext.elements.memoPreviewEl || !data) return;
-  appContext.elements.memoPreviewEl.innerHTML = data.html || '';
+  if (typeof data.html !== 'string') {
+    console.warn('[markdown-view] html を含まないメモ応答のためプレビューを維持しました。', {
+      receivedKeys: Object.keys(data)
+    });
+    return false;
+  }
+  appContext.elements.memoPreviewEl.innerHTML = data.html;
+  return true;
 }
 
 function applyMemoData(data, options) {
@@ -88,7 +109,10 @@ function applyMemoData(data, options) {
       });
     }
   }
-  updateMemoPreview(data);
+  if (updateMemoPreview(data) === false) {
+    setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
+    return false;
+  }
   setMemoEditorDisabled(false);
   return true;
 }
@@ -254,7 +278,20 @@ function finishPendingMemoSave(requestGeneration) {
 function clearStaleMemoSavingStatus() {
   if (appContext.memo.pendingSaveGenerations.length > 0) return;
   if (!appContext.elements.memoSaveStatusEl || appContext.elements.memoSaveStatusEl.dataset.state !== 'saving') return;
-  setMemoSaveStatus('saved', '保存済み');
+  setMemoSavedStatus();
+}
+
+function shouldSurfaceStaleMemoSaveError(err) {
+  if (!err) return false;
+  if (err.type === 'parse') return true;
+  if (err.type !== 'http') return false;
+  return err.status === 403 || err.status === 404 || err.status === 413 || err.status === 422;
+}
+
+function surfaceStaleMemoSaveError(err) {
+  if (appContext.memo.pendingSaveGenerations.length > 0 || !shouldSurfaceStaleMemoSaveError(err)) return false;
+  setMemoSaveStatus('error', '以前のメモ保存に失敗しました。' + getMemoErrorMessage(err));
+  return true;
 }
 
 function cancelMemoAutosave() {
@@ -322,14 +359,17 @@ function saveMemoNow(targetFileOverride, rawOverride) {
     }
     if (targetFileOverride === undefined) {
       if ((data.raw || '') === raw) {
-        updateMemoPreview(data);
+        if (updateMemoPreview(data) === false) {
+          setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
+          return;
+        }
       } else {
         if (applyMemoData(data, { preserveSelection: true }) === false) {
           return;
         }
       }
     }
-    setMemoSaveStatus('saved', '保存済み');
+    setMemoSavedStatus();
     flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
@@ -340,6 +380,9 @@ function saveMemoNow(targetFileOverride, rawOverride) {
         requestGeneration: requestGeneration,
         currentGeneration: appContext.memo.saveGeneration
       });
+      if (surfaceStaleMemoSaveError(err)) {
+        return;
+      }
       clearStaleMemoSavingStatus();
       return;
     }
