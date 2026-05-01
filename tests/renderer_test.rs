@@ -1,5 +1,5 @@
 use markdown_view::renderer::{
-    generate_unique_id, render_markdown, slugify, syntax_theme_css, validate_theme,
+    generate_unique_id, render_document, render_markdown, slugify, syntax_theme_css, validate_theme,
 };
 use markdown_view::toc::generate_toc;
 
@@ -825,6 +825,51 @@ fn test_複数行見出しでもtocリンクが一致する() {
     let toc = generate_toc(md);
     assert!(html.as_str().contains(r##"id="hello-world""##));
     assert!(toc.as_str().contains(r##"href="#hello-world""##));
+}
+
+#[test]
+fn test_render_documentは見出し画像code_softbreakで本文とtocのidを共有する() {
+    let md = concat!(
+        "# ![logo](x.png) Title `code`\n",
+        "continued\n",
+        "\n",
+        "# ![logo](x.png) Title `code` continued\n",
+    );
+
+    let document = render_document(md);
+
+    assert_eq!(document.headings.len(), 2);
+    assert_eq!(document.headings[0].text, "Title code continued");
+    assert_eq!(document.headings[0].id, "title-code-continued");
+    assert_eq!(document.headings[1].id, "title-code-continued-1");
+    assert!(document.content.as_str().contains(r##"id=\"title-code-continued\""##));
+    assert!(document.content.as_str().contains(r##"id=\"title-code-continued-1\""##));
+    assert!(document.toc.as_str().contains(r##"href=\"#title-code-continued\""##));
+    assert!(document.toc.as_str().contains(r##"href=\"#title-code-continued-1\""##));
+    assert!(!document.toc.as_str().contains("logo-title"));
+}
+
+#[test]
+fn test_render_documentはhardbreak見出しでも本文とtocのidを共有する() {
+    let md = "First  \nSecond\n====";
+    let document = render_document(md);
+
+    assert_eq!(document.headings.len(), 1);
+    assert_eq!(document.headings[0].text, "First Second");
+    assert_eq!(document.headings[0].id, "first-second");
+    assert!(document.content.as_str().contains(r##"id=\"first-second\""##));
+    assert!(document.toc.as_str().contains(r##"href=\"#first-second\""##));
+}
+
+#[test]
+fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
+    let md = "# Hello & World\n\n<script>alert(1)</script>";
+    let document = render_document(md);
+
+    assert!(!document.content.as_str().contains("<script>"));
+    assert!(!document.toc.as_str().contains("<script>"));
+    assert!(document.toc.as_str().contains("Hello &amp; World"));
+    assert!(document.toc.as_str().contains(r##"href=\"#hello-world\""##));
 }
 
 #[test]
