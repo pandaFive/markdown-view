@@ -287,6 +287,34 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
   expect(result).toBe('#section-b');
 });
 
+test('augmentHashWithTrailingLineHint は不正なhashエンコードをwarnしてraw fallbackする', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=long.md#%E0%A4%A';
+    link.textContent = 'broken hash';
+    const lineHint = document.createTextNode(' L15');
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#%E0%A4%A');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+
+  expect(result).toBe('#%E0%A4%A:L15');
+  await expect.poll(() => warnings.some((text) => text.includes('hash のデコードに失敗'))).toBe(true);
+});
+
 test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
   // ユーザー自作メモでリンク直後に行番号から始まる散文（`L10 onwards は詳しい` 等）が続く場合、
   // sibling textContent 全体が行番号トークンのみで占められないため augment しない。

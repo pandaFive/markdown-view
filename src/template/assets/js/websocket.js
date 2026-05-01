@@ -19,6 +19,7 @@ function createWebSocketController(ctx, deps) {
   var pendingWsUpdateSignature = '';
   var pendingWsUpdateTimer = null;
   var lastAppliedUpdateSignature = '';
+  var suppressNextReconnect = false;
 
   function discardBufferedLiveUpdate(reason) {
     if (pendingWsUpdateTimer) {
@@ -99,6 +100,7 @@ function createWebSocketController(ctx, deps) {
         console.error('[markdown-view] JSONパースエラー:', e);
         showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
         setLiveStatus('error');
+        suppressNextReconnect = true;
         socket.close();
         return;
       }
@@ -164,6 +166,11 @@ function createWebSocketController(ctx, deps) {
     };
 
     socket.onclose = function() {
+      if (suppressNextReconnect) {
+        suppressNextReconnect = false;
+        return;
+      }
+      if (document.getElementById('ws-parse-error-banner')) return;
       if (!document.getElementById('ws-parse-error-banner') && !document.getElementById('ws-server-error-banner')) {
         setLiveStatus('retry');
       }
@@ -172,7 +179,6 @@ function createWebSocketController(ctx, deps) {
 
     socket.onerror = function(event) {
       console.error('[markdown-view] WebSocketエラー:', event);
-      showWsServerErrorBanner('WebSocket接続でエラーが発生しました。再接続を試みています。');
       setLiveStatus('error');
       socket.close();
     };

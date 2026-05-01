@@ -146,6 +146,10 @@ function parseLineHash(hash) {
   try {
     decoded = decodeURIComponent(raw);
   } catch (error) {
+    console.warn('[markdown-view] hash のデコードに失敗したため raw fragment を使用します。', {
+      hash: hash,
+      error: error && error.message ? error.message : String(error)
+    });
     decoded = raw;
   }
   if (!decoded) return empty;
@@ -206,8 +210,8 @@ function scrollToLineRange(targetLine, behavior) {
   if (!appContext.elements.contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
   var blocks = appContext.elements.contentRoot.querySelectorAll('[data-line-block]');
   // 候補から「最狭マッチ（最深containment）」を選ぶ。
-  // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、<li> を選ばないと
-  // コンテナ先頭にスクロールしてしまうため (PR #73 codex-bot レビュー指摘)
+  // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、最狭の <li> を選ぶ。
+  // 広いコンテナを選ぶと対象行ではなくコンテナ先頭へスクロールしてしまうため。
   // 同値スパン（ネストblockquote内の単独<p>など）では `<=` 比較で DOM 深い側を優先する
   var best = null;
   var bestSpan = Infinity;

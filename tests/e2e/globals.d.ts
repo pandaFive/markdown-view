@@ -38,6 +38,7 @@ declare global {
     __bridgedWs?: MvE2E.TestWebSocketInstance;
     __parseErrorWs?: MvE2E.TestWebSocketInstance;
     __serverErrorWs?: MvE2E.TestWebSocketInstance;
+    __errorWs?: MvE2E.TestWebSocketInstance;
     __realWsOnmessage?: (ev: { data: string }) => void;
     __dispatchWsMessage?: (payload: unknown) => void;
     __markPendingCalls?: number;
