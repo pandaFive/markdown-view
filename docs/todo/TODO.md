@@ -12,8 +12,8 @@
 
 - [ ] `notify_update` の receiver=0 早期 return で `Error` メッセージが silent drop されない経路にする
   - ファイル: `src/server/broadcast.rs` L19-65, `src/server/files/content.rs:70-100`
-  - 現状: `notify_update` は `tx.receiver_count() == 0` で `build_change_broadcast_message` 呼び出し前に早期 return するため、通常の `Update` だけでなく、ファイル削除・読み込み失敗から生成される `Error` も作られない。一方、監視エラー用の `broadcast_error` は早期 return せず送信を試みるが、receiver=0 の `send` 失敗は意図的に無視する。この非対称性により「ファイル変更から派生した Error」はローカルログにも残らない
-  - 対応: `notify_update` は `Update` 系のみ早期 return するか、`Error` 系を `tracing::warn!` でローカルに残す。`broadcast_error` は受信者ゼロ時に送信失敗を無視する理由をコメントで維持し、必要なら同じ警告 helper に寄せる。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
+  - 現状: `notify_update` は `tx.receiver_count() == 0` で `build_change_broadcast_message` 呼び出し前に早期 return するため、通常の `Update` だけでなく、ファイル削除・読み込み失敗から生成される `Error` も作られない。一方、監視エラー用の `broadcast_error` は早期 return せず送信を試み、送信失敗は `send_broadcast_message` 経由で warn ログに残す。この非対称性により「ファイル変更から派生した Error」だけはローカルログにも残らない
+  - 対応: `notify_update` は `Update` 系のみ早期 return するか、`Error` 系を `tracing::warn!` でローカルに残す。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
   - 理由: silent failure。pr-review-toolkit の silent-failure-hunter 観点と整合し、デバッグ可能性を担保
 
 ## Medium Priority
@@ -32,7 +32,7 @@
 
 - [ ] shutdown チェーンの観測性を統合する
   - ファイル: `src/watcher/runtime.rs` L21/L47-57, `src/server/watch.rs` L18/L42-72, `src/server/broadcast.rs` L36-65
-  - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能。`broadcast_error` も受信者ゼロ時に `let _ = send(...)` で握りつぶす
+  - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能
   - 対応: 2 つのタイムアウト定数を共通化し、`abort` 直前に `(elapsed_ms, last_event_kind, receiver_count)` を含む warn ログを 1 行追加。`spawn_watch_event_forwarder` 終了時のログにも `state.tx().receiver_count()` と最後のイベント種別を含めて、シャットダウン時に dropped events があった場合に検知できるようにする
   - 理由: HTTP サーバー再起動経路でのファイルハンドルリークを再現性のあるログで切り分けられるようにする
 
