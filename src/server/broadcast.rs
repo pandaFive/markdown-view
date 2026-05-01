@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::files::build_change_broadcast_message;
+use super::files::{
+    build_change_broadcast_message, build_change_error_log_message_without_receivers,
+};
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::watcher::{WatchError, WatchEvent};
@@ -15,14 +17,26 @@ use crate::watcher::{WatchError, WatchEvent};
 /// ディレクトリモードでは変更ファイルの相対パスを`file`フィールドに含め、
 /// クライアント側でアクティブタブの更新判定に使用する。
 /// ファイル検証や読み込みに失敗した場合はエラーメッセージをbroadcastする。
-/// 受信者がゼロの場合は早期リターンする。
+/// 受信者がゼロの場合は検証・読み込みエラーだけをログに残す。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx().receiver_count() == 0 {
+        log_change_error_without_receivers(state, changed_file).await;
         return;
     }
 
     if let Some(message) = build_change_broadcast_message(state, changed_file).await {
         send_broadcast_message(state.tx(), message);
+    }
+}
+
+async fn log_change_error_without_receivers(state: &AppState, changed_file: &Path) {
+    if let Some(message) =
+        build_change_error_log_message_without_receivers(state, changed_file).await
+    {
+        tracing::warn!(
+            message = %message,
+            "[markdown-view] WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+        );
     }
 }
 
@@ -256,6 +270,81 @@ mod tests {
             rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_notify_update_受信者ゼロ時の検証エラーはwarnログに残す() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("missing.md", "# missing");
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        std::fs::remove_file(&file_path).unwrap();
+        notify_update(&state, &file_path).await;
+
+        assert!(logs_contain(
+            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+        ));
+        assert!(logs_contain("ファイル検証エラー"));
+        assert!(logs_contain("missing.md"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_notify_update_受信者ゼロ時のサイズ超過はwarnログに残す() {
+        let (_dir, file_path, state) = create_single_file_state_with_fixture("large.md", "# large");
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+        file.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        notify_update(&state, &file_path).await;
+
+        assert!(logs_contain(
+            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+        ));
+        assert!(logs_contain("ファイル読み込みエラー"));
+        assert!(logs_contain("ファイルサイズが上限"));
+        assert!(logs_contain("large.md"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_notify_update_受信者ゼロ時の正常更新はwarnログに残さない() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("normal.md", "# normal");
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        notify_update(&state, &file_path).await;
+
+        assert!(!logs_contain(
+            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+        ));
+        assert!(!logs_contain("ファイル読み込みエラー"));
+        assert!(!logs_contain("ファイル検証エラー"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_notify_update_受信者ゼロ時の非utf8は本文読込せずwarnログに残さない() {
+        let (_dir, file_path, state) =
+            create_single_file_state_with_fixture("binary.md", "# valid");
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        std::fs::write(&file_path, b"\xff\xfe\x80\x81").unwrap();
+        notify_update(&state, &file_path).await;
+
+        assert!(!logs_contain(
+            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+        ));
+        assert!(!logs_contain("UTF-8"));
     }
 
     #[tokio::test]
