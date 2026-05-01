@@ -11,7 +11,7 @@ function buildUpdateSignature(data) {
   });
 }
 
-// WebSocket の再接続・buffer 状態は他機能から直接参照しないため、appContext へ広げず controller closure に閉じる。
+// WebSocket の再接続・buffer 状態は closure に閉じ、他機能は controller API 経由で操作する。
 function createWebSocketController(ctx, deps) {
   var socket = null;
   var socketReconnectAttempts = 0;

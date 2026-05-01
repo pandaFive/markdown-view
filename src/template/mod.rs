@@ -521,6 +521,7 @@ mod tests {
         assert!(html
             .contains("ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };"));
         assert!(html.contains("ensurePendingUpdateTimer();"));
+        assert!(html.contains("discardBufferedLiveUpdate('ファイル切替を優先');"));
         assert!(html.contains("if (appContext.state.pendingUpdate.refresh) {"));
         assert!(html.contains("selectFile(refreshFile, false);"));
     }

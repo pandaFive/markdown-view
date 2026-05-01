@@ -272,6 +272,8 @@ function loadMemo(file, ownerGeneration) {
       });
       return;
     }
+    cancelMemoAutosave();
+    setMemoEditorDisabled(true);
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });

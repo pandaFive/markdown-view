@@ -159,6 +159,53 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
 });
 
+test('メモ取得失敗時は古い本文を新ファイルへ保存できないようエディタを無効化する', async ({ page }) => {
+  let putCount = 0;
+  await page.route('**/api/memo*', async (route) => {
+    const request = route.request();
+    if (request.method() === 'PUT') {
+      putCount += 1;
+      const body = request.postDataJSON() as { raw?: string; file?: string | null };
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: body.raw || '',
+          html: `<p>${body.raw || ''}</p>`,
+          file: body.file || 'README.md'
+        })
+      });
+      return;
+    }
+    const url = new URL(request.url());
+    if (url.searchParams.get('file') === 'notes.md') {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'memo load failed' })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+  await page.locator('#memo-editor').fill('readme memo must not be saved as notes');
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+  putCount = 0;
+  await expect(page.locator('#memo-editor')).toHaveValue('readme memo must not be saved as notes');
+
+  await selectFile(page, 'notes.md');
+  await openMemoTab(page);
+
+  await expect(page.locator('#memo-editor')).toBeDisabled();
+  await expect(page.locator('#memo-save-status')).toContainText('失敗');
+  await page.waitForTimeout(700);
+  await expect.poll(() => putCount).toBe(0);
+});
+
 test('メモ保存応答のraw欠落では編集中の内容を消さない', async ({ page }) => {
   const warnings: string[] = [];
   page.on('console', (message) => {

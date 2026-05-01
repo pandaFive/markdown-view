@@ -182,7 +182,7 @@ async fn api_files_handler(
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
     ensure_allowed_request_host(&headers)?;
-    Ok(Json(service::list_files(&state)?))
+    Ok(Json(service::list_files(&state).await?))
 }
 
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す

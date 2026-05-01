@@ -69,7 +69,7 @@ function selectFile(file, pushHistory, options) {
   var previousHash = shouldRestoreHash ? location.hash : undefined;
   var gen = ++appContext.fetch.generation;
   if (appContext.websocket) {
-    appContext.websocket.discardBufferedLiveUpdate();
+    appContext.websocket.discardBufferedLiveUpdate('ファイル切替を優先');
   }
   appContext.state.pendingUpdate = null;
   if (appContext.state.pendingUpdateTimer) {

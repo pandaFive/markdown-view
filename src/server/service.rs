@@ -166,15 +166,27 @@ pub(super) async fn save_memo(
 }
 
 /// ディレクトリモードのMarkdownファイル一覧を返す。単一ファイルモードでは空配列を返す。
-pub(super) fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
-    if let Some(base) = state.mode().directory() {
-        list_markdown_files(base).map_err(|error| {
-            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ファイル一覧の取得に失敗しました",
-            )
-        })
+pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
+    if let Some(base) = state.mode().directory().map(std::path::Path::to_path_buf) {
+        tokio::task::spawn_blocking(move || list_markdown_files(&base))
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
+                    error
+                );
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ファイル一覧の取得に失敗しました",
+                )
+            })?
+            .map_err(|error| {
+                tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ファイル一覧の取得に失敗しました",
+                )
+            })
     } else {
         Ok(Vec::new())
     }
@@ -556,8 +568,8 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[test]
-    fn test_list_files_ディレクトリモードではmarkdown一覧を返す() {
+    #[tokio::test]
+    async fn test_list_files_ディレクトリモードではmarkdown一覧を返す() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
         std::fs::write(dir.path().join("note.txt"), "not markdown").unwrap();
@@ -565,7 +577,7 @@ mod tests {
         std::fs::write(dir.path().join("guide/setup.md"), "# Setup").unwrap();
         let state = create_directory_state(dir.path());
 
-        let files = list_files(&state).unwrap();
+        let files = list_files(&state).await.unwrap();
 
         assert_eq!(
             files,
@@ -573,14 +585,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_list_files_単一ファイルモードでは空配列を返す() {
+    #[tokio::test]
+    async fn test_list_files_単一ファイルモードでは空配列を返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");
         std::fs::write(&file_path, "# Note").unwrap();
         let state = create_single_file_state(&file_path);
 
-        let files = list_files(&state).unwrap();
+        let files = list_files(&state).await.unwrap();
 
         assert!(files.is_empty());
     }
