@@ -830,10 +830,12 @@ fn test_複数行見出しでもtocリンクが一致する() {
 #[test]
 fn test_render_documentは見出し画像code_softbreakで本文とtocのidを共有する() {
     let md = concat!(
-        "# ![logo](x.png) Title `code`\n",
+        "![logo](x.png) Title `code`\n",
         "continued\n",
+        "====\n",
         "\n",
-        "# ![logo](x.png) Title `code` continued\n",
+        "![logo](x.png) Title `code` continued\n",
+        "====\n",
     );
 
     let document = render_document(md);
@@ -842,10 +844,19 @@ fn test_render_documentは見出し画像code_softbreakで本文とtocのidを�
     assert_eq!(document.headings[0].text, "Title code continued");
     assert_eq!(document.headings[0].id, "title-code-continued");
     assert_eq!(document.headings[1].id, "title-code-continued-1");
-    assert!(document.content.as_str().contains(r##"id=\"title-code-continued\""##));
-    assert!(document.content.as_str().contains(r##"id=\"title-code-continued-1\""##));
-    assert!(document.toc.as_str().contains(r##"href=\"#title-code-continued\""##));
-    assert!(document.toc.as_str().contains(r##"href=\"#title-code-continued-1\""##));
+    assert!(document.content.as_str().contains(r##"id="title-code-continued""##));
+    assert!(document
+        .content
+        .as_str()
+        .contains(r##"id="title-code-continued-1""##));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(r##"href="#title-code-continued""##));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(r##"href="#title-code-continued-1""##));
     assert!(!document.toc.as_str().contains("logo-title"));
 }
 
@@ -857,8 +868,8 @@ fn test_render_documentはhardbreak見出しでも本文とtocのidを共有す�
     assert_eq!(document.headings.len(), 1);
     assert_eq!(document.headings[0].text, "First Second");
     assert_eq!(document.headings[0].id, "first-second");
-    assert!(document.content.as_str().contains(r##"id=\"first-second\""##));
-    assert!(document.toc.as_str().contains(r##"href=\"#first-second\""##));
+    assert!(document.content.as_str().contains(r##"id="first-second""##));
+    assert!(document.toc.as_str().contains(r##"href="#first-second""##));
 }
 
 #[test]
@@ -869,7 +880,7 @@ fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
     assert!(!document.content.as_str().contains("<script>"));
     assert!(!document.toc.as_str().contains("<script>"));
     assert!(document.toc.as_str().contains("Hello &amp; World"));
-    assert!(document.toc.as_str().contains(r##"href=\"#hello-world\""##));
+    assert!(document.toc.as_str().contains(r##"href="#hello-world""##));
 }
 
 #[test]
