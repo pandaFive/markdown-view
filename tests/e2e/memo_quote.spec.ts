@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
-import { openMemoTab, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness } from './helpers';
+import { openMemoTab, resetStandardFixtures, selectFile, selectParagraphText, stabilizeWebSocketHarness } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
@@ -110,6 +110,55 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
   await expect(memoEditor).toBeDisabled();
 });
 
+test('メモload_error後もファイル切替で編集を再開できる', async ({ page }) => {
+  await page.route('**/api/memo*', async (route) => {
+    const request = route.request();
+    if (request.method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    const url = new URL(request.url());
+    if (url.searchParams.get('file') === 'notes.md') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: '',
+          html: '',
+          file: 'notes.md',
+          load_error: 'メモを読み込めませんでした。編集を無効化しました。'
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        raw: 'recovered readme memo',
+        html: '<p>recovered readme memo</p>',
+        file: 'README.md'
+      })
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+  await expect(page.locator('#memo-editor')).toBeEnabled();
+
+  await selectFile(page, 'notes.md');
+  await openMemoTab(page);
+  await expect(page.locator('#memo-editor')).toBeDisabled();
+
+  await selectFile(page, 'README.md');
+  await openMemoTab(page);
+
+  await expect(page.locator('#memo-editor')).toBeEnabled();
+  await expect(page.locator('#memo-editor')).toHaveValue('recovered readme memo');
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+});
+
 test('メモ保存応答のraw欠落では編集中の内容を消さない', async ({ page }) => {
   const warnings: string[] = [];
   page.on('console', (message) => {
@@ -187,7 +236,7 @@ test('メモ保存応答のhtml欠落ではプレビューを空にしない', a
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          raw: 'new draft'
+          raw: 'server raw that must not overwrite'
         })
       });
       return;
@@ -207,6 +256,7 @@ test('メモ保存応答のhtml欠落ではプレビューを空にしない', a
   await memoEditor.fill('new draft');
 
   await expect(page.locator('#memo-save-status')).toContainText('メモ応答が不正');
+  await expect(memoEditor).toHaveValue('new draft');
   await expect(page.locator('#memo-preview')).toContainText('stable preview');
   await expect.poll(() => warnings.some((text) => text.includes('html を含まないメモ応答'))).toBe(true);
 });

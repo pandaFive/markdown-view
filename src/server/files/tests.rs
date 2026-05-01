@@ -1873,7 +1873,7 @@ async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わる
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(
         json["error"],
-        "メモ保存先の安全確認に失敗したため操作できません"
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
     );
     assert!(
         std::fs::symlink_metadata(&sidecar_path)

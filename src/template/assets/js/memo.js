@@ -110,6 +110,11 @@ function applyMemoData(data, options) {
     setMemoSaveStatus('error', data.load_error);
     return false;
   }
+  if (typeof data.html !== 'string') {
+    updateMemoPreview(data);
+    setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
+    return false;
+  }
   if (shouldUpdateEditor) {
     if (typeof data.raw === 'string') {
       updateMemoEditor(data.raw, !!(options && options.preserveSelection));
@@ -119,10 +124,7 @@ function applyMemoData(data, options) {
       });
     }
   }
-  if (updateMemoPreview(data) === false) {
-    setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
-    return false;
-  }
+  updateMemoPreview(data);
   setMemoEditorDisabled(false);
   return true;
 }

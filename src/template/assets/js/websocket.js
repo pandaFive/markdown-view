@@ -20,10 +20,16 @@ function createWebSocketController(ctx, deps) {
   var pendingWsUpdateTimer = null;
   var lastAppliedUpdateSignature = '';
 
-  function discardBufferedLiveUpdate() {
+  function discardBufferedLiveUpdate(reason) {
     if (pendingWsUpdateTimer) {
       window.clearTimeout(pendingWsUpdateTimer);
       pendingWsUpdateTimer = null;
+    }
+    if (pendingWsUpdate) {
+      console.warn('[markdown-view] buffer済み更新を破棄しました。', {
+        reason: reason || 'unspecified',
+        signature: pendingWsUpdateSignature
+      });
     }
     pendingWsUpdate = null;
     pendingWsUpdateSignature = '';
@@ -117,7 +123,18 @@ function createWebSocketController(ctx, deps) {
           hideFileFetchErrorBanner();
         }
       }
-      if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {
+      if (data.refresh && ctx.config.isDirMode) {
+        if (!ctx.state.currentFile) {
+          console.warn('[markdown-view] 現在ファイルが未設定のため refresh 通知を無視しました。', {
+            messageFile: data.file || ''
+          });
+          return;
+        }
+        if (!data.file) {
+          console.warn('[markdown-view] file を含まない refresh 通知を現在ファイルへ適用します。', {
+            currentFile: ctx.state.currentFile
+          });
+        }
         if (data.file && data.file !== ctx.state.currentFile) {
           // ディレクトリモードでは他ファイルの変更通知も同じWSへ届くため、現在表示中でない refresh は無視する。
           console.warn('[markdown-view] 現在のファイルと異なる refresh 通知を無視しました。', {
@@ -127,7 +144,7 @@ function createWebSocketController(ctx, deps) {
           return;
         }
         if (isTextSelected()) {
-          discardBufferedLiveUpdate();
+          discardBufferedLiveUpdate('refresh通知を優先');
           ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };
           ensurePendingUpdateTimer();
           return;
@@ -147,7 +164,7 @@ function createWebSocketController(ctx, deps) {
     };
 
     socket.onclose = function() {
-      if (!document.getElementById('ws-server-error-banner')) {
+      if (!document.getElementById('ws-parse-error-banner') && !document.getElementById('ws-server-error-banner')) {
         setLiveStatus('retry');
       }
       scheduleReconnect();

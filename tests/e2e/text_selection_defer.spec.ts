@@ -130,7 +130,28 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await expect(page.locator('#content')).toContainText('Refreshed from server');
 });
 
+test('fileなしrefresh通知は現在ファイルへ適用しつつ警告する', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  await fs.writeFile(readmePath, '# README\n\nRefresh without file\n');
+
+  await dispatchWsMessage(page, { refresh: true, file: '' });
+
+  await expect(page.locator('#content')).toContainText('Refresh without file');
+  await expect.poll(() => warnings.some((text) => text.includes('file を含まない refresh 通知'))).toBe(true);
+});
+
 test('選択中はrefreshが古いバッファ更新より優先される', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
   await selectParagraphText(page, 'Initial README content');
   await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
 
@@ -148,6 +169,25 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await clearSelection(page);
   await expect(page.locator('#content')).toContainText('Refresh wins after selection');
   await expect(page.locator('#content')).not.toContainText('Stale buffered update');
+  await expect.poll(() => warnings.some((text) => text.includes('buffer済み更新を破棄しました'))).toBe(true);
+});
+
+test('fileなしrefreshの保留更新を適用できない場合は警告する', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  await selectParagraphText(page, 'Initial README content');
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.scheduleBufferedLiveUpdate({ refresh: true });
+  });
+  await page.waitForTimeout(150);
+
+  await clearSelection(page);
+  await expect.poll(() => warnings.some((text) => text.includes('refresh 保留更新を適用できませんでした'))).toBe(true);
 });
 
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {

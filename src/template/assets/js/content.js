@@ -1197,10 +1197,20 @@ function applyPendingUpdate() {
     appContext.state.pendingUpdate = null;
     if (appContext.config.isDirMode && refreshFile) {
       selectFile(refreshFile, false);
+    } else {
+      console.warn('[markdown-view] refresh 保留更新を適用できませんでした。', {
+        isDirMode: appContext.config.isDirMode,
+        refreshFile: refreshFile || '',
+        currentFile: appContext.state.currentFile || ''
+      });
     }
     return;
   }
   if (appContext.config.isDirMode && appContext.state.pendingUpdate.file && appContext.state.pendingUpdate.file !== appContext.state.currentFile) {
+    console.warn('[markdown-view] 現在のファイルと異なる保留更新を破棄しました。', {
+      currentFile: appContext.state.currentFile,
+      messageFile: appContext.state.pendingUpdate.file
+    });
     appContext.state.pendingUpdate = null;
     return;
   }

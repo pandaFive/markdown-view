@@ -9,23 +9,28 @@ use super::messages::{ApiError, BroadcastMessage};
 use super::state::AppState;
 use crate::template::{MemoResponse, MemoUpdateMessage, UpdateMessage};
 
+/// indexページ表示に必要な対象ファイル指定。
 pub(super) struct PageRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+/// `/api/content` の対象ファイル指定。
 pub(super) struct ContentRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+/// `/api/memo` 読み込みの対象ファイル指定。
 pub(super) struct MemoRequest<'a> {
     pub file: Option<&'a str>,
 }
 
+/// `/api/memo` 保存の対象ファイルと本文。
 pub(super) struct SaveMemoRequest<'a> {
     pub file: Option<&'a str>,
     pub raw: String,
 }
 
+/// indexページ描画に渡す本文・メモ・サイドバーの集約結果。
 pub(super) struct PageView {
     pub title: String,
     pub update: UpdateMessage,
@@ -33,6 +38,7 @@ pub(super) struct PageView {
     pub sidebar: SidebarView,
 }
 
+/// サイドバー表示モード。単一ファイルではファイル一覧を持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SidebarView {
     SingleFile,
@@ -78,6 +84,10 @@ fn title_for_path(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// indexページ向けに本文とメモを読み込む。
+///
+/// 本文の読み込み失敗はページ表示不能として `ApiError` を返す。一方でメモ読み込み失敗は
+/// 本文閲覧を継続するため `MemoResponse::empty_with_load_error` に変換し、編集を無効化する。
 pub(super) async fn load_page(
     state: &AppState,
     request: PageRequest<'_>,
@@ -117,6 +127,7 @@ pub(super) async fn load_page(
     })
 }
 
+/// `/api/content` 向けに本文更新ペイロードを読み込む。
 pub(super) async fn load_content(
     state: &AppState,
     request: ContentRequest<'_>,
@@ -126,6 +137,10 @@ pub(super) async fn load_content(
     load_route_update(&target, route_request).await
 }
 
+/// `/api/memo` GET 向けにメモを読み込む。
+///
+/// `load_page` と違い、APIでは呼び出し側に失敗を明示するためメモ読み込み失敗をそのまま
+/// `ApiError` として返す。
 pub(super) async fn load_memo(
     state: &AppState,
     request: MemoRequest<'_>,
@@ -135,6 +150,10 @@ pub(super) async fn load_memo(
     load_route_memo(state, &target, route_request).await
 }
 
+/// `/api/memo` PUT 向けにメモを保存する。
+///
+/// 保存成功後だけ `memo_update` をbroadcastし、他タブへ再読み込みを促す。保存失敗時は
+/// broadcastしないことで、未保存または拒否された内容を他クライアントへ通知しない。
 pub(super) async fn save_memo(
     state: &AppState,
     request: SaveMemoRequest<'_>,
@@ -146,6 +165,7 @@ pub(super) async fn save_memo(
     Ok(memo)
 }
 
+/// ディレクトリモードのMarkdownファイル一覧を返す。単一ファイルモードでは空配列を返す。
 pub(super) fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
     if let Some(base) = state.mode().directory() {
         list_markdown_files(base).map_err(|error| {
@@ -160,6 +180,7 @@ pub(super) fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
     }
 }
 
+/// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
     let Some(base_dir) = state.mode().directory() else {
         return Ok(SearchResponse {
@@ -469,6 +490,48 @@ mod tests {
             BroadcastMessage::MemoUpdate(update) => assert_eq!(update.file(), "README.md"),
             other => panic!("unexpected broadcast: {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_save_memo_並行保存は各ファイルのmemo_updateをbroadcastする() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "# Notes").unwrap();
+        let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
+        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let mut rx = state.tx().subscribe();
+
+        let (readme, notes) = tokio::join!(
+            save_memo(
+                &state,
+                SaveMemoRequest {
+                    file: Some("README.md"),
+                    raw: "readme memo".to_string(),
+                },
+            ),
+            save_memo(
+                &state,
+                SaveMemoRequest {
+                    file: Some("notes.md"),
+                    raw: "notes memo".to_string(),
+                },
+            )
+        );
+
+        assert_eq!(readme.unwrap().raw(), "readme memo");
+        assert_eq!(notes.unwrap().raw(), "notes memo");
+        let mut files = Vec::new();
+        for _ in 0..2 {
+            match rx
+                .try_recv()
+                .expect("並行保存それぞれでmemo_updateが送信されるべき")
+            {
+                BroadcastMessage::MemoUpdate(update) => files.push(update.file().to_string()),
+                other => panic!("unexpected broadcast: {:?}", other),
+            }
+        }
+        files.sort();
+        assert_eq!(files, vec!["README.md".to_string(), "notes.md".to_string()]);
     }
 
     #[tokio::test]

@@ -514,9 +514,9 @@ mod tests {
         });
 
         assert!(html.contains("function ensurePendingUpdateTimer()"));
-        assert!(
-            html.contains("if (data.refresh && ctx.config.isDirMode && ctx.state.currentFile) {")
-        );
+        assert!(html.contains("if (data.refresh && ctx.config.isDirMode) {"));
+        assert!(html.contains("現在ファイルが未設定のため refresh 通知を無視しました。"));
+        assert!(html.contains("file を含まない refresh 通知を現在ファイルへ適用します。"));
         assert!(html.contains("if (isTextSelected()) {"));
         assert!(html
             .contains("ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };"));

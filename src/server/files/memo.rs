@@ -426,34 +426,11 @@ fn ensure_safe_memo_path(
 ) -> Result<(), ApiError> {
     let base_dir = state.mode().base_dir();
     if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path) {
-        match unsafe_component {
-            UnsafeMemoPathComponent::Symlink(path) => {
-                tracing::warn!(
-                    "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
-                    request.read_error_log_label(),
-                    target.file_label(),
-                    sanitize_path_for_logging(memo_path, base_dir),
-                    sanitize_path_for_logging(&path, base_dir)
-                );
-                return Err(json_error(
-                    StatusCode::FORBIDDEN,
-                    "メモ保存先にシンボリックリンクが含まれているため操作できません",
-                ));
-            }
-            UnsafeMemoPathComponent::InspectionError(path) => {
-                tracing::warn!(
-                    "[markdown-view] {}メモパスの安全確認に失敗したため拒否 ({} -> {}): {}",
-                    request.read_error_log_label(),
-                    target.file_label(),
-                    sanitize_path_for_logging(memo_path, base_dir),
-                    sanitize_path_for_logging(&path, base_dir)
-                );
-                return Err(json_error(
-                    StatusCode::FORBIDDEN,
-                    "メモ保存先の安全確認に失敗したため操作できません",
-                ));
-            }
-        }
+        log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            unsafe_component.user_message(),
+        ));
     }
     Ok(())
 }
@@ -479,19 +456,68 @@ fn ensure_safe_memo_rename_paths(
         ));
     }
 
-    // HTTP用ApiErrorはMemoFs境界へ出せないため、rename直前検査では利用者向け理由を再作成する。
-    ensure_safe_memo_path(final_path, state, target, request).map_err(|_| {
-        MemoBeforeRenameError::new("メモ保存先の安全確認に失敗したため操作できません")
-    })?;
-    ensure_safe_memo_path(tmp_path, state, target, request).map_err(|_| {
-        MemoBeforeRenameError::new("メモ保存先の安全確認に失敗したため操作できません")
-    })?;
+    ensure_safe_memo_rename_path(final_path, state, target, request)?;
+    ensure_safe_memo_rename_path(tmp_path, state, target, request)?;
+    Ok(())
+}
+
+fn ensure_safe_memo_rename_path(
+    memo_path: &Path,
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<(), MemoBeforeRenameError> {
+    let base_dir = state.mode().base_dir();
+    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path) {
+        log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
+        return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
+    }
     Ok(())
 }
 
 enum UnsafeMemoPathComponent {
     Symlink(PathBuf),
     InspectionError(PathBuf),
+}
+
+impl UnsafeMemoPathComponent {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Symlink(path) | Self::InspectionError(path) => path,
+        }
+    }
+
+    fn user_message(&self) -> &'static str {
+        match self {
+            Self::Symlink(_) => "メモ保存先にシンボリックリンクが含まれているため操作できません",
+            Self::InspectionError(_) => "メモ保存先の安全確認に失敗したため操作できません",
+        }
+    }
+}
+
+fn log_unsafe_memo_path(
+    unsafe_component: &UnsafeMemoPathComponent,
+    memo_path: &Path,
+    base_dir: &Path,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) {
+    match unsafe_component {
+        UnsafeMemoPathComponent::Symlink(_) => tracing::warn!(
+            "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
+            request.read_error_log_label(),
+            target.file_label(),
+            sanitize_path_for_logging(memo_path, base_dir),
+            sanitize_path_for_logging(unsafe_component.path(), base_dir)
+        ),
+        UnsafeMemoPathComponent::InspectionError(_) => tracing::warn!(
+            "[markdown-view] {}メモパスの安全確認に失敗したため拒否 ({} -> {}): {}",
+            request.read_error_log_label(),
+            target.file_label(),
+            sanitize_path_for_logging(memo_path, base_dir),
+            sanitize_path_for_logging(unsafe_component.path(), base_dir)
+        ),
+    }
 }
 
 fn first_unsafe_memo_path_component(
@@ -639,11 +665,11 @@ fn memo_read_error_to_api_error(
 }
 
 #[cfg(test)]
-mod symlink_component_tests {
+mod unsafe_memo_path_component_tests {
     use super::{first_unsafe_memo_path_component, UnsafeMemoPathComponent};
 
     #[test]
-    fn test_first_symlink_component_メタデータエラーは安全側で拒否する() {
+    fn test_first_unsafe_memo_path_component_メタデータエラーは安全側で拒否する() {
         let dir = tempfile::tempdir().expect("tempdirを作成できる");
         let blocking_file = dir.path().join("blocked");
         std::fs::write(&blocking_file, b"not a directory").expect("検査用ファイルを作成できる");

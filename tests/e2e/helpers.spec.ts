@@ -240,10 +240,11 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続経路�
   }));
   expect(parseResult.bannerText).toContain('不正なJSON');
 
-  await expect.poll(() => page.locator('#live-status').getAttribute('data-state')).toBe('retry');
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
   await page.waitForFunction(() => {
     return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
   });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
 });
 
 test('WebSocket再接続成功時にサーバーエラーバナーを解除する', async ({ page }) => {
