@@ -844,7 +844,10 @@ fn test_render_documentは見出し画像code_softbreakで本文とtocのidを�
     assert_eq!(document.headings[0].text, "Title code continued");
     assert_eq!(document.headings[0].id, "title-code-continued");
     assert_eq!(document.headings[1].id, "title-code-continued-1");
-    assert!(document.content.as_str().contains(r##"id="title-code-continued""##));
+    assert!(document
+        .content
+        .as_str()
+        .contains(r##"id="title-code-continued""##));
     assert!(document
         .content
         .as_str()

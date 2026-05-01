@@ -159,6 +159,10 @@ impl RenderState {
             .unwrap_or("")
     }
 
+    pub(super) fn heading_level(&self) -> Option<u8> {
+        self.heading.as_ref().map(|heading| heading.level)
+    }
+
     pub(super) fn heading_range(&self) -> Option<&Range<usize>> {
         self.heading.as_ref().map(|heading| &heading.range)
     }
