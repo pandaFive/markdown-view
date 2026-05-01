@@ -147,12 +147,15 @@ function createWebSocketController(ctx, deps) {
     };
 
     socket.onclose = function() {
-      setLiveStatus('retry');
+      if (!document.getElementById('ws-server-error-banner')) {
+        setLiveStatus('retry');
+      }
       scheduleReconnect();
     };
 
     socket.onerror = function(event) {
       console.error('[markdown-view] WebSocketエラー:', event);
+      showWsServerErrorBanner('WebSocket接続でエラーが発生しました。再接続を試みています。');
       setLiveStatus('error');
       socket.close();
     };

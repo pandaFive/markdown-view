@@ -453,7 +453,9 @@ function installMarkdownViewTestHooks() {
       return moveDocumentSearch(direction);
     },
     scheduleBufferedLiveUpdate: function(data) {
-      if (!appContext.websocket) return undefined;
+      if (!appContext.websocket) {
+        throw new Error('WebSocket controller is not initialized');
+      }
       return appContext.websocket.scheduleBufferedLiveUpdate(data);
     },
     selectFile: function(file, pushHistory, options) {

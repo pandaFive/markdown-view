@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
-import { openMemoTab, resetStandardFixtures, selectParagraphText } from './helpers';
+import { openMemoTab, resetStandardFixtures, selectParagraphText, stabilizeWebSocketHarness } from './helpers';
 
 const fixtureDir = path.join(__dirname, '..', 'fixtures', 'e2e');
 
@@ -141,6 +141,24 @@ test('メモ保存応答のraw欠落では編集中の内容を消さない', as
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
   await expect(memoEditor).toHaveValue('local draft that must remain');
   await expect.poll(() => warnings.some((text) => text.includes('raw を含まないメモ応答'))).toBe(true);
+});
+
+test('メモ保存のネットワーク失敗は接続系エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await route.abort('failed');
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  await page.locator('#memo-editor').fill('network failed draft');
+
+  await expect(page.locator('#memo-save-status')).toContainText('サーバー接続');
 });
 
 test('メモ保存応答のhtml欠落ではプレビューを空にしない', async ({ page }) => {
@@ -296,4 +314,31 @@ test('WebSocket切断中のメモ保存は同期待ちとして表示する', as
   releaseSave();
 
   await expect(page.locator('#memo-save-status')).toContainText('同期待ち');
+});
+
+test('WebSocket再接続後に同期待ちのメモ保存表示は保存済みへ戻る', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await stabilizeWebSocketHarness(page);
+  await openMemoTab(page);
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    window.__serverErrorWs = lastWs;
+    lastWs.close();
+  });
+  await expect.poll(() => page.locator('#live-status').getAttribute('data-state')).toBe('retry');
+
+  await page.locator('#memo-editor').fill('saved while websocket reconnects');
+  await expect(page.locator('#memo-save-status')).toContainText('同期待ち');
+
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__serverErrorWs && window.__lastWs !== window.__serverErrorWs);
+  });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
 });

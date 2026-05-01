@@ -2,6 +2,9 @@ function setLiveStatus(state) {
   if (!appContext.elements.liveStatusEl) return;
   appContext.elements.liveStatusEl.textContent = appContext.labels.liveStatus[state] || state;
   appContext.elements.liveStatusEl.dataset.state = state;
+  if (state === 'live') {
+    clearMemoSyncPendingStatus();
+  }
 }
 
 function updateDocumentStats() {

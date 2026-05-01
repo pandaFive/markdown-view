@@ -184,9 +184,15 @@ fn broadcast_saved_memo(state: &AppState, file: String) {
         return;
     }
 
-    let _ = state
+    if let Err(error) = state
         .tx()
-        .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(file)));
+        .send(BroadcastMessage::MemoUpdate(MemoUpdateMessage::new(file)))
+    {
+        tracing::warn!(
+            "[markdown-view] メモ保存通知の送信に失敗しました: {}",
+            error
+        );
+    }
 }
 
 fn memo_message_file(target: &ResolvedTarget) -> String {

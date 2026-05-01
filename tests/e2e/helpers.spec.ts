@@ -264,10 +264,26 @@ test('WebSocket再接続成功時にサーバーエラーバナーを解除す�
     lastWs.close();
   });
 
-  await expect.poll(() => page.locator('#live-status').getAttribute('data-state')).toBe('retry');
   await page.waitForFunction(() => {
     return Boolean(window.__lastWs && window.__serverErrorWs && window.__lastWs !== window.__serverErrorWs);
   });
   await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
   await expect(page.locator('#ws-server-error-banner')).toHaveCount(0);
+});
+
+test('WebSocket errorはretryへ上書きされてもバナーで可視化する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs || typeof lastWs.onerror !== 'function') {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    lastWs.onerror(new Event('error'));
+  });
+
+  await expect(page.locator('#ws-server-error-banner')).toContainText('WebSocket接続でエラー');
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
 });

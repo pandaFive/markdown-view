@@ -26,6 +26,16 @@ function setMemoSavedStatus() {
   setMemoSaveStatus('saved', '保存済み');
 }
 
+function clearMemoSyncPendingStatus() {
+  if (!appContext.elements.memoSaveStatusEl) return;
+  if (
+    appContext.elements.memoSaveStatusEl.dataset.state === 'error' &&
+    appContext.elements.memoSaveStatusEl.textContent === '保存済み（同期待ち）'
+  ) {
+    setMemoSaveStatus('saved', '保存済み');
+  }
+}
+
 function isLiveSyncDisconnected() {
   if (!appContext.elements.liveStatusEl) return false;
   var state = appContext.elements.liveStatusEl.dataset.state;
@@ -203,6 +213,12 @@ function getMemoErrorMessage(err) {
   if (err && err.type === 'parse') {
     return 'メモAPI応答の解析に失敗しました。';
   }
+  if (err && err.name === 'AbortError') {
+    return 'メモ通信が中断されました。再度お試しください。';
+  }
+  if (err && err.name === 'TypeError') {
+    return 'メモ通信に失敗しました。サーバー接続やブラウザのセキュリティ設定を確認してください。';
+  }
   return 'メモ通信に失敗しました。';
 }
 
@@ -221,6 +237,7 @@ function loadMemo(file, ownerGeneration) {
         currentGeneration: appContext.fetch.generation
       });
       clearStaleMemoLoadingStatus(requestGeneration);
+      flushPendingMemoReloadIfSafe();
       return;
     }
     if (requestGeneration !== appContext.memo.loadGeneration) {
@@ -243,6 +260,7 @@ function loadMemo(file, ownerGeneration) {
         currentGeneration: appContext.fetch.generation
       });
       clearStaleMemoLoadingStatus(requestGeneration);
+      flushPendingMemoReloadIfSafe();
       return;
     }
     if (requestGeneration !== appContext.memo.loadGeneration) {
