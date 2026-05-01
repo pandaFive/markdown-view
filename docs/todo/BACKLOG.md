@@ -151,6 +151,12 @@
 
 ## Done
 
+- [x] `notify_update` receiver=0 エラー観測性改善
+  - ファイル: `src/server/broadcast.rs`, `src/server/files/content.rs`
+  - 内容: WebSocket 受信者が 0 の場合でも、ファイル変更イベント由来の検証・読込前エラーを warn ログへ残す経路を追加した。正常更新では従来通り本文読込と描画を避ける
+  - 完了根拠: `6de7137 fix: notify_updateの受信者なしエラーをログ化 (#114)`、現行の `server::broadcast::tests::*受信者ゼロ*` 系テスト
+  - 由来: TODO.md High Priority
+
 - [x] `augmentHashWithTrailingLineHint` ELEMENT_NODE sibling の直接回帰テスト
   - ファイル: `tests/e2e/memo_jump.spec.ts`
   - 内容: `document.createElement('span')` で `L15` を内包したノードを `link.nextSibling` に置き、`augmentHashWithTrailingLineHint(link, '#section-b')` が `#section-b:L15` を返すことを直接検証した

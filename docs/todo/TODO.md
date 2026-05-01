@@ -10,12 +10,6 @@
   - 対応: 見出し抽出ループを単一にまとめ、`Vec<HeadingInfo>` を render と toc で共有する。`tests/renderer_test.rs:631` の不変条件テストを境界ケース（画像 alt + code 混在、SoftBreak）まで拡張
   - 理由: 仕様不変条件（render と toc は同じ id を出力する）が型・データフローで担保されておらず、リファクタで silent に乖離する経路が残る。既存 CLAUDE.md「2 回パース」記述を超えて、`search` 経由でも 3 回目が走る点も合わせて整理する
 
-- [ ] `notify_update` の receiver=0 早期 return で `Error` メッセージが silent drop されない経路にする
-  - ファイル: `src/server/broadcast.rs` L19-65, `src/server/files/content.rs:70-100`
-  - 現状: `notify_update` は `tx.receiver_count() == 0` で `build_change_broadcast_message` 呼び出し前に早期 return するため、通常の `Update` だけでなく、ファイル削除・読み込み失敗から生成される `Error` も作られない。一方、監視エラー用の `broadcast_error` は早期 return せず送信を試み、送信失敗は `send_broadcast_message` 経由で warn ログに残す。この非対称性により「ファイル変更から派生した Error」だけはローカルログにも残らない
-  - 対応: `notify_update` は `Update` 系のみ早期 return するか、`Error` 系を `tracing::warn!` でローカルに残す。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
-  - 理由: silent failure。pr-review-toolkit の silent-failure-hunter 観点と整合し、デバッグ可能性を担保
-
 ## Medium Priority
 
 - [ ] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
