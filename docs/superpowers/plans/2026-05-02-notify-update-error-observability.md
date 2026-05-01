@@ -14,7 +14,7 @@
 
 - Modify: `src/server/files/content.rs`
   - Add a receiver=0 lightweight helper that returns `Option<String>` for loggable file-change errors.
-  - Add a small pre-render readability check using `tokio::fs::metadata` and `tokio::fs::File::open`.
+  - Add a small pre-render readability check using `tokio::fs::metadata`, regular-file validation, and `tokio::fs::File::open`.
   - Extract shared file-label formatting so the existing broadcast message path and new log-only path stay consistent.
 - Modify: `src/server/broadcast.rs`
   - Route `receiver_count() == 0` through the new log-only helper.
@@ -66,6 +66,12 @@ async fn check_readable_before_render(file_path: &Path) -> Result<(), ReadMarkdo
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
+    if !metadata.is_file() {
+        return Err(ReadMarkdownError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "通常ファイルではありません",
+        )));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         return Err(ReadMarkdownError::TooLarge);
     }

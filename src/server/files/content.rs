@@ -212,6 +212,12 @@ async fn check_readable_before_render(file_path: &Path) -> Result<(), ReadMarkdo
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
+    if !metadata.is_file() {
+        return Err(ReadMarkdownError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "通常ファイルではありません",
+        )));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         return Err(ReadMarkdownError::TooLarge);
     }

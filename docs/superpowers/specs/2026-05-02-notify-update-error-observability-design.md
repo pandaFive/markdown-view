@@ -52,7 +52,7 @@ receiver がいる場合は現行通り `build_change_broadcast_message(state, c
 receiver=0 用には、本文読込を避ける軽量ヘルパーを `src/server/files/content.rs` に追加する。このヘルパーは以下だけを行う。
 
 - `resolve_change_target` による既存の変更ターゲット解決。
-- `tokio::fs::metadata` による存在確認とサイズ上限確認。
+- `tokio::fs::metadata` による存在確認、通常ファイル確認、サイズ上限確認。
 - metadata 成功後、必要最小限の `tokio::fs::File::open` による open 可否確認。
 
 この helper は Markdown 本文を読まず、`render_markdown` と `generate_toc` を呼ばない。戻り値は `Option<BroadcastMessage>` ではなく、ログ用の `Option<String>` とし、送信用メッセージ生成と混同しない。
@@ -99,7 +99,7 @@ receiver=0 時に追加で検証と読込前検査を試みるため、TOCTOU �
 ## 受け入れ条件
 
 - `notify_update` は receiver=0 の正常更新では broadcast を送らず、本文読込・描画を行わず、エラーログも出さない。
-- `notify_update` は receiver=0 のファイル削除・metadata/open 失敗・サイズ超過・検証失敗を warn ログに残す。
+- `notify_update` は receiver=0 のファイル削除・非通常ファイル・metadata/open 失敗・サイズ超過・検証失敗を warn ログに残す。
 - `notify_update` は receiver=0 の非 UTF-8 ファイルでは本文読込を避け、エラーログを出さない。
 - receiver がいる場合の Error broadcast は既存通り動作する。
 - `cargo test --all-targets --all-features` が通る。
