@@ -10,11 +10,29 @@
   - 対応: 見出し抽出ループを単一にまとめ、`Vec<HeadingInfo>` を render と toc で共有する。`tests/renderer_test.rs:631` の不変条件テストを境界ケース（画像 alt + code 混在、SoftBreak）まで拡張
   - 理由: 仕様不変条件（render と toc は同じ id を出力する）が型・データフローで担保されておらず、リファクタで silent に乖離する経路が残る。既存 CLAUDE.md「2 回パース」記述を超えて、`search` 経由でも 3 回目が走る点も合わせて整理する
 
-- [ ] `notify_update` の receiver=0 早期 return で `Error` メッセージが silent drop されない経路にする
-  - ファイル: `src/server/broadcast.rs` L19-65, `src/server/files/content.rs:70-100`
-  - 現状: `notify_update` は `tx.receiver_count() == 0` で `build_change_broadcast_message` 呼び出し前に早期 return するため、通常の `Update` だけでなく、ファイル削除・読み込み失敗から生成される `Error` も作られない。一方、監視エラー用の `broadcast_error` は早期 return せず送信を試み、送信失敗は `send_broadcast_message` 経由で warn ログに残す。この非対称性により「ファイル変更から派生した Error」だけはローカルログにも残らない
-  - 対応: `notify_update` は `Update` 系のみ早期 return するか、`Error` 系を `tracing::warn!` でローカルに残す。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
-  - 理由: silent failure。pr-review-toolkit の silent-failure-hunter 観点と整合し、デバッグ可能性を担保
+- [ ] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
+  - ファイル: `src/renderer/mod.rs`, `src/server/files/search.rs`, `src/renderer/toc.rs`
+  - 現状: renderer/TOC 側の `markdown_options()` は tables/tasklist/strikethrough のみ、検索側は footnotes/heading attributes/GFM も有効にしている。表示対象と検索対象の Markdown 解釈が暗黙に分岐している
+  - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
+  - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
+
+- [ ] 監視イベント経由の変更ファイルを最終読込前に再検証する
+  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`, `src/watcher/strategy.rs`
+  - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
+  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。削除済みファイルや canonicalize 失敗時の扱いは「安全側で error broadcast」になるよう統合テストを追加
+  - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
+
+- [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
+  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
+  - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
+  - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
+  - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
+
+- [ ] ディレクトリ検索の負荷制御をサーバ側に追加する
+  - ファイル: `src/server/routes.rs`, `src/server/files/search.rs`, `src/server/files/catalog.rs`
+  - 現状: `/api/search` はリクエスト処理内で `list_markdown_files()` による同期ディレクトリ走査後、最大 1000 ファイルを順次 `read_markdown_with_limit()` で読み、Markdown パースして検索する。1 ファイル上限は 10MB だが、検索リクエスト全体の総読込量・時間・キャンセル境界はない。さらに `search_directory` は pulldown-cmark を **検索専用にもう一度パース**（renderer/toc に続く 3 回目）し、各ブロックで `original_offsets: Vec<usize>` をテキスト byte 数 +1 確保する。打ち切りが「ファイル単位」ではなく「結果件数 100」なので巨大 1 ファイルで `MAX_SEARCH_RESULTS` を消費すると他ファイルが silent に無視される
+  - 対応: 検索の同期走査/重いパースを `spawn_blocking` または専用検索タスクに逃がす。総読込バイト上限、検索対象ファイル数上限の応答明示、クライアント世代と対応するサーバ側キャンセルまたは古い検索の破棄を検討し、巨大ワークスペースの統合テストを追加。`SearchResultItem` の `before/current/after` を `Cow<str>` 化してマッチごとの `String` 確保を削減
+  - 理由: 横断検索は Markdown workspace の中核機能だが、localhost 前提でも巨大ディレクトリや連続検索で Tokio worker を圧迫し、本文表示・メモ・WebSocket の応答性に影響する可能性がある
 
 ## Medium Priority
 
@@ -77,30 +95,6 @@
   - 現状: 通常ディレクトリ枝とシンボリックリンク枝で `canonicalize_dir_for_cycle` が `None` を返した時の扱いは揃っているが、`(file_type.is_symlink() && path.is_dir())` 判定で同期 `is_dir()` syscall を呼び、TOCTOU と性能の双方で穴が残る。テスト名 `canonicalize失敗時はスキップ扱い` が「失敗＝素通り」を仕様化している
   - 対応: visited 集合経由のループ防止を symlink/通常ディレクトリで完全対称にし、`is_dir()` の同期呼び出しは canonicalize の結果から導く。「canonicalize 失敗時に visited を経由せず再帰しない」ことをテストで固定
   - 理由: ループ防止のセキュリティ境界が「素通り経路」で破綻しないことを担保する
-
-- [ ] 監視イベント経由の変更ファイルを最終読込前に再検証する
-  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`, `src/watcher/strategy.rs`
-  - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
-  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。削除済みファイルや canonicalize 失敗時の扱いは「安全側で error broadcast」になるよう統合テストを追加
-  - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
-
-- [ ] ディレクトリ検索の負荷制御をサーバ側に追加する
-  - ファイル: `src/server/routes.rs`, `src/server/files/search.rs`, `src/server/files/catalog.rs`
-  - 現状: `/api/search` はリクエスト処理内で `list_markdown_files()` による同期ディレクトリ走査後、最大 1000 ファイルを順次 `read_markdown_with_limit()` で読み、Markdown パースして検索する。1 ファイル上限は 10MB だが、検索リクエスト全体の総読込量・時間・キャンセル境界はない。さらに `search_directory` は pulldown-cmark を **検索専用にもう一度パース**（renderer/toc に続く 3 回目）し、各ブロックで `original_offsets: Vec<usize>` をテキスト byte 数 +1 確保する。打ち切りが「ファイル単位」ではなく「結果件数 100」なので巨大 1 ファイルで `MAX_SEARCH_RESULTS` を消費すると他ファイルが silent に無視される
-  - 対応: 検索の同期走査/重いパースを `spawn_blocking` または専用検索タスクに逃がす。総読込バイト上限、検索対象ファイル数上限の応答明示、クライアント世代と対応するサーバ側キャンセルまたは古い検索の破棄を検討し、巨大ワークスペースの統合テストを追加。`SearchResultItem` の `before/current/after` を `Cow<str>` 化してマッチごとの `String` 確保を削減
-  - 理由: 横断検索は Markdown workspace の中核機能だが、localhost 前提でも巨大ディレクトリや連続検索で Tokio worker を圧迫し、本文表示・メモ・WebSocket の応答性に影響する可能性がある
-
-- [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
-  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
-  - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
-  - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
-  - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
-
-- [ ] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
-  - ファイル: `src/renderer/mod.rs`, `src/server/files/search.rs`, `src/renderer/toc.rs`
-  - 現状: renderer/TOC 側の `markdown_options()` は tables/tasklist/strikethrough のみ、検索側は footnotes/heading attributes/GFM も有効にしている。表示対象と検索対象の Markdown 解釈が暗黙に分岐している
-  - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
-  - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
 
 - [ ] ブラウザ JS の責務境界を小モジュールへ分割する
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
