@@ -39,7 +39,6 @@ pub(super) fn render(input: &str) -> RenderOutput {
 struct RenderContext {
     id_counts: HashMap<String, usize>,
     headings: Vec<HeadingInfo>,
-    raw_html_suppression: RawHtmlSuppression,
     state: RenderState,
 }
 
@@ -48,7 +47,6 @@ impl RenderContext {
         Self {
             id_counts: HashMap::new(),
             headings: Vec::new(),
-            raw_html_suppression: RawHtmlSuppression::new(),
             state: RenderState::new(),
         }
     }
@@ -61,20 +59,12 @@ fn dispatch_event(
     syntax_set: &SyntaxSet,
     context: &mut RenderContext,
 ) {
-    if let Event::Html(html) | Event::InlineHtml(html) = &event {
-        handle_html(html, &mut context.raw_html_suppression);
-        return;
-    }
-
-    if context.raw_html_suppression.is_active() {
-        return;
-    }
-
     match event {
         Event::Start(tag) => handle_start(tag, range, line_lookup, &mut context.state),
         Event::End(tag) => handle_end(tag, range, line_lookup, syntax_set, context),
         Event::Text(text) => handle_text(&text, &range, line_lookup, &mut context.state),
         Event::Code(text) => handle_code(&text, &range, line_lookup, &mut context.state),
+        Event::Html(_) | Event::InlineHtml(_) => handle_html(),
         Event::SoftBreak => handle_soft_break(&mut context.state),
         Event::HardBreak => handle_hard_break(&mut context.state),
         Event::Rule => handle_rule(&mut context.state),
@@ -159,42 +149,6 @@ enum IgnoredMarkdownEventKind {
     EndTag,
 }
 
-#[derive(Debug, Default)]
-struct RawHtmlSuppression {
-    active_raw_text_tag: Option<&'static str>,
-}
-
-impl RawHtmlSuppression {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn is_active(&self) -> bool {
-        self.active_raw_text_tag.is_some()
-    }
-
-    fn observe(&mut self, html: &str) {
-        let normalized = html.trim_start().to_ascii_lowercase();
-
-        if let Some(tag) = self.active_raw_text_tag {
-            if normalized.contains(&format!("</{tag}")) {
-                self.active_raw_text_tag = None;
-            }
-            return;
-        }
-
-        for tag in ["script", "style"] {
-            if normalized.starts_with(&format!("<{tag}"))
-                && !normalized.contains(&format!("</{tag}"))
-                && !normalized.ends_with("/>")
-            {
-                self.active_raw_text_tag = Some(tag);
-                return;
-            }
-        }
-    }
-}
-
 fn log_ignored_markdown_event(event: &Event<'_>) -> IgnoredMarkdownEventKind {
     tracing::debug!(
         "[markdown-view] 未処理のMarkdownイベントを無視: {:?}",
@@ -259,8 +213,7 @@ fn handle_code(
 }
 
 /// pulldown_cmark::Event::Html / Event::InlineHtml をまとめて破棄する（XSS防止）。
-fn handle_html(html: &str, raw_html_suppression: &mut RawHtmlSuppression) {
-    raw_html_suppression.observe(html);
+fn handle_html() {
     // raw HTMLイベントは出力せず破棄する（XSS防止）
 }
 
@@ -320,7 +273,7 @@ fn handle_heading_start(level: u8, range: Range<usize>, state: &mut RenderState)
 
 fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
     let state = &mut context.state;
-    let text = state.heading_plain_text().trim().to_string();
+    let text = state.heading_plain_text().to_string();
     let level = state.heading_level();
     let slug = slugify(&text);
     let id = generate_unique_id(&slug, &mut context.id_counts);

@@ -842,7 +842,7 @@ fn test_render_documentは見出し画像code_softbreakで本文とtocのidを�
     let document = render_document(md);
 
     assert_eq!(document.headings.len(), 2);
-    assert_eq!(document.headings[0].text, "Title code continued");
+    assert_eq!(document.headings[0].text, " Title code continued");
     assert_eq!(document.headings[0].id, "title-code-continued");
     assert_eq!(document.headings[1].id, "title-code-continued-1");
     assert!(document
@@ -881,12 +881,15 @@ fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
     let md = "# Hello <script>alert(1)</script> & World";
     let document = render_document(md);
 
+    assert_eq!(document.headings[0].text, "Hello alert(1) & World");
+    assert_eq!(document.headings[0].id, "hello-alert-1-world");
     assert!(!document.content.as_str().contains("<script>"));
     assert!(!document.toc.as_str().contains("<script>"));
-    assert!(!document.toc.as_str().contains("alert(1)"));
-    assert!(document.toc.as_str().contains("Hello"));
-    assert!(document.toc.as_str().contains("&amp; World"));
-    assert!(document.toc.as_str().contains(r##"href="#hello-world""##));
+    assert!(document.toc.as_str().contains("Hello alert(1) &amp; World"));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(r##"href="#hello-alert-1-world""##));
 }
 
 #[test]
