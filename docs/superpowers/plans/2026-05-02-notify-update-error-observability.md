@@ -94,7 +94,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
         Ok(None) => return None,
         Err(error) => {
             let file_label = change_error_file_label(state, changed_file);
-            return Some(format!("ファイル検証エラー ({}): {}", file_label, error));
+            return Some(format!("更新時ファイル検証失敗 ({}): {}", file_label, error));
         }
     };
 
@@ -102,7 +102,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
         Ok(()) => None,
         Err(ReadMarkdownError::NotUtf8) => None,
         Err(error) => Some(format!(
-            "ファイル読み込みエラー ({}): {}",
+            "更新時読み込みエラー ({}): {}",
             target.file_label(),
             error.user_message()
         )),
@@ -153,9 +153,9 @@ In `src/server/broadcast.rs`, add these tests inside the existing `#[cfg(test)] 
         notify_update(&state, &file_path).await;
 
         assert!(logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("ファイル検証エラー"));
+        assert!(logs_contain("更新時ファイル検証失敗"));
         assert!(logs_contain("missing.md"));
     }
 
@@ -176,9 +176,9 @@ In `src/server/broadcast.rs`, add these tests inside the existing `#[cfg(test)] 
         notify_update(&state, &file_path).await;
 
         assert!(logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("ファイル読み込みエラー"));
+        assert!(logs_contain("更新時読み込みエラー"));
         assert!(logs_contain("ファイルサイズが上限"));
         assert!(logs_contain("large.md"));
     }
@@ -200,10 +200,10 @@ In the same test module, add:
         notify_update(&state, &file_path).await;
 
         assert!(!logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(!logs_contain("ファイル読み込みエラー"));
-        assert!(!logs_contain("ファイル検証エラー"));
+        assert!(!logs_contain("更新時読み込みエラー"));
+        assert!(!logs_contain("更新時ファイル検証失敗"));
     }
 
     #[traced_test]
@@ -218,7 +218,7 @@ In the same test module, add:
         notify_update(&state, &file_path).await;
 
         assert!(!logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
         assert!(!logs_contain("UTF-8"));
     }
@@ -258,7 +258,9 @@ In `src/server/broadcast.rs`, replace `notify_update` with:
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx().receiver_count() == 0 {
         log_change_error_without_receivers(state, changed_file).await;
-        return;
+        if state.tx().receiver_count() == 0 {
+            return;
+        }
     }
 
     if let Some(message) = build_change_broadcast_message(state, changed_file).await {
@@ -278,7 +280,7 @@ async fn log_change_error_without_receivers(state: &AppState, changed_file: &Pat
     {
         tracing::warn!(
             message = %message,
-            "[markdown-view] WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "[markdown-view] WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         );
     }
 }

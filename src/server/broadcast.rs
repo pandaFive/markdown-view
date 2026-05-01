@@ -17,11 +17,14 @@ use crate::watcher::{WatchError, WatchEvent};
 /// ディレクトリモードでは変更ファイルの相対パスを`file`フィールドに含め、
 /// クライアント側でアクティブタブの更新判定に使用する。
 /// ファイル検証や読み込みに失敗した場合はエラーメッセージをbroadcastする。
-/// 受信者がゼロの場合は検証・読み込みエラーだけをログに残す。
+/// 受信者がゼロの場合は検証・読み込み前エラーだけをログに残す。
+/// ログ記録中に受信者が増えた場合は、通常のbroadcast経路を再試行する。
 pub async fn notify_update(state: &AppState, changed_file: &Path) {
     if state.tx().receiver_count() == 0 {
         log_change_error_without_receivers(state, changed_file).await;
-        return;
+        if state.tx().receiver_count() == 0 {
+            return;
+        }
     }
 
     if let Some(message) = build_change_broadcast_message(state, changed_file).await {
@@ -29,13 +32,14 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     }
 }
 
+/// WebSocket受信者がいない変更イベントのエラーをローカルログに残す。
 async fn log_change_error_without_receivers(state: &AppState, changed_file: &Path) {
     if let Some(message) =
         build_change_error_log_message_without_receivers(state, changed_file).await
     {
         tracing::warn!(
             message = %message,
-            "[markdown-view] WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "[markdown-view] WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         );
     }
 }
@@ -81,8 +85,8 @@ pub(super) fn spawn_watch_event_forwarder(
 
 /// ファイル監視エラーをブロードキャストする
 ///
-/// `notify_update` では受信者がゼロの場合に早期リターンするが、エラー通知は
-/// 受信者の有無に関わらず送信を試みる。
+/// `notify_update` の受信者なし経路は変更由来エラーをログに留めるが、
+/// 監視エラー通知は受信者の有無に関わらず送信を試みる。
 fn broadcast_error(state: &AppState, error: &WatchError) {
     send_broadcast_message(
         state.tx(),
@@ -223,6 +227,7 @@ mod tests {
             .write(true)
             .open(&file_path)
             .unwrap();
+        // metadata のサイズ上限分岐を固定する。open可否分岐は環境依存が強いため別対象。
         file.set_len(MAX_FILE_SIZE + 1).unwrap();
 
         notify_update(&state, &file_path).await;
@@ -284,9 +289,9 @@ mod tests {
         notify_update(&state, &file_path).await;
 
         assert!(logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("ファイル検証エラー"));
+        assert!(logs_contain("更新時ファイル検証失敗"));
         assert!(logs_contain("missing.md"));
     }
 
@@ -306,11 +311,35 @@ mod tests {
         notify_update(&state, &file_path).await;
 
         assert!(logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("ファイル読み込みエラー"));
+        assert!(logs_contain("更新時読み込みエラー"));
         assert!(logs_contain("ファイルサイズが上限"));
         assert!(logs_contain("large.md"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_notify_update_ディレクトリモード受信者ゼロ時の読込失敗は相対パスでwarnログに残す()
+    {
+        let base_dir = tempfile::tempdir().unwrap();
+        let nested_dir = base_dir.path().join("docs");
+        std::fs::create_dir(&nested_dir).unwrap();
+        let target = nested_dir.join("guide.md");
+        std::fs::write(&target, "# guide").unwrap();
+
+        let state = create_directory_state(base_dir.path());
+        let rx = state.tx().subscribe();
+        drop(rx);
+
+        std::fs::remove_file(&target).unwrap();
+        notify_update(&state, &target).await;
+
+        assert!(logs_contain(
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
+        ));
+        assert!(logs_contain("更新時読み込みエラー"));
+        assert!(logs_contain("docs/guide.md"));
     }
 
     #[traced_test]
@@ -324,10 +353,10 @@ mod tests {
         notify_update(&state, &file_path).await;
 
         assert!(!logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(!logs_contain("ファイル読み込みエラー"));
-        assert!(!logs_contain("ファイル検証エラー"));
+        assert!(!logs_contain("更新時読み込みエラー"));
+        assert!(!logs_contain("更新時ファイル検証失敗"));
     }
 
     #[traced_test]
@@ -342,7 +371,7 @@ mod tests {
         notify_update(&state, &file_path).await;
 
         assert!(!logs_contain(
-            "WebSocket受信者がいないためファイル変更エラーをローカル記録しました"
+            "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
         assert!(!logs_contain("UTF-8"));
     }

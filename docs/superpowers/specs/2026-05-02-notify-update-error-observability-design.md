@@ -24,7 +24,7 @@
 
 `notify_update` の receiver=0 分岐に、エラーだけを観測する補助経路を追加する。
 
-receiver がいる場合は現行通り `build_change_broadcast_message(state, changed_file).await` の結果を `send_broadcast_message` に渡す。receiver が 0 の場合は新しい補助関数を呼び、ターゲット解決と軽量なファイル読込前検査だけを実行する。検証失敗、ファイル削除、metadata/open 失敗、サイズ超過のように本文読込前に分かる異常だけ warn ログに残す。
+receiver がいる場合は現行通り `build_change_broadcast_message(state, changed_file).await` の結果を `send_broadcast_message` に渡す。receiver が 0 の場合は新しい補助関数を呼び、ターゲット解決と軽量なファイル読込前検査だけを実行する。検証失敗、ファイル削除、metadata/open 失敗、サイズ超過のように本文読込前に分かる異常だけ warn ログに残す。補助関数の await 中に受信者が増えた場合は receiver 数を再確認し、通常の broadcast 経路へフォールバックする。
 
 この方針により、通常更新の receiver=0 fast path は維持しつつ、運用上よく起きる削除・検証・サイズ系の異常が silent にならない。非 UTF-8 のように本文読込後にしか分からないエラーは、receiver=0 時の観測対象外とする。
 
@@ -35,13 +35,13 @@ receiver がいる場合は現行通り `build_change_broadcast_message(state, c
 責務は、受信者有無に応じた更新通知の配送またはエラー観測の分岐に限定する。
 
 - receiver が 1 以上: 既存通りメッセージ生成と broadcast 送信を行う。
-- receiver が 0: エラー観測用ヘルパーを呼んで return する。
+- receiver が 0: エラー観測用ヘルパーを呼ぶ。完了時点でも receiver が 0 なら return し、receiver が増えていれば通常 broadcast 経路を再試行する。
 
 ### エラー観測ヘルパー
 
 新しい private async 関数 `log_change_error_without_receivers` を `src/server/broadcast.rs` に追加する。
 
-この関数は `build_change_broadcast_message` を呼ばない。代わりに、既存の変更ターゲット解決と同じ分類を使う軽量ヘルパーで、本文読込前に分かるエラーだけを検出する。ログには、受信者がいないため WebSocket 送信しなかったことと、既存エラーメッセージ形式に揃えた分類を含める。
+この関数は `build_change_broadcast_message` を呼ばない。代わりに、既存の変更ターゲット解決と同じ分類を使う軽量ヘルパーで、本文読込前に分かるエラーだけを検出する。ログには、受信者がいないため WebSocket 送信しなかったことと、既存 warn ログの `更新時ファイル検証失敗` / `更新時読み込みエラー` に揃えた分類を含める。
 
 本文 HTML、Markdown 本文、未サニタイズの外部入力パスはログに出さない。
 
@@ -65,6 +65,7 @@ receiver=0 用には、本文読込を避ける軽量ヘルパーを `src/server
 4. receiver が 0 の場合、エラー観測ヘルパーが変更対象の解決と読込前検査を行う。
 5. 結果がログ対象エラーの場合だけ warn ログに記録する。
 6. 結果が正常またはディレクトリモードの対象なしの場合は何もしない。
+7. ログ記録中に receiver が増えた場合は、通常の `build_change_broadcast_message` と broadcast 送信へ進む。
 
 ## エラーハンドリング
 
@@ -72,14 +73,14 @@ receiver=0 用には、本文読込を避ける軽量ヘルパーを `src/server
 - 読込前検査の失敗は、既存の `ReadMarkdownError::Io` と `ReadMarkdownError::TooLarge` の user message に揃える。
 - `ReadMarkdownError::NotUtf8` は本文読込後にしか分からないため receiver=0 時の観測対象外とする。
 - 受信者なしログは送信失敗ではないため、既存の `send_broadcast_message` の warn とは別文言にする。
-- ログ文言はテストで固定できる短い日本語にする。例: `"[markdown-view] WebSocket受信者がいないためファイル変更エラーをローカル記録しました"`。
+- ログ文言はテストで固定できる短い日本語にする。例: `"[markdown-view] WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"`。
 
 ## テスト方針
 
 `src/server/broadcast.rs` の既存テストへ追加する。
 
 - receiver=0 かつ変更対象が読めない場合、`notify_update` が warn ログを出す。
-- ログには「受信者がいない」ことと、既存エラー分類である `ファイル読み込みエラー` または `ファイル検証エラー` が含まれる。
+- ログには「受信者がいない」ことと、既存 warn ログに合わせた `更新時読み込みエラー` または `更新時ファイル検証失敗` が含まれる。
 - receiver=0 かつ正常更新の場合、送信もエラーログも発生しない。
 - receiver=0 かつ非 UTF-8 ファイルの場合、本文読込を避けるためエラーログを出さない。
 - 既存の receiver あり Error 送信テストは維持する。
