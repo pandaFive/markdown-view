@@ -1,5 +1,6 @@
 use markdown_view::renderer::{
-    generate_unique_id, render_document, render_markdown, slugify, syntax_theme_css, validate_theme,
+    extract_headings, generate_unique_id, render_document, render_markdown, slugify,
+    syntax_theme_css, validate_theme,
 };
 use markdown_view::toc::generate_toc;
 
@@ -886,6 +887,19 @@ fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
     assert!(document.toc.as_str().contains("Hello"));
     assert!(document.toc.as_str().contains("&amp; World"));
     assert!(document.toc.as_str().contains(r##"href="#hello-world""##));
+}
+
+#[test]
+fn test_extract_headingsはrender_documentのheadingsと一致する() {
+    let md = "# A `code`\n\n## ![logo](x.png) B\n\n# A `code`";
+
+    let document = render_document(md);
+    let headings = extract_headings(md);
+
+    assert_eq!(headings, document.headings);
+    assert_eq!(headings[0].id, "a-code");
+    assert_eq!(headings[1].id, "b");
+    assert_eq!(headings[2].id, "a-code-1");
 }
 
 #[test]
