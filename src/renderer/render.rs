@@ -19,28 +19,38 @@ pub(super) struct RenderOutput {
 pub(super) fn render(input: &str) -> RenderOutput {
     let line_lookup = LineLookup::new(input);
     let syntax_set = syntax_set();
-    let mut id_counts = HashMap::new();
-    let mut state = RenderState::new();
-    let mut headings = Vec::new();
-    let mut raw_html_suppression = RawHtmlSuppression::new();
+    let mut context = RenderContext::new();
 
     let parser = Parser::new_ext(input, markdown_options()).into_offset_iter();
     for (event, range) in parser {
-        dispatch_event(
-            event,
-            range,
-            &line_lookup,
-            syntax_set,
-            &mut id_counts,
-            &mut headings,
-            &mut raw_html_suppression,
-            &mut state,
-        );
+        dispatch_event(event, range, &line_lookup, syntax_set, &mut context);
     }
+
+    let RenderContext {
+        state, headings, ..
+    } = context;
 
     RenderOutput {
         content: SanitizedHtml::from_sanitized_html(state.into_html()),
         headings,
+    }
+}
+
+struct RenderContext {
+    id_counts: HashMap<String, usize>,
+    headings: Vec<HeadingInfo>,
+    raw_html_suppression: RawHtmlSuppression,
+    state: RenderState,
+}
+
+impl RenderContext {
+    fn new() -> Self {
+        Self {
+            id_counts: HashMap::new(),
+            headings: Vec::new(),
+            raw_html_suppression: RawHtmlSuppression::new(),
+            state: RenderState::new(),
+        }
     }
 }
 
@@ -49,37 +59,28 @@ fn dispatch_event(
     range: Range<usize>,
     line_lookup: &LineLookup,
     syntax_set: &SyntaxSet,
-    id_counts: &mut HashMap<String, usize>,
-    headings: &mut Vec<HeadingInfo>,
-    raw_html_suppression: &mut RawHtmlSuppression,
-    state: &mut RenderState,
+    context: &mut RenderContext,
 ) {
     if let Event::Html(html) | Event::InlineHtml(html) = &event {
-        handle_html(html, raw_html_suppression);
+        handle_html(html, &mut context.raw_html_suppression);
         return;
     }
 
-    if raw_html_suppression.is_active() {
+    if context.raw_html_suppression.is_active() {
         return;
     }
 
     match event {
-        Event::Start(tag) => handle_start(tag, range, line_lookup, state),
-        Event::End(tag) => handle_end(
-            tag,
-            range,
-            line_lookup,
-            syntax_set,
-            id_counts,
-            headings,
-            state,
-        ),
-        Event::Text(text) => handle_text(&text, &range, line_lookup, state),
-        Event::Code(text) => handle_code(&text, &range, line_lookup, state),
-        Event::SoftBreak => handle_soft_break(state),
-        Event::HardBreak => handle_hard_break(state),
-        Event::Rule => handle_rule(state),
-        Event::TaskListMarker(checked) => handle_task_list_marker(checked, state),
+        Event::Start(tag) => handle_start(tag, range, line_lookup, &mut context.state),
+        Event::End(tag) => handle_end(tag, range, line_lookup, syntax_set, context),
+        Event::Text(text) => handle_text(&text, &range, line_lookup, &mut context.state),
+        Event::Code(text) => handle_code(&text, &range, line_lookup, &mut context.state),
+        Event::SoftBreak => handle_soft_break(&mut context.state),
+        Event::HardBreak => handle_hard_break(&mut context.state),
+        Event::Rule => handle_rule(&mut context.state),
+        Event::TaskListMarker(checked) => {
+            handle_task_list_marker(checked, &mut context.state);
+        }
         other => {
             let _ = log_ignored_markdown_event(&other);
         }
@@ -124,27 +125,27 @@ fn handle_end(
     range: Range<usize>,
     line_lookup: &LineLookup,
     syntax_set: &SyntaxSet,
-    id_counts: &mut HashMap<String, usize>,
-    headings: &mut Vec<HeadingInfo>,
-    state: &mut RenderState,
+    context: &mut RenderContext,
 ) {
     match tag {
-        TagEnd::CodeBlock => handle_code_block_end(range, line_lookup, syntax_set, state),
-        TagEnd::Heading(_) => handle_heading_end(line_lookup, id_counts, headings, state),
-        TagEnd::Image => handle_image_end(state),
-        TagEnd::Paragraph => handle_paragraph_end(state),
-        TagEnd::Emphasis => handle_emphasis_end(state),
-        TagEnd::Strong => handle_strong_end(state),
-        TagEnd::Strikethrough => handle_strikethrough_end(state),
-        TagEnd::Link => handle_link_end(state),
-        TagEnd::BlockQuote(_) => handle_blockquote_end(state),
-        TagEnd::List(true) => handle_ordered_list_end(state),
-        TagEnd::List(false) => handle_unordered_list_end(state),
-        TagEnd::Item => handle_item_end(state),
-        TagEnd::Table => handle_table_end(state),
-        TagEnd::TableHead => handle_table_head_end(state),
-        TagEnd::TableRow => handle_table_row_end(state),
-        TagEnd::TableCell => handle_table_cell_end(state),
+        TagEnd::CodeBlock => {
+            handle_code_block_end(range, line_lookup, syntax_set, &mut context.state)
+        }
+        TagEnd::Heading(_) => handle_heading_end(line_lookup, context),
+        TagEnd::Image => handle_image_end(&mut context.state),
+        TagEnd::Paragraph => handle_paragraph_end(&mut context.state),
+        TagEnd::Emphasis => handle_emphasis_end(&mut context.state),
+        TagEnd::Strong => handle_strong_end(&mut context.state),
+        TagEnd::Strikethrough => handle_strikethrough_end(&mut context.state),
+        TagEnd::Link => handle_link_end(&mut context.state),
+        TagEnd::BlockQuote(_) => handle_blockquote_end(&mut context.state),
+        TagEnd::List(true) => handle_ordered_list_end(&mut context.state),
+        TagEnd::List(false) => handle_unordered_list_end(&mut context.state),
+        TagEnd::Item => handle_item_end(&mut context.state),
+        TagEnd::Table => handle_table_end(&mut context.state),
+        TagEnd::TableHead => handle_table_head_end(&mut context.state),
+        TagEnd::TableRow => handle_table_row_end(&mut context.state),
+        TagEnd::TableCell => handle_table_cell_end(&mut context.state),
         other => {
             let _ = log_ignored_markdown_end_tag(&other);
         }
@@ -317,20 +318,16 @@ fn handle_heading_start(level: u8, range: Range<usize>, state: &mut RenderState)
     state.start_heading(level, range);
 }
 
-fn handle_heading_end(
-    line_lookup: &LineLookup,
-    id_counts: &mut HashMap<String, usize>,
-    headings: &mut Vec<HeadingInfo>,
-    state: &mut RenderState,
-) {
+fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
+    let state = &mut context.state;
     let text = state.heading_plain_text().trim().to_string();
     let level = state.heading_level();
     let slug = slugify(&text);
-    let id = generate_unique_id(&slug, id_counts);
+    let id = generate_unique_id(&slug, &mut context.id_counts);
     let heading_attrs = heading_line_attrs(line_lookup, state);
     if let Some(heading_html) = state.finish_heading(id.clone(), heading_attrs) {
         if let Some(level) = level {
-            headings.push(HeadingInfo { level, text, id });
+            context.headings.push(HeadingInfo { level, text, id });
         }
         state.push_html(&heading_html);
     }
