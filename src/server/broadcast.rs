@@ -22,7 +22,12 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     }
 
     if let Some(msg) = build_change_broadcast_message(state, changed_file).await {
-        let _ = state.tx().send(msg);
+        if let Err(error) = state.tx().send(msg) {
+            tracing::warn!(
+                "[markdown-view] ファイル変更通知の送信に失敗しました: {}",
+                error
+            );
+        }
     }
 }
 

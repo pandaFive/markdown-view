@@ -77,6 +77,7 @@ function selectFile(file, pushHistory, options) {
     appContext.state.pendingUpdateTimer = null;
   }
   flushPendingMemoSave();
+  prepareMemoFileLoad();
   appContext.state.currentFile = file;
   if (pushHistory) setFileParam(file, false, options.historyHash);
   updateFileListActive(file);

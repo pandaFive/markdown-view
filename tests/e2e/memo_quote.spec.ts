@@ -206,6 +206,63 @@ test('メモ取得失敗時は古い本文を新ファイルへ保存できな�
   await expect.poll(() => putCount).toBe(0);
 });
 
+test('メモ読込中は旧本文を新ファイルへ保存できないようエディタを無効化する', async ({ page }) => {
+  let putCount = 0;
+  let releaseNotesMemo!: () => void;
+  const notesMemoPending = new Promise<void>((resolve) => {
+    releaseNotesMemo = resolve;
+  });
+  await page.route('**/api/memo*', async (route) => {
+    const request = route.request();
+    if (request.method() === 'PUT') {
+      putCount += 1;
+      const body = request.postDataJSON() as { raw?: string; file?: string | null };
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: body.raw || '',
+          html: `<p>${body.raw || ''}</p>`,
+          file: body.file || 'README.md'
+        })
+      });
+      return;
+    }
+    const url = new URL(request.url());
+    if (url.searchParams.get('file') === 'notes.md') {
+      await notesMemoPending;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: 'notes memo from server',
+          html: '<p>notes memo from server</p>',
+          file: 'notes.md'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+  await page.locator('#memo-editor').fill('readme memo must not be saved while notes loads');
+  await expect(page.locator('#memo-save-status')).toContainText('保存済み');
+  putCount = 0;
+
+  await selectFile(page, 'notes.md');
+  await expect(page.locator('#content')).toContainText('Notes body');
+  await openMemoTab(page);
+
+  await expect(page.locator('#memo-editor')).toBeDisabled();
+  releaseNotesMemo();
+  await expect(page.locator('#memo-editor')).toBeEnabled();
+  await expect(page.locator('#memo-editor')).toHaveValue('notes memo from server');
+  await expect.poll(() => putCount).toBe(0);
+});
+
 test('メモ保存応答のraw欠落では編集中の内容を消さない', async ({ page }) => {
   const warnings: string[] = [];
   page.on('console', (message) => {

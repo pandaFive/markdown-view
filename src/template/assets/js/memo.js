@@ -51,6 +51,11 @@ function isMemoEditorDisabled() {
   return !!(appContext.elements.memoEditorEl && appContext.elements.memoEditorEl.disabled);
 }
 
+function prepareMemoFileLoad() {
+  cancelMemoAutosave();
+  setMemoEditorDisabled(true);
+}
+
 function rememberMemoCaret() {
   if (!appContext.elements.memoEditorEl) return;
   appContext.memo.caretStart = typeof appContext.elements.memoEditorEl.selectionStart === 'number'
@@ -272,6 +277,7 @@ function loadMemo(file, ownerGeneration) {
       });
       return;
     }
+    // 取得失敗時は古い本文を別ファイル名で上書き保存する事故を防ぐため、復旧まで編集を止める。
     cancelMemoAutosave();
     setMemoEditorDisabled(true);
     setMemoSaveStatus('error', getMemoErrorMessage(err));

@@ -171,10 +171,17 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
         tokio::task::spawn_blocking(move || list_markdown_files(&base))
             .await
             .map_err(|error| {
-                tracing::warn!(
-                    "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
-                    error
-                );
+                if error.is_panic() {
+                    tracing::error!(
+                        "[markdown-view] ファイル一覧取得タスクがpanicしました: {}",
+                        error
+                    );
+                } else {
+                    tracing::warn!(
+                        "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
+                        error
+                    );
+                }
                 json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "ファイル一覧の取得に失敗しました",
