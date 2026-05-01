@@ -874,12 +874,14 @@ fn test_render_documentはhardbreak見出しでも本文とtocのidを共有す�
 
 #[test]
 fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
-    let md = "# Hello & World\n\n<script>alert(1)</script>";
+    let md = "# Hello <script>alert(1)</script> & World";
     let document = render_document(md);
 
     assert!(!document.content.as_str().contains("<script>"));
     assert!(!document.toc.as_str().contains("<script>"));
-    assert!(document.toc.as_str().contains("Hello &amp; World"));
+    assert!(!document.toc.as_str().contains("alert(1)"));
+    assert!(document.toc.as_str().contains("Hello"));
+    assert!(document.toc.as_str().contains("&amp; World"));
     assert!(document.toc.as_str().contains(r##"href="#hello-world""##));
 }
 
