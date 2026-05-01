@@ -71,7 +71,7 @@ async function loadBottomHeadingFixture(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await resetStandardFixtures();
-  await page.addInitScript(installTestWebSocketHarness, { shorten30sTimeouts: true });
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true, shorten30sTimeouts: true });
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
   await stabilizeWebSocketHarness(page);
@@ -107,7 +107,7 @@ test('ファイル遷移時は保留更新をクリアし、新しいファイ�
   });
 
   await page.evaluate(() => {
-    selectFile('notes.md');
+    window.markdownViewTestHooks.selectFile('notes.md');
   });
   await expect(page.locator('#content')).toContainText('Notes body');
 
@@ -130,7 +130,28 @@ test('refreshメッセージも選択中は延期し、解除後に再取得す�
   await expect(page.locator('#content')).toContainText('Refreshed from server');
 });
 
+test('fileなしrefresh通知は現在ファイルへ適用しつつ警告する', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  await fs.writeFile(readmePath, '# README\n\nRefresh without file\n');
+
+  await dispatchWsMessage(page, { refresh: true, file: '' });
+
+  await expect(page.locator('#content')).toContainText('Refresh without file');
+  await expect.poll(() => warnings.some((text) => text.includes('file を含まない refresh 通知'))).toBe(true);
+});
+
 test('選択中はrefreshが古いバッファ更新より優先される', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
   await selectParagraphText(page, 'Initial README content');
   await fs.writeFile(readmePath, '# README\n\nRefresh wins after selection\n');
 
@@ -148,6 +169,25 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await clearSelection(page);
   await expect(page.locator('#content')).toContainText('Refresh wins after selection');
   await expect(page.locator('#content')).not.toContainText('Stale buffered update');
+  await expect.poll(() => warnings.some((text) => text.includes('buffer済み更新を破棄しました'))).toBe(true);
+});
+
+test('fileなしrefreshの保留更新を適用できない場合は警告する', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+  await selectParagraphText(page, 'Initial README content');
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.scheduleBufferedLiveUpdate({ refresh: true });
+  });
+  await page.waitForTimeout(150);
+
+  await clearSelection(page);
+  await expect.poll(() => warnings.some((text) => text.includes('refresh 保留更新を適用できませんでした'))).toBe(true);
 });
 
 test('選択解除されなくても30秒フォールバックで保留更新を適用する', async ({ page }) => {
@@ -436,14 +476,13 @@ test('同一TOCで再初期化してもクリック処理が重複登録され�
 
   await page.evaluate(() => {
     window.__markPendingCalls = 0;
-    const original = window.markPendingTocNavigation;
-    if (!original) {
-      throw new Error('markPendingTocNavigation is not exposed for E2E');
+    const hooks = window.markdownViewTestHooks;
+    if (!hooks) {
+      throw new Error('markdownViewTestHooks is not exposed for E2E');
     }
-    window.markPendingTocNavigation = function(id) {
+    hooks.setMarkPendingTocNavigationObserverForTest(() => {
       window.__markPendingCalls = (window.__markPendingCalls ?? 0) + 1;
-      return original.call(this, id);
-    };
+    });
   });
 
   const payload = await page.evaluate(() => {

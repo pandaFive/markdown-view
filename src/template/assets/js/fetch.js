@@ -24,9 +24,10 @@ function setFileParam(file, replace, hash) {
   }
 }
 
-if (isDirMode) {
-  if (currentFile) {
-    setFileParam(currentFile, true);
+function setupHistoryUrlSync() {
+  if (!appContext.config.isDirMode) return;
+  if (appContext.state.currentFile) {
+    setFileParam(appContext.state.currentFile, true);
   }
 }
 
@@ -45,7 +46,7 @@ function getFileFetchErrorMessage(err) {
       case 404:
         return '指定したファイルが見つかりません。';
       case 413:
-        return 'ファイルサイズが上限（' + MAX_FILE_SIZE_MB + 'MB）を超えています。';
+        return 'ファイルサイズが上限（' + appContext.config.maxFileSizeMb + 'MB）を超えています。';
       case 500:
         return 'サーバー内部エラーが発生しました。';
       default:
@@ -58,28 +59,26 @@ function getFileFetchErrorMessage(err) {
   return 'ネットワークエラーが発生しました。接続を確認して再度お試しください。';
 }
 
-var fetchGeneration = 0;
 function selectFile(file, pushHistory, options) {
   if (pushHistory === undefined) pushHistory = true;
   options = options || {};
-  var previousFile = currentFile;
+  var previousFile = appContext.state.currentFile;
   // historyHash指定時のみ失敗時に元hashへ戻す。未指定経路（サイドバークリック等）では
   // 呼び出し側がhash操作を意図していないため、fetch失敗でcurrent hashを上書きしない。
   var shouldRestoreHash = options.historyHash !== undefined;
   var previousHash = shouldRestoreHash ? location.hash : undefined;
-  var gen = ++fetchGeneration;
-  if (typeof discardBufferedLiveUpdate === 'function') {
-    discardBufferedLiveUpdate();
+  var gen = ++appContext.fetch.generation;
+  if (appContext.websocket) {
+    appContext.websocket.discardBufferedLiveUpdate('ファイル切替を優先');
   }
-  pendingUpdate = null;
-  if (pendingUpdateTimer) {
-    clearTimeout(pendingUpdateTimer);
-    pendingUpdateTimer = null;
+  appContext.state.pendingUpdate = null;
+  if (appContext.state.pendingUpdateTimer) {
+    clearTimeout(appContext.state.pendingUpdateTimer);
+    appContext.state.pendingUpdateTimer = null;
   }
-  if (typeof flushPendingMemoSave === 'function') {
-    flushPendingMemoSave();
-  }
-  currentFile = file;
+  flushPendingMemoSave();
+  prepareMemoFileLoad();
+  appContext.state.currentFile = file;
   if (pushHistory) setFileParam(file, false, options.historyHash);
   updateFileListActive(file);
 
@@ -95,8 +94,8 @@ function selectFile(file, pushHistory, options) {
   })
   .then(function(data) {
     hideFileFetchErrorBanner();
-    if (gen !== fetchGeneration) return;
-    if (!isDirMode && previousFile && previousFile !== file && typeof clearDocumentSearchQuery === 'function') {
+    if (gen !== appContext.fetch.generation) return;
+    if (!appContext.config.isDirMode && previousFile && previousFile !== file) {
       clearDocumentSearchQuery();
     }
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
@@ -106,40 +105,35 @@ function selectFile(file, pushHistory, options) {
       anchorHash: options.anchorHash || '',
       clearHashOnMiss: pushHistory
     });
-    if (isDirMode && !pushHistory) {
-      setFileParam(currentFile, true, options.historyHash);
+    if (appContext.config.isDirMode && !pushHistory) {
+      setFileParam(appContext.state.currentFile, true, options.historyHash);
     }
-    if (data.file && data.file !== currentFile) {
-      currentFile = data.file;
-      setFileParam(currentFile, true, options.historyHash);
-      updateFileListActive(currentFile);
+    if (data.file && data.file !== appContext.state.currentFile) {
+      appContext.state.currentFile = data.file;
+      setFileParam(appContext.state.currentFile, true, options.historyHash);
+      updateFileListActive(appContext.state.currentFile);
     }
-    syncDocumentChrome(currentFile);
-    if (typeof loadMemo === 'function') {
-      loadMemo(currentFile, gen);
-    }
+    syncDocumentChrome(appContext.state.currentFile);
+    loadMemo(appContext.state.currentFile, gen);
     setLiveStatus('live');
   })
   .catch(function(err) {
     console.error('[markdown-view] ファイル取得エラー:', err);
-    if (gen !== fetchGeneration) return;
+    if (gen !== appContext.fetch.generation) return;
     if (
-      isDirMode &&
-      pendingDirectorySearchNavigation &&
-      pendingDirectorySearchNavigation.file === file
+      appContext.config.isDirMode &&
+      appContext.search.pendingDirectoryNavigation &&
+      appContext.search.pendingDirectoryNavigation.file === file
     ) {
-      currentDirectorySearchIndex = pendingDirectorySearchNavigation.previousResultIndex;
-      pendingDirectorySearchNavigation = null;
-      if (typeof renderDirectorySearchUi === 'function') {
-        renderDirectorySearchUi();
-      }
+      appContext.search.currentDirectoryIndex = appContext.search.pendingDirectoryNavigation.previousResultIndex;
+      appContext.search.pendingDirectoryNavigation = null;
+      renderDirectorySearchUi();
     }
-    currentFile = previousFile;
+    appContext.state.currentFile = previousFile;
     updateFileListActive(previousFile);
     setFileParam(previousFile, !pushHistory, previousHash);
-    if (typeof loadMemo === 'function') {
-      loadMemo(previousFile, gen);
-    }
+    // 失敗した遷移の generation で旧ファイルのメモを読み直し、後続遷移があれば loadMemo 側で破棄する。
+    loadMemo(previousFile, gen);
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
     setLiveStatus('error');
   });

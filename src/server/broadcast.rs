@@ -21,8 +21,21 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
         return;
     }
 
-    if let Some(msg) = build_change_broadcast_message(state, changed_file).await {
-        let _ = state.tx().send(msg);
+    if let Some(message) = build_change_broadcast_message(state, changed_file).await {
+        send_broadcast_message(state.tx(), message);
+    }
+}
+
+fn send_broadcast_message(
+    tx: &tokio::sync::broadcast::Sender<BroadcastMessage>,
+    message: BroadcastMessage,
+) {
+    if let Err(error) = tx.send(message) {
+        let failed_message = error.0;
+        tracing::warn!(
+            failed_message = ?failed_message,
+            "[markdown-view] ファイル変更通知の送信に失敗しました"
+        );
     }
 }
 
@@ -55,13 +68,12 @@ pub(super) fn spawn_watch_event_forwarder(
 /// ファイル監視エラーをブロードキャストする
 ///
 /// `notify_update` では受信者がゼロの場合に早期リターンするが、エラー通知は
-/// 受信者の有無に関わらず送信する。受信者がゼロの場合、`send` の戻り値エラーは
-/// 意図的に無視する。
+/// 受信者の有無に関わらず送信を試みる。
 fn broadcast_error(state: &AppState, error: &WatchError) {
-    let _ = state.tx().send(BroadcastMessage::Error(format!(
-        "ファイル監視エラー: {}",
-        error.user_message()
-    )));
+    send_broadcast_message(
+        state.tx(),
+        BroadcastMessage::Error(format!("ファイル監視エラー: {}", error.user_message())),
+    );
 }
 
 #[cfg(test)]
@@ -69,9 +81,34 @@ mod tests {
     use std::path::PathBuf;
 
     use tokio::sync::{broadcast, mpsc};
+    use tracing_test::traced_test;
 
     use super::*;
     use crate::server::{AppMode, AppState, MAX_FILE_SIZE};
+
+    #[traced_test]
+    #[test]
+    fn test_send_broadcast_message_送信失敗はwarnログに残す() {
+        let (tx, rx) = broadcast::channel(1);
+        drop(rx);
+
+        send_broadcast_message(&tx, BroadcastMessage::Error("test error".to_string()));
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("test error"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_broadcast_error_送信失敗はwarnログに残す() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(base_dir.path());
+
+        broadcast_error(&state, &WatchError::notify("watch failure"));
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("watch failure"));
+    }
 
     #[tokio::test]
     async fn test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ() {

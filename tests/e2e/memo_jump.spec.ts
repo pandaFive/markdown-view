@@ -79,7 +79,7 @@ test('メモ出典クリックで本文の対応ブロックへスクロール�
   // 初回WebSocket updateContent が未適用のまま出典クリックすると、クリック直後の
   // live update 再描画で一時ハイライトが消えるため、ユーザー操作前に初期同期を待つ。
   await page.waitForFunction(() => {
-    return (window as unknown as { lastAppliedContent: string | null }).lastAppliedContent !== null;
+    return window.markdownViewTestHooks.lastAppliedContent !== null;
   });
 
   // 1. 中盤の段落を選択して引用追加 → メモタブが activate される
@@ -256,7 +256,7 @@ test('augmentHashWithTrailingLineHint は memo-preview 外のリンクでは has
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '');
     } finally {
       link.remove();
       lineHint.remove();
@@ -278,13 +278,41 @@ test('augmentHashWithTrailingLineHint は `L5abc` など英数字が続く場合
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#section-b');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
       lineHint.remove();
     }
   });
   expect(result).toBe('#section-b');
+});
+
+test('augmentHashWithTrailingLineHint は不正なhashエンコードをwarnしてraw fallbackする', async ({ page }) => {
+  const warnings: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'warning') {
+      warnings.push(message.text());
+    }
+  });
+
+  const result = await page.evaluate(() => {
+    const container = document.getElementById('memo-preview')!;
+    const link = document.createElement('a');
+    link.href = '?file=long.md#%E0%A4%A';
+    link.textContent = 'broken hash';
+    const lineHint = document.createTextNode(' L15');
+    container.appendChild(link);
+    container.appendChild(lineHint);
+    try {
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#%E0%A4%A');
+    } finally {
+      link.remove();
+      lineHint.remove();
+    }
+  });
+
+  expect(result).toBe('#%E0%A4%A:L15');
+  await expect.poll(() => warnings.some((text) => text.includes('hash のデコードに失敗'))).toBe(true);
 });
 
 test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では augment しない', async ({ page }) => {
@@ -301,7 +329,7 @@ test('augmentHashWithTrailingLineHint は `L10 onwards` のような散文では
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#intro');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#intro');
     } finally {
       link.remove();
       lineHint.remove();
@@ -323,7 +351,7 @@ test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の textContent �
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#section-b');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
       lineHint.remove();
@@ -345,7 +373,7 @@ test('augmentHashWithTrailingLineHint は ELEMENT_NODE sibling の散文を行�
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#intro');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#intro');
     } finally {
       link.remove();
       lineHint.remove();
@@ -366,7 +394,7 @@ test('augmentHashWithTrailingLineHint は `L15-L17` 範囲形式を正しく has
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#section-b');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
       lineHint.remove();
@@ -387,7 +415,7 @@ test('augmentHashWithTrailingLineHint は `L17-L15` 逆転範囲では start の
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#section-b');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#section-b');
     } finally {
       link.remove();
       lineHint.remove();
@@ -409,7 +437,7 @@ test('augmentHashWithTrailingLineHint は hash に行範囲が既にあれば li
     container.appendChild(link);
     container.appendChild(lineHint);
     try {
-      return augmentHashWithTrailingLineHint(link, '#section-b:L15');
+      return window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#section-b:L15');
     } finally {
       link.remove();
       lineHint.remove();
@@ -433,8 +461,8 @@ test('augmentHashWithTrailingLineHint は空 hash の合成形は #L<n>（#:L<n>
     container.appendChild(lineHint);
     try {
       return {
-        empty: augmentHashWithTrailingLineHint(link, ''),
-        hashOnly: augmentHashWithTrailingLineHint(link, '#')
+        empty: window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, ''),
+        hashOnly: window.markdownViewTestHooks.augmentHashWithTrailingLineHint(link, '#')
       };
     } finally {
       link.remove();
@@ -558,7 +586,7 @@ test('updateContentはdata.content/toc欠落時に契約違反warnを出す', as
 
   // ケース 10: 同じ全欠落 payload がWSバッファ経由で再度来ても warn される
   await page.evaluate(() => {
-    window.scheduleBufferedLiveUpdate({} as unknown as MvE2E.UpdateContentPayload);
+    window.markdownViewTestHooks.scheduleBufferedLiveUpdate({} as unknown as MvE2E.UpdateContentPayload);
   });
 
   await expect.poll(() => contractWarnings.length).toBe(9);

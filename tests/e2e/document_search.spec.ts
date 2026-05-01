@@ -25,7 +25,7 @@ function searchFixtureToc(): string {
 
 async function loadSearchFixture(page: Page) {
   await page.evaluate(() => {
-    isDirMode = false;
+    window.markdownViewTestHooks.setDirModeForTest(false);
   });
   await updateContentAndActivateToc(page, {
     content: searchFixtureContent(),
@@ -58,8 +58,8 @@ async function setDocumentSearchQuery(page: Page, query: string) {
       throw new Error('document search input not found');
     }
     input.value = value;
-    if (typeof applyDocumentSearchQuery === 'function') {
-      applyDocumentSearchQuery(value);
+    if (window.markdownViewTestHooks) {
+      window.markdownViewTestHooks.applyDocumentSearchQuery(value);
       return;
     }
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -151,13 +151,13 @@ test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page })
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
-    moveDocumentSearch(1);
+    window.markdownViewTestHooks.moveDocumentSearch(1);
   });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 
   await page.evaluate(() => {
-    moveDocumentSearch(-1);
+    window.markdownViewTestHooks.moveDocumentSearch(-1);
   });
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(0)).toHaveClass(/active/);
@@ -178,7 +178,7 @@ test('ファイル切り替え時に検索状態をリセットする', async ({
   await expect.poll(() => visibleMatchCount(page)).toBe(3);
 
   await page.evaluate(() => {
-    selectFile('notes.md');
+    window.markdownViewTestHooks.selectFile('notes.md');
   });
 
   await expect(page.locator('#content')).toContainText('Notes body');
@@ -207,14 +207,14 @@ test('ディレクトリモードでファイル切り替え時は本文の表�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
+    window.markdownViewTestHooks.setDirModeForTest(true);
     window.scrollTo(0, document.documentElement.scrollHeight);
   });
 
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 
   await page.evaluate(() => {
-    selectFile('notes.md');
+    window.markdownViewTestHooks.selectFile('notes.md');
   });
 
   await expect(page.locator('#content')).toContainText('Notes body line 80');
@@ -240,8 +240,8 @@ test('ディレクトリモードで同一ファイルを再読込したとき�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
     window.scrollTo(0, document.documentElement.scrollHeight);
   });
 
@@ -249,7 +249,7 @@ test('ディレクトリモードで同一ファイルを再読込したとき�
   await expect(beforeScrollY).toBeGreaterThan(0);
 
   await page.evaluate(() => {
-    selectFile('README.md', false);
+    window.markdownViewTestHooks.selectFile('README.md', false);
   });
 
   await expect(page.locator('#content')).toContainText('README body line 80');
@@ -261,7 +261,7 @@ test('ファイル切り替え失敗時は元文書の検索状態を維持す�
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
   await page.evaluate(() => {
-    selectFile('missing.md');
+    window.markdownViewTestHooks.selectFile('missing.md');
   });
 
   await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
@@ -344,7 +344,7 @@ test('検索結果移動時に一覧のスクロール位置を維持する', as
   });
 
   await page.evaluate(() => {
-    moveDocumentSearch(1);
+    window.markdownViewTestHooks.moveDocumentSearch(1);
   });
 
   await expect.poll(() => page.evaluate(() => {
@@ -382,7 +382,7 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
+    window.markdownViewTestHooks.setDirModeForTest(true);
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
@@ -429,8 +429,8 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content:
@@ -486,8 +486,8 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
@@ -557,8 +557,8 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'initial.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('initial.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="initial">Initial</h1><p>Placeholder body.</p>',
@@ -569,7 +569,7 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
   await expect(page.locator('#document-search-summary')).toHaveText('0 / 2 件');
 
   await page.evaluate(() => {
-    moveDocumentSearch(1);
+    window.markdownViewTestHooks.moveDocumentSearch(1);
   });
 
   await expect(page).toHaveURL(/file=README\.md/);
@@ -642,8 +642,8 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Initial README content.</p>',
@@ -701,8 +701,8 @@ test('ディレクトリ検索結果のオープン失敗時は以前の選択�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
@@ -764,8 +764,8 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
@@ -830,8 +830,8 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
   });
 
   await page.evaluate(() => {
-    isDirMode = true;
-    currentFile = 'README.md';
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
   await updateContentAndActivateToc(page, {
     content: '<h1 id="readme">README</h1><p>Alpha result is visible.</p><p>Beta result is visible.</p>',

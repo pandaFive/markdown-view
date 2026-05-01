@@ -1,4 +1,5 @@
 const TEMPLATE: &str = concat!(
+    "(function() {\n",
     include_str!("js/bootstrap.js"),
     "\n",
     include_str!("js/selection.js"),
@@ -12,6 +13,9 @@ const TEMPLATE: &str = concat!(
     include_str!("js/websocket.js"),
     "\n",
     include_str!("js/sidebar.js"),
+    "\n",
+    "startMarkdownViewApp();\n",
+    "}());\n",
 );
 
 pub(super) fn inline_js(max_file_size: u64) -> String {

@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { openMemoTab, resetStandardFixtures, saveMemo } from './helpers';
+import { installTestWebSocketHarness } from './browser/test-websocket';
+import { dispatchWsMessage, openMemoTab, resetStandardFixtures, saveMemo, stabilizeWebSocketHarness } from './helpers';
 
 test.beforeEach(async () => {
   await resetStandardFixtures();
@@ -146,4 +147,42 @@ test('別ファイルを開いているページにはメモ更新を誤反映�
   await expect(peer.locator('#memo-editor')).toHaveValue('notes local');
   await expect(peer.locator('#memo-preview')).toContainText('notes local');
   await expect(peer.locator('#memo-preview')).not.toContainText('readme remote');
+});
+
+test('古いメモ読込レスポンスを破棄しても読込中表示を残さない', async ({ page }) => {
+  let resolveMemoResponse!: () => void;
+  const memoResponseReady = new Promise<void>((resolve) => {
+    resolveMemoResponse = resolve;
+  });
+
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.route('**/api/memo', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    await memoResponseReady;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ raw: 'stale memo', html: '<p>stale memo</p>' })
+    });
+  });
+  await page.route('**/api/content?file=notes.md', async () => {
+    // ファイル遷移中に古いmemo_refreshレスポンスだけが返る状態を固定する。
+  });
+
+  await page.goto('/');
+  await stabilizeWebSocketHarness(page);
+  await openMemoTab(page);
+
+  await dispatchWsMessage(page, { memo_refresh: true });
+  await expect(page.locator('#memo-save-status')).toHaveText('読込中');
+
+  await page.locator('.sidebar-tab[data-tab="files"]').click();
+  await page.locator('[data-file="notes.md"]').click();
+  resolveMemoResponse();
+
+  await expect(page.locator('#memo-save-status')).not.toHaveText('読込中');
+  await expect(page.locator('#memo-editor')).not.toHaveValue('stale memo');
 });

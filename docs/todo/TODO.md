@@ -12,8 +12,8 @@
 
 - [ ] `notify_update` の receiver=0 早期 return で `Error` メッセージが silent drop されない経路にする
   - ファイル: `src/server/broadcast.rs` L19-65, `src/server/files/content.rs:70-100`
-  - 現状: `tx.receiver_count() == 0` で早期 return する経路と `build_change_broadcast_message` が `Error` も返す設計が衝突。WS 接続より前にファイル削除・読み込み失敗が起きると、`BroadcastMessage::Error` が誰にも届かず tracing にも残らない（`broadcast_error` も `let _ = send(...)` で握りつぶす）
-  - 対応: `Update` 系のみ早期 return、`Error` 系は `tx.send(...)` を試みるか少なくとも `tracing::warn!` でローカルに残す。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
+  - 現状: `notify_update` は `tx.receiver_count() == 0` で `build_change_broadcast_message` 呼び出し前に早期 return するため、通常の `Update` だけでなく、ファイル削除・読み込み失敗から生成される `Error` も作られない。一方、監視エラー用の `broadcast_error` は早期 return せず送信を試み、送信失敗は `send_broadcast_message` 経由で warn ログに残す。この非対称性により「ファイル変更から派生した Error」だけはローカルログにも残らない
+  - 対応: `notify_update` は `Update` 系のみ早期 return するか、`Error` 系を `tracing::warn!` でローカルに残す。既存テスト `notify_update_読み込み失敗時にエラーをbroadcast` を「receiver=0 のときも warn ログが出る」観点で補強
   - 理由: silent failure。pr-review-toolkit の silent-failure-hunter 観点と整合し、デバッグ可能性を担保
 
 ## Medium Priority
@@ -32,7 +32,7 @@
 
 - [ ] shutdown チェーンの観測性を統合する
   - ファイル: `src/watcher/runtime.rs` L21/L47-57, `src/server/watch.rs` L18/L42-72, `src/server/broadcast.rs` L36-65
-  - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能。`broadcast_error` も受信者ゼロ時に `let _ = send(...)` で握りつぶす
+  - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能
   - 対応: 2 つのタイムアウト定数を共通化し、`abort` 直前に `(elapsed_ms, last_event_kind, receiver_count)` を含む warn ログを 1 行追加。`spawn_watch_event_forwarder` 終了時のログにも `state.tx().receiver_count()` と最後のイベント種別を含めて、シャットダウン時に dropped events があった場合に検知できるようにする
   - 理由: HTTP サーバー再起動経路でのファイルハンドルリークを再現性のあるログで切り分けられるようにする
 
@@ -102,8 +102,8 @@
   - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
   - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
 
-- [ ] ブラウザ JS の巨大グローバル状態を小モジュールへ分割する
+- [ ] ブラウザ JS の責務境界を小モジュールへ分割する
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
-  - 現状: `bootstrap.js` が多数の DOM 参照・状態変数をグローバルに初期化し、`content.js` は 1300 行超で検索、リンク解決、履歴、描画反映、スクロール、引用ジャンプをまとめて扱っている。検索・メモ・引用は Markdown workspace の中核機能だが、実装上は単一スクリプトに集中している。`innerHTML` はサーバー生成の `SanitizedHtml` を信頼する設計だが、信頼境界が JS 側の構造では表現されていない
-  - 対応: `content-renderer` / `document-search` / `navigation` / `live-update-buffer` / `memo-citation` のように責務単位で分割し、共有状態は明示的な state object 経由に寄せる。`updateContent` の入力型・`SanitizedHtml` 前提・`innerHTML` 使用箇所を契約テストで固定する。メモや検索を削る、または純プレビューモードへ戻すことは非目標
-  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。現状の CSP/HTML sanitize 境界は強いが、グローバル関数・暗黙 state・巨大ファイルのままだと将来の入力経路追加で XSS 境界を壊しやすい
+  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。一方、`content.js` は検索、リンク解決、履歴、描画反映、スクロール、引用ジャンプをまとめて扱う巨大ファイルのままで、`appContext` 直接参照も多い。`innerHTML` はサーバー生成の `SanitizedHtml` を信頼する設計だが、信頼境界は型やモジュール境界としてはまだ表現されていない
+  - 対応: `content-renderer` / `document-search` / `navigation` / `live-update-buffer` / `memo-citation` のように責務単位で分割し、分割後の境界では `ctx` 注入や小さな controller API で依存を明示する。`updateContent` の入力型・`SanitizedHtml` 前提・`innerHTML` 使用箇所を契約テストで固定する。メモや検索を削る、または純プレビューモードへ戻すことは非目標
+  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。production グローバル露出は解消したが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で XSS 境界や状態遷移を壊しやすい

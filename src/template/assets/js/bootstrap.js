@@ -1,64 +1,97 @@
 'use strict';
-var MAX_FILE_SIZE_MB = __MAX_FILE_SIZE_MB__;
 
-// グローバルDOM参照の初期化
-var htmlEl = document.documentElement;
-var isDirMode = htmlEl.getAttribute('data-dir-mode') === 'true';
-var currentFile = htmlEl.getAttribute('data-current-file') || '';
-var documentTitleEl = document.getElementById('document-title');
-var docHeadingCountEl = document.getElementById('doc-heading-count');
-var docCharCountEl = document.getElementById('doc-char-count');
-var liveStatusEl = document.getElementById('live-status');
-var readingProgressBar = document.getElementById('reading-progress-bar');
-var backToTop = document.getElementById('back-to-top');
-var contentRoot = document.getElementById('content');
-// updateContent の no-op 判定キャッシュ。
-// 初期化部 (sidebar.js) が connectWS() 直後に enhanceContentInteractions() を呼び
-// heading-anchor / code-copy ボタンを #content に追記するため、SSR 時点の
-// contentRoot.innerHTML は WS 経由 data.content と必ず乖離する (副次的に
-// ブラウザの HTML 正規化差も存在)。よって DOM ではなく「最後に適用した
-// data.content 文字列」を比較対象とする。null 初期化は初回 broadcast で 1 回だけ
-// 再描画させる設計 (.jump-highlight 等の一時状態は初回 broadcast 以降に付与される
-// 想定なので UI 影響なし)。
-var lastAppliedContent = null;
-var documentSearchInputEl = document.getElementById('document-search-input');
-var documentSearchSummaryEl = document.getElementById('document-search-summary');
-var documentSearchResultsEl = document.getElementById('document-search-results');
-var documentSearchPrevEl = document.getElementById('document-search-prev');
-var documentSearchNextEl = document.getElementById('document-search-next');
-var documentSearchClearEl = document.getElementById('document-search-clear');
-var memoEditorEl = document.getElementById('memo-editor');
-var memoPreviewEl = document.getElementById('memo-preview');
-var memoSaveStatusEl = document.getElementById('memo-save-status');
-var quoteSelectionActionEl = document.getElementById('quote-selection-action');
+function createAppContext(doc) {
+  var html = doc.documentElement;
+  var memoEditor = doc.getElementById('memo-editor');
+  var memoCaret = memoEditor ? memoEditor.value.length : 0;
 
-// テキスト選択中のDOM更新延期機構
-// マウスドラッグ中にWebSocket経由のinnerHTML更新が走ると選択が破壊されるため、
-// 選択操作中は更新を保留し、選択解除（selectionchange + isCollapsed）後に適用する。
-// 選択が長時間維持される場合は30秒タイムアウトでフォールバック適用する。
-var pendingUpdate = null;
-var pendingUpdateTimer = null;
-var pendingMemoReload = null;
-var isMouseSelecting = false;
-var memoLoadGeneration = 0;
-var memoSaveGeneration = 0;
-var memoSaveTimer = null;
-var memoCaretStart = memoEditorEl ? memoEditorEl.value.length : 0;
-var memoCaretEnd = memoCaretStart;
-var documentSearchMatches = [];
-var currentDocumentSearchIndex = -1;
-var currentDocumentSearchQuery = '';
-var currentDirectorySearchResults = [];
-var currentDirectorySearchIndex = -1;
-var currentDirectorySearchSkippedFiles = 0;
-var currentDirectorySearchLoading = false;
-var currentDirectorySearchError = '';
-var documentSearchDebounceTimer = null;
-var documentSearchFetchGeneration = 0;
-var pendingDirectorySearchNavigation = null;
-var LIVE_STATUS_LABELS = {
-  live: 'Live',
-  retry: 'Reconnecting',
-  error: 'Error',
-  offline: 'Offline'
-};
+  return {
+    config: {
+      maxFileSizeMb: __MAX_FILE_SIZE_MB__,
+      isDirMode: html.getAttribute('data-dir-mode') === 'true'
+    },
+    state: {
+      currentFile: html.getAttribute('data-current-file') || '',
+      // updateContent の no-op 判定キャッシュ。
+      // 初期化部が enhanceContentInteractions() で heading-anchor / code-copy ボタンを
+      // #content に追記するため、SSR 時点の contentRoot.innerHTML は WS 経由 data.content
+      // と必ず乖離する（副次的にブラウザの HTML 正規化差もある）。DOM ではなく最後に
+      // 適用した data.content 文字列を比較対象にすることで、初回 broadcast 以降の
+      // .jump-highlight 等の一時 DOM 状態を不要に壊さない。
+      lastAppliedContent: null,
+      pendingUpdate: null,
+      pendingUpdateTimer: null,
+      isMouseSelecting: false
+    },
+    elements: {
+      htmlEl: html,
+      documentTitleEl: doc.getElementById('document-title'),
+      docHeadingCountEl: doc.getElementById('doc-heading-count'),
+      docCharCountEl: doc.getElementById('doc-char-count'),
+      liveStatusEl: doc.getElementById('live-status'),
+      readingProgressBar: doc.getElementById('reading-progress-bar'),
+      backToTop: doc.getElementById('back-to-top'),
+      contentRoot: doc.getElementById('content'),
+      documentSearchInputEl: doc.getElementById('document-search-input'),
+      documentSearchSummaryEl: doc.getElementById('document-search-summary'),
+      documentSearchResultsEl: doc.getElementById('document-search-results'),
+      documentSearchPrevEl: doc.getElementById('document-search-prev'),
+      documentSearchNextEl: doc.getElementById('document-search-next'),
+      documentSearchClearEl: doc.getElementById('document-search-clear'),
+      memoEditorEl: memoEditor,
+      memoPreviewEl: doc.getElementById('memo-preview'),
+      memoSaveStatusEl: doc.getElementById('memo-save-status'),
+      quoteSelectionActionEl: doc.getElementById('quote-selection-action')
+    },
+    fetch: {
+      generation: 0
+    },
+    memo: {
+      loadGeneration: 0,
+      saveGeneration: 0,
+      pendingSaveGenerations: [],
+      saveTimer: null,
+      caretStart: memoCaret,
+      caretEnd: memoCaret,
+      pendingReload: null
+    },
+    search: {
+      documentMatches: [],
+      currentDocumentIndex: -1,
+      currentDocumentQuery: '',
+      currentDirectoryResults: [],
+      currentDirectoryIndex: -1,
+      currentDirectorySkippedFiles: 0,
+      currentDirectoryLoading: false,
+      currentDirectoryError: '',
+      documentDebounceTimer: null,
+      documentFetchGeneration: 0,
+      pendingDirectoryNavigation: null
+    },
+    sidebar: {
+      currentTocTracking: null,
+      tocTrackingFrame: null,
+      currentActiveTocId: '',
+      suppressTocTrackingUntil: 0,
+      suppressTocTrackingTimer: null,
+      pendingSuppressedTocTrackingUpdate: false,
+      pendingTocNavigationId: '',
+      pendingTocNavigationUntil: 0,
+      tocRoot: doc.getElementById('toc')
+    },
+    labels: {
+      liveStatus: {
+        live: 'Live',
+        retry: 'Reconnecting',
+        error: 'Error',
+        offline: 'Offline'
+      }
+    },
+    test: {
+      markPendingTocNavigationObserver: null
+    },
+    websocket: null
+  };
+}
+
+var appContext = createAppContext(document);

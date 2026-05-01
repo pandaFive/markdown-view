@@ -186,11 +186,11 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
   await page.evaluate(() => {
     window.__lastWs = {
       onmessage: function(ev: MessageEvent) {
-        const updateContent = window.updateContent;
-        if (!updateContent) {
-          throw new Error('window.updateContent is not exposed for E2E');
+        const hooks = window.markdownViewTestHooks;
+        if (!hooks) {
+          throw new Error('window.markdownViewTestHooks is not exposed for E2E');
         }
-        updateContent(JSON.parse(ev.data as string));
+        hooks.updateContent(JSON.parse(ev.data as string));
       },
       close: function() {},
       send: function() {},
@@ -205,4 +205,135 @@ test('WebSocket harnessは再接続後に再安定化すればdispatchできる'
   });
 
   await expect(page.locator('#content')).toContainText('reconnected update');
+});
+
+test('WebSocketが不正JSONを受信したら接続を閉じて再接続しない', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  const parseResult = await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    const realWsOnmessage = window.__realWsOnmessage;
+    if (!lastWs || !realWsOnmessage) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const originalClose = lastWs.close.bind(lastWs);
+    window.__parseErrorWs = lastWs;
+    window.__wsCloseCalls = 0;
+    lastWs.close = function(...args: Parameters<WebSocket['close']>) {
+      window.__wsCloseCalls = (window.__wsCloseCalls ?? 0) + 1;
+      return originalClose(...args);
+    };
+
+    realWsOnmessage({ data: '{invalid json' });
+    return {
+      closeCalls: window.__wsCloseCalls ?? 0,
+      liveState: document.getElementById('live-status')?.dataset.state ?? '',
+      bannerText: document.getElementById('ws-parse-error-banner')?.textContent ?? ''
+    };
+  });
+
+  expect(parseResult).toEqual(expect.objectContaining({
+    closeCalls: 1,
+    liveState: 'error'
+  }));
+  expect(parseResult.bannerText).toContain('不正なJSON');
+
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
+  await page.waitForTimeout(1300);
+  await expect.poll(() => page.evaluate(() => {
+    return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
+  })).toBe(false);
+});
+
+test('WebSocket parse errorバナー表示中でも通常切断なら再接続する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const banner = document.createElement('div');
+    banner.id = 'ws-parse-error-banner';
+    banner.textContent = 'previous parse error';
+    document.body.appendChild(banner);
+    window.__parseErrorWs = lastWs;
+    lastWs.close();
+  });
+
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
+  });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#ws-parse-error-banner')).toHaveCount(0);
+});
+
+test('WebSocket再接続成功時にサーバーエラーバナーを解除する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await dispatchWsMessage(page, { error: 'temporary server failure' });
+  await expect(page.locator('#ws-server-error-banner')).toContainText('temporary server failure');
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    window.__serverErrorWs = lastWs;
+    lastWs.close();
+  });
+
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__serverErrorWs && window.__lastWs !== window.__serverErrorWs);
+  });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#ws-server-error-banner')).toHaveCount(0);
+});
+
+test('WebSocket errorはサーバーエラーバナーを出さず再接続する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await page.evaluate(() => {
+    const lastWs = window.__lastWs;
+    if (!lastWs || typeof lastWs.onerror !== 'function') {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const originalClose = lastWs.close.bind(lastWs);
+    window.__wsCloseCalls = 0;
+    window.__errorWs = lastWs;
+    lastWs.close = function(...args: Parameters<WebSocket['close']>) {
+      window.__wsCloseCalls = (window.__wsCloseCalls ?? 0) + 1;
+      return originalClose(...args);
+    };
+    lastWs.onerror(new Event('error'));
+    return {
+      closeCalls: window.__wsCloseCalls ?? 0,
+      liveState: document.getElementById('live-status')?.dataset.state ?? '',
+      serverBanner: document.getElementById('ws-server-error-banner')?.textContent ?? ''
+    };
+  });
+
+  const errorResult = await page.evaluate(() => ({
+    closeCalls: window.__wsCloseCalls ?? 0,
+    liveState: document.getElementById('live-status')?.dataset.state ?? '',
+    serverBanner: document.getElementById('ws-server-error-banner')?.textContent ?? ''
+  }));
+  expect(errorResult).toEqual({
+    closeCalls: 1,
+    liveState: 'retry',
+    serverBanner: ''
+  });
+  await page.waitForFunction(() => {
+    return Boolean(window.__lastWs && window.__errorWs && window.__lastWs !== window.__errorWs);
+  });
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'live');
 });
