@@ -1,11 +1,22 @@
+//! Markdown 方言 profile を定義する共通モジュール。
+//!
+//! 表示系は安全に HTML 化できる最小の GFM subset に留める。
+//! 検索系は表示系の option を必ず起点にし、検索専用の拡張だけを追加する。
+
 use pulldown_cmark::Options;
 
+/// Markdown parser を使う用途別 profile。
+///
+/// `Render` は本文 HTML と TOC 用、`Search` は検索テキスト抽出用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MarkdownProfile {
     Render,
     Search,
 }
 
+/// profile に対応する pulldown-cmark options を返す。
+///
+/// `Search` は `Render` の上位互換として組み立てる。
 pub(crate) fn markdown_options(profile: MarkdownProfile) -> Options {
     match profile {
         MarkdownProfile::Render => render_options(),

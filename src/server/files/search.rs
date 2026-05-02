@@ -613,6 +613,31 @@ mod tests {
     }
 
     #[test]
+    fn test_search_profileはvoidタグ後の同段落テキストを検索対象に含める() {
+        let blocks = extract_search_blocks("before <br> after\n\nimage <img src=\"x\"> tail");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "before  after");
+        assert_eq!(blocks[1].text, "image  tail");
+    }
+
+    #[test]
+    fn test_search_profileは自閉じタグ後の段落内テキストを検索対象に含める() {
+        let blocks = extract_search_blocks("before <custom/> after");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "before  after");
+    }
+
+    #[test]
+    fn test_search_profileはブロックhtml後の段落を検索対象にする() {
+        let blocks = extract_search_blocks("<section>hidden html</section>\n\n次の段落 visible");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "次の段落 visible");
+    }
+
+    #[test]
     fn test_search_profileは未閉鎖inline_html後の次段落を検索対象にする() {
         let blocks = extract_search_blocks("本文 <span>hidden\n\n次の段落 visible");
 
@@ -627,6 +652,15 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, "first \nsecond visible");
+    }
+
+    #[test]
+    fn test_search_profileはlist_item内の未閉鎖inline_html後にlist外段落を検索対象にする() {
+        let blocks = extract_search_blocks("- first <span>hidden\n\noutside visible");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "first");
+        assert_eq!(blocks[1].text, "outside visible");
     }
 
     #[test]
