@@ -773,13 +773,13 @@ function renderDirectorySearchResults() {
     return;
   }
 
+  if (appContext.search.currentDirectoryTruncated) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDirectorySearchTruncatedState());
+  }
+
   if (!appContext.search.currentDirectoryResults.length) {
     appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
     return;
-  }
-
-  if (appContext.search.currentDirectoryTruncated) {
-    appContext.elements.documentSearchResultsEl.appendChild(createDirectorySearchTruncatedState());
   }
 
   appContext.search.currentDirectoryResults.forEach(function(result, index) {

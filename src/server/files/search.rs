@@ -3,7 +3,7 @@ use std::path::Path;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::catalog::list_markdown_files;
+use super::catalog::list_markdown_files_with_limit;
 use super::content::read_markdown_with_limit;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
@@ -167,11 +167,11 @@ async fn search_directory_with_limits(
         return Ok(SearchResponse::empty(query));
     }
 
-    let files = list_markdown_files(base_dir)?;
+    let files = list_markdown_files_with_limit(base_dir, limits.max_files.saturating_add(1))?;
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
 
-    if files.len() >= limits.max_files {
+    if files.len() > limits.max_files {
         stats.mark_truncated(SearchTruncationReason::File);
     }
 
@@ -909,6 +909,35 @@ mod tests {
             response.truncated_reasons,
             vec![SearchTruncationReason::File]
         );
+        assert_eq!(response.searched_files, 2);
+        assert_eq!(response.results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_ファイル数が上限ちょうどなら打ち切り扱いにしない() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..2 {
+            std::fs::write(
+                dir.path().join(format!("note-{index}.md")),
+                format!("needle {index}"),
+            )
+            .unwrap();
+        }
+
+        let response = search_directory_with_limits(
+            dir.path(),
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 2,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
         assert_eq!(response.searched_files, 2);
         assert_eq!(response.results.len(), 2);
     }
