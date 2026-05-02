@@ -627,5 +627,11 @@ mod tests {
         assert_eq!(response.searched_files, 0);
         assert_eq!(response.skipped_files, 0);
         assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
+        assert_eq!(response.limits.max_results, 100);
+        assert_eq!(response.limits.max_files, 1000);
+        assert_eq!(response.limits.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(response.searched_bytes, 0);
     }
 }

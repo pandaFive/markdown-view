@@ -878,4 +878,65 @@ mod tests {
         assert_eq!(response.results.len(), 100);
         assert_eq!(response.searched_files, 1);
     }
+
+    #[tokio::test]
+    async fn test_search_directory_ファイル数上限到達を明示する() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..3 {
+            std::fs::write(
+                dir.path().join(format!("note-{index}.md")),
+                format!("needle {index}"),
+            )
+            .unwrap();
+        }
+
+        let response = search_directory_with_limits(
+            dir.path(),
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 2,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::FileLimit]
+        );
+        assert_eq!(response.searched_files, 2);
+        assert_eq!(response.results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_総読込バイト上限到達を明示し超過ファイルは検索しない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
+
+        let response = search_directory_with_limits(
+            dir.path(),
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: "needle".len(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::ByteLimit]
+        );
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.searched_bytes, "needle".len());
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+    }
 }
