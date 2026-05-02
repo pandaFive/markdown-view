@@ -30,11 +30,13 @@ impl Default for SearchLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(in crate::server) enum SearchTruncationReason {
-    ResultLimit,
-    FileLimit,
-    ByteLimit,
+    #[serde(rename = "result_limit")]
+    Result,
+    #[serde(rename = "file_limit")]
+    File,
+    #[serde(rename = "byte_limit")]
+    Byte,
 }
 
 #[derive(Debug, Clone)]
@@ -170,7 +172,7 @@ async fn search_directory_with_limits(
     let mut stats = SearchStats::new();
 
     if files.len() >= limits.max_files {
-        stats.mark_truncated(SearchTruncationReason::FileLimit);
+        stats.mark_truncated(SearchTruncationReason::File);
     }
 
     for relative in files.into_iter().take(limits.max_files) {
@@ -201,7 +203,7 @@ async fn search_directory_with_limits(
         };
 
         if stats.searched_bytes.saturating_add(markdown.len()) > limits.max_bytes {
-            stats.mark_truncated(SearchTruncationReason::ByteLimit);
+            stats.mark_truncated(SearchTruncationReason::Byte);
             break;
         }
 
@@ -212,7 +214,7 @@ async fn search_directory_with_limits(
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
-                stats.mark_truncated(SearchTruncationReason::ResultLimit);
+                stats.mark_truncated(SearchTruncationReason::Result);
                 break;
             }
         }
@@ -873,7 +875,7 @@ mod tests {
         assert!(response.truncated);
         assert_eq!(
             response.truncated_reasons,
-            vec![SearchTruncationReason::ResultLimit]
+            vec![SearchTruncationReason::Result]
         );
         assert_eq!(response.results.len(), 100);
         assert_eq!(response.searched_files, 1);
@@ -905,7 +907,7 @@ mod tests {
         assert!(response.truncated);
         assert_eq!(
             response.truncated_reasons,
-            vec![SearchTruncationReason::FileLimit]
+            vec![SearchTruncationReason::File]
         );
         assert_eq!(response.searched_files, 2);
         assert_eq!(response.results.len(), 2);
@@ -932,7 +934,7 @@ mod tests {
         assert!(response.truncated);
         assert_eq!(
             response.truncated_reasons,
-            vec![SearchTruncationReason::ByteLimit]
+            vec![SearchTruncationReason::Byte]
         );
         assert_eq!(response.searched_files, 1);
         assert_eq!(response.searched_bytes, "needle".len());
