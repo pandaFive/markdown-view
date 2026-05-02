@@ -16,7 +16,7 @@ use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 use super::memo_fs::MemoBeforeRenameError;
 use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
 use super::memo_sidecar::SidecarMemoName;
-use super::resolve::revalidate_single_file_target;
+use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
@@ -2335,6 +2335,114 @@ async fn test_build_change_broadcast_message_ディレクトリモードでfile�
             assert_eq!(update.file(), Some("docs/api.md"));
         }
         other => panic!("Updateを期待したが {:?} を受信", other),
+    }
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更はcanonical_pathへ再解決する() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let changed = dir.path().join("docs/../docs/api.md");
+    let expected = dir.path().join("docs/api.md").canonicalize().unwrap();
+
+    let target = resolve_change_target(&state, &changed)
+        .expect("watcher change should resolve")
+        .expect("directory watcher change should produce a target");
+
+    assert_eq!(target.file_path(), expected.as_path());
+    assert_eq!(target.relative_path(), Some("docs/api.md"));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の隠しパスは拒否する() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let hidden = dir.path().join(".hidden/secret.md");
+
+    let result = resolve_change_target(&state, &hidden);
+
+    assert!(matches!(result, Err(ResolveFileError::Hidden)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase外パスは拒否する() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("outside.md");
+    std::fs::write(&outside, "# outside").unwrap();
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase外symlinkは拒否する() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("secret.md");
+    std::fs::write(&outside, "# secret").unwrap();
+    let link = base_dir.path().join("link.md");
+    symlink(&outside, &link).unwrap();
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &link);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_単一ファイル変更は再検証済みpathを返す() {
+    let (_dir, file_path) = create_markdown_fixture("target.md", "# target");
+    let canonical = file_path.canonicalize().unwrap();
+    let state = create_single_file_state(&file_path);
+
+    let target = resolve_change_target(&state, &file_path)
+        .expect("single file change should resolve")
+        .expect("single file watcher change should produce a target");
+
+    assert_eq!(target.file_path(), canonical.as_path());
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_削除済みディレクトリ変更はbroadcastをスキップする() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("deleted.md");
+    std::fs::write(&target, "# deleted").unwrap();
+    let state = create_directory_state(dir.path());
+    std::fs::remove_file(&target).unwrap();
+
+    let message = build_change_broadcast_message(&state, &target).await;
+
+    assert!(message.is_none(), "削除済みファイルはbroadcastしない");
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_隠しパスは検証エラーをbroadcastする() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let hidden = dir.path().join(".hidden/secret.md");
+
+    let message = build_change_broadcast_message(&state, &hidden)
+        .await
+        .expect("hidden path should broadcast a validation error");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("隠しファイルへのアクセスは禁止されています"),
+                "Hiddenのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
     }
 }
 

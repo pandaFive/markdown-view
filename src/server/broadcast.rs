@@ -97,8 +97,10 @@ fn broadcast_error(state: &AppState, error: &WatchError) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use tokio::sync::{broadcast, mpsc};
+    use tokio::time::timeout;
     use tracing_test::traced_test;
 
     use super::*;
@@ -129,7 +131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ() {
+    async fn test_notify_update_ディレクトリモードでbase外パスは検証エラーを送信する() {
         let base_dir = tempfile::tempdir().unwrap();
         std::fs::write(base_dir.path().join("README.md"), "# README").unwrap();
 
@@ -142,14 +144,26 @@ mod tests {
         let mut rx = state.tx().subscribe();
 
         notify_update(&state, &outside_canonical).await;
-        assert!(matches!(
-            rx.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
+
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("検証エラーのbroadcastを期待")
+            .unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル検証エラー"));
+                assert!(
+                    message.contains("ディレクトリ外へのアクセスは禁止されています"),
+                    "Traversalのエラー文言を期待: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
     }
 
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモードで読み込み失敗時はerrorを送信する() {
+    async fn test_notify_update_ディレクトリモードで削除済みファイルは送信をスキップする() {
         let base_dir = tempfile::tempdir().unwrap();
         let target = base_dir.path().join("README.md");
         std::fs::write(&target, "# before").unwrap();
@@ -160,18 +174,10 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         notify_update(&state, &target).await;
 
-        let received = rx.recv().await.unwrap();
-        match received {
-            BroadcastMessage::Error(message) => {
-                assert!(message.contains("ファイル読み込みエラー"));
-                assert!(
-                    message.contains("README.md"),
-                    "エラーメッセージにファイル名が含まれるべき: {}",
-                    message
-                );
-            }
-            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
-        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
