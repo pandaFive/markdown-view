@@ -9,6 +9,62 @@ use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
 
 const MAX_SEARCH_RESULTS: usize = 100;
+const MAX_SEARCH_FILES: usize = 1000;
+const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(in crate::server) struct SearchLimits {
+    pub(in crate::server) max_results: usize,
+    pub(in crate::server) max_files: usize,
+    pub(in crate::server) max_bytes: usize,
+}
+
+impl Default for SearchLimits {
+    fn default() -> Self {
+        Self {
+            max_results: MAX_SEARCH_RESULTS,
+            max_files: MAX_SEARCH_FILES,
+            max_bytes: MAX_SEARCH_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::server) enum SearchTruncationReason {
+    ResultLimit,
+    FileLimit,
+    ByteLimit,
+}
+
+#[derive(Debug, Clone)]
+struct SearchStats {
+    searched_files: usize,
+    skipped_files: usize,
+    searched_bytes: usize,
+    truncated_reasons: Vec<SearchTruncationReason>,
+}
+
+impl SearchStats {
+    fn new() -> Self {
+        Self {
+            searched_files: 0,
+            skipped_files: 0,
+            searched_bytes: 0,
+            truncated_reasons: Vec::new(),
+        }
+    }
+
+    fn mark_truncated(&mut self, reason: SearchTruncationReason) {
+        if !self.truncated_reasons.contains(&reason) {
+            self.truncated_reasons.push(reason);
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        !self.truncated_reasons.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchResultItem {
@@ -43,15 +99,37 @@ pub(in crate::server) struct SearchResponse {
     pub(in crate::server) results: Vec<SearchResultItem>,
     pub(in crate::server) searched_files: usize,
     pub(in crate::server) skipped_files: usize,
+    pub(in crate::server) truncated: bool,
+    pub(in crate::server) truncated_reasons: Vec<SearchTruncationReason>,
+    pub(in crate::server) limits: SearchLimits,
+    pub(in crate::server) searched_bytes: usize,
 }
 
 impl SearchResponse {
-    fn empty(query: String) -> Self {
+    pub(in crate::server) fn empty(query: String) -> Self {
+        Self::from_parts(
+            query,
+            Vec::new(),
+            SearchLimits::default(),
+            SearchStats::new(),
+        )
+    }
+
+    fn from_parts(
+        query: String,
+        results: Vec<SearchResultItem>,
+        limits: SearchLimits,
+        stats: SearchStats,
+    ) -> Self {
         Self {
             query,
-            results: Vec::new(),
-            searched_files: 0,
-            skipped_files: 0,
+            results,
+            searched_files: stats.searched_files,
+            skipped_files: stats.skipped_files,
+            truncated: stats.truncated(),
+            truncated_reasons: stats.truncated_reasons,
+            limits,
+            searched_bytes: stats.searched_bytes,
         }
     }
 }
@@ -74,6 +152,14 @@ pub(in crate::server) async fn search_directory(
     base_dir: &Path,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
+    search_directory_with_limits(base_dir, raw_query, SearchLimits::default()).await
+}
+
+async fn search_directory_with_limits(
+    base_dir: &Path,
+    raw_query: &str,
+    limits: SearchLimits,
+) -> std::io::Result<SearchResponse> {
     let query = raw_query.trim().to_string();
     if query.is_empty() {
         return Ok(SearchResponse::empty(query));
@@ -81,14 +167,13 @@ pub(in crate::server) async fn search_directory(
 
     let files = list_markdown_files(base_dir)?;
     let mut results = Vec::new();
-    let mut searched_files = 0;
-    let mut skipped_files = 0;
+    let mut stats = SearchStats::new();
 
-    for relative in files {
-        if results.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
+    if files.len() >= limits.max_files {
+        stats.mark_truncated(SearchTruncationReason::FileLimit);
+    }
 
+    for relative in files.into_iter().take(limits.max_files) {
         let file_path = match resolve_file(base_dir, &relative) {
             Ok(file_path) => file_path,
             Err(error) => {
@@ -97,7 +182,7 @@ pub(in crate::server) async fn search_directory(
                     relative,
                     error
                 );
-                skipped_files += 1;
+                stats.skipped_files += 1;
                 continue;
             }
         };
@@ -110,28 +195,34 @@ pub(in crate::server) async fn search_directory(
                     relative,
                     error
                 );
-                skipped_files += 1;
+                stats.skipped_files += 1;
                 continue;
             }
         };
 
-        searched_files += 1;
+        if stats.searched_bytes.saturating_add(markdown.len()) > limits.max_bytes {
+            stats.mark_truncated(SearchTruncationReason::ByteLimit);
+            break;
+        }
+
+        stats.searched_files += 1;
+        stats.searched_bytes += markdown.len();
         let blocks = extract_search_blocks(&markdown);
         let file_results = find_matches_for_file(&relative, &blocks, &query);
         for item in file_results {
             results.push(item);
-            if results.len() >= MAX_SEARCH_RESULTS {
+            if results.len() >= limits.max_results {
+                stats.mark_truncated(SearchTruncationReason::ResultLimit);
                 break;
             }
         }
+
+        if results.len() >= limits.max_results {
+            break;
+        }
     }
 
-    Ok(SearchResponse {
-        query,
-        results,
-        searched_files,
-        skipped_files,
-    })
+    Ok(SearchResponse::from_parts(query, results, limits, stats))
 }
 
 fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
@@ -743,5 +834,48 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[0].current, "İstanbul is here.");
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_通常検索は打ち切りなしの統計を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
+
+        let response = search_directory(dir.path(), "needle").await.unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
+        assert_eq!(response.limits.max_results, 100);
+        assert_eq!(response.limits.max_files, 1000);
+        assert_eq!(response.limits.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(response.searched_files, 2);
+        assert_eq!(response.skipped_files, 0);
+        assert_eq!(
+            response.searched_bytes,
+            "# Home\n\nneedle".len() + "# Other".len()
+        );
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_結果数上限到達を明示する() {
+        let dir = tempfile::tempdir().unwrap();
+        let markdown = (0..120)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+
+        let response = search_directory(dir.path(), "needle").await.unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::ResultLimit]
+        );
+        assert_eq!(response.results.len(), 100);
+        assert_eq!(response.searched_files, 1);
     }
 }
