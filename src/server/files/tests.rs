@@ -1,9 +1,12 @@
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::unix::{fs::symlink, fs::PermissionsExt},
+};
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -16,7 +19,7 @@ use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 use super::memo_fs::MemoBeforeRenameError;
 use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
 use super::memo_sidecar::SidecarMemoName;
-use super::resolve::revalidate_single_file_target;
+use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
 use crate::server::{AppMode, AppState, BroadcastMessage};
@@ -586,10 +589,10 @@ fn test_resolve_file_nulバイト拒否() {
 }
 
 #[test]
-fn test_resolve_file_ディレクトリパス拒否() {
+fn test_resolve_file_ディレクトリパスはnotfileを返す() {
     let dir = create_test_dir();
     let result = resolve_file(dir.path(), "docs");
-    assert_eq!(result, Err(ResolveFileError::NotFound));
+    assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
 #[test]
@@ -2339,6 +2342,433 @@ async fn test_build_change_broadcast_message_ディレクトリモードでfile�
 }
 
 #[test]
+fn test_resolve_change_target_ディレクトリ変更はcanonical_pathへ再解決する() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let changed = dir.path().join("docs/../docs/api.md");
+    let expected = dir.path().join("docs/api.md").canonicalize().unwrap();
+
+    let target = resolve_change_target(&state, &changed)
+        .expect("watcher change should resolve")
+        .expect("directory watcher change should produce a target");
+
+    assert_eq!(target.file_path(), expected.as_path());
+    assert_eq!(target.relative_path(), Some("docs/api.md"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_unixのbackslashファイル名を通常文字として扱う() {
+    let dir = tempfile::tempdir().unwrap();
+    let changed = dir.path().join("back\\slash.md");
+    std::fs::write(&changed, "# backslash").unwrap();
+    let state = create_directory_state(dir.path());
+    let expected = changed.canonicalize().unwrap();
+
+    let target = resolve_change_target(&state, &changed)
+        .expect("backslash file name should resolve")
+        .expect("directory watcher change should produce a target");
+
+    assert_eq!(target.file_path(), expected.as_path());
+    assert_eq!(target.relative_path(), Some("back\\slash.md"));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の隠しパスは拒否する() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let hidden = dir.path().join(".hidden/secret.md");
+
+    let result = resolve_change_target(&state, &hidden);
+
+    assert!(matches!(result, Err(ResolveFileError::Hidden)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase外パスは拒否する() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("outside.md");
+    std::fs::write(&outside, "# outside").unwrap();
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の正規化不能なpathはnotfoundを返す() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("missing.md");
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmissing_pathはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.md");
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &missing);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmissing_baseはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.md");
+    std::fs::write(&missing, "# missing").unwrap();
+    let state = create_directory_state(dir.path());
+    drop(dir);
+
+    let result = resolve_change_target(&state, &missing);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase正規化notfoundを返す() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("outside.md");
+    let state = create_directory_state(base_dir.path());
+    drop(base_dir);
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の正規化io失敗はio_kindを返す() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let locked_dir = outside_dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(base_dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_base配下の正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の非utf8相対パスは拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
+    let target = dir.path().join(file_name);
+    std::fs::write(&target, "# invalid").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::InvalidPath)));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase外symlinkは拒否する() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("secret.md");
+    std::fs::write(&outside, "# secret").unwrap();
+    let link = base_dir.path().join("link.md");
+    symlink(&outside, &link).unwrap();
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &link);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_単一ファイル変更は再検証済みpathを返す() {
+    let (_dir, file_path) = create_markdown_fixture("target.md", "# target");
+    let canonical = file_path.canonicalize().unwrap();
+    let state = create_single_file_state(&file_path);
+
+    let target = resolve_change_target(&state, &file_path)
+        .expect("single file change should resolve")
+        .expect("single file watcher change should produce a target");
+
+    assert_eq!(target.file_path(), canonical.as_path());
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_削除済みディレクトリ変更はbroadcastをスキップする() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("deleted.md");
+    std::fs::write(&target, "# deleted").unwrap();
+    let state = create_directory_state(dir.path());
+    std::fs::remove_file(&target).unwrap();
+
+    let message = build_change_broadcast_message(&state, &target).await;
+
+    assert!(message.is_none(), "削除済みファイルはbroadcastしない");
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_削除済み単一ファイルは検証エラーをbroadcastする() {
+    let (_dir, file_path) = create_markdown_fixture("deleted.md", "# deleted");
+    let state = create_single_file_state(&file_path);
+
+    std::fs::remove_file(&file_path).unwrap();
+    let message = build_change_broadcast_message(&state, &file_path)
+        .await
+        .expect("単一ファイルの削除は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(message) => {
+            assert!(message.contains("ファイル検証エラー"));
+            assert!(message.contains("ファイルが見つかりません"));
+        }
+        other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+    }
+}
+
+#[test]
+fn test_resolve_file_mdディレクトリはnotfileを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("folder.md")).unwrap();
+
+    let result = resolve_file(dir.path(), "folder.md");
+
+    assert_eq!(result, Err(ResolveFileError::NotFile));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmdディレクトリはnotfileを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("folder.md");
+    std::fs::create_dir(&target).unwrap();
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFile)));
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_mdディレクトリは検証エラーをbroadcastする() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("folder.md");
+    std::fs::create_dir(&target).unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("通常ファイルでない更新対象は検証エラーをbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("通常ファイルではありません"),
+                "NotFileのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_unixのbackslashファイル名をupdateに保持する() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("back\\slash.md");
+    std::fs::write(&target, "# backslash").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("backslash file name should broadcast update");
+
+    match message {
+        BroadcastMessage::Update(update) => {
+            assert_eq!(update.file(), Some("back\\slash.md"));
+        }
+        other => panic!("Updateを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_隠しパスは検証エラーをbroadcastする() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+    let hidden = dir.path().join(".hidden/secret.md");
+
+    let message = build_change_broadcast_message(&state, &hidden)
+        .await
+        .expect("hidden path should broadcast a validation error");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("隠しファイルへのアクセスは禁止されています"),
+                "Hiddenのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_正規化不能なpathはbroadcastをスキップする() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("missing.md");
+    let state = create_directory_state(base_dir.path());
+
+    let message = build_change_broadcast_message(&state, &outside).await;
+
+    assert!(message.is_none(), "存在しない変更pathはbroadcastしない");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_非utf8相対パスはbroadcastをスキップする() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
+    let target = dir.path().join(file_name);
+    std::fs::write(&target, "# invalid").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target).await;
+
+    assert!(
+        message.is_none(),
+        "watcher由来の非UTF-8 pathはbroadcastしない"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_正規化io失敗はkind付き検証エラーをbroadcastする() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let locked_dir = outside_dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(base_dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("I/O失敗は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("PermissionDenied"),
+                "I/O種別の表示を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_base配下の正規化io失敗はkind付き検証エラーをbroadcastする(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("base配下のI/O失敗は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("PermissionDenied"),
+                "I/O種別の表示を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_error_io_displayはerror_kindを含む() {
+    let error = ResolveFileError::Io(std::io::ErrorKind::PermissionDenied);
+
+    assert!(error.to_string().contains("PermissionDenied"));
+}
+
+#[test]
 fn test_revalidate_single_file_target_正常なファイルを許可する() {
     let (dir, file_path) = create_markdown_fixture("test.md", "# test");
     let canonical = file_path.canonicalize().unwrap();
@@ -2358,11 +2788,11 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
 }
 
 #[test]
-fn test_revalidate_single_file_target_ディレクトリはnotfoundを返す() {
+fn test_revalidate_single_file_target_ディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
     let canonical = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &canonical);
-    assert_eq!(result, Err(ResolveFileError::NotFound));
+    assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
 #[test]
@@ -2407,6 +2837,39 @@ fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, Pat
     let file_path = dir.path().join(name);
     std::fs::write(&file_path, content).unwrap();
     (dir, file_path)
+}
+
+#[cfg(unix)]
+struct PermissionGuard {
+    path: PathBuf,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionGuard {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.original_mode));
+    }
+}
+
+#[cfg(unix)]
+fn make_dir_unsearchable(dir: &Path, probe: &Path) -> Option<PermissionGuard> {
+    let original_mode = fs::metadata(dir).unwrap().permissions().mode();
+    let guard = PermissionGuard {
+        path: dir.to_path_buf(),
+        original_mode,
+    };
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if probe.canonicalize().is_ok() {
+        eprintln!(
+            "chmod 0o000 後も対象パスを正規化できるため、canonicalize I/Oエラーテストをskipします"
+        );
+        drop(guard);
+        None
+    } else {
+        Some(guard)
+    }
 }
 
 fn create_single_file_state(file_path: &std::path::Path) -> AppState {

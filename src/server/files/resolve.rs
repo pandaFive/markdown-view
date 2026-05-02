@@ -183,16 +183,16 @@ pub(super) fn resolve_change_target(
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     if let Some(expected) = state.mode().single_file() {
-        revalidate_single_file_target(expected, state.mode().base_dir())?;
-        Ok(Some(build_resolved_target(
+        let validated_path = revalidate_single_file_target(expected, state.mode().base_dir())?;
+        return Ok(Some(build_resolved_target(
             state,
-            changed_file.to_path_buf(),
+            validated_path,
             None,
             "更新対象の相対パス算出失敗",
-        )))
-    } else {
-        Ok(build_update_target(state, changed_file))
+        )));
     }
+
+    resolve_directory_change_target(state, changed_file)
 }
 
 fn resolve_request_target(
@@ -272,28 +272,101 @@ fn build_resolved_target(
         // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
         // - 本関数は警告ログのみで描画継続を許容する（graceful degradation）
         // - HTTP経路: サイドバーのハイライトが落ちるだけで本文描画は継続
-        // - WebSocket変更通知経路: build_update_target が relative_path.is_none() を見て
-        //   ブロードキャスト自体をスキップし、不整合な更新が出ないよう抑止する
+        // - WebSocket変更通知経路: 変更ターゲット解決時の再検証後にここへ到達したら内部不整合
     }
 
     ResolvedTarget::new(file_path, file_list, relative_path)
 }
 
-fn build_update_target(state: &AppState, changed_file: &Path) -> Option<ResolvedTarget> {
-    let target = build_resolved_target(
+fn resolve_directory_change_target(
+    state: &AppState,
+    changed_file: &Path,
+) -> Result<Option<ResolvedTarget>, ResolveFileError> {
+    let Some(base_dir) = state.mode().directory() else {
+        tracing::error!("[markdown-view] 未知のAppModeです");
+        return Err(ResolveFileError::InternalState);
+    };
+
+    let relative = relative_change_path(base_dir, changed_file)?;
+    let relative_string = relative_change_path_to_query(&relative)?;
+    let validated_path = resolve_file_for_directory_change(base_dir, &relative_string)?;
+    Ok(Some(build_resolved_target(
         state,
-        changed_file.to_path_buf(),
+        validated_path,
         None,
-        "相対パス算出失敗のためブロードキャストをスキップ",
-    );
-    if state.mode().is_directory() && target.relative_path.is_none() {
-        return None;
+        "更新対象の相対パス算出失敗",
+    )))
+}
+
+fn relative_change_path_to_query(relative: &Path) -> Result<String, ResolveFileError> {
+    relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .ok_or(ResolveFileError::InvalidPath)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
+fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf, ResolveFileError> {
+    if let Ok(relative) = changed_file.strip_prefix(base_dir) {
+        return Ok(relative.to_path_buf());
     }
-    Some(target)
+
+    let canonical_base = base_dir.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
+        tracing::warn!(
+            "[markdown-view] watcher変更ターゲット: ベース正規化失敗: {} ({})",
+            base_dir.display(),
+            error
+        );
+        resolve_canonicalize_error(error_kind)
+    })?;
+
+    let canonical_changed = changed_file.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
+        tracing::warn!(
+            "[markdown-view] watcher変更ターゲット: パス正規化失敗: {} ({})",
+            sanitize_path_for_logging(changed_file, base_dir),
+            error
+        );
+        resolve_canonicalize_error(error_kind)
+    })?;
+
+    canonical_changed
+        .strip_prefix(&canonical_base)
+        .map(Path::to_path_buf)
+        .map_err(|_| ResolveFileError::Traversal)
+}
+
+fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileError {
+    if error_kind == std::io::ErrorKind::NotFound {
+        ResolveFileError::NotFound
+    } else {
+        ResolveFileError::Io(error_kind)
+    }
 }
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
+    resolve_file_with_canonicalize_error(base_dir, relative, |_| ResolveFileError::NotFound)
+}
+
+fn resolve_file_for_directory_change(
+    base_dir: &Path,
+    relative: &str,
+) -> Result<PathBuf, ResolveFileError> {
+    resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
+}
+
+fn resolve_file_with_canonicalize_error(
+    base_dir: &Path,
+    relative: &str,
+    map_canonicalize_error: fn(std::io::ErrorKind) -> ResolveFileError,
+) -> Result<PathBuf, ResolveFileError> {
     if relative.is_empty() {
         return Err(ResolveFileError::EmptyPath);
     }
@@ -313,7 +386,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
             sanitize_path_for_logging(&candidate, base_dir),
             error
         );
-        ResolveFileError::NotFound
+        map_canonicalize_error(error.kind())
     })?;
 
     let canonical_base = base_dir.canonicalize().map_err(|error| {
@@ -322,7 +395,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
             base_dir.display(),
             error
         );
-        ResolveFileError::NotFound
+        map_canonicalize_error(error.kind())
     })?;
     if !canonical.starts_with(&canonical_base) {
         return Err(ResolveFileError::Traversal);
@@ -338,7 +411,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     }
 
     if !canonical.is_file() {
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::NotFile);
     }
 
     match canonical.extension() {
@@ -368,7 +441,7 @@ pub(super) fn revalidate_single_file_target(
         return Err(ResolveFileError::Traversal);
     }
     if !canonical.is_file() {
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::NotFile);
     }
 
     match canonical.extension() {
@@ -385,12 +458,18 @@ pub enum ResolveFileError {
     InvalidPath,
     /// ファイルが見つからない
     NotFound,
+    /// 通常ファイルではない
+    NotFile,
     /// ディレクトリトラバーサル検出
     Traversal,
     /// Markdownファイルではない
     NotMarkdown,
     /// 隠しファイルへのアクセス
     Hidden,
+    /// watcher再検証中の一時不在ではないI/O失敗
+    Io(std::io::ErrorKind),
+    /// AppModeの内部不整合
+    InternalState,
 }
 
 impl std::fmt::Display for ResolveFileError {
@@ -399,6 +478,7 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::EmptyPath => write!(f, "ファイルパスが空です"),
             ResolveFileError::InvalidPath => write!(f, "無効なパスです"),
             ResolveFileError::NotFound => write!(f, "ファイルが見つかりません"),
+            ResolveFileError::NotFile => write!(f, "通常ファイルではありません"),
             ResolveFileError::Traversal => {
                 write!(f, "ディレクトリ外へのアクセスは禁止されています")
             }
@@ -406,6 +486,10 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::Hidden => {
                 write!(f, "隠しファイルへのアクセスは禁止されています")
             }
+            ResolveFileError::Io(kind) => {
+                write!(f, "ファイル解決中にI/Oエラーが発生しました ({kind:?})")
+            }
+            ResolveFileError::InternalState => write!(f, "内部状態が不整合です"),
         }
     }
 }

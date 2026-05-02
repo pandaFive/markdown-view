@@ -16,10 +16,10 @@
   - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
   - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
 
-- [ ] 監視イベント経由の変更ファイルを最終読込前に再検証する
-  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`, `src/watcher/strategy.rs`
+- [x] 監視イベント経由の変更ファイルを最終読込前に再検証する
+  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`
   - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
-  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。削除済みファイルや canonicalize 失敗時の扱いは「安全側で error broadcast」になるよう統合テストを追加
+  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。HTTP/API 用の404統一は維持しつつ、watcher変更通知用の内部経路だけはcanonicalizeの `NotFound` 以外のI/O種別を保持する。ディレクトリモードのbase 配下の削除済み・一時不在ファイルとwatcher由来の非UTF-8 pathは通知なしでスキップし、単一ファイルモードの監視対象消失は検証エラーとして通知する。既存base外・hidden・非 Markdown・非通常ファイル・base 外 symlinkは error broadcast する境界テストを追加
   - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
 
 - [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ

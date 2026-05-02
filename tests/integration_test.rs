@@ -823,34 +823,6 @@ async fn test_ファイル変更でwebsocket更新() {
     drop(tmp_dir);
 }
 
-#[tokio::test]
-async fn test_ファイル削除でwebsocketエラー通知() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("watch_delete.md");
-    tokio::fs::write(&file_path, "# Before").await.unwrap();
-
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
-
-    let watch_service = WatchService::start(state.clone()).await.unwrap();
-
-    let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
-    let (_write, mut read) = ws_stream.split();
-
-    let _initial_message = next_ws_message(&mut read).await;
-
-    tokio::fs::remove_file(&file_path).await.unwrap();
-
-    let msg = next_ws_message(&mut read).await;
-
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let error = json["error"].as_str().expect("errorフィールドが存在する");
-    assert!(error.contains("ファイル検証エラー"));
-    assert!(error.contains("watch_delete.md"));
-    watch_service.shutdown().await;
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
@@ -1357,6 +1329,43 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
         .unwrap()
         .contains("Updated content"));
     assert_eq!(json["file"].as_str().unwrap(), "README.md");
+    watch_service.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_ディレクトリモード_websocket更新はbackslashファイル名を保持する() {
+    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let file_path = tmp_dir.path().join("back\\slash.md");
+    tokio::fs::write(&file_path, "# Backslash\n\nBefore")
+        .await
+        .unwrap();
+    let watch_service = markdown_view::server::WatchService::start(state.clone())
+        .await
+        .unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let initial = tokio::time::timeout(Duration::from_millis(500), read.next()).await;
+    assert!(
+        initial.is_err(),
+        "ディレクトリモードでは更新前に初期WebSocketメッセージを送信しない"
+    );
+
+    tokio::fs::write(&file_path, "# Backslash\n\nAfter")
+        .await
+        .unwrap();
+
+    let msg = next_ws_message(&mut read).await;
+
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
+    assert!(json["content"].as_str().unwrap().contains("After"));
+    assert_eq!(json["file"].as_str().unwrap(), "back\\slash.md");
     watch_service.shutdown().await;
 }
 

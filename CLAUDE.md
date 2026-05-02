@@ -114,6 +114,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 
 ## コード規約
 
+- Create and work on feature/fix branches in git worktrees by default; use normal branch checkouts only for trivial, single-session changes.
 - コメント・コミットメッセージは日本語
 - `tracing::info!/warn!/error!` マクロで構造化ログ出力（初期化失敗時のみ `eprintln!` フォールバック）
 - syntect/pulldown-cmarkの静的リソースは`OnceLock`でlazy初期化

@@ -192,10 +192,18 @@ impl AppMode {
             AppModeKind::Directory(base) => file_path
                 .strip_prefix(base.as_path())
                 .ok()
-                .map(|relative| relative.to_string_lossy().replace('\\', "/")),
+                .map(relative_path_to_display_string),
             AppModeKind::SingleFile(_) => None,
         }
     }
+}
+
+fn relative_path_to_display_string(relative: &Path) -> String {
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// サーバー共有状態

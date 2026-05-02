@@ -158,8 +158,13 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
 
 /// ファイル変更イベントからブロードキャスト用メッセージを生成する。
 ///
-/// Noneを返した場合、ブロードキャストをスキップすべきことを示す
-/// （ディレクトリモードで相対パスが算出できない場合）。
+/// Noneを返した場合、ブロードキャストをスキップすべきことを示す。
+/// これは、対象なし、ディレクトリモードの削除・rename中の一時不在、
+/// またはwatcher由来の無効なpathをブラウザへ通知しない場合に発生する。
+///
+/// 単一ファイルモードの `NotFound` と、`NotFile` / `Traversal` / `Hidden` /
+/// `NotMarkdown` / `Io` / `InternalState` などの検証失敗は、セキュリティ境界の拒否、
+/// 一時不在ではない異常、または内部不整合としてError broadcastにする。
 pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
     changed_file: &Path,
@@ -168,7 +173,58 @@ pub(in crate::server) async fn build_change_broadcast_message(
     match validate_and_render(resolve_result).await {
         ValidateRenderOutcome::NoTarget => None,
         ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
-        ValidateRenderOutcome::ResolveFailed(error) => {
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::NotFound)
+            if should_skip_not_found_change(state) =>
+        {
+            let file_label = change_error_file_label(state, changed_file);
+            tracing::debug!(
+                "[markdown-view] 更新対象が削除または一時不在のためbroadcastをスキップ: {}",
+                file_label
+            );
+            None
+        }
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::NotFound) => {
+            let file_label = change_error_file_label(state, changed_file);
+            let error = ResolveFileError::NotFound;
+            tracing::warn!(
+                "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
+                file_label,
+                error
+            );
+            Some(BroadcastMessage::Error(format!(
+                "ファイル検証エラー ({}): {}",
+                file_label, error
+            )))
+        }
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::InvalidPath) => {
+            let file_label = change_error_file_label(state, changed_file);
+            tracing::error!(
+                "[markdown-view] watcher由来の無効な更新pathを検出したためbroadcastをスキップ: {}",
+                file_label
+            );
+            None
+        }
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::InternalState) => {
+            let file_label = change_error_file_label(state, changed_file);
+            let error = ResolveFileError::InternalState;
+            tracing::error!(
+                "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
+                file_label,
+                error
+            );
+            Some(BroadcastMessage::Error(format!(
+                "ファイル検証エラー ({}): {}",
+                file_label, error
+            )))
+        }
+        ValidateRenderOutcome::ResolveFailed(
+            error @ (ResolveFileError::EmptyPath
+            | ResolveFileError::NotFile
+            | ResolveFileError::Traversal
+            | ResolveFileError::NotMarkdown
+            | ResolveFileError::Hidden
+            | ResolveFileError::Io(_)),
+        ) => {
             let file_label = change_error_file_label(state, changed_file);
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
@@ -193,6 +249,10 @@ pub(in crate::server) async fn build_change_broadcast_message(
             )))
         }
     }
+}
+
+fn should_skip_not_found_change(state: &AppState) -> bool {
+    state.mode().is_directory()
 }
 
 /// 変更通知の検証失敗ログに使うファイル表示名を返す。
@@ -237,6 +297,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
     let target = match resolve_result {
         Ok(Some(target)) => target,
         Ok(None) => return None,
+        Err(ResolveFileError::NotFound) if should_skip_not_found_change(state) => return None,
         Err(error) => {
             let file_label = change_error_file_label(state, changed_file);
             return Some(format!(

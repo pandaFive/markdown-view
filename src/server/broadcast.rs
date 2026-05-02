@@ -97,8 +97,10 @@ fn broadcast_error(state: &AppState, error: &WatchError) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use tokio::sync::{broadcast, mpsc};
+    use tokio::time::timeout;
     use tracing_test::traced_test;
 
     use super::*;
@@ -129,7 +131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモードで相対パス算出失敗時は送信をスキップ() {
+    async fn test_notify_update_ディレクトリモードでbase外パスは検証エラーを送信する() {
         let base_dir = tempfile::tempdir().unwrap();
         std::fs::write(base_dir.path().join("README.md"), "# README").unwrap();
 
@@ -142,14 +144,26 @@ mod tests {
         let mut rx = state.tx().subscribe();
 
         notify_update(&state, &outside_canonical).await;
-        assert!(matches!(
-            rx.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
+
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("Updateのbroadcastを期待")
+            .unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル検証エラー"));
+                assert!(
+                    message.contains("ディレクトリ外へのアクセスは禁止されています"),
+                    "Traversalのエラー文言を期待: {}",
+                    message
+                );
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
     }
 
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモードで読み込み失敗時はerrorを送信する() {
+    async fn test_notify_update_ディレクトリモードで削除済みファイルは送信をスキップする() {
         let base_dir = tempfile::tempdir().unwrap();
         let target = base_dir.path().join("README.md");
         std::fs::write(&target, "# before").unwrap();
@@ -160,22 +174,14 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         notify_update(&state, &target).await;
 
-        let received = rx.recv().await.unwrap();
-        match received {
-            BroadcastMessage::Error(message) => {
-                assert!(message.contains("ファイル読み込みエラー"));
-                assert!(
-                    message.contains("README.md"),
-                    "エラーメッセージにファイル名が含まれるべき: {}",
-                    message
-                );
-            }
-            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
-        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
-    async fn test_notify_update_ファイル名不明時はdisplay表示がエラーに含まれる() {
+    async fn test_notify_update_単一ファイルモードではchanged_fileでなくexpectedを更新する() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("dummy.md");
         std::fs::write(&file_path, "# dummy").unwrap();
@@ -185,34 +191,36 @@ mod tests {
 
         notify_update(&state, Path::new("/")).await;
 
-        let received = rx.recv().await.unwrap();
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("検証エラーのbroadcastを期待")
+            .unwrap();
         match received {
-            BroadcastMessage::Error(message) => {
-                assert!(
-                    message.contains("/"),
-                    "ファイル名不明時はdisplay()表示が含まれるべき: {}",
-                    message
-                );
+            BroadcastMessage::Update(update) => {
+                assert!(update.content().as_str().contains("dummy"));
+                assert!(update.file().is_none());
             }
-            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+            other => panic!("Updateメッセージを期待したが {:?} を受信", other),
         }
     }
 
     #[tokio::test]
-    async fn test_notify_update_単一ファイルモードで読み込み失敗時はファイル名を含むエラーを送信する(
-    ) {
+    async fn test_notify_update_単一ファイルモードで削除済みファイルは検証エラーを送信する() {
         let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
         let mut rx = state.tx().subscribe();
 
         std::fs::remove_file(&file_path).unwrap();
         notify_update(&state, &file_path).await;
 
-        let received = rx.recv().await.unwrap();
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("検証エラーのbroadcastを期待")
+            .unwrap();
         match received {
             BroadcastMessage::Error(message) => {
                 assert!(message.contains("ファイル検証エラー"));
+                assert!(message.contains("ファイルが見つかりません"));
                 assert!(message.contains("test.md"));
-                assert!(!message.contains("No such file"));
             }
             other => panic!("Errorメッセージを期待したが {:?} を受信", other),
         }
@@ -279,7 +287,7 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn test_notify_update_受信者ゼロ時の検証エラーはwarnログに残す() {
+    async fn test_notify_update_単一ファイルモード受信者ゼロ時のnot_foundはwarnログに残す() {
         let (_dir, file_path, state) =
             create_single_file_state_with_fixture("missing.md", "# missing");
         let rx = state.tx().subscribe();
@@ -292,7 +300,8 @@ mod tests {
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
         assert!(logs_contain("更新時ファイル検証失敗"));
-        assert!(logs_contain("missing.md"));
+        assert!(logs_contain("ファイルが見つかりません"));
+        assert!(!logs_contain("更新時読み込みエラー"));
     }
 
     #[traced_test]
@@ -320,8 +329,8 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモード受信者ゼロ時の読込失敗は相対パスでwarnログに残す()
-    {
+    async fn test_notify_update_ディレクトリモード受信者ゼロ時の削除済みファイルはwarnログに残さない(
+    ) {
         let base_dir = tempfile::tempdir().unwrap();
         let nested_dir = base_dir.path().join("docs");
         std::fs::create_dir(&nested_dir).unwrap();
@@ -335,12 +344,11 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         notify_update(&state, &target).await;
 
-        assert!(logs_contain(
+        assert!(!logs_contain(
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("更新時読み込みエラー"));
         assert!(!logs_contain("更新時ファイル検証失敗"));
-        assert!(logs_contain("docs/guide.md"));
+        assert!(!logs_contain("更新時読み込みエラー"));
     }
 
     #[traced_test]
@@ -359,10 +367,9 @@ mod tests {
         assert!(logs_contain(
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(logs_contain("更新時読み込みエラー"));
-        assert!(!logs_contain("更新時ファイル検証失敗"));
-        assert!(logs_contain("docs.md"));
+        assert!(logs_contain("更新時ファイル検証失敗"));
         assert!(logs_contain("通常ファイルではありません"));
+        assert!(!logs_contain("更新時読み込みエラー"));
     }
 
     #[traced_test]
