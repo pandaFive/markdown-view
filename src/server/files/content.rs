@@ -162,8 +162,9 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
 /// これは、対象なし、削除・rename中の一時不在、またはwatcher由来の
 /// 無効なpathをブラウザへ通知しない場合に発生する。
 ///
-/// `Traversal` / `Hidden` / `NotMarkdown` / `Io` などの検証失敗は、
-/// セキュリティ境界の拒否や一時不在ではない異常としてError broadcastにする。
+/// `Traversal` / `Hidden` / `NotMarkdown` / `Io` / `InternalState` などの検証失敗は、
+/// セキュリティ境界の拒否、一時不在ではない異常、または内部不整合として
+/// Error broadcastにする。
 pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
     changed_file: &Path,
@@ -188,7 +189,26 @@ pub(in crate::server) async fn build_change_broadcast_message(
             );
             None
         }
-        ValidateRenderOutcome::ResolveFailed(error) => {
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::InternalState) => {
+            let file_label = change_error_file_label(state, changed_file);
+            let error = ResolveFileError::InternalState;
+            tracing::error!(
+                "[markdown-view] 更新時ファイル検証失敗 ({}): {}",
+                file_label,
+                error
+            );
+            Some(BroadcastMessage::Error(format!(
+                "ファイル検証エラー ({}): {}",
+                file_label, error
+            )))
+        }
+        ValidateRenderOutcome::ResolveFailed(
+            error @ (ResolveFileError::EmptyPath
+            | ResolveFileError::Traversal
+            | ResolveFileError::NotMarkdown
+            | ResolveFileError::Hidden
+            | ResolveFileError::Io(_)),
+        ) => {
             let file_label = change_error_file_label(state, changed_file);
             tracing::warn!(
                 "[markdown-view] 更新時ファイル検証失敗 ({}): {}",

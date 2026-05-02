@@ -1348,6 +1348,12 @@ async fn test_ディレクトリモード_websocket更新はbackslashファイ�
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
+    let initial = tokio::time::timeout(Duration::from_millis(500), read.next()).await;
+    assert!(
+        initial.is_err(),
+        "ディレクトリモードでは更新前に初期WebSocketメッセージを送信しない"
+    );
+
     tokio::fs::write(&file_path, "# Backslash\n\nAfter")
         .await
         .unwrap();

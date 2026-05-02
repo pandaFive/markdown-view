@@ -3,7 +3,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::unix::{fs::symlink, fs::PermissionsExt},
+};
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -2430,6 +2433,41 @@ fn test_resolve_change_target_ディレクトリ変更のmissing_baseはnotfound
     assert!(matches!(result, Err(ResolveFileError::NotFound)));
 }
 
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のbase正規化notfoundを返す() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("outside.md");
+    let state = create_directory_state(base_dir.path());
+    drop(base_dir);
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の正規化io失敗はio_kindを返す() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let locked_dir = outside_dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(base_dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn test_resolve_change_target_ディレクトリ変更の非utf8相対パスは拒否する() {
@@ -2562,6 +2600,49 @@ async fn test_build_change_broadcast_message_非utf8相対パスはbroadcastを�
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_正規化io失敗はkind付き検証エラーをbroadcastする() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let locked_dir = outside_dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(base_dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("I/O失敗は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("PermissionDenied"),
+                "I/O種別の表示を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_error_io_displayはerror_kindを含む() {
+    let error = ResolveFileError::Io(std::io::ErrorKind::PermissionDenied);
+
+    assert!(error.to_string().contains("PermissionDenied"));
+}
+
 #[test]
 fn test_revalidate_single_file_target_正常なファイルを許可する() {
     let (dir, file_path) = create_markdown_fixture("test.md", "# test");
@@ -2631,6 +2712,39 @@ fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, Pat
     let file_path = dir.path().join(name);
     std::fs::write(&file_path, content).unwrap();
     (dir, file_path)
+}
+
+#[cfg(unix)]
+struct PermissionGuard {
+    path: PathBuf,
+    original_mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionGuard {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.original_mode));
+    }
+}
+
+#[cfg(unix)]
+fn make_dir_unsearchable(dir: &Path, probe: &Path) -> Option<PermissionGuard> {
+    let original_mode = fs::metadata(dir).unwrap().permissions().mode();
+    let guard = PermissionGuard {
+        path: dir.to_path_buf(),
+        original_mode,
+    };
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if probe.canonicalize().is_ok() {
+        eprintln!(
+            "chmod 0o000 後も対象パスを正規化できるため、canonicalize I/Oエラーテストをskipします"
+        );
+        drop(guard);
+        None
+    } else {
+        Some(guard)
+    }
 }
 
 fn create_single_file_state(file_path: &std::path::Path) -> AppState {

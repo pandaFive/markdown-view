@@ -468,7 +468,9 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::Hidden => {
                 write!(f, "隠しファイルへのアクセスは禁止されています")
             }
-            ResolveFileError::Io(_) => write!(f, "ファイル解決中にI/Oエラーが発生しました"),
+            ResolveFileError::Io(kind) => {
+                write!(f, "ファイル解決中にI/Oエラーが発生しました ({kind:?})")
+            }
             ResolveFileError::InternalState => write!(f, "内部状態が不整合です"),
         }
     }
