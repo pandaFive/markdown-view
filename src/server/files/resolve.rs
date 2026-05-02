@@ -183,16 +183,16 @@ pub(super) fn resolve_change_target(
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     if let Some(expected) = state.mode().single_file() {
-        revalidate_single_file_target(expected, state.mode().base_dir())?;
-        Ok(Some(build_resolved_target(
+        let validated_path = revalidate_single_file_target(expected, state.mode().base_dir())?;
+        return Ok(Some(build_resolved_target(
             state,
-            changed_file.to_path_buf(),
+            validated_path,
             None,
             "更新対象の相対パス算出失敗",
-        )))
-    } else {
-        Ok(build_update_target(state, changed_file))
+        )));
     }
+
+    resolve_directory_change_target(state, changed_file)
 }
 
 fn resolve_request_target(
@@ -272,24 +272,59 @@ fn build_resolved_target(
         // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
         // - 本関数は警告ログのみで描画継続を許容する（graceful degradation）
         // - HTTP経路: サイドバーのハイライトが落ちるだけで本文描画は継続
-        // - WebSocket変更通知経路: build_update_target が relative_path.is_none() を見て
-        //   ブロードキャスト自体をスキップし、不整合な更新が出ないよう抑止する
+        // - WebSocket変更通知経路: 変更ターゲット解決時に再検証し、不整合な更新を抑止する
     }
 
     ResolvedTarget::new(file_path, file_list, relative_path)
 }
 
-fn build_update_target(state: &AppState, changed_file: &Path) -> Option<ResolvedTarget> {
-    let target = build_resolved_target(
+fn resolve_directory_change_target(
+    state: &AppState,
+    changed_file: &Path,
+) -> Result<Option<ResolvedTarget>, ResolveFileError> {
+    let Some(base_dir) = state.mode().directory() else {
+        tracing::error!("[markdown-view] 未知のAppModeです");
+        return Err(ResolveFileError::NotFound);
+    };
+
+    let relative = relative_change_path(base_dir, changed_file)?;
+    let relative_string = relative.to_string_lossy().replace('\\', "/");
+    let validated_path = resolve_file(base_dir, &relative_string)?;
+    Ok(Some(build_resolved_target(
         state,
-        changed_file.to_path_buf(),
+        validated_path,
         None,
-        "相対パス算出失敗のためブロードキャストをスキップ",
-    );
-    if state.mode().is_directory() && target.relative_path.is_none() {
-        return None;
+        "更新対象の相対パス算出失敗",
+    )))
+}
+
+fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf, ResolveFileError> {
+    if let Ok(relative) = changed_file.strip_prefix(base_dir) {
+        return Ok(relative.to_path_buf());
     }
-    Some(target)
+
+    let canonical_base = base_dir.canonicalize().map_err(|error| {
+        tracing::warn!(
+            "[markdown-view] watcher変更ターゲット: ベース正規化失敗: {} ({})",
+            base_dir.display(),
+            error
+        );
+        ResolveFileError::Traversal
+    })?;
+
+    let canonical_changed = changed_file.canonicalize().map_err(|error| {
+        tracing::warn!(
+            "[markdown-view] watcher変更ターゲット: パス正規化失敗: {} ({})",
+            sanitize_path_for_logging(changed_file, base_dir),
+            error
+        );
+        ResolveFileError::NotFound
+    })?;
+
+    canonical_changed
+        .strip_prefix(&canonical_base)
+        .map(Path::to_path_buf)
+        .map_err(|_| ResolveFileError::Traversal)
 }
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）

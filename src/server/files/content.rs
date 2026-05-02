@@ -168,6 +168,14 @@ pub(in crate::server) async fn build_change_broadcast_message(
     match validate_and_render(resolve_result).await {
         ValidateRenderOutcome::NoTarget => None,
         ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::NotFound) => {
+            let file_label = change_error_file_label(state, changed_file);
+            tracing::debug!(
+                "[markdown-view] 更新対象が削除または一時不在のためbroadcastをスキップ: {}",
+                file_label
+            );
+            None
+        }
         ValidateRenderOutcome::ResolveFailed(error) => {
             let file_label = change_error_file_label(state, changed_file);
             tracing::warn!(
@@ -237,6 +245,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
     let target = match resolve_result {
         Ok(Some(target)) => target,
         Ok(None) => return None,
+        Err(ResolveFileError::NotFound) => return None,
         Err(error) => {
             let file_label = change_error_file_label(state, changed_file);
             return Some(format!(
