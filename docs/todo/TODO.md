@@ -36,6 +36,12 @@
 
 ## Medium Priority
 
+- [ ] Host middleware の構造契約と WebSocket bypass 観測性を強化する
+  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`
+  - 現状: `build_routes()` へ route 定義を閉じ込め、`create_router()` 側で Host middleware と security header layer を適用する構造にした。ただし `build_routes()` の戻り値は通常の `Router<Arc<AppState>>` なので、将来この関数内へ共通 `.layer(...)` を追加しても型では検知できない。また `ws_handler` 後段の `is_allowed_ws_origin()` 内 Host 再検証は defense-in-depth として残しているが、middleware bypass が将来発生した場合でも、現状は WebSocket Origin 拒否の汎用 403 として見えやすい
+  - 対応: `build_routes()` へ共通 layer を混ぜない契約を、型またはテストでより強く固定する。例として private newtype、route 定義専用 helper の命名強化、または Host 拒否前に動いてはいけない layer の回帰テストを検討する。WebSocket 経路では `WsOriginRejection` の Host 系拒否を bypass 検知として `error!` へ上げる、または debug build で明示的に検知できる境界を追加する
+  - 理由: DNS Rebinding 対策は route 横断のセキュリティ境界であり、middleware 化後も「構造上の守り忘れ」や「bypass の無音化」を将来リファクタで再導入しないようにする
+
 - [ ] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
   - ファイル: `src/server/files/catalog.rs` L39/60/83/157, `src/server/files/memo.rs` L439, `src/watcher/strategy.rs` L186-210/L262-275
   - 現状: tokio worker thread をブロックしうる経路が 3 箇所に散在する: (a) `list_markdown_files_recursive` が `std::fs::read_dir` / `entry.file_type()` / `path.canonicalize()` を毎再帰呼び出し（さらに `base_dir.canonicalize()` を再帰内で繰り返す）、(b) `ensure_safe_memo_path` から呼ばれる `first_symlink_component` が `std::fs::symlink_metadata` を async 関数の中で実行（他は `tokio::fs::*` で揃えているのに非対称）、(c) debouncer コールバック（notify 内部スレッド）内で `is_within_base_dir` / `try_strip_base` が `path.canonicalize()` を毎イベント呼び出し
