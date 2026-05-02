@@ -2353,6 +2353,23 @@ fn test_resolve_change_target_ディレクトリ変更はcanonical_pathへ再解
     assert_eq!(target.relative_path(), Some("docs/api.md"));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resolve_change_target_unixのbackslashファイル名を通常文字として扱う() {
+    let dir = tempfile::tempdir().unwrap();
+    let changed = dir.path().join("back\\slash.md");
+    std::fs::write(&changed, "# backslash").unwrap();
+    let state = create_directory_state(dir.path());
+    let expected = changed.canonicalize().unwrap();
+
+    let target = resolve_change_target(&state, &changed)
+        .expect("backslash file name should resolve")
+        .expect("directory watcher change should produce a target");
+
+    assert_eq!(target.file_path(), expected.as_path());
+    assert_eq!(target.relative_path(), Some("back\\slash.md"));
+}
+
 #[test]
 fn test_resolve_change_target_ディレクトリ変更の隠しパスは拒否する() {
     let dir = create_test_dir();
@@ -2443,6 +2460,26 @@ async fn test_build_change_broadcast_message_削除済みディレクトリ変�
     let message = build_change_broadcast_message(&state, &target).await;
 
     assert!(message.is_none(), "削除済みファイルはbroadcastしない");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_unixのbackslashファイル名をupdateに保持する() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("back\\slash.md");
+    std::fs::write(&target, "# backslash").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("backslash file name should broadcast update");
+
+    match message {
+        BroadcastMessage::Update(update) => {
+            assert_eq!(update.file(), Some("back\\slash.md"));
+        }
+        other => panic!("Updateを期待したが {:?} を受信", other),
+    }
 }
 
 #[tokio::test]

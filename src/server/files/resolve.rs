@@ -288,10 +288,7 @@ fn resolve_directory_change_target(
     };
 
     let relative = relative_change_path(base_dir, changed_file)?;
-    let relative_string = relative
-        .to_str()
-        .ok_or(ResolveFileError::InvalidPath)?
-        .replace('\\', "/");
+    let relative_string = relative_change_path_to_query(&relative)?;
     let validated_path = resolve_file(base_dir, &relative_string)?;
     Ok(Some(build_resolved_target(
         state,
@@ -299,6 +296,19 @@ fn resolve_directory_change_target(
         None,
         "更新対象の相対パス算出失敗",
     )))
+}
+
+fn relative_change_path_to_query(relative: &Path) -> Result<String, ResolveFileError> {
+    relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .ok_or(ResolveFileError::InvalidPath)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
 }
 
 fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf, ResolveFileError> {
