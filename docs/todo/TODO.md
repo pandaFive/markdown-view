@@ -17,9 +17,9 @@
   - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
 
 - [x] 監視イベント経由の変更ファイルを最終読込前に再検証する
-  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`, `src/watcher/strategy.rs`
+  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`
   - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
-  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。base 配下の削除済み・一時不在ファイルは通知なしでスキップし、base 外・hidden・非 Markdown・base 外 symlink・相対化不能なパスは error broadcast する境界テストを追加
+  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。base 配下の削除済み・一時不在ファイルとwatcher由来の非UTF-8 pathは通知なしでスキップし、既存base外・hidden・非 Markdown・base 外 symlinkは error broadcast する境界テストを追加
   - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
 
 - [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ

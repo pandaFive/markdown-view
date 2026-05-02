@@ -272,7 +272,7 @@ fn build_resolved_target(
         // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
         // - 本関数は警告ログのみで描画継続を許容する（graceful degradation）
         // - HTTP経路: サイドバーのハイライトが落ちるだけで本文描画は継続
-        // - WebSocket変更通知経路: 変更ターゲット解決時に再検証し、不整合な更新を抑止する
+        // - WebSocket変更通知経路: 変更ターゲット解決時の再検証後にここへ到達したら内部不整合
     }
 
     ResolvedTarget::new(file_path, file_list, relative_path)
@@ -284,7 +284,7 @@ fn resolve_directory_change_target(
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     let Some(base_dir) = state.mode().directory() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::InternalState);
     };
 
     let relative = relative_change_path(base_dir, changed_file)?;
@@ -317,27 +317,37 @@ fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf,
     }
 
     let canonical_base = base_dir.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] watcher変更ターゲット: ベース正規化失敗: {} ({})",
             base_dir.display(),
             error
         );
-        ResolveFileError::Traversal
+        resolve_canonicalize_error(error_kind)
     })?;
 
     let canonical_changed = changed_file.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] watcher変更ターゲット: パス正規化失敗: {} ({})",
             sanitize_path_for_logging(changed_file, base_dir),
             error
         );
-        ResolveFileError::Traversal
+        resolve_canonicalize_error(error_kind)
     })?;
 
     canonical_changed
         .strip_prefix(&canonical_base)
         .map(Path::to_path_buf)
         .map_err(|_| ResolveFileError::Traversal)
+}
+
+fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileError {
+    if error_kind == std::io::ErrorKind::NotFound {
+        ResolveFileError::NotFound
+    } else {
+        ResolveFileError::Io(error_kind)
+    }
 }
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
@@ -439,6 +449,10 @@ pub enum ResolveFileError {
     NotMarkdown,
     /// 隠しファイルへのアクセス
     Hidden,
+    /// watcher再検証中の一時不在ではないI/O失敗
+    Io(std::io::ErrorKind),
+    /// AppModeの内部不整合
+    InternalState,
 }
 
 impl std::fmt::Display for ResolveFileError {
@@ -454,6 +468,8 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::Hidden => {
                 write!(f, "隠しファイルへのアクセスは禁止されています")
             }
+            ResolveFileError::Io(_) => write!(f, "ファイル解決中にI/Oエラーが発生しました"),
+            ResolveFileError::InternalState => write!(f, "内部状態が不整合です"),
         }
     }
 }

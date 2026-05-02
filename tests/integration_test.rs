@@ -1332,6 +1332,37 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
     watch_service.shutdown().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_ディレクトリモード_websocket更新はbackslashファイル名を保持する() {
+    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let file_path = tmp_dir.path().join("back\\slash.md");
+    tokio::fs::write(&file_path, "# Backslash\n\nBefore")
+        .await
+        .unwrap();
+    let watch_service = markdown_view::server::WatchService::start(state.clone())
+        .await
+        .unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    tokio::fs::write(&file_path, "# Backslash\n\nAfter")
+        .await
+        .unwrap();
+
+    let msg = next_ws_message(&mut read).await;
+
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
+    assert!(json["content"].as_str().unwrap().contains("After"));
+    assert_eq!(json["file"].as_str().unwrap(), "back\\slash.md");
+    watch_service.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_ディレクトリモード_api_filesは不正hostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_dir_server().await;

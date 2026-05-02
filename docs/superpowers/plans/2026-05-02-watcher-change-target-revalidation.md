@@ -4,7 +4,7 @@
 
 **Goal:** watcher経由のディレクトリ変更イベントを読込直前にHTTP経路と同等の検証へ通し、安全なcanonical pathだけを描画する。
 
-**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、`NotFound` だけbroadcastをスキップする。
+**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、`NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類する。
 
 **Tech Stack:** Rust, axum, tokio, tempfile, `cargo test`, `./verify.sh`
 
@@ -22,6 +22,7 @@
   - `resolve_directory_change_target()` と `relative_change_path()` を追加する。
 - Modify: `src/server/files/content.rs`
   - watcher変更通知で `ResolveFileError::NotFound` をbroadcastスキップへ変換する。
+  - watcher由来の `ResolveFileError::InvalidPath` をブラウザへ送らず、ローカルログに留める。
   - WebSocket受信者なしログでも `NotFound` はローカルエラー扱いにしない。
 - Modify: `docs/todo/TODO.md`
   - 実装と検証完了後、対象High Priority項目を完了済みにする。
@@ -333,11 +334,11 @@ fn resolve_directory_change_target(
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     let Some(base_dir) = state.mode().directory() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::InternalState);
     };
 
     let relative = relative_change_path(base_dir, changed_file)?;
-    let relative_string = relative.to_string_lossy().replace('\\', "/");
+    let relative_string = relative_change_path_to_query(&relative)?;
     let validated_path = resolve_file(base_dir, &relative_string)?;
     Ok(Some(build_resolved_target(
         state,
@@ -353,21 +354,23 @@ fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf,
     }
 
     let canonical_base = base_dir.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] watcher変更ターゲット: ベース正規化失敗: {} ({})",
             base_dir.display(),
             error
         );
-        ResolveFileError::Traversal
+        resolve_canonicalize_error(error_kind)
     })?;
 
     let canonical_changed = changed_file.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] watcher変更ターゲット: パス正規化失敗: {} ({})",
             sanitize_path_for_logging(changed_file, base_dir),
             error
         );
-        ResolveFileError::Traversal
+        resolve_canonicalize_error(error_kind)
     })?;
 
     canonical_changed
@@ -375,7 +378,30 @@ fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf,
         .map(Path::to_path_buf)
         .map_err(|_| ResolveFileError::Traversal)
 }
+
+fn relative_change_path_to_query(relative: &Path) -> Result<String, ResolveFileError> {
+    relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .ok_or(ResolveFileError::InvalidPath)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
+fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileError {
+    if error_kind == std::io::ErrorKind::NotFound {
+        ResolveFileError::NotFound
+    } else {
+        ResolveFileError::Io(error_kind)
+    }
+}
 ```
+
+`relative_change_path_to_query()` はcomponent単位で `/` joinする。非UTF-8 componentは `to_string_lossy()` で置換せず `InvalidPath` にし、Unix上の `back\slash.md` のbackslashは区切りではなくファイル名の通常文字として保持する。
 
 - [ ] **Step 3: 未使用になった `build_update_target()` を削除する**
 

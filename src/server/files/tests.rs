@@ -2395,7 +2395,7 @@ fn test_resolve_change_target_ディレクトリ変更のbase外パスは拒否�
 }
 
 #[test]
-fn test_resolve_change_target_ディレクトリ変更の正規化不能なbase外パスは拒否する() {
+fn test_resolve_change_target_ディレクトリ変更の正規化不能なpathはnotfoundを返す() {
     let base_dir = tempfile::tempdir().unwrap();
     let outside_dir = tempfile::tempdir().unwrap();
     let outside = outside_dir.path().join("missing.md");
@@ -2403,7 +2403,31 @@ fn test_resolve_change_target_ディレクトリ変更の正規化不能なbase�
 
     let result = resolve_change_target(&state, &outside);
 
-    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmissing_pathはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.md");
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &missing);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmissing_baseはnotfoundを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.md");
+    std::fs::write(&missing, "# missing").unwrap();
+    let state = create_directory_state(dir.path());
+    drop(dir);
+
+    let result = resolve_change_target(&state, &missing);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFound)));
 }
 
 #[cfg(unix)]
@@ -2510,61 +2534,32 @@ async fn test_build_change_broadcast_message_隠しパスは検証エラーをbr
 }
 
 #[tokio::test]
-async fn test_build_change_broadcast_message_正規化不能なbase外パスは検証エラーをbroadcastする() {
+async fn test_build_change_broadcast_message_正規化不能なpathはbroadcastをスキップする() {
     let base_dir = tempfile::tempdir().unwrap();
     let outside_dir = tempfile::tempdir().unwrap();
     let outside = outside_dir.path().join("missing.md");
     let state = create_directory_state(base_dir.path());
 
-    let message = build_change_broadcast_message(&state, &outside)
-        .await
-        .expect("base外path should broadcast a validation error");
+    let message = build_change_broadcast_message(&state, &outside).await;
 
-    match message {
-        BroadcastMessage::Error(msg) => {
-            assert!(
-                msg.contains("ファイル検証エラー"),
-                "検証エラーのprefixを期待: {}",
-                msg
-            );
-            assert!(
-                msg.contains("ディレクトリ外へのアクセスは禁止されています"),
-                "Traversalのエラー文言を期待: {}",
-                msg
-            );
-        }
-        other => panic!("Errorを期待したが {:?} を受信", other),
-    }
+    assert!(message.is_none(), "存在しない変更pathはbroadcastしない");
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_build_change_broadcast_message_非utf8相対パスは検証エラーをbroadcastする() {
+async fn test_build_change_broadcast_message_非utf8相対パスはbroadcastをスキップする() {
     let dir = tempfile::tempdir().unwrap();
     let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
     let target = dir.path().join(file_name);
     std::fs::write(&target, "# invalid").unwrap();
     let state = create_directory_state(dir.path());
 
-    let message = build_change_broadcast_message(&state, &target)
-        .await
-        .expect("non-UTF-8 path should broadcast a validation error");
+    let message = build_change_broadcast_message(&state, &target).await;
 
-    match message {
-        BroadcastMessage::Error(msg) => {
-            assert!(
-                msg.contains("ファイル検証エラー"),
-                "検証エラーのprefixを期待: {}",
-                msg
-            );
-            assert!(
-                msg.contains("無効なパスです"),
-                "InvalidPathのエラー文言を期待: {}",
-                msg
-            );
-        }
-        other => panic!("Errorを期待したが {:?} を受信", other),
-    }
+    assert!(
+        message.is_none(),
+        "watcher由来の非UTF-8 pathはbroadcastしない"
+    );
 }
 
 #[test]

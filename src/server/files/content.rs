@@ -158,8 +158,12 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
 
 /// ファイル変更イベントからブロードキャスト用メッセージを生成する。
 ///
-/// Noneを返した場合、ブロードキャストをスキップすべきことを示す
-/// （ディレクトリモードで相対パスが算出できない場合）。
+/// Noneを返した場合、ブロードキャストをスキップすべきことを示す。
+/// これは、対象なし、削除・rename中の一時不在、またはwatcher由来の
+/// 無効なpathをブラウザへ通知しない場合に発生する。
+///
+/// `Traversal` / `Hidden` / `NotMarkdown` / `Io` などの検証失敗は、
+/// セキュリティ境界の拒否や一時不在ではない異常としてError broadcastにする。
 pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
     changed_file: &Path,
@@ -172,6 +176,14 @@ pub(in crate::server) async fn build_change_broadcast_message(
             let file_label = change_error_file_label(state, changed_file);
             tracing::debug!(
                 "[markdown-view] 更新対象が削除または一時不在のためbroadcastをスキップ: {}",
+                file_label
+            );
+            None
+        }
+        ValidateRenderOutcome::ResolveFailed(ResolveFileError::InvalidPath) => {
+            let file_label = change_error_file_label(state, changed_file);
+            tracing::error!(
+                "[markdown-view] watcher由来の無効な更新pathを検出したためbroadcastをスキップ: {}",
                 file_label
             );
             None

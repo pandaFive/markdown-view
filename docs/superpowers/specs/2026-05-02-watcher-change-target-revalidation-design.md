@@ -29,14 +29,17 @@
 
 ディレクトリモードでは、`changed_file` から `base_dir` 相対パスを復元し、その文字列表現を `resolve_file(base_dir, relative)` に渡す。`resolve_file()` が返したcanonical pathを `ResolvedTarget` に入れるため、HTTP経路と同じ検証済みpathだけが後段へ流れる。
 
-相対化できない `changed_file` は `ResolveFileError::Traversal` として扱う。相対化できても `resolve_file()` が拒否した場合は、そのエラー種別を維持する。
+相対化できない `changed_file` は、存在するbase外ファイルやbase外symlinkなら `ResolveFileError::Traversal` として扱う。`changed_file` またはbaseが `NotFound` で正規化できない場合は、削除・rename中の一時不在として `ResolveFileError::NotFound` に分類する。その他のcanonicalize I/O失敗は `ResolveFileError::Io(ErrorKind)` に分類し、OS詳細をUIへ出さずに検証エラーとして扱う。相対化できても `resolve_file()` が拒否した場合は、そのエラー種別を維持する。
+
+relative pathをquery文字列へ戻す際は、各path componentを `to_str()` で確認し、非UTF-8 componentは `InvalidPath` として拒否する。これは `to_string_lossy()` による置換文字混入で別ファイル名に見えることを避けるためである。区切り文字はcomponent単位で `/` にjoinし、Unix上の `back\slash.md` のようなbackslashを含むファイル名は通常文字として保持する。
 
 ## エラー処理
 
 watcher変更通知では `ResolveFileError` を次のように扱う。
 
 - `NotFound`: broadcastをスキップする。削除済みファイル、rename中、atomic save中の一時不在を通常操作として扱う。ログは `tracing::debug!` で、サニタイズ済みパスとスキップ理由を残す。
-- `Traversal` / `Hidden` / `NotMarkdown` / `InvalidPath` / `EmptyPath`: 既存の `ResolveFailed` 経路に流し、`BroadcastMessage::Error` として通知する。
+- `InvalidPath`: watcher由来pathが非UTF-8等で表示・query化できない場合は、ブラウザへError broadcastせずローカルログに留める。HTTP/APIとWebSocket初期ロードのvalidationは従来通りuser-facing errorとして扱う。
+- `Traversal` / `Hidden` / `NotMarkdown` / `EmptyPath` / `Io` / `InternalState`: 既存の `ResolveFailed` 経路に流し、`BroadcastMessage::Error` として通知する。
 - `TooLarge` / UTF-8不正 / I/O失敗: 解決後の読込エラーとして既存の `ReadFailed` 経路を維持する。
 
 ログやエラーメッセージでファイルパスを扱う場合は、既存の `sanitize_path_for_logging()` を使い、外部入力由来になりうるwatcher pathをそのまま露出しない。
@@ -57,7 +60,9 @@ TDDで次の失敗テストを先に追加する。
 
 - watcher由来の通常 `.md` 変更は、`resolve_file()` 後のcanonical pathを返す。
 - watcher由来のhidden pathは `Hidden` で拒否される。
-- watcher由来のbase外pathは `Traversal` で拒否される。
+- watcher由来の既存base外pathは `Traversal` で拒否される。
+- watcher由来の存在しないpathまたは消えたbaseは `NotFound` でbroadcastをスキップする。
+- watcher由来の非UTF-8 pathはError broadcastせず、ローカルログのみになる。
 - watcher由来のsymlinkがbase外へ向く場合は `Traversal` で拒否される。
 - watcher由来の削除済み `.md` はbroadcastスキップ相当になる。
 - `build_change_broadcast_message()` で `NotFound` は `None`、境界違反は `Some(BroadcastMessage::Error(_))` になる。
