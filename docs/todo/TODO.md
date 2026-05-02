@@ -22,7 +22,7 @@
   - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。HTTP/API 用の404統一は維持しつつ、watcher変更通知用の内部経路だけはcanonicalizeの `NotFound` 以外のI/O種別を保持する。ディレクトリモードのbase 配下の削除済み・一時不在ファイルとwatcher由来の非UTF-8 pathは通知なしでスキップし、単一ファイルモードの監視対象消失は検証エラーとして通知する。既存base外・hidden・非 Markdown・非通常ファイル・base 外 symlinkは error broadcast する境界テストを追加
   - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
 
-- [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
+- [x] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
   - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
   - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
