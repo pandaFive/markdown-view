@@ -16,7 +16,7 @@
   - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
   - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
 
-- [ ] 監視イベント経由の変更ファイルを最終読込前に再検証する
+- [x] 監視イベント経由の変更ファイルを最終読込前に再検証する
   - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`, `src/watcher/strategy.rs`
   - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
   - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。削除済みファイルや canonicalize 失敗時の扱いは「安全側で error broadcast」になるよう統合テストを追加
