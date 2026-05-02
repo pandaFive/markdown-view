@@ -24,6 +24,7 @@ fn build_toc_html(headings: &[HeadingInfo]) -> String {
     for heading in headings {
         // 見出しレベルの急な深化を防止（h1→h4のような場合、h1→h2として扱う）
         // これにより<ul>の直接ネスト（<ul><ul>）を回避する
+        // 内部境界としてlevel=0が渡ってもh1相当に正規化し、インデックスOOBを防ぐ
         let level = heading.level.min(current_level.saturating_add(1)).max(1);
 
         // 深い階層から戻る場合は、開いているli/ulを閉じる
@@ -66,4 +67,25 @@ fn build_toc_html(headings: &[HeadingInfo]) -> String {
     }
 
     html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_toc_html, HeadingInfo};
+
+    #[test]
+    fn test_build_toc_htmlはlevel0をh1相当に正規化する() {
+        let headings = vec![HeadingInfo {
+            level: 0,
+            text: "Zero <Level>".to_string(),
+            id: "zero\"level".to_string(),
+        }];
+
+        let html = build_toc_html(&headings);
+
+        assert_eq!(
+            html,
+            "<ul>\n<li><a href=\"#zero&quot;level\">Zero &lt;Level&gt;</a></li>\n</ul>\n"
+        );
+    }
 }
