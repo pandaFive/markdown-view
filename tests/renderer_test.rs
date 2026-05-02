@@ -121,6 +121,36 @@ fn test_取消線() {
 }
 
 #[test]
+fn test_render_profileは脚注定義本文を表示対象にしない() {
+    let md = "本文です。[^note]\n\n[^note]: 検索専用の脚注本文";
+    let document = render_document(md);
+    let html = normalize_source_markup(document.content.as_str());
+
+    assert!(html.contains("<p>本文です。"));
+    assert!(html.contains(">^note</a>"));
+    assert!(html.contains(r#"href="検索専用の脚注本文""#));
+    assert!(!html.contains("[^note]: 検索専用の脚注本文"));
+    assert!(document.toc.as_str().is_empty());
+}
+
+#[test]
+fn test_render_profileはheading_attributesを表示idに採用しない() {
+    let md = "# 表示見出し {#custom-id}";
+    let document = render_document(md);
+
+    assert!(document
+        .content
+        .as_str()
+        .contains(r#"id="表示見出し-custom-id""#));
+    assert!(!document.content.as_str().contains(r#"id="custom-id""#));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(r##"href="#表示見出し-custom-id""##));
+    assert!(!document.toc.as_str().contains(r##"href="#custom-id""##));
+}
+
+#[test]
 fn test_コードブロック_ハイライト() {
     let md = "```rust\nfn main() {}\n```";
     let html = render_markdown(md);
