@@ -13,47 +13,26 @@
 ## File Structure
 
 - Modify: `src/renderer/toc.rs`
-  - `#[cfg(test)] mod tests` を追加する。
-  - `HeadingInfo.level=0` の境界テストを置く。
-  - 必要なら level 正規化コメントを 1 行だけ補う。
-- Modify: `docs/todo/TODO.md`
-  - 検証完了後、Medium Priority の `toc.rs` level=0 OOB ガード項目を完了済みにする。
+  - `#[cfg(test)] mod tests` を拡張する。
+  - `HeadingInfo.level=0` の単独、連続、ネスト復帰の境界テストを置く。
+  - level 正規化コメントで `1 <= level <= current_level + 1` と underflow/OOB 防止対象を明示する。
+- Unchanged: `docs/todo/TODO.md`
+  - このPRでは変更しない。TODO更新は merge 後の後続作業として扱う。
 - Reference only: `docs/superpowers/specs/2026-05-02-toc-level-zero-guard-design.md`
   - 実装判断の根拠。変更しない。
 
 ---
 
-### Task 1: TOC level=0 境界テストを追加する
+### Task 1: TOC level=0 境界テストを拡張する
 
 **Files:**
 - Modify: `src/renderer/toc.rs`
 
-- [ ] **Step 1: 境界テストを追加する**
+- [ ] **Step 1: 境界テストを拡張する**
 
-`src/renderer/toc.rs` の末尾に次のテストモジュールを追加する。
+`src/renderer/toc.rs` の既存テストモジュールで、単独 `level=0` ケースを維持しつつ、連続 `level=0` と `level=1 -> level=2 -> level=0` の復帰ケースを追加する。
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::{build_toc_html, HeadingInfo};
-
-    #[test]
-    fn test_build_toc_htmlはlevel0をh1相当に正規化する() {
-        let headings = vec![HeadingInfo {
-            level: 0,
-            text: "Zero <Level>".to_string(),
-            id: "zero\"level".to_string(),
-        }];
-
-        let html = build_toc_html(&headings);
-
-        assert_eq!(
-            html,
-            "<ul>\n<li><a href=\"#zero&quot;level\">Zero &lt;Level&gt;</a></li>\n</ul>\n"
-        );
-    }
-}
-```
+単独ケースの `id` は `r#"zero"level"#` 形式で表現し、期待値では既存どおり `&quot;` に escape されることを固定する。
 
 - [ ] **Step 2: 既存の正規化挙動が固定されることを確認する**
 
@@ -73,12 +52,12 @@ test renderer::toc::tests::test_build_toc_htmlはlevel0をh1相当に正規化�
 
 - [ ] **Step 3: 正規化コメントを補う**
 
-`src/renderer/toc.rs` の `let level = ...` 直前のコメントを次のように更新する。
+`src/renderer/toc.rs` の `let level = ...` 直前のコメントを次の趣旨へ更新する。
 
 ```rust
-        // 見出しレベルの急な深化を防止（h1→h4のような場合、h1→h2として扱う）
-        // これにより<ul>の直接ネスト（<ul><ul>）を回避する
-        // 内部境界としてlevel=0が渡ってもh1相当に正規化し、インデックスOOBを防ぐ
+        // 1 <= level <= current_level + 1 に正規化し、急な深化（h1→h4）はh1→h2として扱う
+        // HeadingInfo.levelはu8なので、内部境界として0が渡ってもh1相当に正規化する
+        // これにより<ul>の直接ネストと、後段のcurrent_level - 1によるunderflow/OOBを防ぐ
         let level = heading.level.min(current_level.saturating_add(1)).max(1);
 ```
 
@@ -127,28 +106,12 @@ Expected:
 
 ---
 
-### Task 2: TODO と全体検証を完了する
+### Task 2: 全体検証を完了する
 
 **Files:**
-- Modify: `docs/todo/TODO.md`
+- Unchanged: `docs/todo/TODO.md`
 
-- [ ] **Step 1: TODO の対象項目を完了済みにする**
-
-`docs/todo/TODO.md` の Medium Priority にある次の項目:
-
-```markdown
-- [ ] `toc.rs` の `build_toc_html` で `level=0` インデックス OOB ガードを入れる
-```
-
-を次に変更する。
-
-```markdown
-- [x] `toc.rs` の `build_toc_html` で `level=0` インデックス OOB ガードを入れる
-```
-
-本文説明は履歴として残し、チェックボックスだけを変更する。
-
-- [ ] **Step 2: 全体検証を実行する**
+- [ ] **Step 1: 全体検証を実行する**
 
 Run:
 
@@ -164,22 +127,7 @@ All checks passed
 
 実際のスクリプト出力が異なる場合でも、format、clippy、test がすべて成功して終了コード `0` なら合格とする。
 
-- [ ] **Step 3: TODO 更新をコミットする**
-
-Run:
-
-```bash
-git add docs/todo/TODO.md
-git commit -m "docs: TOC level=0ガードTODOを完了"
-```
-
-Expected:
-
-```text
-[docs/toc-level-zero-guard <hash>] docs: TOC level=0ガードTODOを完了
-```
-
-- [ ] **Step 4: 最終状態を確認する**
+- [ ] **Step 2: 最終状態を確認する**
 
 Run:
 
@@ -205,3 +153,4 @@ Expected:
 
 - `HeadingInfo.level` は引き続き `u8` のため、型レベルで `0` を禁止する設計ではない。今回の目的は、既存の正規化挙動を境界テストで固定することに限定する。
 - `NonZeroU8` 化は公開APIと renderer 呼び出し側への波及が大きいため、この作業では扱わない。
+- `docs/todo/TODO.md` の該当項目は、このPRの merge 後に後続作業で完了扱いへ更新する。
