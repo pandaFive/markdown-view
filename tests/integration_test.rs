@@ -1193,6 +1193,15 @@ async fn test_ディレクトリモード_検索apiは複数ファイルから�
     assert_eq!(json["query"].as_str().unwrap(), "alpha note");
     assert_eq!(json["searched_files"].as_u64().unwrap(), 2);
     assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
+    assert_eq!(json["truncated"].as_bool().unwrap(), false);
+    assert!(json["truncated_reasons"].as_array().unwrap().is_empty());
+    assert_eq!(json["limits"]["max_results"].as_u64().unwrap(), 100);
+    assert_eq!(json["limits"]["max_files"].as_u64().unwrap(), 1000);
+    assert_eq!(
+        json["limits"]["max_bytes"].as_u64().unwrap(),
+        64 * 1024 * 1024
+    );
+    assert!(json["searched_bytes"].as_u64().unwrap() > 0);
 
     let results = json["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
@@ -1202,6 +1211,32 @@ async fn test_ディレクトリモード_検索apiは複数ファイルから�
         .as_str()
         .unwrap()
         .contains("Alpha note appears here."));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchは結果数打ち切りをjsonで返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let markdown = (0..120)
+        .map(|index| format!("alpha note {index}."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+
+    let state = build_dir_state(dir.path());
+    let addr = spawn_test_server(state).await;
+    let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["truncated"].as_bool().unwrap(), true);
+    assert_eq!(json["truncated_reasons"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["truncated_reasons"][0].as_str().unwrap(),
+        "result_limit"
+    );
+    assert_eq!(json["results"].as_array().unwrap().len(), 100);
 }
 
 #[tokio::test]
