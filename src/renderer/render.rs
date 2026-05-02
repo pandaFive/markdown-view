@@ -4,12 +4,12 @@ use std::ops::Range;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Parser, Tag, TagEnd};
 use syntect::parsing::SyntaxSet;
 
+use crate::markdown::{markdown_options, MarkdownProfile};
+
 use super::line::{block_line_attrs, line_block_marker_with, source_line_attrs, LineLookup};
 use super::security::{html_escape, sanitize_link_href};
 use super::state::RenderState;
-use super::{
-    generate_unique_id, markdown_options, slugify, syntax_set, HeadingInfo, SanitizedHtml,
-};
+use super::{generate_unique_id, slugify, syntax_set, HeadingInfo, SanitizedHtml};
 
 pub(super) struct RenderOutput {
     pub(super) content: SanitizedHtml,
@@ -21,7 +21,8 @@ pub(super) fn render(input: &str) -> RenderOutput {
     let syntax_set = syntax_set();
     let mut context = RenderContext::new();
 
-    let parser = Parser::new_ext(input, markdown_options()).into_offset_iter();
+    let parser =
+        Parser::new_ext(input, markdown_options(MarkdownProfile::Render)).into_offset_iter();
     for (event, range) in parser {
         dispatch_event(event, range, &line_lookup, syntax_set, &mut context);
     }

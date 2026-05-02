@@ -1,11 +1,12 @@
 use std::ops::Range;
 use std::path::Path;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 use super::catalog::list_markdown_files;
 use super::content::read_markdown_with_limit;
 use super::resolve::resolve_file;
+use crate::markdown::{markdown_options, MarkdownProfile};
 
 const MAX_SEARCH_RESULTS: usize = 100;
 
@@ -133,17 +134,6 @@ pub(in crate::server) async fn search_directory(
     })
 }
 
-fn markdown_options() -> Options {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_FOOTNOTES);
-    options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
-    options.insert(Options::ENABLE_GFM);
-    options
-}
-
 fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     let mut blocks = Vec::new();
     let mut current_block = String::new();
@@ -152,8 +142,9 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     let mut link_depth = 0usize;
     let mut image_depth = 0usize;
     let mut code_block_depth = 0usize;
+    let mut inline_html_depth = 0usize;
 
-    for event in Parser::new_ext(markdown, markdown_options()) {
+    for event in Parser::new_ext(markdown, markdown_options(MarkdownProfile::Search)) {
         match event {
             Event::Start(tag) => {
                 if matches!(tag, Tag::Item) {
@@ -190,10 +181,18 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                         if block_depth == 0 {
                             finalize_search_block(&mut blocks, &current_block);
                             current_block.clear();
+                            inline_html_depth = 0;
                         }
                     }
                 } else if is_search_block_end_tag(&tag) {
                     block_depth = block_depth.saturating_sub(1);
+                    if !matches!(tag, TagEnd::Paragraph) {
+                        debug_assert_eq!(
+                            inline_html_depth, 0,
+                            "inline HTML depth must be balanced before non-paragraph block end"
+                        );
+                    }
+                    inline_html_depth = 0;
                     if block_depth == 0 {
                         finalize_search_block(&mut blocks, &current_block);
                         current_block.clear();
@@ -214,6 +213,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     link_depth,
                     image_depth,
                     code_block_depth,
+                    inline_html_depth,
                 ) {
                     current_block.push_str(&text);
                 }
@@ -225,6 +225,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     link_depth,
                     image_depth,
                     code_block_depth,
+                    inline_html_depth,
                 ) {
                     current_block.push_str(&text);
                 }
@@ -236,6 +237,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     link_depth,
                     image_depth,
                     code_block_depth,
+                    inline_html_depth,
                 ) && !current_block.ends_with('\n')
                 {
                     current_block.push('\n');
@@ -246,8 +248,8 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     current_block.push('\n');
                 }
             }
+            Event::InlineHtml(html) => update_inline_html_depth(&mut inline_html_depth, &html),
             Event::Html(_)
-            | Event::InlineHtml(_)
             | Event::TaskListMarker(_)
             | Event::InlineMath(_)
             | Event::DisplayMath(_)
@@ -268,12 +270,66 @@ fn should_capture_text(
     link_depth: usize,
     image_depth: usize,
     code_block_depth: usize,
+    inline_html_depth: usize,
 ) -> bool {
     block_depth > 0
         && item_depth <= 1
         && link_depth == 0
         && image_depth == 0
         && code_block_depth == 0
+        && inline_html_depth == 0
+}
+
+fn update_inline_html_depth(depth: &mut usize, html: &str) {
+    let trimmed = html.trim();
+    if !trimmed.starts_with('<') {
+        return;
+    }
+
+    if trimmed.starts_with("</") {
+        *depth = depth.saturating_sub(1);
+        return;
+    }
+
+    if trimmed.starts_with("<!") || trimmed.starts_with("<?") || trimmed.ends_with("/>") {
+        return;
+    }
+
+    if let Some(tag_name) = inline_html_tag_name(trimmed) {
+        if !is_void_html_tag(tag_name) {
+            *depth += 1;
+        }
+    }
+}
+
+fn inline_html_tag_name(html: &str) -> Option<&str> {
+    let without_lt = html.strip_prefix('<')?.trim_start();
+    let tag_name_end = without_lt
+        .char_indices()
+        .find_map(|(index, ch)| (!(ch.is_ascii_alphanumeric() || ch == '-')).then_some(index))
+        .unwrap_or(without_lt.len());
+
+    (tag_name_end > 0).then_some(&without_lt[..tag_name_end])
+}
+
+fn is_void_html_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name.to_ascii_lowercase().as_str(),
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 fn is_search_block_tag(tag: &Tag<'_>) -> bool {
@@ -533,6 +589,116 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "Paragraph with footnote.");
         assert_eq!(blocks[1].text, "hidden footnote body");
+    }
+
+    #[test]
+    fn test_search_profileは脚注定義本文を検索ブロック化する() {
+        let blocks = extract_search_blocks("本文です。[^note]\n\n[^note]: 検索専用の脚注本文");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "本文です。");
+        assert_eq!(blocks[1].text, "検索専用の脚注本文");
+    }
+
+    #[test]
+    fn test_search_profileはheading_attributes付き見出しの本文を検索対象にする() {
+        let blocks = extract_search_blocks("# 表示見出し {#custom-id}");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "表示見出し");
+    }
+
+    #[test]
+    fn test_search_profileでもraw_htmlとinline_htmlは検索対象にしない() {
+        let blocks = extract_search_blocks(
+            "<section>hidden html</section>\n\n本文 visible <span>hidden inline</span>",
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "本文 visible");
+    }
+
+    #[test]
+    fn test_search_profileはネストしたinline_html内テキストを検索対象にしない() {
+        let blocks = extract_search_blocks("before <span>a <span>b</span> c</span> tail");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "before  tail");
+    }
+
+    #[test]
+    fn test_search_profileは非paragraphブロック内inline_htmlを検索対象にしない() {
+        let blocks = extract_search_blocks(
+            "# 見出し <span>secret</span> tail\n\n> 引用 <span>hidden</span> tail\n\n| col |\n| --- |\n| セル <span>private</span> tail |",
+        );
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].text, "見出し  tail");
+        assert_eq!(blocks[1].text, "引用  tail");
+        assert_eq!(blocks[2].text, "col");
+        assert_eq!(blocks[3].text, "セル  tail");
+    }
+
+    #[test]
+    fn test_search_profileはvoidタグ後の同段落テキストを検索対象に含める() {
+        let blocks = extract_search_blocks("before <br> after\n\nimage <img src=\"x\"> tail");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "before  after");
+        assert_eq!(blocks[1].text, "image  tail");
+    }
+
+    #[test]
+    fn test_search_profileはハイフン付きcustom_element内テキストを検索対象にしない() {
+        let blocks = extract_search_blocks(
+            "before <img-card>hidden</img-card> after\n\nhead <wbr-widget>secret</wbr-widget> tail",
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "before  after");
+        assert_eq!(blocks[1].text, "head  tail");
+    }
+
+    #[test]
+    fn test_search_profileは自閉じタグ後の段落内テキストを検索対象に含める() {
+        let blocks = extract_search_blocks("before <custom/> after");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "before  after");
+    }
+
+    #[test]
+    fn test_search_profileはブロックhtml後の段落を検索対象にする() {
+        let blocks = extract_search_blocks("<section>hidden html</section>\n\n次の段落 visible");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "次の段落 visible");
+    }
+
+    #[test]
+    fn test_search_profileは未閉鎖inline_html後の次段落を検索対象にする() {
+        let blocks = extract_search_blocks("本文 <span>hidden\n\n次の段落 visible");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "本文");
+        assert_eq!(blocks[1].text, "次の段落 visible");
+    }
+
+    #[test]
+    fn test_search_profileはlist_item内の未閉鎖inline_html後の段落を検索対象にする() {
+        let blocks = extract_search_blocks("- first <span>hidden\n\n  second visible");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "first \nsecond visible");
+    }
+
+    #[test]
+    fn test_search_profileはlist_item内の未閉鎖inline_html後にlist外段落を検索対象にする() {
+        let blocks = extract_search_blocks("- first <span>hidden\n\noutside visible");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "first");
+        assert_eq!(blocks[1].text, "outside visible");
     }
 
     #[test]

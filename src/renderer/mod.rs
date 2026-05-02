@@ -11,7 +11,6 @@ mod state;
 
 use std::sync::OnceLock;
 
-use pulldown_cmark::Options;
 use syntect::highlighting::ThemeSet;
 use syntect::html::{css_for_theme_with_class_style, ClassStyle};
 use syntect::parsing::SyntaxSet;
@@ -153,14 +152,6 @@ body::before {
 }
 "#
     .to_string()
-}
-
-fn markdown_options() -> Options {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options
 }
 
 /// Markdownから抽出した見出し情報

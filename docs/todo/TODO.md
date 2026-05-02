@@ -10,7 +10,7 @@
   - 対応: 見出し抽出ループを単一にまとめ、`Vec<HeadingInfo>` を render と toc で共有する。`tests/renderer_test.rs:631` の不変条件テストを境界ケース（画像 alt + code 混在、SoftBreak）まで拡張
   - 理由: 仕様不変条件（render と toc は同じ id を出力する）が型・データフローで担保されておらず、リファクタで silent に乖離する経路が残る。既存 CLAUDE.md「2 回パース」記述を超えて、`search` 経由でも 3 回目が走る点も合わせて整理する
 
-- [ ] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
+- [x] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
   - ファイル: `src/renderer/mod.rs`, `src/server/files/search.rs`, `src/renderer/toc.rs`
   - 現状: renderer/TOC 側の `markdown_options()` は tables/tasklist/strikethrough のみ、検索側は footnotes/heading attributes/GFM も有効にしている。表示対象と検索対象の Markdown 解釈が暗黙に分岐している
   - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
