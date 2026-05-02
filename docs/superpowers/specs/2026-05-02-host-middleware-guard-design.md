@@ -10,7 +10,7 @@
 
 この変更は DNS Rebinding 対策の適用漏れを減らすためのセキュリティ境界整理である。既存の `ensure_allowed_request_host` が持つ許可条件、拒否時の `403` JSON 形状、監査ログ方針は維持する。
 
-WebSocket の不正 Host 拒否は Host middleware 経由になるため、エラーメッセージは従来の汎用的な `WebSocket接続元が許可されていません` ではなく、Host 拒否を示す `許可されていないHostヘッダーです` になる。これは Host 拒否経路と Origin 拒否経路を区別するための互換性上の変更として扱う。
+WebSocket の不正 Host 拒否は Host middleware 経由になるため、エラーメッセージは従来の汎用的な `WebSocket接続元が許可されていません` ではなく、Host 拒否を示す `許可されていないHostヘッダーです` になる。これは Host 拒否経路と Origin 拒否経路を区別するための互換性上の変更として扱う。HTTP status と JSON shape は維持するが、WS Host 拒否の `error` 文字列は外部観測可能な互換性変更であるため、PR 本文の Compatibility / Breaking Change にも明記する。
 
 ## 非目的
 
@@ -25,11 +25,11 @@ WebSocket の不正 Host 拒否は Host middleware 経由になるため、エ�
 
 `src/server/guards.rs` に axum middleware 用の Host 検証関数を追加する。middleware は request headers を使って既存の `ensure_allowed_request_host(&headers)` を呼び、許可なら `next.run(request).await` へ進め、拒否なら既存と同じ `ApiError` 応答を返す。
 
-`src/server/routes.rs` では route 登録を内部ヘルパーへ閉じ込め、その route 群へ Host middleware を layer として適用する。これにより `/`, `/api/content`, `/api/memo`, `/api/files`, `/api/search`, `/ws` が同じ Host 境界を通る。新規 route は Host middleware の後ろへ直接追加せず、必ず route 登録ヘルパー側へ追加する。
+`src/server/routes.rs` では route 登録を内部ヘルパーへ閉じ込め、その route 群へ Host middleware を layer として適用する。これにより `/`, `/api/content`, `/api/memo`, `/api/files`, `/api/search`, `/ws` が同じ Host 境界を通る。新規 route は Host middleware の後ろへ直接追加せず、必ず route 登録ヘルパー側へ追加する。route 登録ヘルパーは route 定義のみを持ち、共通 `.layer(...)` は `create_router()` 側で route 群全体へ適用する。
 
 middleware 化後、HTTP handler から手動 `ensure_allowed_request_host` 呼び出しを削除する。`ws_handler` では Host 検証を middleware に任せ、handler 内には既存の `Origin` 検証だけを残す。WebSocket は Host middleware と Origin 検証の二段構えにする。
 
-既存のレスポンスヘッダー layer は維持する。Host middleware の layer 順は、拒否時の JSON 応答にも必要なセキュリティヘッダーを付与できる順序にする。
+既存のレスポンスヘッダー layer は維持する。Host middleware の layer 順は、拒否時の JSON 応答にも必要なセキュリティヘッダーを付与できる順序にする。`Router::layer` は呼び出し時点で存在する route にだけ適用されるため、Host middleware 後に route を追加すると、その route は Host 検証を完全に bypass する。
 
 ## テスト方針
 

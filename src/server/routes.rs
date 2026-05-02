@@ -33,12 +33,12 @@ const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
     build_routes()
-        // 新規 route は必ず build_routes() 内へ追加する。ここより後ろへ
-        // `.route(...)` を足すと Host middleware の外側になり、DNS Rebinding
-        // 防御の適用漏れになる。
+        // `Router::layer` は呼び出し時点で存在する route にだけ適用される。
+        // 新規 route は必ず build_routes() 内へ追加し、ここより後ろへ
+        // `.route(...)` を足して Host middleware を完全に bypass させないこと。
         .layer(middleware::from_fn(require_allowed_request_host))
         // Host 拒否の 403 JSON にも security headers を付与するため、
-        // response header layer は Host middleware の外側に置く。
+        // 後から追加した response header layer が拒否 response も処理する順に置く。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -59,6 +59,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Host middleware 適用前の route 定義だけを集約する。
+///
+/// ここでは route 登録だけを行い、共通 `.layer(...)` は追加しない。
+/// 共通 security layer は `create_router` 側で route 群全体へ適用する。
 fn build_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(index_handler))
@@ -202,8 +206,11 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Host は router middleware で先に検証済み。ここでは WS 固有の
-    // Origin authority 一致だけを検証する。`is_allowed_ws_origin` 内の
-    // Host 再検証は defense-in-depth と拒否理由ログの分類のため維持する。
+    // Origin authority 一致だけを検証する。
+    // `is_allowed_ws_origin` 内の Host 再検証は middleware 後段では
+    // 構造上到達不能だが、将来の bypass に対する defense-in-depth として残す。
+    // ログ分類の主眼は MissingOrigin/UnsupportedScheme/AuthorityMismatch など
+    // Origin 系拒否の段階化。
     if !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();

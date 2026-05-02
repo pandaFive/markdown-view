@@ -638,13 +638,17 @@ async fn test_host_middlewareはbody付きmemo_putもbody_limit前に不正host�
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
+    let oversized_raw = "x".repeat(21 * 1024 * 1024);
+    let body = serde_json::json!({
+        "raw": oversized_raw
+    })
+    .to_string();
 
     let resp = client
         .put(format!("http://{}/api/memo", addr))
         .header("Host", &attack_host)
-        .json(&serde_json::json!({
-            "raw": "blocked memo"
-        }))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
         .send()
         .await
         .unwrap();
@@ -688,7 +692,7 @@ async fn test_apiメモ_getは不正hostを拒否する() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_forbidden_with_security_headers(&resp);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert!(json["error"].as_str().is_some());
 }
@@ -709,7 +713,7 @@ async fn test_apiメモ_putは不正hostを拒否する() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_forbidden_with_security_headers(&resp);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert!(json["error"].as_str().is_some());
 }
