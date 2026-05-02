@@ -290,7 +290,8 @@ pub(super) fn normalize_authority(authority: &str) -> String {
 #[cfg(test)]
 mod tests {
     use axum::http::header::{HOST, ORIGIN};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::{middleware, routing::get, Router};
 
     use super::*;
 
@@ -415,6 +416,42 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "evil.example:3000".parse().unwrap());
         assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[tokio::test]
+    async fn test_host_middlewareは不正hostを拒否して許可hostを通す() {
+        let app = Router::new()
+            .route("/probe", get(|| async { "ok" }))
+            .layer(middleware::from_fn(require_allowed_request_host));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let attack_host = format!("evil.example:{}", addr.port());
+        let rejected = client
+            .get(format!("http://{}/probe", addr))
+            .header("Host", &attack_host)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        let json: serde_json::Value = rejected.json().await.unwrap();
+        assert!(json["error"].as_str().is_some());
+
+        let allowed = client
+            .get(format!("http://{}/probe", addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(allowed.text().await.unwrap(), "ok");
     }
 
     #[test]
