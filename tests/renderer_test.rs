@@ -893,6 +893,20 @@ fn test_render_documentはraw_htmlを破棄しtocをescapeする() {
 }
 
 #[test]
+fn test_render_documentは未閉鎖script後もmarkdown構造を維持する() {
+    let md = "# A <script>bad\n\nAfter";
+    let document = render_document(md);
+    let content = normalize_source_markup(document.content.as_str());
+
+    assert_eq!(document.headings[0].text, "A bad");
+    assert_eq!(document.headings[0].id, "a-bad");
+    assert!(!content.contains("<script>"));
+    assert!(content.contains(r##"<h1 id="a-bad">A bad</h1>"##));
+    assert!(content.contains("<p>After</p>"));
+    assert!(document.toc.as_str().contains(r##"href="#a-bad""##));
+}
+
+#[test]
 fn test_extract_headingsはrender_documentのheadingsと一致する() {
     let md = "# A `code`\n\n## ![logo](x.png) B\n\n# A `code`";
 
