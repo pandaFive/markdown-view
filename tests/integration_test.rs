@@ -824,7 +824,7 @@ async fn test_ファイル変更でwebsocket更新() {
 }
 
 #[tokio::test]
-async fn test_ファイル削除でwebsocketエラー通知() {
+async fn test_ファイル削除でwebsocket通知をスキップする() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("watch_delete.md");
     tokio::fs::write(&file_path, "# Before").await.unwrap();
@@ -841,13 +841,12 @@ async fn test_ファイル削除でwebsocketエラー通知() {
 
     tokio::fs::remove_file(&file_path).await.unwrap();
 
-    let msg = next_ws_message(&mut read).await;
-
-    let text = msg.into_text().unwrap();
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let error = json["error"].as_str().expect("errorフィールドが存在する");
-    assert!(error.contains("ファイル検証エラー"));
-    assert!(error.contains("watch_delete.md"));
+    let result = tokio::time::timeout(Duration::from_millis(800), read.next()).await;
+    assert!(
+        result.is_err(),
+        "ファイル削除ではWebSocket通知を送信しない想定だが {:?} を受信",
+        result
+    );
     watch_service.shutdown().await;
 }
 
