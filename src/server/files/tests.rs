@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(unix)]
@@ -2391,6 +2391,20 @@ fn test_resolve_change_target_ディレクトリ変更の正規化不能なbase�
 
 #[cfg(unix)]
 #[test]
+fn test_resolve_change_target_ディレクトリ変更の非utf8相対パスは拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
+    let target = dir.path().join(file_name);
+    std::fs::write(&target, "# invalid").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::InvalidPath)));
+}
+
+#[cfg(unix)]
+#[test]
 fn test_resolve_change_target_ディレクトリ変更のbase外symlinkは拒否する() {
     let base_dir = tempfile::tempdir().unwrap();
     let outside_dir = tempfile::tempdir().unwrap();
@@ -2479,6 +2493,36 @@ async fn test_build_change_broadcast_message_正規化不能なbase外パスは�
             assert!(
                 msg.contains("ディレクトリ外へのアクセスは禁止されています"),
                 "Traversalのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_非utf8相対パスは検証エラーをbroadcastする() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
+    let target = dir.path().join(file_name);
+    std::fs::write(&target, "# invalid").unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("non-UTF-8 path should broadcast a validation error");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("無効なパスです"),
+                "InvalidPathのエラー文言を期待: {}",
                 msg
             );
         }

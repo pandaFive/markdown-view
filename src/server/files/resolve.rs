@@ -288,7 +288,10 @@ fn resolve_directory_change_target(
     };
 
     let relative = relative_change_path(base_dir, changed_file)?;
-    let relative_string = relative.to_string_lossy().replace('\\', "/");
+    let relative_string = relative
+        .to_str()
+        .ok_or(ResolveFileError::InvalidPath)?
+        .replace('\\', "/");
     let validated_path = resolve_file(base_dir, &relative_string)?;
     Ok(Some(build_resolved_target(
         state,
