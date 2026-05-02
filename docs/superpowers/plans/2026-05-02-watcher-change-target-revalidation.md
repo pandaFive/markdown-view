@@ -4,7 +4,7 @@
 
 **Goal:** watcher経由のディレクトリ変更イベントを読込直前にHTTP経路と同等の検証へ通し、安全なcanonical pathだけを描画する。
 
-**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、`NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。存在するが通常ファイルでない `.md` は `NotFile`、存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
+**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、ディレクトリモードの `NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。単一ファイルモードの `NotFound` は監視対象消失として検証エラーを通知する。存在するが通常ファイルでない `.md` は `NotFile`、存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
 
 **Tech Stack:** Rust, axum, tokio, tempfile, `cargo test`, `./verify.sh`
 
@@ -21,9 +21,9 @@
   - `resolve_change_target()` の単一ファイル分岐を再検証済みcanonical path利用へ寄せる。
   - `resolve_directory_change_target()` と `relative_change_path()` を追加する。
 - Modify: `src/server/files/content.rs`
-  - watcher変更通知で `ResolveFileError::NotFound` をbroadcastスキップへ変換する。
+  - watcher変更通知でディレクトリモードの `ResolveFileError::NotFound` をbroadcastスキップへ変換する。
   - watcher由来の `ResolveFileError::InvalidPath` をブラウザへ送らず、ローカルログに留める。
-  - WebSocket受信者なしログでも `NotFound` はローカルエラー扱いにしない。
+  - WebSocket受信者なしログでもディレクトリモードの `NotFound` はローカルエラー扱いにしない。
 - Modify: `docs/todo/TODO.md`
   - 実装と検証完了後、対象High Priority項目を完了済みにする。
 

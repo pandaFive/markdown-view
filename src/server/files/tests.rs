@@ -2524,6 +2524,25 @@ async fn test_build_change_broadcast_message_削除済みディレクトリ変�
     assert!(message.is_none(), "削除済みファイルはbroadcastしない");
 }
 
+#[tokio::test]
+async fn test_build_change_broadcast_message_削除済み単一ファイルは検証エラーをbroadcastする() {
+    let (_dir, file_path) = create_markdown_fixture("deleted.md", "# deleted");
+    let state = create_single_file_state(&file_path);
+
+    std::fs::remove_file(&file_path).unwrap();
+    let message = build_change_broadcast_message(&state, &file_path)
+        .await
+        .expect("単一ファイルの削除は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(message) => {
+            assert!(message.contains("ファイル検証エラー"));
+            assert!(message.contains("ファイルが見つかりません"));
+        }
+        other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+    }
+}
+
 #[test]
 fn test_resolve_file_mdディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();

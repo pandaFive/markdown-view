@@ -147,7 +147,7 @@ mod tests {
 
         let received = timeout(Duration::from_millis(100), rx.recv())
             .await
-            .expect("検証エラーのbroadcastを期待")
+            .expect("Updateのbroadcastを期待")
             .unwrap();
         match received {
             BroadcastMessage::Error(message) => {
@@ -191,7 +191,10 @@ mod tests {
 
         notify_update(&state, Path::new("/")).await;
 
-        let received = rx.recv().await.unwrap();
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("検証エラーのbroadcastを期待")
+            .unwrap();
         match received {
             BroadcastMessage::Update(update) => {
                 assert!(update.content().as_str().contains("dummy"));
@@ -202,17 +205,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_notify_update_単一ファイルモードで削除済みファイルは送信をスキップする() {
+    async fn test_notify_update_単一ファイルモードで削除済みファイルは検証エラーを送信する() {
         let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
         let mut rx = state.tx().subscribe();
 
         std::fs::remove_file(&file_path).unwrap();
         notify_update(&state, &file_path).await;
 
-        assert!(matches!(
-            rx.try_recv(),
-            Err(broadcast::error::TryRecvError::Empty)
-        ));
+        let received = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("検証エラーのbroadcastを期待")
+            .unwrap();
+        match received {
+            BroadcastMessage::Error(message) => {
+                assert!(message.contains("ファイル検証エラー"));
+                assert!(message.contains("ファイルが見つかりません"));
+                assert!(message.contains("test.md"));
+            }
+            other => panic!("Errorメッセージを期待したが {:?} を受信", other),
+        }
     }
 
     #[tokio::test]
@@ -276,7 +287,7 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn test_notify_update_受信者ゼロ時のnot_foundはwarnログに残さない() {
+    async fn test_notify_update_単一ファイルモード受信者ゼロ時のnot_foundはwarnログに残す() {
         let (_dir, file_path, state) =
             create_single_file_state_with_fixture("missing.md", "# missing");
         let rx = state.tx().subscribe();
@@ -285,10 +296,12 @@ mod tests {
         std::fs::remove_file(&file_path).unwrap();
         notify_update(&state, &file_path).await;
 
-        assert!(!logs_contain(
+        assert!(logs_contain(
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(!logs_contain("更新時ファイル検証失敗"));
+        assert!(logs_contain("更新時ファイル検証失敗"));
+        assert!(logs_contain("ファイルが見つかりません"));
+        assert!(!logs_contain("更新時読み込みエラー"));
     }
 
     #[traced_test]
