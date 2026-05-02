@@ -100,3 +100,16 @@ fn test_slugify_日本語見出しはsection連番で一意化される() {
     assert!(toc.as_str().contains(r##"href="#日本語見出し""##));
     assert!(toc.as_str().contains(r##"href="#日本語見出し-1""##));
 }
+
+#[test]
+fn test_generate_tocはrender_documentのtocと一致する() {
+    let md = "# A `code`\n\n## ![logo](x.png) B\n\n# A `code`";
+
+    let toc = generate_toc(md);
+    let document = markdown_view::renderer::render_document(md);
+
+    assert_eq!(toc, document.toc);
+    assert!(toc.as_str().contains(r##"href="#a-code""##));
+    assert!(toc.as_str().contains(r##"href="#b""##));
+    assert!(toc.as_str().contains(r##"href="#a-code-1""##));
+}

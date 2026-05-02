@@ -4,7 +4,7 @@
 
 ## High Priority
 
-- [ ] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
+- [x] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
   - ファイル: `src/renderer/render.rs` L250-260, `src/renderer/mod.rs` L150-214, `src/renderer/toc.rs`
   - 現状: `handle_heading_end`（render 側）と `extract_headings`（toc 側）がそれぞれ独自の `id_counts: HashMap<String, usize>` を持ち、pulldown-cmark を 2 回パースする。`extract_headings` は `Tag::Image` を見出しテキストから明示除外するが SoftBreak の `in_heading_image` チェック非対称（`mod.rs:181-189`）。画像 alt + `Event::Code` 混在見出しで TOC ID と本文 `<h{n} id=...>` が乖離し得る
   - 対応: 見出し抽出ループを単一にまとめ、`Vec<HeadingInfo>` を render と toc で共有する。`tests/renderer_test.rs:631` の不変条件テストを境界ケース（画像 alt + code 混在、SoftBreak）まで拡張

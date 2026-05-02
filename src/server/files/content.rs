@@ -9,12 +9,11 @@ use super::resolve::{
     file_display_name, resolve_change_target, resolve_single_file_target, ResolveFileError,
     ResolvedTarget, RouteTargetRequest,
 };
-use crate::renderer::render_markdown;
+use crate::renderer::render_document;
 use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::{ApiError, BroadcastMessage, LaggedRecoveryMessage};
 use crate::server::state::AppState;
 use crate::template::{error_message_json, UpdateMessage};
-use crate::toc::generate_toc;
 
 /// ファイルサイズ上限: OOM防止
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -369,9 +368,6 @@ pub(super) async fn read_bytes_with_limit(
 /// ファイルを読み込み、Markdown→HTML変換とTOC生成を行いUpdateMessageとして返す
 async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMarkdownError> {
     let markdown = read_markdown_with_limit(file_path).await?;
-    Ok(UpdateMessage::new(
-        render_markdown(&markdown),
-        generate_toc(&markdown),
-        None,
-    ))
+    let document = render_document(&markdown);
+    Ok(UpdateMessage::new(document.content, document.toc, None))
 }
