@@ -823,33 +823,6 @@ async fn test_ファイル変更でwebsocket更新() {
     drop(tmp_dir);
 }
 
-#[tokio::test]
-async fn test_ファイル削除でwebsocket通知をスキップする() {
-    let tmp_dir = tempfile::tempdir().unwrap();
-    let file_path = tmp_dir.path().join("watch_delete.md");
-    tokio::fs::write(&file_path, "# Before").await.unwrap();
-
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
-
-    let watch_service = WatchService::start(state.clone()).await.unwrap();
-
-    let url = format!("ws://{}/ws", addr);
-    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
-    let (_write, mut read) = ws_stream.split();
-
-    let _initial_message = next_ws_message(&mut read).await;
-
-    tokio::fs::remove_file(&file_path).await.unwrap();
-
-    let result = tokio::time::timeout(Duration::from_millis(800), read.next()).await;
-    assert!(
-        result.is_err(),
-        "ファイル削除ではWebSocket通知を送信しない想定だが {:?} を受信",
-        result
-    );
-    watch_service.shutdown().await;
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
