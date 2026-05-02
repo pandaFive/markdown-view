@@ -396,7 +396,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
     }
 
     if !canonical.is_file() {
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::NotFile);
     }
 
     match canonical.extension() {
@@ -426,7 +426,7 @@ pub(super) fn revalidate_single_file_target(
         return Err(ResolveFileError::Traversal);
     }
     if !canonical.is_file() {
-        return Err(ResolveFileError::NotFound);
+        return Err(ResolveFileError::NotFile);
     }
 
     match canonical.extension() {
@@ -443,6 +443,8 @@ pub enum ResolveFileError {
     InvalidPath,
     /// ファイルが見つからない
     NotFound,
+    /// 通常ファイルではない
+    NotFile,
     /// ディレクトリトラバーサル検出
     Traversal,
     /// Markdownファイルではない
@@ -461,6 +463,7 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::EmptyPath => write!(f, "ファイルパスが空です"),
             ResolveFileError::InvalidPath => write!(f, "無効なパスです"),
             ResolveFileError::NotFound => write!(f, "ファイルが見つかりません"),
+            ResolveFileError::NotFile => write!(f, "通常ファイルではありません"),
             ResolveFileError::Traversal => {
                 write!(f, "ディレクトリ外へのアクセスは禁止されています")
             }

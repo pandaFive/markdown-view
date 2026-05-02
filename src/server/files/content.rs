@@ -162,8 +162,8 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
 /// これは、対象なし、削除・rename中の一時不在、またはwatcher由来の
 /// 無効なpathをブラウザへ通知しない場合に発生する。
 ///
-/// `Traversal` / `Hidden` / `NotMarkdown` / `Io` / `InternalState` などの検証失敗は、
-/// セキュリティ境界の拒否、一時不在ではない異常、または内部不整合として
+/// `NotFile` / `Traversal` / `Hidden` / `NotMarkdown` / `Io` / `InternalState`
+/// などの検証失敗は、セキュリティ境界の拒否、一時不在ではない異常、または内部不整合として
 /// Error broadcastにする。
 pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
@@ -204,6 +204,7 @@ pub(in crate::server) async fn build_change_broadcast_message(
         }
         ValidateRenderOutcome::ResolveFailed(
             error @ (ResolveFileError::EmptyPath
+            | ResolveFileError::NotFile
             | ResolveFileError::Traversal
             | ResolveFileError::NotMarkdown
             | ResolveFileError::Hidden

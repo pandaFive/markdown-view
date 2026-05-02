@@ -589,10 +589,10 @@ fn test_resolve_file_nulバイト拒否() {
 }
 
 #[test]
-fn test_resolve_file_ディレクトリパス拒否() {
+fn test_resolve_file_ディレクトリパスはnotfileを返す() {
     let dir = create_test_dir();
     let result = resolve_file(dir.path(), "docs");
-    assert_eq!(result, Err(ResolveFileError::NotFound));
+    assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
 #[test]
@@ -2524,6 +2524,56 @@ async fn test_build_change_broadcast_message_削除済みディレクトリ変�
     assert!(message.is_none(), "削除済みファイルはbroadcastしない");
 }
 
+#[test]
+fn test_resolve_file_mdディレクトリはnotfileを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("folder.md")).unwrap();
+
+    let result = resolve_file(dir.path(), "folder.md");
+
+    assert_eq!(result, Err(ResolveFileError::NotFile));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ変更のmdディレクトリはnotfileを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("folder.md");
+    std::fs::create_dir(&target).unwrap();
+    let state = create_directory_state(dir.path());
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::NotFile)));
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_mdディレクトリは検証エラーをbroadcastする() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("folder.md");
+    std::fs::create_dir(&target).unwrap();
+    let state = create_directory_state(dir.path());
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("通常ファイルでない更新対象は検証エラーをbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("通常ファイルではありません"),
+                "NotFileのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_build_change_broadcast_message_unixのbackslashファイル名をupdateに保持する() {
@@ -2663,11 +2713,11 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
 }
 
 #[test]
-fn test_revalidate_single_file_target_ディレクトリはnotfoundを返す() {
+fn test_revalidate_single_file_target_ディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
     let canonical = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &canonical);
-    assert_eq!(result, Err(ResolveFileError::NotFound));
+    assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
 #[test]

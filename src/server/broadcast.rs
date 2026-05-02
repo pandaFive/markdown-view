@@ -340,8 +340,7 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn test_notify_update_ディレクトリモード受信者ゼロ時のmdディレクトリはwarnログに残さない()
-    {
+    async fn test_notify_update_ディレクトリモード受信者ゼロ時のmdディレクトリはwarnログに残す() {
         let base_dir = tempfile::tempdir().unwrap();
         let target = base_dir.path().join("docs.md");
         std::fs::create_dir(&target).unwrap();
@@ -352,10 +351,11 @@ mod tests {
 
         notify_update(&state, &target).await;
 
-        assert!(!logs_contain(
+        assert!(logs_contain(
             "WebSocket受信者がいないため更新時ファイル変更エラーをローカル記録しました"
         ));
-        assert!(!logs_contain("更新時ファイル検証失敗"));
+        assert!(logs_contain("更新時ファイル検証失敗"));
+        assert!(logs_contain("通常ファイルではありません"));
         assert!(!logs_contain("更新時読み込みエラー"));
     }
 

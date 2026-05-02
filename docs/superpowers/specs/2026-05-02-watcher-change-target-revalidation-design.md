@@ -39,7 +39,7 @@ watcher変更通知では `ResolveFileError` を次のように扱う。
 
 - `NotFound`: broadcastをスキップする。削除済みファイル、rename中、atomic save中の一時不在を通常操作として扱う。ログは `tracing::debug!` で、サニタイズ済みパスとスキップ理由を残す。
 - `InvalidPath`: watcher由来pathが非UTF-8等で表示・query化できない場合は、ブラウザへError broadcastせずローカルログに留める。HTTP/APIとWebSocket初期ロードのvalidationは従来通りuser-facing errorとして扱う。
-- `Traversal` / `Hidden` / `NotMarkdown` / `EmptyPath` / `Io` / `InternalState`: 既存の `ResolveFailed` 経路に流し、`BroadcastMessage::Error` として通知する。`Io` は `ErrorKind` を表示して切り分け可能にし、`InternalState` は内部不整合として `error!` ログにする。
+- `NotFile` / `Traversal` / `Hidden` / `NotMarkdown` / `EmptyPath` / `Io` / `InternalState`: 既存の `ResolveFailed` 経路に流し、`BroadcastMessage::Error` として通知する。`Io` は `ErrorKind` を表示して切り分け可能にし、`InternalState` は内部不整合として `error!` ログにする。
 - `TooLarge` / UTF-8不正 / I/O失敗: 解決後の読込エラーとして既存の `ReadFailed` 経路を維持する。
 
 ログやエラーメッセージでファイルパスを扱う場合は、既存の `sanitize_path_for_logging()` を使い、外部入力由来になりうるwatcher pathをそのまま露出しない。
@@ -60,13 +60,14 @@ TDDで次の失敗テストを先に追加する。
 
 - watcher由来の通常 `.md` 変更は、`resolve_file()` 後のcanonical pathを返す。
 - watcher由来のhidden pathは `Hidden` で拒否される。
+- watcher由来の `.md` ディレクトリは `NotFile` で拒否され、Error broadcastになる。
 - watcher由来の既存base外pathは `Traversal` で拒否される。
 - watcher由来の存在しないpathまたは消えたbaseは `NotFound` でbroadcastをスキップする。
 - watcher由来のcanonicalize I/O失敗は `Io(ErrorKind)` としてError broadcastになり、`PermissionDenied` 等の種別を含む。
 - watcher由来の非UTF-8 pathはError broadcastせず、ローカルログのみになる。
 - watcher由来のsymlinkがbase外へ向く場合は `Traversal` で拒否される。
 - watcher由来の削除済み `.md` はbroadcastスキップ相当になる。
-- `build_change_broadcast_message()` で `NotFound` は `None`、境界違反は `Some(BroadcastMessage::Error(_))` になる。
+- `build_change_broadcast_message()` で `NotFound` は `None`、非通常ファイルや境界違反は `Some(BroadcastMessage::Error(_))` になる。
 
 完了前に `./verify.sh` を実行する。途中確認では対象unit testと `cargo test --test integration_test` を使う。
 
@@ -75,7 +76,7 @@ TDDで次の失敗テストを先に追加する。
 - watcher経由のディレクトリ変更イベントは、読込直前にHTTP経路と同等のファイル検証を通る。
 - `read_and_render_file()` へ渡るpathは検証済みcanonical pathである。
 - 削除済みまたは一時不在の `.md` はUIに不要なエラーを出さない。
-- base外、hidden、非Markdown、base外symlinkはError broadcastになる。
+- base外、hidden、非Markdown、非通常ファイル、base外symlinkはError broadcastになる。
 - 単一ファイルモードの既存動作は維持される。
 - HTTP、memo、search経路の仕様は変わらない。
 - 追加テストと `./verify.sh` が通る。

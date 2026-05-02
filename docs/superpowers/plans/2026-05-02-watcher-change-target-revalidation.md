@@ -4,7 +4,7 @@
 
 **Goal:** watcher経由のディレクトリ変更イベントを読込直前にHTTP経路と同等の検証へ通し、安全なcanonical pathだけを描画する。
 
-**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、`NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
+**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、`NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。存在するが通常ファイルでない `.md` は `NotFile`、存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
 
 **Tech Stack:** Rust, axum, tokio, tempfile, `cargo test`, `./verify.sh`
 
