@@ -32,19 +32,13 @@ const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
-    Router::new()
-        .route("/", get(index_handler))
-        .route("/ws", get(ws_handler))
-        .route("/api/content", get(api_content_handler))
-        .route("/api/search", get(api_search_handler))
-        .route(
-            "/api/memo",
-            get(api_memo_handler)
-                .put(api_memo_save_handler)
-                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
-        )
-        .route("/api/files", get(api_files_handler))
+    build_routes()
+        // 新規 route は必ず build_routes() 内へ追加する。ここより後ろへ
+        // `.route(...)` を足すと Host middleware の外側になり、DNS Rebinding
+        // 防御の適用漏れになる。
         .layer(middleware::from_fn(require_allowed_request_host))
+        // Host 拒否の 403 JSON にも security headers を付与するため、
+        // response header layer は Host middleware の外側に置く。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -63,6 +57,21 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             csp_header,
         ))
         .with_state(state)
+}
+
+fn build_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/", get(index_handler))
+        .route("/ws", get(ws_handler))
+        .route("/api/content", get(api_content_handler))
+        .route("/api/search", get(api_search_handler))
+        .route(
+            "/api/memo",
+            get(api_memo_handler)
+                .put(api_memo_save_handler)
+                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
+        )
+        .route("/api/files", get(api_files_handler))
 }
 
 /// クエリパラメータ
@@ -192,6 +201,9 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Host は router middleware で先に検証済み。ここでは WS 固有の
+    // Origin authority 一致だけを検証する。`is_allowed_ws_origin` 内の
+    // Host 再検証は defense-in-depth と拒否理由ログの分類のため維持する。
     if !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();

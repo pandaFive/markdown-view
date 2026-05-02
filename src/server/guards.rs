@@ -67,7 +67,14 @@ pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), Api
     }
 }
 
-/// Host 検証を全 route へ適用する axum middleware。
+/// Host 検証を通過したリクエストだけを後続 route へ渡す axum middleware。
+///
+/// 拒否時の warn 監査ログと `403` JSON 応答は
+/// `ensure_allowed_request_host` に委譲する。許可時だけ `next.run` を呼び、
+/// handler 側で Host 検証を重複実装しないための共通境界として使う。
+///
+/// 適用範囲は呼び出し側の `Router::layer` 配置で決まるため、route 追加時は
+/// `create_router` 側の Host middleware 配下に入る構造を維持すること。
 pub(super) async fn require_allowed_request_host(request: Request, next: Next) -> Response {
     if let Err(error) = ensure_allowed_request_host(request.headers()) {
         return error.into_response();

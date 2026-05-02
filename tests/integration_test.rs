@@ -613,7 +613,13 @@ async fn test_host_middlewareは全http_routeの不正hostを拒否する() {
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
-    for path in ["/", "/api/content", "/api/memo", "/api/search?q=test"] {
+    for path in [
+        "/",
+        "/api/content",
+        "/api/memo",
+        "/api/files",
+        "/api/search?q=test",
+    ] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .header("Host", &attack_host)
@@ -621,27 +627,52 @@ async fn test_host_middlewareは全http_routeの不正hostを拒否する() {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
-        assert_eq!(
-            resp.headers()
-                .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|value| value.to_str().ok()),
-            Some("nosniff")
-        );
-        assert_eq!(
-            resp.headers()
-                .get(reqwest::header::X_FRAME_OPTIONS)
-                .and_then(|value| value.to_str().ok()),
-            Some("DENY")
-        );
-        assert!(resp
-            .headers()
-            .get(reqwest::header::CONTENT_SECURITY_POLICY)
-            .and_then(|value| value.to_str().ok())
-            .is_some());
+        assert_forbidden_with_security_headers(&resp);
         let json: serde_json::Value = resp.json().await.unwrap();
         assert!(json["error"].as_str().is_some());
     }
+}
+
+#[tokio::test]
+async fn test_host_middlewareはbody付きmemo_putもbody_limit前に不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+
+    let resp = client
+        .put(format!("http://{}/api/memo", addr))
+        .header("Host", &attack_host)
+        .json(&serde_json::json!({
+            "raw": "blocked memo"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_forbidden_with_security_headers(&resp);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "許可されていないHostヘッダーです");
+}
+
+fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::X_FRAME_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    assert!(resp
+        .headers()
+        .get(reqwest::header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .is_some());
 }
 
 #[tokio::test]

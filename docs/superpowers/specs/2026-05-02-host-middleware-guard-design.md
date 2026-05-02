@@ -8,7 +8,9 @@
 
 `Host` 検証を handler ごとの手動呼び出しから `create_router()` 配下の共通 middleware に移し、新規 HTTP route 追加時の検証漏れを構造的に防ぐ。
 
-この変更は DNS Rebinding 対策の適用漏れを減らすためのセキュリティ境界整理である。既存の `ensure_allowed_request_host` が持つ許可条件、拒否時の `403` JSON 応答、監査ログ方針は維持する。
+この変更は DNS Rebinding 対策の適用漏れを減らすためのセキュリティ境界整理である。既存の `ensure_allowed_request_host` が持つ許可条件、拒否時の `403` JSON 形状、監査ログ方針は維持する。
+
+WebSocket の不正 Host 拒否は Host middleware 経由になるため、エラーメッセージは従来の汎用的な `WebSocket接続元が許可されていません` ではなく、Host 拒否を示す `許可されていないHostヘッダーです` になる。これは Host 拒否経路と Origin 拒否経路を区別するための互換性上の変更として扱う。
 
 ## 非目的
 
@@ -23,17 +25,17 @@
 
 `src/server/guards.rs` に axum middleware 用の Host 検証関数を追加する。middleware は request headers を使って既存の `ensure_allowed_request_host(&headers)` を呼び、許可なら `next.run(request).await` へ進め、拒否なら既存と同じ `ApiError` 応答を返す。
 
-`src/server/routes.rs` では `create_router()` に定義された route 群へ Host middleware を layer として適用する。これにより `/`, `/api/content`, `/api/memo`, `/api/files`, `/api/search`, `/ws` が同じ Host 境界を通る。
+`src/server/routes.rs` では route 登録を内部ヘルパーへ閉じ込め、その route 群へ Host middleware を layer として適用する。これにより `/`, `/api/content`, `/api/memo`, `/api/files`, `/api/search`, `/ws` が同じ Host 境界を通る。新規 route は Host middleware の後ろへ直接追加せず、必ず route 登録ヘルパー側へ追加する。
 
 middleware 化後、HTTP handler から手動 `ensure_allowed_request_host` 呼び出しを削除する。`ws_handler` では Host 検証を middleware に任せ、handler 内には既存の `Origin` 検証だけを残す。WebSocket は Host middleware と Origin 検証の二段構えにする。
 
-既存のレスポンスヘッダー layer は維持する。Host middleware の layer 順は、拒否時の JSON 応答にも必要なセキュリティヘッダーを付与できるかを実装時に確認し、既存の拒否レスポンス契約を弱めない順序にする。
+既存のレスポンスヘッダー layer は維持する。Host middleware の layer 順は、拒否時の JSON 応答にも必要なセキュリティヘッダーを付与できる順序にする。
 
 ## テスト方針
 
 TDD で進める。最初に Host middleware 経由で拒否されることを期待する統合テストを追加または更新し、その後実装する。
 
-既存の不正 Host テストは維持する。追加確認では、少なくとも `/`, `/api/files`, `/api/search`, `/ws` のように page/API/WebSocket upgrade の複数 route 種別で `Host: evil.example:<port>` が `403` になることを固定する。
+既存の不正 Host テストは維持する。追加確認では、少なくとも `/`, `/api/files`, `/api/search`, `/api/memo`, `/ws` のように page/API/WebSocket upgrade の複数 route 種別で `Host: evil.example:<port>` が `403` になることを固定する。body 付き PUT `/api/memo` でも、Host middleware が body limit より前に拒否し、拒否レスポンスに security headers が付くことを確認する。
 
 `/ws` については、不正 Host が Host middleware で拒否されることと、許可 Host かつ不正 Origin は既存の Origin 検証で拒否されることを分けて確認する。
 
@@ -44,7 +46,7 @@ TDD で進める。最初に Host middleware 経由で拒否されることを�
 - 全 HTTP route と `/ws` が `create_router()` の Host middleware を通る。
 - handler ごとの Host 手動検証が不要になっている。
 - 不正 Host は `/`, `/api/content`, `/api/memo`, `/api/files`, `/api/search` で `403` になる。
-- `/ws` は不正 Host を拒否し、許可 Host かつ不正 Origin も引き続き拒否する。
+- `/ws` は不正 Host を Host 固有メッセージで拒否し、許可 Host かつ不正 Origin も引き続き拒否する。
 - `Host` と `Origin` の許可条件を緩めていない。
 - Host 拒否時の warn 監査ログを維持している。
 - `cargo test --all-targets --all-features` が通る。
