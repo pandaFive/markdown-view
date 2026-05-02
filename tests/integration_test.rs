@@ -904,13 +904,25 @@ async fn test_websocketはoriginポート不一致を拒否する() {
 #[tokio::test]
 async fn test_websocketはhost_middlewareで不正hostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Host Test").await;
+    let client = reqwest::Client::new();
 
-    let url = format!("ws://{}/ws", addr);
     let attack_host = format!("evil.example:{}", addr.port());
     let allowed_origin = format!("http://{}", addr);
-    let result = connect_ws_with_host(&url, &allowed_origin, Some(&attack_host)).await;
+    let resp = client
+        .get(format!("http://{}/ws", addr))
+        .header("Host", attack_host)
+        .header("Origin", allowed_origin)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
 
-    assert!(result.is_err());
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "許可されていないHostヘッダーです");
 }
 
 #[tokio::test]
