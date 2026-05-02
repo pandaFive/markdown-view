@@ -181,6 +181,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                         if block_depth == 0 {
                             finalize_search_block(&mut blocks, &current_block);
                             current_block.clear();
+                            inline_html_depth = 0;
                         }
                     }
                 } else if is_search_block_end_tag(&tag) {
@@ -188,6 +189,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     if block_depth == 0 {
                         finalize_search_block(&mut blocks, &current_block);
                         current_block.clear();
+                        inline_html_depth = 0;
                     }
                 }
 
@@ -608,6 +610,15 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, "本文 visible");
+    }
+
+    #[test]
+    fn test_search_profileは未閉鎖inline_html後の次段落を検索対象にする() {
+        let blocks = extract_search_blocks("本文 <span>hidden\n\n次の段落 visible");
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "本文");
+        assert_eq!(blocks[1].text, "次の段落 visible");
     }
 
     #[test]
