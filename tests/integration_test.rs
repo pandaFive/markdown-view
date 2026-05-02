@@ -608,19 +608,37 @@ async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で�
 }
 
 #[tokio::test]
-async fn test_httpは許可されないhostを拒否する() {
+async fn test_host_middlewareは全http_routeの不正hostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Check").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
-    for path in ["/", "/api/content"] {
+    for path in ["/", "/api/content", "/api/memo", "/api/search?q=test"] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .header("Host", &attack_host)
             .send()
             .await
             .unwrap();
+
         assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            resp.headers()
+                .get(reqwest::header::X_FRAME_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        assert!(resp
+            .headers()
+            .get(reqwest::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .is_some());
         let json: serde_json::Value = resp.json().await.unwrap();
         assert!(json["error"].as_str().is_some());
     }
@@ -880,6 +898,18 @@ async fn test_websocketはoriginポート不一致を拒否する() {
     let url = format!("ws://{}/ws", addr);
     let wrong_port_origin = format!("http://localhost:{}", addr.port() + 1);
     let result = connect_ws(&url, &wrong_port_origin).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_websocketはhost_middlewareで不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Host Test").await;
+
+    let url = format!("ws://{}/ws", addr);
+    let attack_host = format!("evil.example:{}", addr.port());
+    let allowed_origin = format!("http://{}", addr);
+    let result = connect_ws_with_host(&url, &allowed_origin, Some(&attack_host)).await;
+
     assert!(result.is_err());
 }
 

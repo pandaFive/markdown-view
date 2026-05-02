@@ -12,8 +12,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
-    build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
-    require_allowed_request_host,
+    build_csp_header, is_allowed_ws_origin, json_error, require_allowed_request_host,
 };
 use super::messages::ApiError;
 use super::service::{
@@ -101,10 +100,8 @@ fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let page = service::load_page(
         &state,
         PageRequest {
@@ -127,10 +124,8 @@ async fn index_handler(
 /// GET /api/content : 現在のコンテンツをJSON形式で返す
 async fn api_content_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let update = service::load_content(
         &state,
         ContentRequest {
@@ -145,10 +140,8 @@ async fn api_content_handler(
 /// GET /api/memo : 現在のメモをJSON形式で返す
 async fn api_memo_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let memo = service::load_memo(
         &state,
         MemoRequest {
@@ -163,10 +156,8 @@ async fn api_memo_handler(
 /// PUT /api/memo : メモを保存してJSON形式で返す
 async fn api_memo_save_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(payload): Json<MemoSaveRequest>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let memo = service::save_memo(
         &state,
         SaveMemoRequest {
@@ -182,19 +173,15 @@ async fn api_memo_save_handler(
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
 async fn api_files_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     Ok(Json(service::list_files(&state).await?))
 }
 
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
 async fn api_search_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let response = service::search(&state, query.q.unwrap_or_default()).await?;
     Ok(Json(response))
 }
@@ -205,10 +192,7 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // HOST 経路の拒否を監査ログに残すため ensure_allowed_request_host を使う。
-    // `||` の短絡評価により、HOST 拒否時は is_allowed_ws_origin (内部で HOST を
-    // 再チェックする) が走らず、重複ログを防ぐ。
-    if ensure_allowed_request_host(&headers).is_err() || !is_allowed_ws_origin(&headers) {
+    if !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();
     }
