@@ -300,7 +300,7 @@ fn inline_html_tag_name(html: &str) -> Option<&str> {
     let without_lt = html.strip_prefix('<')?.trim_start();
     let tag_name_end = without_lt
         .char_indices()
-        .find_map(|(index, ch)| (!ch.is_ascii_alphanumeric()).then_some(index))
+        .find_map(|(index, ch)| (!(ch.is_ascii_alphanumeric() || ch == '-')).then_some(index))
         .unwrap_or(without_lt.len());
 
     (tag_name_end > 0).then_some(&without_lt[..tag_name_end])
@@ -619,6 +619,17 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "before  after");
         assert_eq!(blocks[1].text, "image  tail");
+    }
+
+    #[test]
+    fn test_search_profileはハイフン付きcustom_element内テキストを検索対象にしない() {
+        let blocks = extract_search_blocks(
+            "before <img-card>hidden</img-card> after\n\nhead <wbr-widget>secret</wbr-widget> tail",
+        );
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "before  after");
+        assert_eq!(blocks[1].text, "head  tail");
     }
 
     #[test]
