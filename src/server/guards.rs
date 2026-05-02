@@ -2,9 +2,12 @@
 
 use std::net::IpAddr;
 
+use axum::extract::Request;
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use super::messages::ApiError;
@@ -62,6 +65,22 @@ pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), Api
             "許可されていないHostヘッダーです",
         ))
     }
+}
+
+/// Host 検証を通過したリクエストだけを後続 route へ渡す axum middleware。
+///
+/// 拒否時の warn 監査ログと `403` JSON 応答は
+/// `ensure_allowed_request_host` に委譲する。許可時だけ `next.run` を呼び、
+/// handler 側で Host 検証を重複実装しないための共通境界として使う。
+///
+/// 適用範囲は呼び出し側の `Router::layer` 配置で決まるため、route 追加時は
+/// `create_router` 側の Host middleware 配下に入る構造を維持すること。
+pub(super) async fn require_allowed_request_host(request: Request, next: Next) -> Response {
+    if let Err(error) = ensure_allowed_request_host(request.headers()) {
+        return error.into_response();
+    }
+
+    next.run(request).await
 }
 
 pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
@@ -290,7 +309,8 @@ pub(super) fn normalize_authority(authority: &str) -> String {
 #[cfg(test)]
 mod tests {
     use axum::http::header::{HOST, ORIGIN};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::{middleware, routing::get, Router};
 
     use super::*;
 
@@ -415,6 +435,40 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "evil.example:3000".parse().unwrap());
         assert!(!is_allowed_request_host(&headers));
+    }
+
+    #[tokio::test]
+    async fn test_host_middlewareは不正hostを拒否して許可hostを通す() {
+        let app = Router::new()
+            .route("/probe", get(|| async { "ok" }))
+            .layer(middleware::from_fn(require_allowed_request_host));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let attack_host = format!("evil.example:{}", addr.port());
+        let rejected = client
+            .get(format!("http://{}/probe", addr))
+            .header("Host", &attack_host)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        let json: serde_json::Value = rejected.json().await.unwrap();
+        assert!(json["error"].as_str().is_some());
+
+        let allowed = client
+            .get(format!("http://{}/probe", addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(allowed.text().await.unwrap(), "ok");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
@@ -11,7 +12,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use super::files::{SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
-    build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
+    build_csp_header, is_allowed_ws_origin, json_error, require_allowed_request_host,
 };
 use super::messages::ApiError;
 use super::service::{
@@ -31,18 +32,13 @@ const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
-    Router::new()
-        .route("/", get(index_handler))
-        .route("/ws", get(ws_handler))
-        .route("/api/content", get(api_content_handler))
-        .route("/api/search", get(api_search_handler))
-        .route(
-            "/api/memo",
-            get(api_memo_handler)
-                .put(api_memo_save_handler)
-                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
-        )
-        .route("/api/files", get(api_files_handler))
+    build_routes()
+        // `Router::layer` は呼び出し時点で存在する route にだけ適用される。
+        // 新規 route は必ず build_routes() 内へ追加し、ここより後ろへ
+        // `.route(...)` を足して Host middleware を完全に bypass させないこと。
+        .layer(middleware::from_fn(require_allowed_request_host))
+        // Host 拒否の 403 JSON にも security headers を付与するため、
+        // 後から追加した response header layer が拒否 response も処理する順に置く。
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -61,6 +57,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             csp_header,
         ))
         .with_state(state)
+}
+
+/// Host middleware 適用前の route 定義だけを集約する。
+///
+/// ここでは route 登録だけを行い、共通 `.layer(...)` は追加しない。
+/// 共通 security layer は `create_router` 側で route 群全体へ適用する。
+fn build_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/", get(index_handler))
+        .route("/ws", get(ws_handler))
+        .route("/api/content", get(api_content_handler))
+        .route("/api/search", get(api_search_handler))
+        .route(
+            "/api/memo",
+            get(api_memo_handler)
+                .put(api_memo_save_handler)
+                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
+        )
+        .route("/api/files", get(api_files_handler))
 }
 
 /// クエリパラメータ
@@ -98,10 +113,8 @@ fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
 /// GET / : 初期HTMLページを返す
 async fn index_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Html<String>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let page = service::load_page(
         &state,
         PageRequest {
@@ -124,10 +137,8 @@ async fn index_handler(
 /// GET /api/content : 現在のコンテンツをJSON形式で返す
 async fn api_content_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<UpdateMessage>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let update = service::load_content(
         &state,
         ContentRequest {
@@ -142,10 +153,8 @@ async fn api_content_handler(
 /// GET /api/memo : 現在のメモをJSON形式で返す
 async fn api_memo_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<FileQuery>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let memo = service::load_memo(
         &state,
         MemoRequest {
@@ -160,10 +169,8 @@ async fn api_memo_handler(
 /// PUT /api/memo : メモを保存してJSON形式で返す
 async fn api_memo_save_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(payload): Json<MemoSaveRequest>,
 ) -> Result<Json<MemoResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let memo = service::save_memo(
         &state,
         SaveMemoRequest {
@@ -179,19 +186,15 @@ async fn api_memo_save_handler(
 /// GET /api/files : ディレクトリ内の.mdファイル一覧をJSON形式で返す
 async fn api_files_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     Ok(Json(service::list_files(&state).await?))
 }
 
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
 async fn api_search_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    ensure_allowed_request_host(&headers)?;
     let response = service::search(&state, query.q.unwrap_or_default()).await?;
     Ok(Json(response))
 }
@@ -202,10 +205,13 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // HOST 経路の拒否を監査ログに残すため ensure_allowed_request_host を使う。
-    // `||` の短絡評価により、HOST 拒否時は is_allowed_ws_origin (内部で HOST を
-    // 再チェックする) が走らず、重複ログを防ぐ。
-    if ensure_allowed_request_host(&headers).is_err() || !is_allowed_ws_origin(&headers) {
+    // Host は router middleware で先に検証済み。ここでは WS 固有の
+    // Origin authority 一致だけを検証する。
+    // `is_allowed_ws_origin` 内の Host 再検証は middleware 後段では
+    // 構造上到達不能だが、将来の bypass に対する defense-in-depth として残す。
+    // ログ分類の主眼は MissingOrigin/UnsupportedScheme/AuthorityMismatch など
+    // Origin 系拒否の段階化。
+    if !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();
     }

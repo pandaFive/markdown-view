@@ -22,7 +22,7 @@
   - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。HTTP/API 用の404統一は維持しつつ、watcher変更通知用の内部経路だけはcanonicalizeの `NotFound` 以外のI/O種別を保持する。ディレクトリモードのbase 配下の削除済み・一時不在ファイルとwatcher由来の非UTF-8 pathは通知なしでスキップし、単一ファイルモードの監視対象消失は検証エラーとして通知する。既存base外・hidden・非 Markdown・非通常ファイル・base 外 symlinkは error broadcast する境界テストを追加
   - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
 
-- [ ] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
+- [x] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
   - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
   - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
@@ -35,6 +35,12 @@
   - 理由: 横断検索は Markdown workspace の中核機能だが、localhost 前提でも巨大ディレクトリや連続検索で Tokio worker を圧迫し、本文表示・メモ・WebSocket の応答性に影響する可能性がある
 
 ## Medium Priority
+
+- [ ] Host middleware の構造契約と WebSocket bypass 観測性を強化する
+  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`
+  - 現状: `build_routes()` へ route 定義を閉じ込め、`create_router()` 側で Host middleware と security header layer を適用する構造にした。ただし `build_routes()` の戻り値は通常の `Router<Arc<AppState>>` なので、将来この関数内へ共通 `.layer(...)` を追加しても型では検知できない。また `ws_handler` 後段の `is_allowed_ws_origin()` 内 Host 再検証は defense-in-depth として残しているが、middleware bypass が将来発生した場合でも、現状は WebSocket Origin 拒否の汎用 403 として見えやすい
+  - 対応: `build_routes()` へ共通 layer を混ぜない契約を、型またはテストでより強く固定する。例として private newtype、route 定義専用 helper の命名強化、または Host 拒否前に動いてはいけない layer の回帰テストを検討する。WebSocket 経路では `WsOriginRejection` の Host 系拒否を bypass 検知として `error!` へ上げる、または debug build で明示的に検知できる境界を追加する
+  - 理由: DNS Rebinding 対策は route 横断のセキュリティ境界であり、middleware 化後も「構造上の守り忘れ」や「bypass の無音化」を将来リファクタで再導入しないようにする
 
 - [ ] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
   - ファイル: `src/server/files/catalog.rs` L39/60/83/157, `src/server/files/memo.rs` L439, `src/watcher/strategy.rs` L186-210/L262-275

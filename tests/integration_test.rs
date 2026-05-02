@@ -608,22 +608,75 @@ async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で�
 }
 
 #[tokio::test]
-async fn test_httpは許可されないhostを拒否する() {
+async fn test_host_middlewareは全http_routeの不正hostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Check").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
-    for path in ["/", "/api/content"] {
+    for path in [
+        "/",
+        "/api/content",
+        "/api/memo",
+        "/api/files",
+        "/api/search?q=test",
+    ] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .header("Host", &attack_host)
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        assert_forbidden_with_security_headers(&resp);
         let json: serde_json::Value = resp.json().await.unwrap();
         assert!(json["error"].as_str().is_some());
     }
+}
+
+#[tokio::test]
+async fn test_host_middlewareはbody付きmemo_putもbody_limit前に不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
+    let client = reqwest::Client::new();
+    let attack_host = format!("evil.example:{}", addr.port());
+    let oversized_raw = "x".repeat(21 * 1024 * 1024);
+    let body = serde_json::json!({
+        "raw": oversized_raw
+    })
+    .to_string();
+
+    let resp = client
+        .put(format!("http://{}/api/memo", addr))
+        .header("Host", &attack_host)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_forbidden_with_security_headers(&resp);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "許可されていないHostヘッダーです");
+}
+
+fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::X_FRAME_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    assert!(resp
+        .headers()
+        .get(reqwest::header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .is_some());
 }
 
 #[tokio::test]
@@ -639,7 +692,7 @@ async fn test_apiメモ_getは不正hostを拒否する() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_forbidden_with_security_headers(&resp);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert!(json["error"].as_str().is_some());
 }
@@ -660,7 +713,7 @@ async fn test_apiメモ_putは不正hostを拒否する() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_forbidden_with_security_headers(&resp);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert!(json["error"].as_str().is_some());
 }
@@ -881,6 +934,30 @@ async fn test_websocketはoriginポート不一致を拒否する() {
     let wrong_port_origin = format!("http://localhost:{}", addr.port() + 1);
     let result = connect_ws(&url, &wrong_port_origin).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_websocketはhost_middlewareで不正hostを拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Host Test").await;
+    let client = reqwest::Client::new();
+
+    let attack_host = format!("evil.example:{}", addr.port());
+    let allowed_origin = format!("http://{}", addr);
+    let resp = client
+        .get(format!("http://{}/ws", addr))
+        .header("Host", attack_host)
+        .header("Origin", allowed_origin)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "許可されていないHostヘッダーです");
 }
 
 #[tokio::test]
