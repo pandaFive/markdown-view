@@ -1193,7 +1193,7 @@ async fn test_ディレクトリモード_検索apiは複数ファイルから�
     assert_eq!(json["query"].as_str().unwrap(), "alpha note");
     assert_eq!(json["searched_files"].as_u64().unwrap(), 2);
     assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
-    assert_eq!(json["truncated"].as_bool().unwrap(), false);
+    assert!(!json["truncated"].as_bool().unwrap());
     assert!(json["truncated_reasons"].as_array().unwrap().is_empty());
     assert_eq!(json["limits"]["max_results"].as_u64().unwrap(), 100);
     assert_eq!(json["limits"]["max_files"].as_u64().unwrap(), 1000);
@@ -1230,7 +1230,7 @@ async fn test_ディレクトリモード_api_searchは結果数打ち切りをj
 
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["truncated"].as_bool().unwrap(), true);
+    assert!(json["truncated"].as_bool().unwrap());
     assert_eq!(json["truncated_reasons"].as_array().unwrap().len(), 1);
     assert_eq!(
         json["truncated_reasons"][0].as_str().unwrap(),
