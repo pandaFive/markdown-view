@@ -318,7 +318,7 @@ fn relative_change_path(base_dir: &Path, changed_file: &Path) -> Result<PathBuf,
             sanitize_path_for_logging(changed_file, base_dir),
             error
         );
-        ResolveFileError::NotFound
+        ResolveFileError::Traversal
     })?;
 
     canonical_changed

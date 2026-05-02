@@ -2377,6 +2377,18 @@ fn test_resolve_change_target_ディレクトリ変更のbase外パスは拒否�
     assert!(matches!(result, Err(ResolveFileError::Traversal)));
 }
 
+#[test]
+fn test_resolve_change_target_ディレクトリ変更の正規化不能なbase外パスは拒否する() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("missing.md");
+    let state = create_directory_state(base_dir.path());
+
+    let result = resolve_change_target(&state, &outside);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
 #[cfg(unix)]
 #[test]
 fn test_resolve_change_target_ディレクトリ変更のbase外symlinkは拒否する() {
@@ -2439,6 +2451,34 @@ async fn test_build_change_broadcast_message_隠しパスは検証エラーをbr
             assert!(
                 msg.contains("隠しファイルへのアクセスは禁止されています"),
                 "Hiddenのエラー文言を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
+async fn test_build_change_broadcast_message_正規化不能なbase外パスは検証エラーをbroadcastする() {
+    let base_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("missing.md");
+    let state = create_directory_state(base_dir.path());
+
+    let message = build_change_broadcast_message(&state, &outside)
+        .await
+        .expect("base外path should broadcast a validation error");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("ディレクトリ外へのアクセスは禁止されています"),
+                "Traversalのエラー文言を期待: {}",
                 msg
             );
         }
