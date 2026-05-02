@@ -2,9 +2,12 @@
 
 use std::net::IpAddr;
 
+use axum::extract::Request;
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use super::messages::ApiError;
@@ -62,6 +65,15 @@ pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), Api
             "許可されていないHostヘッダーです",
         ))
     }
+}
+
+/// Host 検証を全 route へ適用する axum middleware。
+pub(super) async fn require_allowed_request_host(request: Request, next: Next) -> Response {
+    if let Err(error) = ensure_allowed_request_host(request.headers()) {
+        return error.into_response();
+    }
+
+    next.run(request).await
 }
 
 pub(super) fn is_allowed_request_host(headers: &HeaderMap) -> bool {
@@ -423,9 +435,7 @@ mod tests {
         let app = Router::new()
             .route("/probe", get(|| async { "ok" }))
             .layer(middleware::from_fn(require_allowed_request_host));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
@@ -12,6 +13,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use super::files::{SearchResponse, MAX_FILE_SIZE};
 use super::guards::{
     build_csp_header, ensure_allowed_request_host, is_allowed_ws_origin, json_error,
+    require_allowed_request_host,
 };
 use super::messages::ApiError;
 use super::service::{
@@ -43,6 +45,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
         )
         .route("/api/files", get(api_files_handler))
+        .layer(middleware::from_fn(require_allowed_request_host))
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
