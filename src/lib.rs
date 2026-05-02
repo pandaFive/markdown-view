@@ -1,4 +1,5 @@
 pub mod cli;
+pub(crate) mod markdown;
 pub mod renderer;
 pub mod server;
 pub mod template;
