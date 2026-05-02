@@ -2470,6 +2470,27 @@ fn test_resolve_change_target_ディレクトリ変更の正規化io失敗はio_
 
 #[cfg(unix)]
 #[test]
+fn test_resolve_change_target_base配下の正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn test_resolve_change_target_ディレクトリ変更の非utf8相対パスは拒否する() {
     let dir = tempfile::tempdir().unwrap();
     let file_name = std::ffi::OsString::from_vec(b"invalid-\xff.md".to_vec());
@@ -2686,6 +2707,41 @@ async fn test_build_change_broadcast_message_正規化io失敗はkind付き検�
     let message = build_change_broadcast_message(&state, &target)
         .await
         .expect("I/O失敗は検証エラーとしてbroadcastする");
+
+    match message {
+        BroadcastMessage::Error(msg) => {
+            assert!(
+                msg.contains("ファイル検証エラー"),
+                "検証エラーのprefixを期待: {}",
+                msg
+            );
+            assert!(
+                msg.contains("PermissionDenied"),
+                "I/O種別の表示を期待: {}",
+                msg
+            );
+        }
+        other => panic!("Errorを期待したが {:?} を受信", other),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_build_change_broadcast_message_base配下の正規化io失敗はkind付き検証エラーをbroadcastする(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let state = create_directory_state(dir.path());
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("base配下のI/O失敗は検証エラーとしてbroadcastする");
 
     match message {
         BroadcastMessage::Error(msg) => {

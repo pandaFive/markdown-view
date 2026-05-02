@@ -289,7 +289,7 @@ fn resolve_directory_change_target(
 
     let relative = relative_change_path(base_dir, changed_file)?;
     let relative_string = relative_change_path_to_query(&relative)?;
-    let validated_path = resolve_file(base_dir, &relative_string)?;
+    let validated_path = resolve_file_for_directory_change(base_dir, &relative_string)?;
     Ok(Some(build_resolved_target(
         state,
         validated_path,
@@ -352,6 +352,21 @@ fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileErro
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
+    resolve_file_with_canonicalize_error(base_dir, relative, |_| ResolveFileError::NotFound)
+}
+
+fn resolve_file_for_directory_change(
+    base_dir: &Path,
+    relative: &str,
+) -> Result<PathBuf, ResolveFileError> {
+    resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
+}
+
+fn resolve_file_with_canonicalize_error(
+    base_dir: &Path,
+    relative: &str,
+    map_canonicalize_error: fn(std::io::ErrorKind) -> ResolveFileError,
+) -> Result<PathBuf, ResolveFileError> {
     if relative.is_empty() {
         return Err(ResolveFileError::EmptyPath);
     }
@@ -371,7 +386,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
             sanitize_path_for_logging(&candidate, base_dir),
             error
         );
-        ResolveFileError::NotFound
+        map_canonicalize_error(error.kind())
     })?;
 
     let canonical_base = base_dir.canonicalize().map_err(|error| {
@@ -380,7 +395,7 @@ pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveF
             base_dir.display(),
             error
         );
-        ResolveFileError::NotFound
+        map_canonicalize_error(error.kind())
     })?;
     if !canonical.starts_with(&canonical_base) {
         return Err(ResolveFileError::Traversal);

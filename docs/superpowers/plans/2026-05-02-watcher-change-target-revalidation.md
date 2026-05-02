@@ -4,7 +4,7 @@
 
 **Goal:** watcher経由のディレクトリ変更イベントを読込直前にHTTP経路と同等の検証へ通し、安全なcanonical pathだけを描画する。
 
-**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` へ通し、ディレクトリモードの `NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。単一ファイルモードの `NotFound` は監視対象消失として検証エラーを通知する。存在するが通常ファイルでない `.md` は `NotFile`、存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
+**Architecture:** `resolve_change_target()` をwatcher変更通知の最終検証ゲートにする。ディレクトリモードでは `changed_file` をbase相対文字列に戻して `resolve_file()` 相当の内部検証へ通し、ディレクトリモードの `NotFound` とwatcher由来の `InvalidPath` はbroadcastをスキップする。HTTP/API向け `resolve_file()` は404統一のためcanonicalize失敗を従来通り `NotFound` に揃えるが、watcher変更通知用の内部経路だけは `ErrorKind::NotFound` 以外のcanonicalize I/O失敗を `Io(ErrorKind)` として保持する。単一ファイルモードの `NotFound` は監視対象消失として検証エラーを通知する。存在するが通常ファイルでない `.md` は `NotFile`、存在するbase外ファイルやbase外symlinkは `Traversal`、canonicalizeの一時不在以外のI/O失敗は `Io(ErrorKind)` として検証エラーに分類し、Error broadcastには `PermissionDenied` 等の `ErrorKind` を含める。
 
 **Tech Stack:** Rust, axum, tokio, tempfile, `cargo test`, `./verify.sh`
 

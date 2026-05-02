@@ -27,7 +27,7 @@
 
 単一ファイルモードでは、既存の `revalidate_single_file_target(expected, base_dir)` を使う。`ResolvedTarget` には watcherの `changed_file` ではなく、再検証済みcanonical pathを入れる。これにより「検証はexpected、読込はchanged_file」というズレをなくす。
 
-ディレクトリモードでは、`changed_file` から `base_dir` 相対パスを復元し、その文字列表現を `resolve_file(base_dir, relative)` に渡す。`resolve_file()` が返したcanonical pathを `ResolvedTarget` に入れるため、HTTP経路と同じ検証済みpathだけが後段へ流れる。
+ディレクトリモードでは、`changed_file` から `base_dir` 相対パスを復元し、その文字列表現を `resolve_file(base_dir, relative)` 相当の内部検証に渡す。`resolve_file()` 公開関数はHTTP/API向けの404統一を維持するためcanonicalize失敗を `NotFound` に揃えるが、watcher変更通知用の内部経路だけは `ErrorKind::NotFound` 以外のcanonicalize I/O失敗を `Io(ErrorKind)` として保持する。検証が返したcanonical pathを `ResolvedTarget` に入れるため、HTTP経路と同じ境界検証済みpathだけが後段へ流れる。
 
 相対化できない `changed_file` は、存在するbase外ファイルやbase外symlinkなら `ResolveFileError::Traversal` として扱う。`changed_file` またはbaseが `NotFound` で正規化できない場合は、削除・rename中の一時不在として `ResolveFileError::NotFound` に分類する。その他のcanonicalize I/O失敗は `ResolveFileError::Io(ErrorKind)` に分類し、詳細なOSエラー本文ではなく `ErrorKind` だけを検証エラーに含める。相対化できても `resolve_file()` が拒否した場合は、そのエラー種別を維持する。
 
