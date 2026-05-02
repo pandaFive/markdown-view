@@ -186,6 +186,12 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
                     }
                 } else if is_search_block_end_tag(&tag) {
                     block_depth = block_depth.saturating_sub(1);
+                    if !matches!(tag, TagEnd::Paragraph) {
+                        debug_assert_eq!(
+                            inline_html_depth, 0,
+                            "inline HTML depth must be balanced before non-paragraph block end"
+                        );
+                    }
                     inline_html_depth = 0;
                     if block_depth == 0 {
                         finalize_search_block(&mut blocks, &current_block);
@@ -610,6 +616,27 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, "本文 visible");
+    }
+
+    #[test]
+    fn test_search_profileはネストしたinline_html内テキストを検索対象にしない() {
+        let blocks = extract_search_blocks("before <span>a <span>b</span> c</span> tail");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "before  tail");
+    }
+
+    #[test]
+    fn test_search_profileは非paragraphブロック内inline_htmlを検索対象にしない() {
+        let blocks = extract_search_blocks(
+            "# 見出し <span>secret</span> tail\n\n> 引用 <span>hidden</span> tail\n\n| col |\n| --- |\n| セル <span>private</span> tail |",
+        );
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].text, "見出し  tail");
+        assert_eq!(blocks[1].text, "引用  tail");
+        assert_eq!(blocks[2].text, "col");
+        assert_eq!(blocks[3].text, "セル  tail");
     }
 
     #[test]
