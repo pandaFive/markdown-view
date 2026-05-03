@@ -19,6 +19,12 @@
 
 ## P2: 保守性・局所回帰検知
 
+- [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
+  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
+  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
+  - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
+  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)
+
 - [ ] CLAUDE.md のアーキテクチャ記述を現在の実装構成に揃える
   - ファイル: `CLAUDE.md`
   - 現状: CLAUDE.md は `server/files.rs` / `watcher.rs` / `template/mod.rs` を単一ファイル前提で記載しているが、実装は `src/server/files/{catalog,content,memo,memo_fs,memo_sidecar,resolve,search,test_support,tests}.rs`、`src/watcher/{runtime,strategy,error}.rs`、`src/server/{log_path,watch}.rs`、`src/renderer/{state,security,line,highlight,render}.rs`、`src/template/assets/{css,js}/` まで細分化済み。さらに「見出しパースが 2 回」と書かれているが `search` 経由で 3 回目が走る

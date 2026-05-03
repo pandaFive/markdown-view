@@ -28,10 +28,10 @@
   - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
   - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
 
-- [ ] ディレクトリ検索の負荷制御をサーバ側に追加する
+- [x] ディレクトリ検索の負荷制御をサーバ側に追加する
   - ファイル: `src/server/routes.rs`, `src/server/files/search.rs`, `src/server/files/catalog.rs`
-  - 現状: `/api/search` はリクエスト処理内で `list_markdown_files()` による同期ディレクトリ走査後、最大 1000 ファイルを順次 `read_markdown_with_limit()` で読み、Markdown パースして検索する。1 ファイル上限は 10MB だが、検索リクエスト全体の総読込量・時間・キャンセル境界はない。さらに `search_directory` は pulldown-cmark を **検索専用にもう一度パース**（renderer/toc に続く 3 回目）し、各ブロックで `original_offsets: Vec<usize>` をテキスト byte 数 +1 確保する。打ち切りが「ファイル単位」ではなく「結果件数 100」なので巨大 1 ファイルで `MAX_SEARCH_RESULTS` を消費すると他ファイルが silent に無視される
-  - 対応: 検索の同期走査/重いパースを `spawn_blocking` または専用検索タスクに逃がす。総読込バイト上限、検索対象ファイル数上限の応答明示、クライアント世代と対応するサーバ側キャンセルまたは古い検索の破棄を検討し、巨大ワークスペースの統合テストを追加。`SearchResultItem` の `before/current/after` を `Cow<str>` 化してマッチごとの `String` 確保を削減
+  - 現状: PR #121 で検索結果数・検索対象ファイル数・総読込 byte 数の打ち切りが API/UI に明示され、今回の blocking 隔離でディレクトリ走査、ファイル読込、Markdown パース、検索一致抽出をリクエスト単位の `spawn_blocking` 内へ移した
+  - 対応: 完了。残る改善候補は、クライアント世代と対応するサーバ側キャンセルまたは古い検索の破棄、検索結果コンテキストの allocation 削減、検索インデックス導入の必要性評価として BACKLOG.md へ分離する
   - 理由: 横断検索は Markdown workspace の中核機能だが、localhost 前提でも巨大ディレクトリや連続検索で Tokio worker を圧迫し、本文表示・メモ・WebSocket の応答性に影響する可能性がある
 
 ## Medium Priority
