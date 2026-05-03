@@ -5,7 +5,7 @@ use std::path::Path;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 use super::catalog::list_markdown_files_with_limit;
-use super::content::{read_markdown_with_limit, MAX_FILE_SIZE};
+use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
 
@@ -155,10 +155,19 @@ pub(in crate::server) async fn search_directory(
     base_dir: &Path,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
-    search_directory_with_limits(base_dir, raw_query, SearchLimits::default()).await
+    let base_dir = base_dir.to_path_buf();
+    let raw_query = raw_query.to_owned();
+
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
+        .await
+        .map_err(map_search_join_error)?
 }
 
-async fn search_directory_with_limits(
+fn search_directory_blocking(base_dir: &Path, raw_query: &str) -> std::io::Result<SearchResponse> {
+    search_directory_with_limits_blocking(base_dir, raw_query, SearchLimits::default())
+}
+
+fn search_directory_with_limits_blocking(
     base_dir: &Path,
     raw_query: &str,
     limits: SearchLimits,
@@ -190,7 +199,7 @@ async fn search_directory_with_limits(
             }
         };
 
-        let markdown = match read_markdown_with_limit(&file_path).await {
+        let markdown = match read_markdown_with_limit_blocking(&file_path) {
             Ok(markdown) => markdown,
             Err(error) => {
                 tracing::warn!(
@@ -228,7 +237,22 @@ async fn search_directory_with_limits(
     Ok(SearchResponse::from_parts(query, results, limits, stats))
 }
 
-#[allow(dead_code)]
+fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
+    if error.is_panic() {
+        tracing::error!(
+            "[markdown-view] ディレクトリ検索blockingタスクがpanicしました: {}",
+            error
+        );
+    } else {
+        tracing::warn!(
+            "[markdown-view] ディレクトリ検索blockingタスクのjoinエラー: {}",
+            error
+        );
+    }
+
+    std::io::Error::other("ディレクトリ検索タスクの実行に失敗しました")
+}
+
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
     let metadata = std::fs::metadata(file_path)?;
     if metadata.len() > MAX_FILE_SIZE {
@@ -255,7 +279,6 @@ fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String
     })
 }
 
-#[allow(dead_code)]
 fn file_too_large_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -917,6 +940,7 @@ mod tests {
             "# Home\n\nneedle".len() + "# Other".len()
         );
         assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "README.md");
     }
 
     #[tokio::test]
@@ -950,7 +974,7 @@ mod tests {
             .unwrap();
         }
 
-        let response = search_directory_with_limits(
+        let response = search_directory_with_limits_blocking(
             dir.path(),
             "needle",
             SearchLimits {
@@ -959,7 +983,6 @@ mod tests {
                 max_bytes: 64 * 1024 * 1024,
             },
         )
-        .await
         .unwrap();
 
         assert!(response.truncated);
@@ -982,7 +1005,7 @@ mod tests {
             .unwrap();
         }
 
-        let response = search_directory_with_limits(
+        let response = search_directory_with_limits_blocking(
             dir.path(),
             "needle",
             SearchLimits {
@@ -991,7 +1014,6 @@ mod tests {
                 max_bytes: 64 * 1024 * 1024,
             },
         )
-        .await
         .unwrap();
 
         assert!(!response.truncated);
@@ -1006,7 +1028,7 @@ mod tests {
         std::fs::write(dir.path().join("a.md"), "needle").unwrap();
         std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
 
-        let response = search_directory_with_limits(
+        let response = search_directory_with_limits_blocking(
             dir.path(),
             "needle",
             SearchLimits {
@@ -1015,7 +1037,6 @@ mod tests {
                 max_bytes: "needle".len(),
             },
         )
-        .await
         .unwrap();
 
         assert!(response.truncated);
