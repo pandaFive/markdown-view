@@ -399,6 +399,91 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('notes.md');
 });
 
+test('ディレクトリモードでは検索打ち切り警告を結果一覧の先頭に表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha result is visible.',
+            after: ''
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0,
+        truncated: true,
+        truncated_reasons: ['result_limit'],
+        limits: {
+          max_results: 100,
+          max_files: 1000,
+          max_bytes: 67108864
+        },
+        searched_bytes: 1024
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha result is visible.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-results')).toContainText('上限により一部のみ表示しています。');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+  await expect(page.locator('#document-search-results .document-search-result').first())
+    .toContainText('Alpha result is visible.');
+});
+
+test('ディレクトリモードでは検索結果0件でも検索打ち切り警告を表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0,
+        truncated: true,
+        truncated_reasons: ['byte_limit'],
+        limits: {
+          max_results: 100,
+          max_files: 1000,
+          max_bytes: 67108864
+        },
+        searched_bytes: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>No matching text here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-results')).toContainText('上限により一部のみ表示しています。');
+  await expect(page.locator('#document-search-results')).toContainText('ディレクトリ内に一致が見つかりません。');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+});
+
 test('ディレクトリモードでは現在ファイルの本文ヒットを検索結果選択に反映する', async ({ page }) => {
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({

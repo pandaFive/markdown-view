@@ -202,12 +202,7 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
     let Some(base_dir) = state.mode().directory() else {
-        return Ok(SearchResponse {
-            query: query.trim().to_string(),
-            results: Vec::new(),
-            searched_files: 0,
-            skipped_files: 0,
-        });
+        return Ok(SearchResponse::empty(query.trim().to_string()));
     };
 
     search_directory(base_dir, &query).await.map_err(|error| {
@@ -632,5 +627,11 @@ mod tests {
         assert_eq!(response.searched_files, 0);
         assert_eq!(response.skipped_files, 0);
         assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
+        assert_eq!(response.limits.max_results, 100);
+        assert_eq!(response.limits.max_files, 1000);
+        assert_eq!(response.limits.max_bytes, 64 * 1024 * 1024);
+        assert_eq!(response.searched_bytes, 0);
     }
 }

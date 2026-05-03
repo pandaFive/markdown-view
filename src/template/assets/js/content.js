@@ -466,6 +466,13 @@ function createDocumentSearchEmptyState(message) {
   return empty;
 }
 
+function createDirectorySearchTruncatedState() {
+  var item = document.createElement('div');
+  item.className = 'document-search-empty';
+  item.textContent = '上限により一部のみ表示しています。';
+  return item;
+}
+
 function formatDirectorySearchSummary() {
   var baseText;
   if (!appContext.search.currentDocumentQuery) {
@@ -766,6 +773,10 @@ function renderDirectorySearchResults() {
     return;
   }
 
+  if (appContext.search.currentDirectoryTruncated) {
+    appContext.elements.documentSearchResultsEl.appendChild(createDirectorySearchTruncatedState());
+  }
+
   if (!appContext.search.currentDirectoryResults.length) {
     appContext.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
     return;
@@ -901,6 +912,8 @@ function runDirectorySearch(query) {
   appContext.search.currentDirectoryResults = [];
   appContext.search.currentDirectoryIndex = -1;
   appContext.search.currentDirectorySkippedFiles = 0;
+  appContext.search.currentDirectoryTruncated = false;
+  appContext.search.currentDirectoryTruncatedReasons = [];
   renderDirectorySearchUi();
 
   fetch('/api/search?q=' + encodeURIComponent(query), {
@@ -920,6 +933,11 @@ function runDirectorySearch(query) {
     appContext.search.currentDirectoryError = '';
     appContext.search.currentDirectoryResults = Array.isArray(data.results) ? data.results : [];
     appContext.search.currentDirectorySkippedFiles = Number(data.skipped_files || 0);
+    appContext.search.currentDirectoryTruncated = data.truncated === true ||
+      (Array.isArray(data.truncated_reasons) && data.truncated_reasons.length > 0);
+    appContext.search.currentDirectoryTruncatedReasons = Array.isArray(data.truncated_reasons)
+      ? data.truncated_reasons.slice()
+      : [];
     appContext.search.currentDirectoryIndex = resolveDirectorySearchIndex(
       appContext.search.currentDirectoryResults,
       preferredSelection
@@ -933,6 +951,8 @@ function runDirectorySearch(query) {
     appContext.search.currentDirectoryResults = [];
     appContext.search.currentDirectoryIndex = -1;
     appContext.search.currentDirectorySkippedFiles = 0;
+    appContext.search.currentDirectoryTruncated = false;
+    appContext.search.currentDirectoryTruncatedReasons = [];
     appContext.search.currentDirectoryError = getFileFetchErrorMessage(err);
     console.error('[markdown-view] ディレクトリ検索エラー:', err);
     renderDirectorySearchUi();
@@ -1072,6 +1092,8 @@ function applyDocumentSearchQuery(query) {
       appContext.search.currentDirectoryResults = [];
       appContext.search.currentDirectoryIndex = -1;
       appContext.search.currentDirectorySkippedFiles = 0;
+      appContext.search.currentDirectoryTruncated = false;
+      appContext.search.currentDirectoryTruncatedReasons = [];
       appContext.search.currentDirectoryLoading = false;
       appContext.search.currentDirectoryError = '';
       renderDirectorySearchUi();
@@ -1080,6 +1102,8 @@ function applyDocumentSearchQuery(query) {
     appContext.search.currentDirectoryResults = [];
     appContext.search.currentDirectoryIndex = -1;
     appContext.search.currentDirectorySkippedFiles = 0;
+    appContext.search.currentDirectoryTruncated = false;
+    appContext.search.currentDirectoryTruncatedReasons = [];
     appContext.search.currentDirectoryLoading = true;
     appContext.search.currentDirectoryError = '';
     scheduleDirectorySearch(appContext.search.currentDocumentQuery);
@@ -1103,6 +1127,8 @@ function clearDocumentSearchQuery() {
   appContext.search.currentDirectoryResults = [];
   appContext.search.currentDirectoryIndex = -1;
   appContext.search.currentDirectorySkippedFiles = 0;
+  appContext.search.currentDirectoryTruncated = false;
+  appContext.search.currentDirectoryTruncatedReasons = [];
   appContext.search.currentDirectoryLoading = false;
   appContext.search.currentDirectoryError = '';
   clearDocumentSearchHighlights();

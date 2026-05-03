@@ -11,13 +11,27 @@ pub(super) const MAX_DIR_DEPTH: usize = 32;
 
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
+    list_markdown_files_with_limit(base_dir, MAX_FILE_LIST)
+}
+
+pub(super) fn list_markdown_files_with_limit(
+    base_dir: &Path,
+    max_files: usize,
+) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
     let mut visited_dirs = HashSet::new();
     let canonical_base = base_dir.canonicalize()?;
     visited_dirs.insert(canonical_base);
-    list_markdown_files_recursive(base_dir, base_dir, &mut files, &mut visited_dirs, 0)?;
+    list_markdown_files_recursive(
+        base_dir,
+        base_dir,
+        &mut files,
+        &mut visited_dirs,
+        0,
+        max_files,
+    )?;
     files.sort();
-    files.truncate(MAX_FILE_LIST);
+    files.truncate(max_files);
     Ok(files)
 }
 
@@ -27,6 +41,7 @@ fn list_markdown_files_recursive(
     files: &mut Vec<String>,
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
+    max_files: usize,
 ) -> std::io::Result<()> {
     if depth >= MAX_DIR_DEPTH {
         tracing::warn!(
@@ -70,7 +85,7 @@ fn list_markdown_files_recursive(
         };
 
         if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
-            if files.len() >= MAX_FILE_LIST {
+            if files.len() >= max_files {
                 return Ok(());
             }
 
@@ -117,7 +132,14 @@ fn list_markdown_files_recursive(
                 }
             }
 
-            list_markdown_files_recursive(base_dir, &path, files, visited_dirs, depth + 1)?;
+            list_markdown_files_recursive(
+                base_dir,
+                &path,
+                files,
+                visited_dirs,
+                depth + 1,
+                max_files,
+            )?;
         } else if file_type.is_file()
             && path
                 .extension()
@@ -131,7 +153,7 @@ fn list_markdown_files_recursive(
                         .collect::<Vec<_>>()
                         .join("/");
                     files.push(relative_str);
-                    if files.len() >= MAX_FILE_LIST {
+                    if files.len() >= max_files {
                         return Ok(());
                     }
                 }

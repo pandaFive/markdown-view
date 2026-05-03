@@ -62,6 +62,8 @@ function createAppContext(doc) {
       currentDirectoryResults: [],
       currentDirectoryIndex: -1,
       currentDirectorySkippedFiles: 0,
+      currentDirectoryTruncated: false,
+      currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
       documentDebounceTimer: null,
