@@ -1,10 +1,11 @@
+use std::io::Read;
 use std::ops::Range;
 use std::path::Path;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 use super::catalog::list_markdown_files_with_limit;
-use super::content::read_markdown_with_limit;
+use super::content::{read_markdown_with_limit, MAX_FILE_SIZE};
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
 
@@ -225,6 +226,41 @@ async fn search_directory_with_limits(
     }
 
     Ok(SearchResponse::from_parts(query, results, limits, stats))
+}
+
+#[allow(dead_code)]
+fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
+    let metadata = std::fs::metadata(file_path)?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(file_too_large_error());
+    }
+
+    let file = std::fs::File::open(file_path)?;
+    let mut limited_reader = file.take(MAX_FILE_SIZE + 1);
+    let mut buffer = Vec::new();
+    limited_reader.read_to_end(&mut buffer)?;
+    if buffer.len() as u64 > MAX_FILE_SIZE {
+        return Err(file_too_large_error());
+    }
+
+    String::from_utf8(buffer).map_err(|error| {
+        tracing::warn!(
+            "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+            error.utf8_error().valid_up_to()
+        );
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ファイルがUTF-8テキストではありません",
+        )
+    })
+}
+
+#[allow(dead_code)]
+fn file_too_large_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "ファイルサイズが上限（10MB）を超えています",
+    )
 }
 
 fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
@@ -660,6 +696,28 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "見出し\n\nneedle").unwrap();
+
+        let markdown = read_markdown_with_limit_blocking(&path).unwrap();
+
+        assert_eq!(markdown, "見出し\n\nneedle");
+    }
+
+    #[test]
+    fn test_read_markdown_with_limit_blocking_utf8以外はinvalid_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.md");
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let error = read_markdown_with_limit_blocking(&path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn test_extract_search_blocks_リンクとコードブロックを除外し_inline_codeを含める() {
