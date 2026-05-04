@@ -955,7 +955,7 @@ async fn test_websocketはhost_middlewareで不正hostを拒否する() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_forbidden_with_security_headers(&resp);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "許可されていないHostヘッダーです");
 }
