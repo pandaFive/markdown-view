@@ -329,6 +329,7 @@ mod tests {
     use axum::http::header::{HOST, ORIGIN};
     use axum::http::{HeaderMap, StatusCode};
     use axum::{middleware, routing::get, Router};
+    use tracing_test::traced_test;
 
     use super::*;
 
@@ -592,6 +593,18 @@ mod tests {
         assert!(!is_host_middleware_bypass_indicator(
             WsOriginRejection::AuthorityMismatch
         ));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_ws_host系拒否はbypass兆候として専用ログに記録する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        assert!(!is_allowed_ws_origin(&headers));
+        assert!(logs_contain("WS Host middleware bypass 兆候"));
+        assert!(logs_contain("MissingHost"));
+        assert!(!logs_contain("WS Origin 拒否"));
     }
 
     #[test]

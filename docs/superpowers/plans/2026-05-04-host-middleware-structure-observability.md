@@ -24,7 +24,7 @@
 **Files:**
 - Modify: `tests/integration_test.rs`
 
-- [ ] **Step 1: Write the failing test update**
+- [x] **Step 1: Write the failing test update**
 
 `tests/integration_test.rs` の `test_websocketはhost_middlewareで不正hostを拒否する` 内で、素の status assertion を既存 helper に置き換える。
 
@@ -44,7 +44,7 @@ With:
     assert_eq!(json["error"], "許可されていないHostヘッダーです");
 ```
 
-- [ ] **Step 2: Run the targeted test**
+- [x] **Step 2: Run the targeted test**
 
 Run:
 
@@ -54,7 +54,7 @@ cargo test --test integration_test test_websocketはhost_middlewareで不正host
 
 Expected: PASS on current code if `/ws` Host middleware rejection already receives security headers. If it fails, the failure should show a missing `x-content-type-options`, `x-frame-options`, or `content-security-policy` header and Task 2 must preserve/fix layer ordering.
 
-- [ ] **Step 3: Commit the test lock**
+- [x] **Step 3: Commit the test lock**
 
 Run:
 
@@ -70,7 +70,7 @@ Expected: commit succeeds with only `tests/integration_test.rs` staged.
 **Files:**
 - Modify: `src/server/routes.rs`
 
-- [ ] **Step 1: Change `build_routes()` to return `RouteDefinitions`**
+- [x] **Step 1: Change `build_routes()` to return `RouteDefinitions`**
 
 In `src/server/routes.rs`, add this private newtype near `MEMO_JSON_BODY_LIMIT`:
 
@@ -139,7 +139,7 @@ fn build_routes() -> RouteDefinitions {
 }
 ```
 
-- [ ] **Step 2: Run focused compile/test checks**
+- [x] **Step 2: Run focused compile/test checks**
 
 Run:
 
@@ -157,7 +157,7 @@ cargo test --test integration_test test_websocketはhost_middlewareで不正host
 
 Expected: PASS.
 
-- [ ] **Step 3: Commit route boundary change**
+- [x] **Step 3: Commit route boundary change**
 
 Run:
 
@@ -173,7 +173,7 @@ Expected: commit succeeds with only `src/server/routes.rs` staged.
 **Files:**
 - Modify: `src/server/guards.rs`
 
-- [ ] **Step 1: Add the classification helper and unit test**
+- [x] **Step 1: Add the classification helper and unit test**
 
 In `src/server/guards.rs`, add this helper after the `WsOriginRejection` enum:
 
@@ -227,7 +227,7 @@ In the existing `#[cfg(test)] mod tests` in the same file, add:
     }
 ```
 
-- [ ] **Step 2: Run helper test before logging change**
+- [x] **Step 2: Run helper test before logging change**
 
 Run:
 
@@ -237,7 +237,7 @@ cargo test server::guards::tests::test_ws_host系拒否はmiddleware_bypass兆�
 
 Expected: PASS after adding the helper and test.
 
-- [ ] **Step 3: Update `is_allowed_ws_origin()` log classification**
+- [x] **Step 3: Update `is_allowed_ws_origin()` log classification**
 
 Replace the `match rejection { ... }` block inside `is_allowed_ws_origin()` with:
 
@@ -273,7 +273,7 @@ Replace the `match rejection { ... }` block inside `is_allowed_ws_origin()` with
 
 This intentionally moves `MissingHost` from info to error because Host middleware should reject that request before `ws_handler`.
 
-- [ ] **Step 4: Run guards tests**
+- [x] **Step 4: Run guards tests**
 
 Run:
 
@@ -283,7 +283,7 @@ cargo test server::guards
 
 Expected: PASS. Existing `check_ws_origin()` tests should still return the same `WsOriginRejection` variants.
 
-- [ ] **Step 5: Commit logging classification**
+- [x] **Step 5: Commit logging classification**
 
 Run:
 
@@ -302,7 +302,7 @@ Expected: commit succeeds with only `src/server/guards.rs` staged.
 - Verify: `tests/integration_test.rs`
 - Modify: `docs/todo/TODO.md`
 
-- [ ] **Step 1: Run full Rust test suite**
+- [x] **Step 1: Run full Rust test suite**
 
 Run:
 
@@ -312,7 +312,7 @@ cargo test --all-targets --all-features
 
 Expected: PASS.
 
-- [ ] **Step 2: Run required repository verification**
+- [x] **Step 2: Run required repository verification**
 
 Run:
 
@@ -322,15 +322,9 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 3: Mark the TODO item complete**
+- [x] **Step 3: Mark the TODO item complete**
 
-In `docs/todo/TODO.md`, change the Medium Priority item:
-
-```markdown
-- [ ] Host middleware の構造契約と WebSocket bypass 観測性を強化する
-```
-
-to:
+In `docs/todo/TODO.md`, change the Medium Priority item for `Host middleware の構造契約と WebSocket bypass 観測性を強化する` to the completed form:
 
 ```markdown
 - [x] Host middleware の構造契約と WebSocket bypass 観測性を強化する
@@ -338,7 +332,7 @@ to:
 
 Keep the existing description below it so the completion context remains reviewable.
 
-- [ ] **Step 4: Run docs sanity checks**
+- [x] **Step 4: Run docs sanity checks**
 
 Run:
 
@@ -348,7 +342,7 @@ rg -n "Host middleware の構造契約|WS Host middleware bypass|RouteDefinition
 
 Expected: output includes the completed TODO item, the `RouteDefinitions` newtype, and the bypass log message.
 
-- [ ] **Step 5: Commit TODO completion**
+- [x] **Step 5: Commit TODO completion**
 
 Run:
 
@@ -359,7 +353,7 @@ git commit -m "docs: Host middleware構造契約TODOを完了"
 
 Expected: commit succeeds with only `docs/todo/TODO.md` staged.
 
-- [ ] **Step 6: Report completion**
+- [x] **Step 6: Report completion**
 
 Final report must include:
 
