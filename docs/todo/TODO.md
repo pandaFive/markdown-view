@@ -10,12 +10,6 @@
 
 ## Medium Priority
 
-- [ ] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
-  - ファイル: `src/server/guards.rs`, `docs/todo/TODO.md`
-  - 現状: PR #123 で Host 系 `WsOriginRejection::{MissingHost, HostMalformed, UntrustedHost}` を bypass 兆候として `error!` に上げ、MissingHost の traced log test を追加した。一方、`is_allowed_ws_origin()` の非 Host 系ログ分類は `_ => warn!()` に残っており、新しい rejection variant が追加された場合にコンパイラで分類漏れを検出できない。`is_host_middleware_bypass_indicator()` も `matches!` の false 側へ暗黙に落ちるため、variant 追加時の意図確認が弱い。HostMalformed / UntrustedHost の実ログ出力は helper 分類テストで間接的に守られているが、traced log test では直接固定していない
-  - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`tracing::event!` でログ分岐を平坦化する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
-  - 理由: DNS Rebinding 防御の判定自体は変えずに、将来 variant 追加時の silent fallback とログ分類漏れをコンパイル時・テスト時に検出しやすくする
-
 - [ ] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
   - ファイル: `src/watcher/strategy.rs` L43-48, `src/watcher/runtime.rs` L192-198
   - 現状: ディレクトリモードは `RecursiveMode::Recursive` を無条件で適用し、`is_hidden_relative` でイベント受信後にフィルタする。Linux 既定の `fs.inotify.max_user_watches` (8192) を `node_modules`/`target`/`.git` を含む大規模ツリーで枯渇させ、`ENOSPC` 時に `WatchError::init` がそのまま漏れる
@@ -72,6 +66,8 @@
 
 ## Done Summary
 
+- [x] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
+  - 完了根拠: `WsOriginRejection` のログ分類を wildcard なしの helper に分離し、Host 系 3 variant の traced log test とログ helper 経由の単一出力で固定した
 - [x] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
   - 完了根拠: `render_document` が同一 `headings` から本文と TOC を生成する構成になっている
 - [x] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
