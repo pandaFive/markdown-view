@@ -36,7 +36,7 @@
 
 ## Medium Priority
 
-- [ ] Host middleware の構造契約と WebSocket bypass 観測性を強化する
+- [x] Host middleware の構造契約と WebSocket bypass 観測性を強化する
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`
   - 現状: `build_routes()` へ route 定義を閉じ込め、`create_router()` 側で Host middleware と security header layer を適用する構造にした。ただし `build_routes()` の戻り値は通常の `Router<Arc<AppState>>` なので、将来この関数内へ共通 `.layer(...)` を追加しても型では検知できない。また `ws_handler` 後段の `is_allowed_ws_origin()` 内 Host 再検証は defense-in-depth として残しているが、middleware bypass が将来発生した場合でも、現状は WebSocket Origin 拒否の汎用 403 として見えやすい
   - 対応: `build_routes()` へ共通 layer を混ぜない契約を、型またはテストでより強く固定する。例として private newtype、route 定義専用 helper の命名強化、または Host 拒否前に動いてはいけない layer の回帰テストを検討する。WebSocket 経路では `WsOriginRejection` の Host 系拒否を bypass 検知として `error!` へ上げる、または debug build で明示的に検知できる境界を追加する
