@@ -4,10 +4,11 @@ use std::path::Path;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::catalog::list_markdown_files_with_limit;
+use super::catalog::list_markdown_files_with_limit_from_canonical_base;
 use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
+use crate::server::CanonicalPath;
 
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
@@ -152,10 +153,10 @@ struct SearchContext {
 
 /// ディレクトリ内のMarkdownを横断検索する。
 pub(in crate::server) async fn search_directory(
-    base_dir: &Path,
+    base_dir: &CanonicalPath,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
-    let base_dir = base_dir.to_path_buf();
+    let base_dir = base_dir.clone();
     let raw_query = raw_query.to_owned();
 
     tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
@@ -163,12 +164,15 @@ pub(in crate::server) async fn search_directory(
         .map_err(map_search_join_error)?
 }
 
-fn search_directory_blocking(base_dir: &Path, raw_query: &str) -> std::io::Result<SearchResponse> {
+fn search_directory_blocking(
+    base_dir: &CanonicalPath,
+    raw_query: &str,
+) -> std::io::Result<SearchResponse> {
     search_directory_with_limits_blocking(base_dir, raw_query, SearchLimits::default())
 }
 
 fn search_directory_with_limits_blocking(
-    base_dir: &Path,
+    base_dir: &CanonicalPath,
     raw_query: &str,
     limits: SearchLimits,
 ) -> std::io::Result<SearchResponse> {
@@ -177,7 +181,11 @@ fn search_directory_with_limits_blocking(
         return Ok(SearchResponse::empty(query));
     }
 
-    let files = list_markdown_files_with_limit(base_dir, limits.max_files.saturating_add(1))?;
+    let files = list_markdown_files_with_limit_from_canonical_base(
+        base_dir,
+        limits.max_files.saturating_add(1),
+    )?;
+    let base_path = base_dir.as_path();
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
 
@@ -186,7 +194,7 @@ fn search_directory_with_limits_blocking(
     }
 
     for relative in files.into_iter().take(limits.max_files) {
-        let file_path = match resolve_file(base_dir, &relative) {
+        let file_path = match resolve_file(base_path, &relative) {
             Ok(file_path) => file_path,
             Err(error) => {
                 tracing::warn!(
@@ -719,6 +727,7 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::CanonicalPath;
 
     #[test]
     fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
@@ -924,8 +933,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-        let response = search_directory(dir.path(), "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert_eq!(response.query, "needle");
         assert!(!response.truncated);
@@ -944,6 +954,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_directory_canonical_base_再canonicalizeなしで検索する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+        let response = search_directory(&canonical, "target").await.unwrap();
+
+        assert_eq!(response.query, "target");
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "guide.md");
+    }
+
+    #[tokio::test]
     async fn test_search_directory_結果数上限到達を明示する() {
         let dir = tempfile::tempdir().unwrap();
         let markdown = (0..120)
@@ -951,8 +974,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-        let response = search_directory(dir.path(), "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert!(response.truncated);
         assert_eq!(
@@ -973,9 +997,10 @@ mod tests {
             )
             .unwrap();
         }
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
         let response = search_directory_with_limits_blocking(
-            dir.path(),
+            &canonical,
             "needle",
             SearchLimits {
                 max_results: 100,
@@ -1004,9 +1029,10 @@ mod tests {
             )
             .unwrap();
         }
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
         let response = search_directory_with_limits_blocking(
-            dir.path(),
+            &canonical,
             "needle",
             SearchLimits {
                 max_results: 100,
@@ -1027,9 +1053,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle").unwrap();
         std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
         let response = search_directory_with_limits_blocking(
-            dir.path(),
+            &canonical,
             "needle",
             SearchLimits {
                 max_results: 100,

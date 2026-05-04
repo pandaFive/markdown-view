@@ -45,15 +45,6 @@ pub(super) fn list_markdown_files_with_limit_from_canonical_base(
     Ok(files)
 }
 
-pub(super) fn list_markdown_files_with_limit(
-    base_dir: &Path,
-    max_files: usize,
-) -> std::io::Result<Vec<String>> {
-    let canonical = CanonicalPath::try_from_path(base_dir)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::NotFound, error))?;
-    list_markdown_files_with_limit_from_canonical_base(&canonical, max_files)
-}
-
 fn list_markdown_files_recursive(
     log_base_dir: &Path,
     canonical_base_dir: &Path,

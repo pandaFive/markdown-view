@@ -202,7 +202,7 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
 
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
-    let Some(base_dir) = state.mode().directory() else {
+    let Some(base_dir) = state.mode().directory_canonical() else {
         return Ok(SearchResponse::empty(query.trim().to_string()));
     };
 
