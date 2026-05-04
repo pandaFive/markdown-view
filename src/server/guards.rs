@@ -182,14 +182,20 @@ fn ws_rejection_log_message(rejection: WsOriginRejection) -> &'static str {
 fn emit_ws_rejection_log(
     level: tracing::Level,
     message: &'static str,
+    host_recheck_anomaly: bool,
     rejection: WsOriginRejection,
     host: &str,
     origin: &str,
 ) {
     macro_rules! emit_ws_rejection_event {
         ($macro_name:ident) => {
-            if message == "WS Host 検証異常" {
+            if host_recheck_anomaly {
                 tracing::$macro_name!(
+                    rejection = ?rejection,
+                    host = ?host,
+                    origin = ?origin,
+                    ws_rejection_class = message,
+                    host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
                     message,
                     rejection,
@@ -198,6 +204,11 @@ fn emit_ws_rejection_log(
                 );
             } else {
                 tracing::$macro_name!(
+                    rejection = ?rejection,
+                    host = ?host,
+                    origin = ?origin,
+                    ws_rejection_class = message,
+                    host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}",
                     message,
                     rejection,
@@ -285,7 +296,15 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
             let origin = log_value_for_header(headers, &ORIGIN);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
-            emit_ws_rejection_log(level, message, rejection, host, origin);
+            let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
+            emit_ws_rejection_log(
+                level,
+                message,
+                host_recheck_anomaly,
+                rejection,
+                host,
+                origin,
+            );
             false
         }
     }
@@ -391,12 +410,81 @@ pub(super) fn normalize_authority(authority: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+
     use axum::http::header::{HOST, ORIGIN};
     use axum::http::{HeaderMap, StatusCode};
     use axum::{middleware, routing::get, Router};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
     use tracing_test::traced_test;
 
     use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedEvent {
+        level: Level,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct CapturedFields {
+        values: BTreeMap<String, String>,
+    }
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.values
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.values
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.values
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .expect("event capture lock")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields: fields.values,
+                });
+        }
+    }
+
+    fn capture_ws_rejection_events(headers: &HeaderMap) -> Vec<CapturedEvent> {
+        let capture = EventCapture::default();
+        let events = Arc::clone(&capture.0);
+        let subscriber = Registry::default().with(capture);
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!is_allowed_ws_origin(headers));
+        });
+
+        let captured = events.lock().expect("event capture lock").clone();
+        captured
+    }
 
     #[test]
     fn test_trusted_host_localhost() {
@@ -705,6 +793,112 @@ mod tests {
                 ws_rejection_log_message(rejection),
                 message,
                 "{rejection:?} のログメッセージ分類が不正"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ws_origin拒否実ログは分類levelと構造化fieldを出力する() {
+        let mut missing_host = HeaderMap::new();
+        missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        let mut host_malformed = HeaderMap::new();
+        host_malformed.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        host_malformed.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+
+        let mut untrusted_host = HeaderMap::new();
+        untrusted_host.insert(HOST, "evil.example:3000".parse().unwrap());
+        untrusted_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        let mut missing_origin = HeaderMap::new();
+        missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
+
+        let mut authority_mismatch = HeaderMap::new();
+        authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
+        authority_mismatch.insert(ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+
+        let cases = [
+            (
+                missing_host,
+                Level::ERROR,
+                "MissingHost",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                host_malformed,
+                Level::ERROR,
+                "HostMalformed",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                untrusted_host,
+                Level::ERROR,
+                "UntrustedHost",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                missing_origin,
+                Level::INFO,
+                "MissingOrigin",
+                "WS Origin 拒否",
+                "false",
+            ),
+            (
+                authority_mismatch,
+                Level::WARN,
+                "AuthorityMismatch",
+                "WS Origin 拒否",
+                "false",
+            ),
+        ];
+
+        for (headers, expected_level, expected_rejection, expected_class, expected_anomaly) in cases
+        {
+            let events = capture_ws_rejection_events(&headers);
+            assert_eq!(
+                events.len(),
+                1,
+                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+            );
+
+            let event = &events[0];
+            assert_eq!(
+                event.level, expected_level,
+                "{expected_rejection} の実ログ level が不正"
+            );
+            assert!(
+                event
+                    .fields
+                    .get("rejection")
+                    .is_some_and(|actual| actual.contains(expected_rejection)),
+                "{expected_rejection} の rejection field が不正: {:?}",
+                event.fields
+            );
+            assert_eq!(
+                event.fields.get("ws_rejection_class").map(String::as_str),
+                Some(expected_class),
+                "{expected_rejection} の分類 field が不正"
+            );
+            assert_eq!(
+                event.fields.get("host_recheck_anomaly").map(String::as_str),
+                Some(expected_anomaly),
+                "{expected_rejection} の Host 再検証異常 field が不正"
+            );
+            assert!(
+                event.fields.contains_key("host"),
+                "{expected_rejection} の host field が欠落: {:?}",
+                event.fields
+            );
+            assert!(
+                event.fields.contains_key("origin"),
+                "{expected_rejection} の origin field が欠落: {:?}",
+                event.fields
             );
         }
     }

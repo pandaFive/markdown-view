@@ -45,7 +45,7 @@
 | `UntrustedOriginAuthority` | `WARN` | 通常の WS Origin 拒否 |
 | `AuthorityMismatch` | `WARN` | 通常の WS Origin 拒否 |
 
-`is_allowed_ws_origin()` は `check_ws_origin(headers)` の `Err(rejection)` で、上記 helper から level と message を取得し、`tracing::event!` で 1 箇所からログを出す。これにより nested `if/match` と `_ => warn!()` を削除する。
+`is_allowed_ws_origin()` は `check_ws_origin(headers)` の `Err(rejection)` で、上記 helper から level と message を取得し、`emit_ws_rejection_log()` へ集約して 1 箇所からログを出す。現行の `tracing` macro 制約に合わせ、helper 内で level ごとに `error!` / `warn!` / `info!` などへ dispatch する。これにより nested `if/match` と `_ => warn!()` を削除する。
 
 Host 系ログメッセージは、Host middleware bypass だけに断定しすぎず、以下の意味が伝わる文言にする。
 
@@ -71,7 +71,7 @@ Host 系ログメッセージは、Host middleware bypass だけに断定しす�
 
 `is_allowed_ws_origin()` は `check_ws_origin()` で Origin / Host の検証を行う。許可時は `true` を返す。拒否時は `WsOriginRejection` を受け取り、`log_value_for_header()` で Host / Origin を audit log 用の安全な文字列へ変換する。
 
-その後、`ws_rejection_log_level()` と `ws_rejection_log_message()` で分類し、`tracing::event!` でログを出して `false` を返す。
+その後、`ws_rejection_log_level()` と `ws_rejection_log_message()` で分類し、`emit_ws_rejection_log()` 経由でログを出して `false` を返す。ログには人間向け本文に加えて `rejection`, `host`, `origin`, `ws_rejection_class`, `host_recheck_anomaly` の structured fields を含める。
 
 ## エラー処理
 

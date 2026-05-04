@@ -4,11 +4,21 @@
 
 **Goal:** `WsOriginRejection` のログ分類を wildcard なしの全列挙にし、Host 系 rejection の実ログ分類を traced test で固定する。
 
-**Architecture:** `src/server/guards.rs` に分類 helper を追加し、`is_allowed_ws_origin()` は helper が返す level/message を `tracing::event!` で出力する。Host / Origin の許可判定、HTTP status、WebSocket 拒否レスポンス body は変更しない。
+**Architecture:** `src/server/guards.rs` に分類 helper を追加し、`is_allowed_ws_origin()` は helper が返す level/message を `emit_ws_rejection_log()` へ渡して出力する。現行 `tracing` macro 制約に合わせ、helper 内で `error!` / `warn!` / `info!` などへ level dispatch する。Host / Origin の許可判定、HTTP status、WebSocket 拒否レスポンス body は変更しない。
 
 **Tech Stack:** Rust, axum, tracing, tracing-test, cargo test, `./verify.sh`
 
 ---
+
+## Execution Preconditions
+
+Commit を含む実装手順を実行する前に、以下を確認する。
+
+- ユーザーがこの plan の実装を承認している。
+- `git status --short --branch` で現在ブランチと未コミット差分を確認する。
+- `main` または `develop` 上なら停止し、feature/fix branch または worktree に移る。
+- 未コミット差分に対象外ファイルやユーザー作業が混ざっている場合は停止し、扱いを確認する。
+- `git commit` 手順は、承認済みの実装セッション内でのみ実行する。
 
 ## File Structure
 
@@ -16,7 +26,7 @@
   - `WsOriginRejection` の Host 系 doc comment を更新する。
   - `is_host_middleware_bypass_indicator()` を wildcard なしの `match` にする。
   - `ws_rejection_log_level()` と `ws_rejection_log_message()` を追加する。
-  - `is_allowed_ws_origin()` の nested `if/match` と `_ => warn!()` を `tracing::event!` に置き換える。
+  - `is_allowed_ws_origin()` の nested `if/match` と `_ => warn!()` を `emit_ws_rejection_log()` helper 経由の level dispatch に置き換える。
   - 分類 unit test と traced log test を追加する。
 - Modify: `src/server/routes.rs`
   - `ws_handler()` の Host 再検証コメントを、実装後のログ分類と一致する説明へ更新する。
@@ -288,17 +298,13 @@ In `src/server/guards.rs`, replace the current `Err(rejection)` body inside `is_
             let origin = log_value_for_header(headers, &ORIGIN);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
-            tracing::event!(
-                level,
-                "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
-                message,
-                rejection,
-                host,
-                origin
-            );
+            let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
+            emit_ws_rejection_log(level, message, host_recheck_anomaly, rejection, host, origin);
             false
         }
 ```
+
+`emit_ws_rejection_log()` は `tracing::event!` の動的 level 指定に依存せず、`match level` で `error!` / `warn!` / `info!` などへ dispatch する。ログ本文は既存の人間向け文字列を維持しつつ、`rejection = ?rejection`, `host = ?host`, `origin = ?origin`, `ws_rejection_class = message`, `host_recheck_anomaly = host_recheck_anomaly` を named fields として併記する。
 
 After replacement, the full function should be:
 
@@ -311,14 +317,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
             let origin = log_value_for_header(headers, &ORIGIN);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
-            tracing::event!(
-                level,
-                "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
-                message,
-                rejection,
-                host,
-                origin
-            );
+            let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
+            emit_ws_rejection_log(level, message, host_recheck_anomaly, rejection, host, origin);
             false
         }
     }
@@ -358,10 +358,10 @@ Expected: PASS. The existing `test_check_ws_origin_variants_網羅` must still p
 Run:
 
 ```bash
-rg -n "_ =>|WS Host middleware bypass 兆候|WS Origin 拒否" src/server/guards.rs
+rg -n "_ => warn|WS Host middleware bypass 兆候" src/server/guards.rs docs/todo/TODO.md src/server/routes.rs
 ```
 
-Expected: no `_ =>` inside `is_allowed_ws_origin()`, no `WS Host middleware bypass 兆候`, and `WS Origin 拒否` appears only as the return value in `ws_rejection_log_message()` or test expectations.
+Expected: no matches. `WS Origin 拒否` は helper の返り値や test expectation として許容されるため、この禁止文字列検索には含めない。
 
 - [ ] **Step 7: Commit logging refactor**
 
@@ -402,7 +402,7 @@ In `docs/todo/TODO.md`, remove this full Medium Priority item:
 - [ ] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
   - ファイル: `src/server/guards.rs`, `docs/todo/TODO.md`
   - 現状: PR #123 で Host 系 `WsOriginRejection::{MissingHost, HostMalformed, UntrustedHost}` を bypass 兆候として `error!` に上げ、MissingHost の traced log test を追加した。一方、`is_allowed_ws_origin()` の非 Host 系ログ分類は `_ => warn!()` に残っており、新しい rejection variant が追加された場合にコンパイラで分類漏れを検出できない。`is_host_middleware_bypass_indicator()` も `matches!` の false 側へ暗黙に落ちるため、variant 追加時の意図確認が弱い。HostMalformed / UntrustedHost の実ログ出力は helper 分類テストで間接的に守られているが、traced log test では直接固定していない
-  - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`tracing::event!` でログ分岐を平坦化する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
+  - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`emit_ws_rejection_log()` でログ出力を集約する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
   - 理由: DNS Rebinding 防御の判定自体は変えずに、将来 variant 追加時の silent fallback とログ分類漏れをコンパイル時・テスト時に検出しやすくする
 ```
 
@@ -410,7 +410,7 @@ Then add this Done Summary item near the top of `## Done Summary`:
 
 ```markdown
 - [x] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
-  - 完了根拠: `WsOriginRejection` のログ分類を wildcard なしの helper に分離し、Host 系 3 variant の traced log test と `tracing::event!` 経由の単一ログ出力で固定した
+  - 完了根拠: `WsOriginRejection` のログ分類を wildcard なしの helper に分離し、Host 系 3 variant の traced log test と `emit_ws_rejection_log()` 経由の単一 helper 出力で固定した
 ```
 
 - [ ] **Step 3: Run docs/comment validation**
@@ -435,7 +435,7 @@ Run:
 cargo fmt --all -- --check
 ```
 
-Expected: PASS. If formatting fails, run `cargo fmt --all`, then rerun the check and include formatting changes in this task's commit.
+Expected: PASS. If formatting fails, run `git status --short` and inspect the changed-file scope before running `cargo fmt --all`. If unrelated or user-owned Rust changes exist, stop and confirm handling first. After formatting, rerun `git status --short` and include only files touched by this task or already-owned Rust files in the commit.
 
 - [ ] **Step 5: Commit comments and TODO update**
 
@@ -479,13 +479,14 @@ Run:
 
 ```bash
 git status --short --branch
-git diff --stat HEAD~3..HEAD
+git diff --stat 81981b2347ae1c44f0bb3a03ff28175e4576c80a HEAD
 ```
 
 Expected:
 
 - Working tree is clean.
-- Diff includes only `src/server/guards.rs`, `src/server/routes.rs`, and `docs/todo/TODO.md`.
+- Branch diff includes the implementation files (`src/server/guards.rs`, `src/server/routes.rs`, `docs/todo/TODO.md`) plus this plan/spec documentation, and any retained review report under `reviews/`.
+- If checking implementation commits only, use the relevant implementation commit range and document that narrower scope explicitly.
 
 - [ ] **Step 4: Prepare completion report**
 
