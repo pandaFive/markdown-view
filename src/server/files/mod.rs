@@ -14,10 +14,17 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
+use crate::server::CanonicalPath;
+
 pub use self::catalog::list_markdown_files;
-pub(in crate::server) use self::catalog::list_markdown_files_from_canonical_base;
 pub use self::content::MAX_FILE_SIZE;
 pub use self::resolve::{resolve_file, ResolveFileError};
+
+pub(in crate::server) fn list_markdown_files_from_canonical_base(
+    base_dir: &CanonicalPath,
+) -> std::io::Result<Vec<String>> {
+    self::catalog::list_markdown_files_from_canonical_base(base_dir)
+}
 
 pub(in crate::server) use self::content::{
     build_change_broadcast_message, build_change_error_log_message_without_receivers,

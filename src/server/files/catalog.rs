@@ -17,7 +17,7 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     list_markdown_files_from_canonical_base(&canonical)
 }
 
-pub(in crate::server) fn list_markdown_files_from_canonical_base(
+pub(super) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
 ) -> std::io::Result<Vec<String>> {
     list_markdown_files_with_limit_from_canonical_base(base_dir, MAX_FILE_LIST)
@@ -95,41 +95,69 @@ fn list_markdown_files_recursive(
             }
         };
 
-        if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
+        if file_type.is_dir() {
             if files.len() >= max_files {
                 return Ok(());
             }
 
-            if file_type.is_symlink() {
-                let Some(resolved) =
-                    canonicalize_dir_for_cycle(&path, "シンボリックリンク", log_base_dir)
-                else {
-                    continue;
-                };
-                if !resolved.starts_with(canonical_base_dir) {
+            let Some(canonical) =
+                canonicalize_dir_for_cycle(&path, "通常ディレクトリ", log_base_dir)
+            else {
+                continue;
+            };
+            if !visited_dirs.insert(canonical) {
+                continue;
+            }
+
+            list_markdown_files_recursive(
+                log_base_dir,
+                canonical_base_dir,
+                &path,
+                files,
+                visited_dirs,
+                depth + 1,
+                max_files,
+            )?;
+        } else if file_type.is_symlink() {
+            let Some(resolved) =
+                canonicalize_dir_for_cycle(&path, "シンボリックリンク", log_base_dir)
+            else {
+                continue;
+            };
+            if !resolved.starts_with(canonical_base_dir) {
+                tracing::warn!(
+                    "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+                    sanitize_path_for_logging(&path, log_base_dir),
+                    sanitize_path_for_logging(&resolved, log_base_dir)
+                );
+                continue;
+            }
+
+            let metadata = match resolved.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
                     tracing::warn!(
-                        "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+                        "[markdown-view] シンボリックリンク先メタデータ取得エラー（スキップ）: {} -> {} ({})",
                         sanitize_path_for_logging(&path, log_base_dir),
-                        sanitize_path_for_logging(&resolved, log_base_dir)
+                        sanitize_path_for_logging(&resolved, log_base_dir),
+                        error
                     );
                     continue;
                 }
-                if !visited_dirs.insert(resolved) {
-                    tracing::warn!(
-                        "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
-                        sanitize_path_for_logging(&path, log_base_dir)
-                    );
-                    continue;
-                }
-            } else {
-                let Some(canonical) =
-                    canonicalize_dir_for_cycle(&path, "通常ディレクトリ", log_base_dir)
-                else {
-                    continue;
-                };
-                if !visited_dirs.insert(canonical) {
-                    continue;
-                }
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            if files.len() >= max_files {
+                return Ok(());
+            }
+            if !visited_dirs.insert(resolved) {
+                tracing::warn!(
+                    "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                    sanitize_path_for_logging(&path, log_base_dir)
+                );
+                continue;
             }
 
             list_markdown_files_recursive(
