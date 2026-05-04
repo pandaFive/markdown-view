@@ -86,7 +86,7 @@ fn test_app_state_new_with_tokio_memo_fsは本番用memo_fsを組み込む() {
 
     assert!(state.dark_mode());
     assert!(!state.syntax_css().is_empty());
-    assert_eq!(state.tx().receiver_count(), 0);
+    assert_eq!(state.tx().receiver_count(), 1);
 }
 ```
 
