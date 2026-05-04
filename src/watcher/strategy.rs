@@ -130,7 +130,7 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         if !is_md {
             continue;
         }
-        let Some(base_relative_check_path) = path_for_base_relative_checks(&event.path, base_path)
+        let Some(base_relative_check) = path_for_base_relative_checks(&event.path, base_path)
         else {
             tracing::warn!(
                 "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
@@ -138,12 +138,10 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
             );
             continue;
         };
-        if is_hidden_relative_to_canonical_base(&event.path, base_path)
-            || is_hidden_relative_to_canonical_base(&base_relative_check_path, base_path)
-        {
+        if base_relative_check.is_hidden {
             continue;
         }
-        let normalized_event_path = normalize_lexical_path(&event.path);
+        let normalized_event_path = base_relative_check.normalized_event_path;
         if notified.insert(normalized_event_path.clone()) {
             changed_paths.push(normalized_event_path);
         }
@@ -165,6 +163,7 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
 /// production経路ではbase配下判定後のパスを受け取る想定だが、テストや将来の呼び出し
 /// 変更で `try_strip_canonical_base_lexical` が `None` を返した場合は `true` を返し、
 /// 安全側に倒す（隠しファイルとして扱い処理をスキップする）。
+#[cfg(test)]
 fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> bool {
     match try_strip_canonical_base_lexical(path, canonical_base) {
         Some(relative) => relative
@@ -180,6 +179,7 @@ fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> b
     }
 }
 
+#[cfg(test)]
 fn try_strip_canonical_base_lexical(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
     let normalized_path = normalize_lexical_path(path);
     let normalized_base = normalize_lexical_path(canonical_base);
@@ -189,23 +189,43 @@ fn try_strip_canonical_base_lexical(path: &Path, canonical_base: &Path) -> Optio
         .map(Path::to_path_buf)
 }
 
+#[cfg(test)]
 fn is_within_canonical_base_lexical(path: &Path, canonical_base: &Path) -> bool {
     try_strip_canonical_base_lexical(path, canonical_base).is_some()
+}
+
+struct BaseRelativeCheckPath {
+    normalized_event_path: PathBuf,
+    is_hidden: bool,
 }
 
 /// base相対の追加検査に使うパスを返す。
 ///
 /// 存在するパスはcanonical targetでbase配下を確認する。削除済みなどNotFoundの場合は
 /// lexicalなbase配下判定にfallbackし、それ以外のI/O失敗は通知対象から除外する。
-fn path_for_base_relative_checks(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
+fn path_for_base_relative_checks(
+    path: &Path,
+    canonical_base: &Path,
+) -> Option<BaseRelativeCheckPath> {
+    let normalized_event_path = normalize_lexical_path(path);
+    let relative_event = normalized_event_path
+        .strip_prefix(normalize_lexical_path(canonical_base))
+        .ok()?
+        .to_path_buf();
+
     match path.canonicalize() {
-        Ok(canonical_path) => canonical_path
-            .starts_with(canonical_base)
-            .then_some(canonical_path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            is_within_canonical_base_lexical(path, canonical_base)
-                .then(|| normalize_lexical_path(path))
+        Ok(canonical_path) => {
+            let relative_canonical = canonical_path.strip_prefix(canonical_base).ok()?;
+            Some(BaseRelativeCheckPath {
+                normalized_event_path,
+                is_hidden: has_hidden_component(&relative_event)
+                    || has_hidden_component(relative_canonical),
+            })
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(BaseRelativeCheckPath {
+            normalized_event_path,
+            is_hidden: has_hidden_component(&relative_event),
+        }),
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] ベース配下判定: パス正規化失敗（スキップ）: {} ({})",
@@ -215,6 +235,12 @@ fn path_for_base_relative_checks(path: &Path, canonical_base: &Path) -> Option<P
             None
         }
     }
+}
+
+fn has_hidden_component(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 /// パスが監視対象ファイルと一致するか判定する

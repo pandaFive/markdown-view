@@ -5,23 +5,20 @@ use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::{CanonicalPath, CanonicalPathError};
 
 /// ファイル一覧の最大件数
-pub(super) const MAX_FILE_LIST: usize = 1000;
+pub(in crate::server) const MAX_FILE_LIST: usize = 1000;
 
 /// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
 pub(super) const MAX_DIR_DEPTH: usize = 32;
 
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
-    list_markdown_files_with_limit(base_dir, MAX_FILE_LIST)
+    let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
+        CanonicalPathError::Canonicalize(error) => error,
+    })?;
+    list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST)
 }
 
-pub(super) fn list_markdown_files_from_canonical_base(
-    base_dir: &CanonicalPath,
-) -> std::io::Result<Vec<String>> {
-    list_markdown_files_with_limit_from_canonical_base(base_dir, MAX_FILE_LIST)
-}
-
-pub(super) fn list_markdown_files_with_limit_from_canonical_base(
+pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
@@ -41,16 +38,6 @@ pub(super) fn list_markdown_files_with_limit_from_canonical_base(
     files.sort();
     files.truncate(max_files);
     Ok(files)
-}
-
-pub(super) fn list_markdown_files_with_limit(
-    base_dir: &Path,
-    max_files: usize,
-) -> std::io::Result<Vec<String>> {
-    let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
-        CanonicalPathError::Canonicalize(error) => error,
-    })?;
-    list_markdown_files_with_limit_from_canonical_base(&canonical, max_files)
 }
 
 fn list_markdown_files_recursive(
@@ -123,6 +110,11 @@ fn list_markdown_files_recursive(
                     continue;
                 }
                 if !resolved.is_dir() {
+                    tracing::debug!(
+                        "[markdown-view] シンボリックリンクが通常ファイルを指すためスキップ: {} -> {}",
+                        name_str,
+                        sanitize_path_for_logging(&resolved, log_base_dir)
+                    );
                     continue;
                 }
                 if !visited_dirs.insert(resolved) {

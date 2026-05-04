@@ -20,6 +20,7 @@ pub use self::catalog::list_markdown_files;
 pub use self::content::MAX_FILE_SIZE;
 pub use self::resolve::{resolve_file, ResolveFileError};
 
+pub(in crate::server) use self::catalog::{list_markdown_files_from_canonical_base, MAX_FILE_LIST};
 pub(in crate::server) use self::content::{
     build_change_broadcast_message, build_change_error_log_message_without_receivers,
     build_lagged_recovery_message, load_initial_socket_update, load_route_update,
@@ -30,12 +31,6 @@ pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
 pub(in crate::server) use self::search::{search_directory, SearchResponse};
-
-pub(in crate::server) fn list_markdown_files_from_canonical_base(
-    base_dir: &crate::server::CanonicalPath,
-) -> std::io::Result<Vec<String>> {
-    catalog::list_markdown_files_from_canonical_base(base_dir)
-}
 
 pub(in crate::server) async fn run_blocking_file_task<T, F>(
     task_label: &'static str,

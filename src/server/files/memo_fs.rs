@@ -33,32 +33,31 @@ pub(crate) enum MemoReadError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MemoBeforeRenameError {
-    user_message: String,
-    status_code: StatusCode,
+pub(crate) enum MemoBeforeRenameError {
+    Forbidden(String),
+    Internal(String),
 }
 
 impl MemoBeforeRenameError {
     pub(crate) fn new(user_message: impl Into<String>) -> Self {
-        Self {
-            user_message: user_message.into(),
-            status_code: StatusCode::FORBIDDEN,
-        }
+        Self::Forbidden(user_message.into())
     }
 
     pub(crate) fn internal(user_message: impl Into<String>) -> Self {
-        Self {
-            user_message: user_message.into(),
-            status_code: StatusCode::INTERNAL_SERVER_ERROR,
-        }
+        Self::Internal(user_message.into())
     }
 
     pub(crate) fn user_message(&self) -> &str {
-        &self.user_message
+        match self {
+            Self::Forbidden(message) | Self::Internal(message) => message,
+        }
     }
 
     pub(crate) fn status_code(&self) -> StatusCode {
-        self.status_code
+        match self {
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
     }
 }
 
@@ -82,10 +81,19 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
 /// rename 直前に再確認すべき保存先不変条件を検査する。
 pub(crate) type BeforeRenameFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a>>;
-pub(crate) type BeforeRenameCheck<'a> = dyn for<'final_path, 'tmp_path> Fn(&'final_path Path, &'tmp_path Path) -> BeforeRenameFuture<'a>
-    + Send
-    + Sync
-    + 'a;
+pub(crate) type BeforeRenameCheck<'a> =
+    dyn Fn(&Path, &Path) -> BeforeRenameFuture<'a> + Send + Sync + 'a;
+
+pub(crate) fn before_rename_future<'a>(
+    future: impl Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a,
+) -> BeforeRenameFuture<'a> {
+    Box::pin(future)
+}
+
+#[cfg(test)]
+pub(crate) fn always_ok_before_rename(_: &Path, _: &Path) -> BeforeRenameFuture<'static> {
+    before_rename_future(async { Ok(()) })
+}
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TMP_ATTEMPTS: u8 = 8;
@@ -400,7 +408,7 @@ mod tests {
                 let final_path = final_path.to_path_buf();
                 let tmp_path = tmp_path.to_path_buf();
                 let path_for_check = path_for_check.clone();
-                Box::pin(async move {
+                before_rename_future(async move {
                     assert_eq!(final_path.as_path(), path_for_check.as_path());
                     assert!(tmp_path.exists(), "tmp file should exist before rename");
                     assert_eq!(
@@ -448,9 +456,7 @@ mod tests {
             let path = path.clone();
             let content = format!("parallel-memo-{index:02}-{}", "x".repeat(index + 1));
             handles.push(tokio::spawn(async move {
-                let before_rename =
-                    |_: &Path, _: &Path| Box::pin(async { Ok(()) }) as BeforeRenameFuture<'_>;
-                fs.write_atomic(&path, content.as_bytes(), &before_rename)
+                fs.write_atomic(&path, content.as_bytes(), &always_ok_before_rename)
                     .await
                     .expect("parallel atomic write should succeed");
                 content.into_bytes()
@@ -501,7 +507,7 @@ mod tests {
             .write_atomic(&path, b"new", &move |_, tmp_path| {
                 let observed_tmp_for_check = Arc::clone(&observed_tmp_for_check);
                 let tmp_path = tmp_path.to_path_buf();
-                Box::pin(async move {
+                before_rename_future(async move {
                     assert!(tmp_path.exists(), "tmp file should exist before check");
                     *observed_tmp_for_check
                         .lock()
@@ -547,7 +553,7 @@ mod tests {
             .write_atomic(&path, b"secret", &move |_, tmp_path| {
                 let observed_mode_for_check = Arc::clone(&observed_mode_for_check);
                 let tmp_path = tmp_path.to_path_buf();
-                Box::pin(async move {
+                before_rename_future(async move {
                     let mode = std::fs::metadata(&tmp_path)
                         .expect("tmp metadata should be readable")
                         .permissions()
@@ -588,14 +594,9 @@ mod tests {
         }
 
         // counter 0 の全 attempt を占有し、retry 枯渇時も最終ファイルを壊さないことを固定する。
-        let err = write_atomic_with_counter(
-            &path,
-            b"new",
-            &|_, _| Box::pin(async { Ok(()) }) as BeforeRenameFuture<'_>,
-            counter,
-        )
-        .await
-        .expect_err("occupied tmp attempts should exhaust");
+        let err = write_atomic_with_counter(&path, b"new", &always_ok_before_rename, counter)
+            .await
+            .expect_err("occupied tmp attempts should exhaust");
 
         match err {
             MemoWriteError::Io(error) => {

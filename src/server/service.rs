@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use super::files::{
     list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
     resolve_route_target, run_blocking_file_task, save_route_memo, search_directory,
-    ResolvedTarget, RouteTargetRequest, SearchResponse,
+    ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -170,7 +170,7 @@ pub(super) async fn save_memo(
 pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
     if let Some(base) = state.mode().directory_canonical().cloned() {
         run_blocking_file_task("ファイル一覧取得", move || {
-            list_markdown_files_from_canonical_base(&base)
+            list_markdown_files_from_canonical_base(&base, MAX_FILE_LIST)
         })
         .await
         .map_err(|_| {

@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 
 use super::content::MAX_FILE_SIZE;
 use super::memo_fs::{
-    BeforeRenameCheck, BeforeRenameFuture, MemoBeforeRenameError, MemoFs, MemoReadError,
+    before_rename_future, BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError,
     MemoWriteError,
 };
 use super::memo_sidecar::SidecarMemoName;
@@ -70,9 +70,9 @@ pub(in crate::server) async fn save_route_memo(
     let before_rename = |final_path: &Path, tmp_path: &Path| {
         let final_path = final_path.to_path_buf();
         let tmp_path = tmp_path.to_path_buf();
-        Box::pin(async move {
+        before_rename_future(async move {
             ensure_safe_memo_rename_paths(&final_path, &tmp_path, state, target, request).await
-        }) as BeforeRenameFuture<'_>
+        })
     };
     fs.write_atomic(
         memo_path,
@@ -543,7 +543,19 @@ async fn first_unsafe_memo_path_component(
     base_dir: &Path,
     target: &Path,
 ) -> Option<UnsafeMemoPathComponent> {
-    let relative = target.strip_prefix(base_dir).ok()?;
+    let relative = match target.strip_prefix(base_dir) {
+        Ok(relative) => relative,
+        Err(_) => {
+            tracing::warn!(
+                "[markdown-view] メモパスがbase外のため安全側で拒否します: {} (base: {})",
+                sanitize_path_for_logging(target, base_dir),
+                base_dir.display()
+            );
+            return Some(UnsafeMemoPathComponent::InspectionError(
+                target.to_path_buf(),
+            ));
+        }
+    };
     let mut current = base_dir.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
@@ -697,6 +709,18 @@ mod unsafe_memo_path_component_tests {
         match first_unsafe_memo_path_component(dir.path(), &target).await {
             Some(UnsafeMemoPathComponent::InspectionError(path)) => assert_eq!(path, target),
             _ => panic!("メタデータエラーは安全確認失敗として返すべき"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_first_unsafe_memo_path_component_base外pathは安全確認失敗として拒否する() {
+        let base = tempfile::tempdir().expect("base tempdirを作成できる");
+        let outside = tempfile::tempdir().expect("outside tempdirを作成できる");
+        let target = outside.path().join("memo.md");
+
+        match first_unsafe_memo_path_component(base.path(), &target).await {
+            Some(UnsafeMemoPathComponent::InspectionError(path)) => assert_eq!(path, target),
+            _ => panic!("base外pathは安全確認失敗として返すべき"),
         }
     }
 }

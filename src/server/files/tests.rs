@@ -21,7 +21,7 @@ use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 #[cfg(unix)]
 use super::memo_fs::MemoBeforeRenameError;
 use super::memo_fs::{
-    BeforeRenameCheck, BeforeRenameFuture, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+    before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
 };
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::{resolve_change_target, revalidate_single_file_target};
@@ -156,7 +156,7 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
                 let final_path = final_path.to_path_buf();
                 let tmp_path = tmp_path.to_path_buf();
                 let link_target = link_target.clone();
-                Box::pin(async move {
+                before_rename_future(async move {
                     match std::fs::remove_file(&final_path) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -172,7 +172,7 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
                         ))
                     })?;
                     before_rename(&final_path, &tmp_path).await
-                }) as BeforeRenameFuture<'_>
+                })
             })
             .await
     }
@@ -213,7 +213,7 @@ impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
                 let final_path = final_path.to_path_buf();
                 let tmp_path = tmp_path.to_path_buf();
                 let link_target = link_target.clone();
-                Box::pin(async move {
+                before_rename_future(async move {
                     match std::fs::remove_file(&tmp_path) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -229,7 +229,7 @@ impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
                         ))
                     })?;
                     before_rename(&final_path, &tmp_path).await
-                }) as BeforeRenameFuture<'_>
+                })
             })
             .await
     }
@@ -703,6 +703,26 @@ fn test_resolve_file_シンボリックリンクによるトラバーサル拒�
     assert_eq!(result, Err(ResolveFileError::Traversal));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_file(dir.path(), "locked/secret.md");
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
 #[test]
 fn test_list_markdown_files_基本動作() {
     let dir = create_test_dir();
@@ -720,7 +740,7 @@ fn test_list_markdown_files_from_canonical_base_基本動作() {
     std::fs::write(dir.path().join("skip.txt"), "skip").unwrap();
 
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
-    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert_eq!(files, vec!["a.md".to_string(), "b.md".to_string()]);
 }
@@ -736,13 +756,14 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
     symlink(outside.path(), base.path().join("linked")).unwrap();
 
     let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
-    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert!(files.is_empty());
 }
 
 #[test]
 #[cfg(unix)]
+#[tracing_test::traced_test]
 fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレクトリだけ辿る() {
     use std::os::unix::fs::symlink;
 
@@ -760,9 +781,13 @@ fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレ�
     symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
 
     let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
-    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert_eq!(files, vec!["linked_dir/doc.md".to_string()]);
+    assert!(logs_contain(
+        "シンボリックリンクが通常ファイルを指すためスキップ"
+    ));
+    assert!(logs_contain("linked_file.md"));
 }
 
 #[test]
@@ -3121,6 +3146,27 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&file_path, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = revalidate_single_file_target(&target, &base_dir);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
 }
 
 #[test]

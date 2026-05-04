@@ -216,11 +216,9 @@ async fn resolve_request_target(
         tracing::error!("[markdown-view] 未知のAppModeです");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    let base_path = base_dir.as_path();
-
     let mut precomputed_files = None;
     let file_path = if let Some(relative) = request.query_file() {
-        resolve_file_blocking(base_path, relative)
+        resolve_file_blocking(base_dir, relative)
             .await?
             .map_err(|error| {
                 tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
@@ -237,7 +235,7 @@ async fn resolve_request_target(
 
         match default_file {
             Some(relative) => {
-                resolve_file_blocking(base_path, relative)
+                resolve_file_blocking(base_dir, relative)
                     .await?
                     .map_err(|error| {
                         tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
@@ -263,7 +261,7 @@ async fn resolve_request_target(
 async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
     let base_dir = base_dir.clone();
     run_blocking_file_task("ファイル一覧取得", move || {
-        list_markdown_files_from_canonical_base(&base_dir)
+        list_markdown_files_from_canonical_base(&base_dir, super::catalog::MAX_FILE_LIST)
     })
     .await?
     .map_err(|error| {
@@ -273,13 +271,13 @@ async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<St
 }
 
 async fn resolve_file_blocking(
-    base_dir: &Path,
+    base_dir: &CanonicalPath,
     relative: &str,
 ) -> Result<Result<PathBuf, ResolveFileError>, StatusCode> {
-    let base_dir = base_dir.to_path_buf();
+    let base_dir = base_dir.clone();
     let relative = relative.to_owned();
     run_blocking_file_task("ファイル解決", move || {
-        resolve_file(&base_dir, &relative)
+        resolve_file(base_dir.as_path(), &relative)
     })
     .await
 }
@@ -381,7 +379,7 @@ fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileErro
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
-    resolve_file_with_canonicalize_error(base_dir, relative, |_| ResolveFileError::NotFound)
+    resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
 }
 
 fn resolve_file_for_directory_change(
@@ -458,12 +456,13 @@ pub(super) fn revalidate_single_file_target(
     base_dir: &Path,
 ) -> Result<PathBuf, ResolveFileError> {
     let canonical = expected_path.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] 単一ファイルパス正規化失敗: {} ({})",
             sanitize_path_for_logging(expected_path, base_dir),
             error
         );
-        ResolveFileError::NotFound
+        resolve_canonicalize_error(error_kind)
     })?;
 
     if canonical != expected_path {

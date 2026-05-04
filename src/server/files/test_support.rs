@@ -14,7 +14,8 @@ use crate::server::messages::BroadcastMessage;
 use crate::server::state::{AppMode, AppState};
 
 use super::memo_fs::{
-    BeforeRenameCheck, BeforeRenameFuture, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+    always_ok_before_rename, before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError,
+    MemoWriteError, TokioMemoFs,
 };
 
 /// tempdir ベースのテスト用ワークスペース。
@@ -266,12 +267,12 @@ mod tests {
                 let final_path = final_path.to_path_buf();
                 let tmp_path = tmp_path.to_path_buf();
                 let memo_path_for_check = memo_path_for_check.clone();
-                Box::pin(async move {
+                before_rename_future(async move {
                     assert_eq!(final_path.as_path(), memo_path_for_check.as_path());
                     assert_eq!(tmp_path.parent(), final_path.parent());
                     assert!(tmp_path.exists(), "tmp file should exist before rename");
                     Ok(())
-                }) as BeforeRenameFuture<'_>
+                })
             })
             .await
             .expect("atomic write should succeed");
@@ -313,11 +314,11 @@ mod tests {
         memo_fs.fail_at(Op::AtomicRename, &rename_path, io::ErrorKind::AlreadyExists);
 
         let write_err = memo_fs
-            .write_atomic(&write_path, b"new", &|_, _| Box::pin(async { Ok(()) }))
+            .write_atomic(&write_path, b"new", &always_ok_before_rename)
             .await
             .expect_err("write_atomic failure should be injected");
         let rename_err = memo_fs
-            .write_atomic(&rename_path, b"new", &|_, _| Box::pin(async { Ok(()) }))
+            .write_atomic(&rename_path, b"new", &always_ok_before_rename)
             .await
             .expect_err("atomic rename failure should be injected");
 
