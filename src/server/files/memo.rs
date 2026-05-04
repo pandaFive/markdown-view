@@ -60,14 +60,16 @@ pub(in crate::server) async fn save_route_memo(
     }
 
     let memo_path = &memo_paths.sidecar;
-    ensure_safe_memo_path(memo_path, state, target, request)?;
+    ensure_safe_memo_path(memo_path, state, target, request).await?;
     if let Some(parent) = memo_path.parent() {
         fs.create_dir_all(parent)
             .await
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
     let before_rename = |final_path: &Path, tmp_path: &Path| {
-        ensure_safe_memo_rename_paths(final_path, tmp_path, state, target, request)
+        run_memo_before_rename_check(ensure_safe_memo_rename_paths(
+            final_path, tmp_path, state, target, request,
+        ))
     };
     fs.write_atomic(
         memo_path,
@@ -93,7 +95,7 @@ async fn delete_route_memo(
     memo_paths: &MemoPaths,
     fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
-    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request)?;
+    ensure_safe_memo_path(&memo_paths.sidecar, state, target, request).await?;
 
     cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
     cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
@@ -264,7 +266,7 @@ async fn pick_existing_safe_path(
     unsafe_path: UnsafeMemoPath,
     fs: &dyn MemoFs,
 ) -> Result<Option<PathBuf>, ApiError> {
-    if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
+    if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
         let action = match unsafe_path {
             UnsafeMemoPath::Reject => "読み込みを拒否します",
             UnsafeMemoPath::Skip => "読み込み候補から除外します",
@@ -351,7 +353,7 @@ async fn cleanup_memo_path_best_effort(
     label: &str,
     fs: &dyn MemoFs,
 ) {
-    if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
+    if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
         tracing::warn!(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),
@@ -400,7 +402,7 @@ async fn cleanup_memo_path_required(
     label: &str,
     fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
-    if let Err(error) = ensure_safe_memo_path(path, state, target, request) {
+    if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
         tracing::warn!(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),
@@ -418,14 +420,14 @@ async fn cleanup_memo_path_required(
     }
 }
 
-fn ensure_safe_memo_path(
+async fn ensure_safe_memo_path(
     memo_path: &Path,
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<(), ApiError> {
     let base_dir = state.mode().base_dir();
-    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path) {
+    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
         return Err(json_error(
             StatusCode::FORBIDDEN,
@@ -435,7 +437,7 @@ fn ensure_safe_memo_path(
     Ok(())
 }
 
-fn ensure_safe_memo_rename_paths(
+async fn ensure_safe_memo_rename_paths(
     final_path: &Path,
     tmp_path: &Path,
     state: &AppState,
@@ -456,23 +458,56 @@ fn ensure_safe_memo_rename_paths(
         ));
     }
 
-    ensure_safe_memo_rename_path(final_path, state, target, request)?;
-    ensure_safe_memo_rename_path(tmp_path, state, target, request)?;
+    ensure_safe_memo_rename_path(final_path, state, target, request).await?;
+    ensure_safe_memo_rename_path(tmp_path, state, target, request).await?;
     Ok(())
 }
 
-fn ensure_safe_memo_rename_path(
+async fn ensure_safe_memo_rename_path(
     memo_path: &Path,
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<(), MemoBeforeRenameError> {
     let base_dir = state.mode().base_dir();
-    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path) {
+    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
         return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
     }
     Ok(())
+}
+
+fn run_memo_before_rename_check<F>(future: F) -> Result<(), MemoBeforeRenameError>
+where
+    F: std::future::Future<Output = Result<(), MemoBeforeRenameError>> + Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        tracing::warn!(
+                            "[markdown-view] メモrename直前の安全確認runtime作成に失敗したため拒否します: {}",
+                            error
+                        );
+                        MemoBeforeRenameError::new(
+                            "メモ保存先の安全確認に失敗したため操作できません",
+                        )
+                    })?;
+                runtime.block_on(future)
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    "[markdown-view] メモrename直前の安全確認threadがpanicしたため拒否します"
+                );
+                Err(MemoBeforeRenameError::new(
+                    "メモ保存先の安全確認に失敗したため操作できません",
+                ))
+            })
+    })
 }
 
 enum UnsafeMemoPathComponent {
@@ -520,7 +555,7 @@ fn log_unsafe_memo_path(
     }
 }
 
-fn first_unsafe_memo_path_component(
+async fn first_unsafe_memo_path_component(
     base_dir: &Path,
     target: &Path,
 ) -> Option<UnsafeMemoPathComponent> {
@@ -528,7 +563,7 @@ fn first_unsafe_memo_path_component(
     let mut current = base_dir.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
+        match tokio::fs::symlink_metadata(&current).await {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Some(UnsafeMemoPathComponent::Symlink(current));
             }
@@ -668,14 +703,14 @@ fn memo_read_error_to_api_error(
 mod unsafe_memo_path_component_tests {
     use super::{first_unsafe_memo_path_component, UnsafeMemoPathComponent};
 
-    #[test]
-    fn test_first_unsafe_memo_path_component_メタデータエラーは安全側で拒否する() {
+    #[tokio::test]
+    async fn test_first_unsafe_memo_path_component_メタデータエラーは安全側で拒否する() {
         let dir = tempfile::tempdir().expect("tempdirを作成できる");
         let blocking_file = dir.path().join("blocked");
         std::fs::write(&blocking_file, b"not a directory").expect("検査用ファイルを作成できる");
         let target = blocking_file.join("memo.md");
 
-        match first_unsafe_memo_path_component(dir.path(), &target) {
+        match first_unsafe_memo_path_component(dir.path(), &target).await {
             Some(UnsafeMemoPathComponent::InspectionError(path)) => assert_eq!(path, target),
             _ => panic!("メタデータエラーは安全確認失敗として返すべき"),
         }
