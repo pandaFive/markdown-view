@@ -138,7 +138,9 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
             );
             continue;
         };
-        if is_hidden_relative_to_canonical_base(&base_relative_check_path, base_path) {
+        if is_hidden_relative_to_canonical_base(&event.path, base_path)
+            || is_hidden_relative_to_canonical_base(&base_relative_check_path, base_path)
+        {
             continue;
         }
         let normalized_event_path = normalize_lexical_path(&event.path);
@@ -499,6 +501,27 @@ mod tests {
         let link = canonical_base.as_path().join("link.md");
         symlink(&hidden_file, &link).unwrap();
         let events = vec![debounced_event(link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_hidden_symlink名markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let visible_file = canonical_base.as_path().join("visible.md");
+        std::fs::write(&visible_file, "# visible").unwrap();
+        let hidden_link = canonical_base.as_path().join(".secret.md");
+        symlink(&visible_file, &hidden_link).unwrap();
+        let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
 
         let changes = WatchStrategy::Directory {
             base_dir: canonical_base,
