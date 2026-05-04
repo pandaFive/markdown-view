@@ -162,7 +162,8 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
 /// 正しく動作するよう、相対パス部分のみをチェックする。
 ///
 /// ## Fail-safe動作
-/// `try_strip_canonical_base_lexical` が `None` を返した場合は `true` を返し、
+/// production経路ではbase配下判定後のパスを受け取る想定だが、テストや将来の呼び出し
+/// 変更で `try_strip_canonical_base_lexical` が `None` を返した場合は `true` を返し、
 /// 安全側に倒す（隠しファイルとして扱い処理をスキップする）。
 fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> bool {
     match try_strip_canonical_base_lexical(path, canonical_base) {
@@ -192,6 +193,10 @@ fn is_within_canonical_base_lexical(path: &Path, canonical_base: &Path) -> bool 
     try_strip_canonical_base_lexical(path, canonical_base).is_some()
 }
 
+/// base相対の追加検査に使うパスを返す。
+///
+/// 存在するパスはcanonical targetでbase配下を確認する。削除済みなどNotFoundの場合は
+/// lexicalなbase配下判定にfallbackし、それ以外のI/O失敗は通知対象から除外する。
 fn path_for_base_relative_checks(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
     match path.canonicalize() {
         Ok(canonical_path) => canonical_path
@@ -521,6 +526,26 @@ mod tests {
         std::fs::write(&visible_file, "# visible").unwrap();
         let hidden_link = canonical_base.as_path().join(".secret.md");
         symlink(&visible_file, &hidden_link).unwrap();
+        let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_broken_hidden_symlink名markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let missing_target = canonical_base.as_path().join("missing.md");
+        let hidden_link = canonical_base.as_path().join(".missing.md");
+        symlink(&missing_target, &hidden_link).unwrap();
         let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
 
         let changes = WatchStrategy::Directory {

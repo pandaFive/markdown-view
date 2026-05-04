@@ -433,7 +433,7 @@ async fn ensure_safe_memo_path(
     if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
         return Err(json_error(
-            StatusCode::FORBIDDEN,
+            unsafe_component.status_code(),
             unsafe_component.user_message(),
         ));
     }
@@ -475,7 +475,7 @@ async fn ensure_safe_memo_rename_path(
     let base_dir = state.mode().base_dir();
     if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
-        return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
+        return Err(unsafe_component.before_rename_error());
     }
     Ok(())
 }
@@ -495,7 +495,21 @@ impl UnsafeMemoPathComponent {
     fn user_message(&self) -> &'static str {
         match self {
             Self::Symlink(_) => "メモ保存先にシンボリックリンクが含まれているため操作できません",
-            Self::InspectionError(_) => "メモ保存先の安全確認に失敗したため操作できません",
+            Self::InspectionError(_) => "メモ保存先の安全確認に失敗しました",
+        }
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Symlink(_) => StatusCode::FORBIDDEN,
+            Self::InspectionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn before_rename_error(&self) -> MemoBeforeRenameError {
+        match self {
+            Self::Symlink(_) => MemoBeforeRenameError::new(self.user_message()),
+            Self::InspectionError(_) => MemoBeforeRenameError::internal(self.user_message()),
         }
     }
 }
@@ -613,7 +627,7 @@ fn memo_write_error_to_api_error(
                 target.file_label(),
                 error.user_message()
             );
-            json_error(StatusCode::FORBIDDEN, error.user_message())
+            json_error(error.status_code(), error.user_message())
         }
     }
 }

@@ -55,6 +55,23 @@ impl SymlinkBeforeRenameMemoFs {
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+struct TmpSymlinkBeforeRenameMemoFs {
+    inner: TokioMemoFs,
+    link_target: PathBuf,
+}
+
+#[cfg(unix)]
+impl TmpSymlinkBeforeRenameMemoFs {
+    fn new(link_target: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            link_target,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct MismatchedTmpParentMemoFs {
     inner: TokioMemoFs,
@@ -152,6 +169,63 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
                     symlink(&link_target, &final_path).map_err(|error| {
                         MemoBeforeRenameError::new(format!(
                             "テスト用メモsymlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                }) as BeforeRenameFuture<'_>
+            })
+            .await
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_rename: &BeforeRenameCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        let link_target = self.link_target.clone();
+        self.inner
+            .write_atomic(path, content, &move |final_path, tmp_path| {
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                Box::pin(async move {
+                    match std::fs::remove_file(&tmp_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用tmp差し替えに失敗しました: {error}"
+                            )));
+                        }
+                    }
+                    symlink(&link_target, &tmp_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用tmp symlink作成に失敗しました: {error}"
                         ))
                     })?;
                     before_rename(&final_path, &tmp_path).await
@@ -2057,6 +2131,80 @@ async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わる
         std::fs::read_to_string(&outside_memo).expect("outside memo should remain readable"),
         "outside memo"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると403を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+    let outside_dir = tempfile::tempdir().expect("outside dir should be created");
+    let outside_tmp = outside_dir.path().join("outside.tmp");
+    std::fs::write(&outside_tmp, "outside tmp").expect("outside tmp should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, TmpSymlinkBeforeRenameMemoFs::new(outside_tmp.clone()));
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("tmp precheck should reject symlink replacement");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        "old memo"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_tmp).expect("outside tmp should remain readable"),
+        "outside tmp"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    let Some(_guard) = make_dir_unsearchable(workspace.path(), &sidecar_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("inspection failure should be surfaced as 500");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
 }
 
 #[tokio::test]

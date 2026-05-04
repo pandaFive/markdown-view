@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use axum::http::StatusCode;
 
 use super::catalog::list_markdown_files_from_canonical_base;
+use super::run_blocking_file_task;
 use crate::server::guards::json_error;
 use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
@@ -219,10 +220,12 @@ async fn resolve_request_target(
 
     let mut precomputed_files = None;
     let file_path = if let Some(relative) = request.query_file() {
-        resolve_file(base_path, relative).map_err(|error| {
-            tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
-            error.status_code()
-        })?
+        resolve_file_blocking(base_path, relative)
+            .await?
+            .map_err(|error| {
+                tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
+                error.status_code()
+            })?
     } else {
         let files = list_markdown_files_blocking(base_dir).await?;
         precomputed_files = Some(files.clone());
@@ -233,10 +236,14 @@ async fn resolve_request_target(
             .or_else(|| files.first());
 
         match default_file {
-            Some(relative) => resolve_file(base_path, relative).map_err(|error| {
-                tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?,
+            Some(relative) => {
+                resolve_file_blocking(base_path, relative)
+                    .await?
+                    .map_err(|error| {
+                        tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            }
             None => return Err(StatusCode::NOT_FOUND),
         }
     };
@@ -255,26 +262,26 @@ async fn resolve_request_target(
 
 async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
     let base_dir = base_dir.clone();
-    tokio::task::spawn_blocking(move || list_markdown_files_from_canonical_base(&base_dir))
-        .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!(
-                    "[markdown-view] ファイル一覧取得タスクがpanicしました: {}",
-                    error
-                );
-            } else {
-                tracing::warn!(
-                    "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
-                    error
-                );
-            }
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .map_err(|error| {
-            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    run_blocking_file_task("ファイル一覧取得", move || {
+        list_markdown_files_from_canonical_base(&base_dir)
+    })
+    .await?
+    .map_err(|error| {
+        tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+async fn resolve_file_blocking(
+    base_dir: &Path,
+    relative: &str,
+) -> Result<Result<PathBuf, ResolveFileError>, StatusCode> {
+    let base_dir = base_dir.to_path_buf();
+    let relative = relative.to_owned();
+    run_blocking_file_task("ファイル解決", move || {
+        resolve_file(&base_dir, &relative)
+    })
+    .await
 }
 
 fn build_resolved_target(

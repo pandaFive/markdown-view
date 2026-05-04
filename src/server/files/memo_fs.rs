@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
@@ -34,17 +35,30 @@ pub(crate) enum MemoReadError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MemoBeforeRenameError {
     user_message: String,
+    status_code: StatusCode,
 }
 
 impl MemoBeforeRenameError {
     pub(crate) fn new(user_message: impl Into<String>) -> Self {
         Self {
             user_message: user_message.into(),
+            status_code: StatusCode::FORBIDDEN,
+        }
+    }
+
+    pub(crate) fn internal(user_message: impl Into<String>) -> Self {
+        Self {
+            user_message: user_message.into(),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     pub(crate) fn user_message(&self) -> &str {
         &self.user_message
+    }
+
+    pub(crate) fn status_code(&self) -> StatusCode {
+        self.status_code
     }
 }
 
@@ -60,12 +74,12 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
     }
 }
 
-/// tmp を最終パスへ置換する直前の検査フック。
+/// tmp を最終パスへ置換する直前の非同期検査フック。
 ///
 /// 第1引数は最終保存先、第2引数は同一ディレクトリ内に作成済みの tmp パス。
 /// `Err` を返すと tmp は削除され、最終保存先は置換されない。
-/// 呼び出し側は、final/tmp の親ディレクトリ一致と symlink component 不在など、
-/// rename 直前に再確認すべき保存先不変条件をここで検査する。
+/// 実装は async で final/tmp の親ディレクトリ一致と symlink component 不在など、
+/// rename 直前に再確認すべき保存先不変条件を検査する。
 pub(crate) type BeforeRenameFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a>>;
 pub(crate) type BeforeRenameCheck<'a> = dyn for<'final_path, 'tmp_path> Fn(&'final_path Path, &'tmp_path Path) -> BeforeRenameFuture<'a>

@@ -1,5 +1,7 @@
 //! Markdownファイルの探索、検証、読み込み、描画を管理する。
 
+use axum::http::StatusCode;
+
 mod catalog;
 mod content;
 mod memo;
@@ -33,6 +35,32 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &crate::server::CanonicalPath,
 ) -> std::io::Result<Vec<String>> {
     catalog::list_markdown_files_from_canonical_base(base_dir)
+}
+
+pub(in crate::server) async fn run_blocking_file_task<T, F>(
+    task_label: &'static str,
+    task: F,
+) -> Result<T, StatusCode>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(task).await.map_err(|error| {
+        if error.is_panic() {
+            tracing::error!(
+                "[markdown-view] {}タスクがpanicしました: {}",
+                task_label,
+                error
+            );
+        } else {
+            tracing::warn!(
+                "[markdown-view] {}タスクのjoinエラー: {}",
+                task_label,
+                error
+            );
+        }
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 #[cfg(test)]
