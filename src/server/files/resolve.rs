@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
-use super::catalog::list_markdown_files;
+use super::catalog::list_markdown_files_from_canonical_base;
+use super::run_blocking_file_task;
 use crate::server::guards::json_error;
 use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
-use crate::server::state::AppState;
+use crate::server::state::{AppState, CanonicalPath};
 use crate::template::UpdateMessage;
 
 #[derive(Debug, Clone)]
@@ -133,25 +134,28 @@ impl<'a> RouteTargetRequest<'a> {
 }
 
 /// 対象ファイル解決エラーをエンドポイント文脈に応じたAPIエラーへ変換する。
-pub(in crate::server) fn resolve_route_target(
+pub(in crate::server) async fn resolve_route_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
 ) -> Result<ResolvedTarget, ApiError> {
-    let (file_path, file_list) = resolve_request_target(state, request).map_err(|status| {
-        let message = match status {
-            StatusCode::NOT_FOUND => request.not_found_message(),
-            StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-            other => {
-                tracing::warn!(
-                    "[markdown-view] 予期しないファイル解決ステータスを検出: request={:?}, status={}",
-                    request,
-                    other
-                );
-                "ファイル解決に失敗しました"
-            }
-        };
-        json_error(status, message)
-    })?;
+    let (file_path, file_list) =
+        resolve_request_target(state, request)
+            .await
+            .map_err(|status| {
+                let message = match status {
+                    StatusCode::NOT_FOUND => request.not_found_message(),
+                    StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
+                    other => {
+                        tracing::warn!(
+                            "[markdown-view] 予期しないファイル解決ステータスを検出: request={:?}, status={}",
+                            request,
+                            other
+                        );
+                        "ファイル解決に失敗しました"
+                    }
+                };
+                json_error(status, message)
+            })?;
 
     Ok(build_resolved_target(
         state,
@@ -195,7 +199,7 @@ pub(super) fn resolve_change_target(
     resolve_directory_change_target(state, changed_file)
 }
 
-fn resolve_request_target(
+async fn resolve_request_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
 ) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
@@ -208,22 +212,20 @@ fn resolve_request_target(
         return Ok((canonical, None));
     }
 
-    let Some(base_dir) = state.mode().directory() else {
+    let Some(base_dir) = state.mode().directory_canonical() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
-
     let mut precomputed_files = None;
     let file_path = if let Some(relative) = request.query_file() {
-        resolve_file(base_dir, relative).map_err(|error| {
-            tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
-            error.status_code()
-        })?
+        resolve_file_blocking(base_dir, relative)
+            .await?
+            .map_err(|error| {
+                tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
+                error.status_code()
+            })?
     } else {
-        let files = list_markdown_files(base_dir).map_err(|error| {
-            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let files = list_markdown_files_blocking(base_dir).await?;
         precomputed_files = Some(files.clone());
 
         let default_file = files
@@ -232,10 +234,14 @@ fn resolve_request_target(
             .or_else(|| files.first());
 
         match default_file {
-            Some(relative) => resolve_file(base_dir, relative).map_err(|error| {
-                tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?,
+            Some(relative) => {
+                resolve_file_blocking(base_dir, relative)
+                    .await?
+                    .map_err(|error| {
+                        tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            }
             None => return Err(StatusCode::NOT_FOUND),
         }
     };
@@ -243,16 +249,37 @@ fn resolve_request_target(
     let file_list = if request.include_file_list() {
         match precomputed_files {
             Some(files) => Some(files),
-            None => Some(list_markdown_files(base_dir).map_err(|error| {
-                tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?),
+            None => Some(list_markdown_files_blocking(base_dir).await?),
         }
     } else {
         None
     };
 
     Ok((file_path, file_list))
+}
+
+async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
+    let base_dir = base_dir.clone();
+    run_blocking_file_task("ファイル一覧取得", move || {
+        list_markdown_files_from_canonical_base(&base_dir, super::catalog::MAX_FILE_LIST)
+    })
+    .await?
+    .map_err(|error| {
+        tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+async fn resolve_file_blocking(
+    base_dir: &CanonicalPath,
+    relative: &str,
+) -> Result<Result<PathBuf, ResolveFileError>, StatusCode> {
+    let base_dir = base_dir.clone();
+    let relative = relative.to_owned();
+    run_blocking_file_task("ファイル解決", move || {
+        resolve_file(base_dir.as_path(), &relative)
+    })
+    .await
 }
 
 fn build_resolved_target(
@@ -352,7 +379,7 @@ fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileErro
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
-    resolve_file_with_canonicalize_error(base_dir, relative, |_| ResolveFileError::NotFound)
+    resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
 }
 
 fn resolve_file_for_directory_change(
@@ -429,12 +456,14 @@ pub(super) fn revalidate_single_file_target(
     base_dir: &Path,
 ) -> Result<PathBuf, ResolveFileError> {
     let canonical = expected_path.canonicalize().map_err(|error| {
+        let error_kind = error.kind();
         tracing::warn!(
-            "[markdown-view] 単一ファイルパス正規化失敗: {} ({})",
+            "[markdown-view] 単一ファイルパス正規化失敗: {} ({:?}: {})",
             sanitize_path_for_logging(expected_path, base_dir),
+            error_kind,
             error
         );
-        ResolveFileError::NotFound
+        resolve_canonicalize_error(error_kind)
     })?;
 
     if canonical != expected_path {

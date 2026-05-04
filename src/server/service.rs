@@ -1,8 +1,9 @@
 use axum::http::StatusCode;
 
 use super::files::{
-    list_markdown_files, load_route_memo, load_route_update, resolve_route_target, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse,
+    list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
+    resolve_route_target, run_blocking_file_task, save_route_memo, search_directory,
+    ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -93,7 +94,7 @@ pub(super) async fn load_page(
     request: PageRequest<'_>,
 ) -> Result<PageView, ApiError> {
     let route_request = RouteTargetRequest::page(request.file);
-    let target = resolve_route_target(state, route_request)?;
+    let target = resolve_route_target(state, route_request).await?;
     let update = load_route_update(&target, route_request).await?;
     let memo =
         match load_route_memo(state, &target, RouteTargetRequest::api_memo(request.file)).await {
@@ -133,7 +134,7 @@ pub(super) async fn load_content(
     request: ContentRequest<'_>,
 ) -> Result<UpdateMessage, ApiError> {
     let route_request = RouteTargetRequest::api_content(request.file);
-    let target = resolve_route_target(state, route_request)?;
+    let target = resolve_route_target(state, route_request).await?;
     load_route_update(&target, route_request).await
 }
 
@@ -146,7 +147,7 @@ pub(super) async fn load_memo(
     request: MemoRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
     let route_request = RouteTargetRequest::api_memo(request.file);
-    let target = resolve_route_target(state, route_request)?;
+    let target = resolve_route_target(state, route_request).await?;
     load_route_memo(state, &target, route_request).await
 }
 
@@ -159,7 +160,7 @@ pub(super) async fn save_memo(
     request: SaveMemoRequest<'_>,
 ) -> Result<MemoResponse, ApiError> {
     let route_request = RouteTargetRequest::api_memo(request.file);
-    let target = resolve_route_target(state, route_request)?;
+    let target = resolve_route_target(state, route_request).await?;
     let memo = save_route_memo(state, &target, request.raw, route_request).await?;
     broadcast_saved_memo(state, memo_message_file(&target));
     Ok(memo)
@@ -167,33 +168,24 @@ pub(super) async fn save_memo(
 
 /// ディレクトリモードのMarkdownファイル一覧を返す。単一ファイルモードでは空配列を返す。
 pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
-    if let Some(base) = state.mode().directory().map(std::path::Path::to_path_buf) {
-        tokio::task::spawn_blocking(move || list_markdown_files(&base))
-            .await
-            .map_err(|error| {
-                if error.is_panic() {
-                    tracing::error!(
-                        "[markdown-view] ファイル一覧取得タスクがpanicしました: {}",
-                        error
-                    );
-                } else {
-                    tracing::warn!(
-                        "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
-                        error
-                    );
-                }
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ファイル一覧の取得に失敗しました",
-                )
-            })?
-            .map_err(|error| {
-                tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ファイル一覧の取得に失敗しました",
-                )
-            })
+    if let Some(base) = state.mode().directory_canonical().cloned() {
+        run_blocking_file_task("ファイル一覧取得", move || {
+            list_markdown_files_from_canonical_base(&base, MAX_FILE_LIST)
+        })
+        .await
+        .map_err(|_| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ファイル一覧の取得に失敗しました",
+            )
+        })?
+        .map_err(|error| {
+            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ファイル一覧の取得に失敗しました",
+            )
+        })
     } else {
         Ok(Vec::new())
     }
@@ -201,7 +193,7 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
 
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
-    let Some(base_dir) = state.mode().directory() else {
+    let Some(base_dir) = state.mode().directory_canonical() else {
         return Ok(SearchResponse::empty(query.trim().to_string()));
     };
 

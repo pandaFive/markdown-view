@@ -12,17 +12,22 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
-use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
+use super::catalog::{
+    canonicalize_dir_for_cycle, list_markdown_files_from_canonical_base, MAX_DIR_DEPTH,
+    MAX_FILE_LIST,
+};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 #[cfg(unix)]
 use super::memo_fs::MemoBeforeRenameError;
-use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
+use super::memo_fs::{
+    before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
-use crate::server::{AppMode, AppState, BroadcastMessage};
+use crate::server::{AppMode, AppState, BroadcastMessage, CanonicalPath};
 
 fn assert_plain_sidecar_filename(name: &str) {
     let path = Path::new(name);
@@ -42,6 +47,23 @@ struct SymlinkBeforeRenameMemoFs {
 
 #[cfg(unix)]
 impl SymlinkBeforeRenameMemoFs {
+    fn new(link_target: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            link_target,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct TmpSymlinkBeforeRenameMemoFs {
+    inner: TokioMemoFs,
+    link_target: PathBuf,
+}
+
+#[cfg(unix)]
+impl TmpSymlinkBeforeRenameMemoFs {
     fn new(link_target: PathBuf) -> Arc<Self> {
         Arc::new(Self {
             inner: TokioMemoFs,
@@ -90,7 +112,7 @@ impl MemoFs for MismatchedTmpParentMemoFs {
             .expect("memo path should have a parent")
             .join(".other-tmp-dir")
             .join("memo.tmp");
-        match before_rename(path, &tmp_path) {
+        match before_rename(path, &tmp_path).await {
             Ok(()) => Err(MemoWriteError::Io(std::io::Error::other(
                 "mismatched tmp parent should be rejected before rename",
             ))),
@@ -131,21 +153,83 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
         let link_target = self.link_target.clone();
         self.inner
             .write_atomic(path, content, &move |final_path, tmp_path| {
-                match std::fs::remove_file(final_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(MemoBeforeRenameError::new(format!(
-                            "テスト用メモ差し替えに失敗しました: {error}"
-                        )));
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                before_rename_future(async move {
+                    match std::fs::remove_file(&final_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用メモ差し替えに失敗しました: {error}"
+                            )));
+                        }
                     }
-                }
-                symlink(&link_target, final_path).map_err(|error| {
-                    MemoBeforeRenameError::new(format!(
-                        "テスト用メモsymlink作成に失敗しました: {error}"
-                    ))
-                })?;
-                before_rename(final_path, tmp_path)
+                    symlink(&link_target, &final_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用メモsymlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                })
+            })
+            .await
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_rename: &BeforeRenameCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        let link_target = self.link_target.clone();
+        self.inner
+            .write_atomic(path, content, &move |final_path, tmp_path| {
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                before_rename_future(async move {
+                    match std::fs::remove_file(&tmp_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用tmp差し替えに失敗しました: {error}"
+                            )));
+                        }
+                    }
+                    symlink(&link_target, &tmp_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用tmp symlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                })
             })
             .await
     }
@@ -619,6 +703,26 @@ fn test_resolve_file_シンボリックリンクによるトラバーサル拒�
     assert_eq!(result, Err(ResolveFileError::Traversal));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_file(dir.path(), "locked/secret.md");
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
 #[test]
 fn test_list_markdown_files_基本動作() {
     let dir = create_test_dir();
@@ -626,6 +730,64 @@ fn test_list_markdown_files_基本動作() {
     assert!(files.contains(&"README.md".to_string()));
     assert!(files.contains(&"guide.md".to_string()));
     assert!(files.contains(&"docs/api.md".to_string()));
+}
+
+#[test]
+fn test_list_markdown_files_from_canonical_base_基本動作() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.md"), "# b").unwrap();
+    std::fs::write(dir.path().join("a.md"), "# a").unwrap();
+    std::fs::write(dir.path().join("skip.txt"), "skip").unwrap();
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert_eq!(files, vec!["a.md".to_string(), "b.md".to_string()]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレクトリは除外() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "# secret").unwrap();
+    symlink(outside.path(), base.path().join("linked")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
+fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレクトリだけ辿る() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    std::fs::write(base.path().join(".target.md"), "# hidden target").unwrap();
+    symlink(
+        base.path().join(".target.md"),
+        base.path().join("linked_file.md"),
+    )
+    .unwrap();
+
+    let hidden_dir = base.path().join(".target-dir");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    std::fs::write(hidden_dir.join("doc.md"), "# doc").unwrap();
+    symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert_eq!(files, vec!["linked_dir/doc.md".to_string()]);
+    assert!(logs_contain(
+        "シンボリックリンクが通常ファイルを指すためスキップ"
+    ));
+    assert!(logs_contain("linked_file.md"));
 }
 
 #[test]
@@ -648,6 +810,19 @@ fn test_list_markdown_files_空ディレクトリ() {
     let dir = tempfile::tempdir().unwrap();
     let files = list_markdown_files(dir.path()).unwrap();
     assert!(files.is_empty());
+}
+
+#[tokio::test]
+async fn test_search_directory_canonical_base_再canonicalizeなしで検索する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+    let response = search_directory(&canonical, "target").await.unwrap();
+
+    assert_eq!(response.query, "target");
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].file, "guide.md");
 }
 
 #[test]
@@ -675,7 +850,26 @@ fn test_list_markdown_files_最大1000件で打ち切る() {
 fn test_list_markdown_files_ベースディレクトリ正規化失敗はエラーを返す() {
     let missing = PathBuf::from("/path/that/does/not/exist");
     let result = list_markdown_files(&missing);
-    assert!(result.is_err());
+
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_ベースディレクトリ正規化失敗のio_error_kindを保持する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("blocked");
+    std::fs::create_dir(&base).unwrap();
+    let Some(_guard) = make_dir_unsearchable(parent.path(), &base) else {
+        return;
+    };
+
+    let result = list_markdown_files(&base);
+
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
 }
 
 #[cfg(unix)]
@@ -804,39 +998,43 @@ async fn test_read_markdown_error_into_response_not_utf8のjson形式() {
     );
 }
 
-#[test]
-fn test_resolve_route_target_page_ディレクトリモードでrelative_pathとfile_listを返す() {
+#[tokio::test]
+async fn test_resolve_route_target_page_ディレクトリモードでrelative_pathとfile_listを返す() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());
 
-    let target =
-        resolve_route_target(&state, RouteTargetRequest::page(Some("docs/api.md"))).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(Some("docs/api.md")))
+        .await
+        .unwrap();
 
     assert_eq!(target.relative_path(), Some("docs/api.md"));
     assert!(target.file_list().is_some());
     assert!(target.file_path().ends_with("docs/api.md"));
 }
 
-#[test]
-fn test_resolve_route_target_api_contentはfile_listを含まない() {
+#[tokio::test]
+async fn test_resolve_route_target_api_contentはfile_listを含まない() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());
 
-    let target =
-        resolve_route_target(&state, RouteTargetRequest::api_content(Some("docs/api.md"))).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_content(Some("docs/api.md")))
+        .await
+        .unwrap();
 
     assert_eq!(target.relative_path(), Some("docs/api.md"));
     assert!(target.file_list().is_none());
 }
 
-#[test]
-fn test_resolve_route_target_page_queryなしではreadmeを優先する() {
+#[tokio::test]
+async fn test_resolve_route_target_ディレクトリ既定ファイルを返す() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();
     std::fs::write(dir.path().join("README.md"), "# readme").unwrap();
     let state = create_directory_state(dir.path());
 
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
 
     assert_eq!(target.relative_path(), Some("README.md"));
     assert!(target.file_path().ends_with("README.md"));
@@ -846,14 +1044,16 @@ fn test_resolve_route_target_page_queryなしではreadmeを優先する() {
     );
 }
 
-#[test]
-fn test_resolve_route_target_page_queryなしではreadme不在時に先頭ファイルを選ぶ() {
+#[tokio::test]
+async fn test_resolve_route_target_page_queryなしではreadme不在時に先頭ファイルを選ぶ() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();
     std::fs::write(dir.path().join("a-first.md"), "# a").unwrap();
     let state = create_directory_state(dir.path());
 
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
 
     assert_eq!(target.relative_path(), Some("a-first.md"));
     assert!(target.file_path().ends_with("a-first.md"));
@@ -872,7 +1072,9 @@ async fn test_load_route_memo_旧メモルートがシンボリックリンク�
     symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
         .expect("unsafe legacy should be ignored when no sidecar exists");
@@ -903,7 +1105,9 @@ async fn test_load_route_memo_新sidecarがシンボリックリンクなら拒�
     .unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
     let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
 
     let (status, body) = result.expect_err("unsafe primary sidecar should be rejected");
@@ -930,7 +1134,9 @@ async fn test_save_route_memo_新メモファイルがシンボリックリン�
     .unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
     let result = save_route_memo(
         &state,
         &target,
@@ -952,7 +1158,9 @@ async fn test_save_route_memo_新メモファイルがシンボリックリン�
 async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ保存する() {
     let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -979,7 +1187,9 @@ async fn test_save_route_memo_tmp親不一致は内部状態エラーを返す()
         .expect("target markdown should be written");
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, MismatchedTmpParentMemoFs::new());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1007,7 +1217,9 @@ async fn test_save_route_memo_10mb超過はatomic_write前に拒否する() {
     let memo_fs = MockMemoFs::new();
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs.clone());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
     let oversized = "a".repeat((MAX_FILE_SIZE as usize) + 1);
 
     let result = save_route_memo(
@@ -1040,7 +1252,9 @@ async fn test_load_route_memo_旧パスのみ存在する場合はそのまま�
     .unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1064,7 +1278,9 @@ async fn test_load_route_memo_新旧両方ある場合は新sidecarを優先す�
     .unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1086,7 +1302,9 @@ async fn test_save_route_memo_旧パスのみ存在する場合は新sidecarへ�
     .unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1112,7 +1330,9 @@ async fn test_save_route_memo_旧symlinkが残っていてもsidecar保存を継
     symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1140,7 +1360,9 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
     symlink(outside_dir.path(), dir.path().join(".markdown-view")).unwrap();
 
     let state = create_directory_state(dir.path());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1154,6 +1376,48 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
     assert_eq!(memo.raw(), "");
     assert!(!dir.path().join(".README.md.memo.md").exists());
     assert!(dir.path().join(".markdown-view").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空白保存_required_legacy安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    workspace
+        .write_file(Path::new("README.md"), "# README")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".README.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/README.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let locked_dir = workspace.path().join(".markdown-view/memos");
+
+    let state = create_directory_state(workspace.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let Some(permission_guard) = make_dir_unsearchable(&locked_dir, &legacy_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) =
+        result.expect_err("required legacy safety inspection failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
+    drop(permission_guard);
+    assert!(legacy_path.exists());
 }
 
 #[cfg(unix)]
@@ -1179,7 +1443,9 @@ async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返�
     );
     let mode = AppMode::new_directory(workspace.path()).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1219,7 +1485,9 @@ async fn test_save_route_memo_空白保存_safe_compat削除失敗は500を返�
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1258,7 +1526,9 @@ async fn test_save_route_memo_保存成功後のlegacy削除失敗は成功扱�
     );
     let mode = AppMode::new_directory(workspace.path()).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let saved = save_route_memo(
         &state,
@@ -1281,10 +1551,12 @@ async fn test_save_route_memo_拡張子の大文字小文字が異なるファ�
     fs::write(dir.path().join("guide.MD"), "# upper").unwrap();
     let state = create_directory_state(dir.path());
 
-    let lower_target =
-        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.md"))).unwrap();
-    let upper_target =
-        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.MD"))).unwrap();
+    let lower_target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.md")))
+        .await
+        .unwrap();
+    let upper_target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("guide.MD")))
+        .await
+        .unwrap();
 
     let lower = save_route_memo(
         &state,
@@ -1316,7 +1588,9 @@ async fn test_save_route_memo_長いファイル名でも短縮sidecarへ保存�
     let file_path = dir.path().join(&file_name);
     fs::write(&file_path, "# long").unwrap();
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1346,7 +1620,9 @@ async fn test_load_route_memo_長いファイル名で未作成なら空メモ�
     let file_path = dir.path().join(&file_name);
     fs::write(&file_path, "# long").unwrap();
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1366,7 +1642,9 @@ async fn test_save_route_memo_長いファイル名のlegacyメモは空白保�
     let legacy_path = dir.path().join(".markdown-view/memos").join(&file_name);
     fs::write(&legacy_path, "memo").unwrap();
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1394,10 +1672,12 @@ async fn test_save_route_memo_非utf8ファイル名でもsidecarが衝突しな
 
     let lower_state = create_single_file_state(&lower_path);
     let upper_state = create_single_file_state(&upper_path);
-    let lower_target =
-        resolve_route_target(&lower_state, RouteTargetRequest::api_memo(None)).unwrap();
-    let upper_target =
-        resolve_route_target(&upper_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let lower_target = resolve_route_target(&lower_state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let upper_target = resolve_route_target(&upper_state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let lower = save_route_memo(
         &lower_state,
@@ -1441,10 +1721,13 @@ async fn test_save_route_memo_正規化される短いファイル名でもsidec
 
     let plain_state = create_single_file_state(&plain_path);
     let separator_shaped_state = create_single_file_state(&separator_shaped_path);
-    let plain_target =
-        resolve_route_target(&plain_state, RouteTargetRequest::api_memo(None)).unwrap();
+    let plain_target = resolve_route_target(&plain_state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
     let separator_shaped_target =
-        resolve_route_target(&separator_shaped_state, RouteTargetRequest::api_memo(None)).unwrap();
+        resolve_route_target(&separator_shaped_state, RouteTargetRequest::api_memo(None))
+            .await
+            .unwrap();
 
     save_route_memo(
         &plain_state,
@@ -1502,7 +1785,9 @@ async fn test_load_route_memo_旧形式backslash_sidecarを読み込む() {
     fs::write(dir.path().join(".a\\b.md.memo.md"), "compat memo").unwrap();
 
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1523,7 +1808,9 @@ async fn test_save_route_memo_旧形式backslash_sidecarを新形式へ移行す
     fs::write(&old_sidecar, "compat memo").unwrap();
 
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -1552,7 +1839,9 @@ async fn test_load_route_memo_新旧backslash_sidecar両方ある場合は新形
     fs::write(&new_sidecar, "new memo").unwrap();
 
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1577,8 +1866,9 @@ async fn test_load_route_memo_sidecar優先_compat_legacy両方存在しても�
     fs::write(&legacy_path, "legacy memo").unwrap();
 
     let state = create_directory_state(dir.path());
-    let target =
-        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md")))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(
         &state,
@@ -1604,8 +1894,9 @@ async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す(
     fs::write(&legacy_path, "legacy memo").unwrap();
 
     let state = create_directory_state(dir.path());
-    let target =
-        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md"))).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("a\\b.md")))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(
         &state,
@@ -1634,7 +1925,9 @@ async fn test_load_route_memo_sidecarがmetadata前に消えたらlegacyへフ�
     memo_fs.fail_at(Op::Metadata, &sidecar_path, std::io::ErrorKind::NotFound);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1659,7 +1952,9 @@ async fn test_load_route_memo_sidecarがread中に消えたらlegacyへフォー
     memo_fs.fail_at(Op::Read, &sidecar_path, std::io::ErrorKind::NotFound);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1680,7 +1975,9 @@ async fn test_load_route_memo_非utf8メモは422を返す() {
     )
     .expect("non-utf8 memo sidecar should be written");
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
 
@@ -1697,7 +1994,9 @@ async fn test_load_route_memo_全て不在なら空メモ() {
         .write_md(Path::new("note.md"), "# note")
         .expect("target markdown should be written");
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None))
         .await
@@ -1724,7 +2023,9 @@ async fn test_save_route_memo_単一ファイルモードでpermission_deniedな
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1756,7 +2057,9 @@ async fn test_save_route_memo_sidecar書込不可で500を返す() {
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1789,7 +2092,9 @@ async fn test_save_route_memo_atomic_rename失敗時は既存メモを保持す�
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1826,7 +2131,9 @@ async fn test_save_route_memo_atomic_write失敗時は既存メモを保持す�
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1861,7 +2168,9 @@ async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わる
 
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, SymlinkBeforeRenameMemoFs::new(outside_memo.clone()));
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1891,6 +2200,80 @@ async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わる
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると403を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+    let outside_dir = tempfile::tempdir().expect("outside dir should be created");
+    let outside_tmp = outside_dir.path().join("outside.tmp");
+    std::fs::write(&outside_tmp, "outside tmp").expect("outside tmp should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, TmpSymlinkBeforeRenameMemoFs::new(outside_tmp.clone()));
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("tmp precheck should reject symlink replacement");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(
+        json["error"],
+        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        "old memo"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside_tmp).expect("outside tmp should remain readable"),
+        "outside tmp"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    let Some(_guard) = make_dir_unsearchable(workspace.path(), &sidecar_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("inspection failure should be surfaced as 500");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+}
+
 #[tokio::test]
 async fn test_save_route_memo_create_dir_all失敗で500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
@@ -1907,7 +2290,9 @@ async fn test_save_route_memo_create_dir_all失敗で500を返す() {
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1936,7 +2321,9 @@ async fn test_save_route_memo_disk_full系IO失敗で500を返す() {
     memo_fs.fail_at(Op::WriteAtomic, &sidecar_path, std::io::ErrorKind::Other);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -1973,7 +2360,9 @@ async fn test_save_route_memo_保存成功後のcompat削除失敗は200を返�
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs.clone());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let saved = save_route_memo(
         &state,
@@ -2009,7 +2398,9 @@ async fn test_save_route_memo_compatと新sidecarが同一パスならcleanupで
     let new_sidecar_path = workspace.path().join(new_sidecar_name.as_str());
 
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let saved = save_route_memo(
         &state,
@@ -2032,7 +2423,9 @@ async fn test_save_route_memo_空保存_sidecarが既にない場合は冪等的
         .expect("target markdown should be written");
     let sidecar_path = workspace.path().join(".note.md.memo.md");
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -2064,7 +2457,9 @@ async fn test_save_route_memo_空保存はprimary_sidecarを最後に削除す�
     let memo_fs = MockMemoFs::new();
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs.clone());
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let memo = save_route_memo(
         &state,
@@ -2103,7 +2498,9 @@ async fn test_save_route_memo_空保存_sidecar削除失敗は500を返す() {
     );
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
 
     let result = save_route_memo(
         &state,
@@ -2174,7 +2571,9 @@ async fn test_load_initial_socket_update_単一ファイルサイズ超過時は
 async fn test_load_route_update_ioエラーを500へ変換する() {
     let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
     std::fs::remove_file(&file_path).unwrap();
 
     let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
@@ -2194,7 +2593,9 @@ async fn test_load_route_update_サイズ超過を413へ変換する() {
         .await
         .unwrap();
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
 
     let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
         .await
@@ -2213,7 +2614,9 @@ async fn test_load_route_update_非utf8を422へ変換する() {
         .await
         .unwrap();
     let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None)).unwrap();
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
 
     let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
         .await
@@ -2785,6 +3188,27 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&file_path, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = revalidate_single_file_target(&target, &base_dir);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
 }
 
 #[test]
