@@ -5,6 +5,12 @@
 
 ## P1: リスク低減・検証基盤
 
+- [ ] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
+  - ファイル: `src/server/routes.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-04-host-middleware-structure-observability-design.md`
+  - 現状: PR #123 で `build_routes() -> RouteDefinitions` として route 定義と Host middleware 適用の境界を命名・可視性で明示した。ただし `RouteDefinitions(Router<Arc<AppState>>)` の中身は通常の `Router` なので、`build_routes()` 内に共通 `.layer(...)` を混ぜても型エラーにはならない。これは型による強制というより intent marker であり、構造契約の強制力は限定的
+  - 対応: `apply_security_layers(routes, csp_header)` のような private helper へ Host middleware / security headers / CSP 適用を集約し、route 定義と layer 適用の呼び出し順をさらに読みやすくする。必要なら許可 Host / 不正 Host の route 横断テストを route 一覧 helper に寄せ、route 追加時にテスト対象へ自然に入る構造へ整理する
+  - 由来: PR #123 レビュー follow-up (2026-05-04)
+
 - [ ] Host middleware 化後の低優先 follow-up を整理して追加検証する
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-02-host-middleware-guard-design.md`
   - 現状: PR #120 で Host 検証を router middleware へ集約し、主要 route の不正 Host 拒否、security headers、WS Host/Origin 経路の分離、大容量 PUT body の順序を固定した。一方、許可 Host の全 route smoke、malformed/missing/empty Host の middleware 統合テスト、WS Origin 拒否の error message assert、middleware warn ログへの URI path 追加、test helper 内 `axum::serve(...).unwrap()` の panic 観測性、CHANGELOG 相当の運用ドキュメント化は未対応
@@ -18,6 +24,12 @@
   - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
 
 ## P2: 保守性・局所回帰検知
+
+- [ ] Superpowers spec/plan の長期保存方針を整理する
+  - ファイル: `docs/superpowers/specs/`, `docs/superpowers/plans/`
+  - 現状: PR #123 では設計書と 372 行の実装計画を保存した。設計書の目的・非目的・セキュリティ考慮は ADR 的に参照価値がある一方、plans は commit 手順や実行済み checklist を含み、時間が経つと実行ログとして rot しやすい
+  - 対応: 完了済み plan を保存し続ける基準を決める。保存する場合は「実行前計画」か「実行済み記録」かを冒頭で明示し、不要なら spec へ要点だけ残して plan を削除する。PR #123 の plan は必要に応じて 50 行程度の設計・検証サマリへ圧縮する
+  - 由来: PR #123 レビュー follow-up (2026-05-04)
 
 - [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
   - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
@@ -68,6 +80,12 @@
   - 由来: Unix 哲学レビュー (2026-04-30)
 
 ## P3: 長期改善・低緊急
+
+- [ ] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
+  - ファイル: `src/server/guards.rs`
+  - 現状: PR #123 で Host middleware 後段に到達した Host 系 `WsOriginRejection` を `error!` ログとして観測できるようにした。個人向け localhost ツールとしてはログで十分だが、本格運用や継続監視を想定するなら、発生回数をメトリクスやカウンタとして扱う余地がある
+  - 対応: 実運用で bypass 兆候を集計する必要が出た場合のみ、軽量なカウンタや structured logging 連携を検討する。現時点では依存追加やメトリクス基盤導入は YAGNI とする
+  - 由来: PR #123 レビュー follow-up (2026-05-04)
 
 - [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
   - ファイル: `src/server/state.rs` L18-24/L112/L132
