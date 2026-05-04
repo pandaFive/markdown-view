@@ -29,6 +29,12 @@ pub(in crate::server) use self::resolve::{
 };
 pub(in crate::server) use self::search::{search_directory, SearchResponse};
 
+pub(in crate::server) fn list_markdown_files_from_canonical_base(
+    base_dir: &crate::server::CanonicalPath,
+) -> std::io::Result<Vec<String>> {
+    catalog::list_markdown_files_from_canonical_base(base_dir)
+}
+
 #[cfg(test)]
 pub(in crate::server) use self::resolve::RouteTargetKind;
 #[cfg(test)]
