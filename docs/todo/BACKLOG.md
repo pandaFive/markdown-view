@@ -3,6 +3,8 @@
 低優先度で蓄積している項目。High/Medium が TODO.md から捌けてから着手する候補。
 未完了項目はリスク低減効果を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）の発見コンテキスト。
 
+最終整理: 2026-05-05。次に実行する High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善・完了済みの履歴を置く。セキュリティ境界に関わる項目は、優先度が低くても文脈を残す。
+
 ## P1: リスク低減・検証基盤
 
 - [ ] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する

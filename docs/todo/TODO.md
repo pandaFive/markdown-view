@@ -1,60 +1,20 @@
 # TODO Issues
 
-レビュー指摘・コードベース探索で検出した改善項目のうち **High / Medium のみ**を優先度順に掲載。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
+レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
+
+最終整理: 2026-05-05。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
 
 ## High Priority
 
-- [x] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
-  - ファイル: `src/renderer/render.rs` L250-260, `src/renderer/mod.rs` L150-214, `src/renderer/toc.rs`
-  - 現状: `handle_heading_end`（render 側）と `extract_headings`（toc 側）がそれぞれ独自の `id_counts: HashMap<String, usize>` を持ち、pulldown-cmark を 2 回パースする。`extract_headings` は `Tag::Image` を見出しテキストから明示除外するが SoftBreak の `in_heading_image` チェック非対称（`mod.rs:181-189`）。画像 alt + `Event::Code` 混在見出しで TOC ID と本文 `<h{n} id=...>` が乖離し得る
-  - 対応: 見出し抽出ループを単一にまとめ、`Vec<HeadingInfo>` を render と toc で共有する。`tests/renderer_test.rs:631` の不変条件テストを境界ケース（画像 alt + code 混在、SoftBreak）まで拡張
-  - 理由: 仕様不変条件（render と toc は同じ id を出力する）が型・データフローで担保されておらず、リファクタで silent に乖離する経路が残る。既存 CLAUDE.md「2 回パース」記述を超えて、`search` 経由でも 3 回目が走る点も合わせて整理する
-
-- [x] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
-  - ファイル: `src/renderer/mod.rs`, `src/server/files/search.rs`, `src/renderer/toc.rs`
-  - 現状: renderer/TOC 側の `markdown_options()` は tables/tasklist/strikethrough のみ、検索側は footnotes/heading attributes/GFM も有効にしている。表示対象と検索対象の Markdown 解釈が暗黙に分岐している
-  - 対応: 共通の Markdown option profile を導入し、表示・TOC・検索で同じ方言を使うか、用途別に差を残すなら `RenderProfile` / `SearchProfile` のように意図を型・テスト名で明示する。footnote・heading attributes・GFM の検索/表示一致テストを追加
-  - 理由: Markdown 機能追加時に検索では見つかるが表示されない、または表示されるが検索されない回帰が起きやすい
-
-- [x] 監視イベント経由の変更ファイルを最終読込前に再検証する
-  - ファイル: `src/server/files/resolve.rs`, `src/server/files/content.rs`
-  - 現状: HTTP 経路は `resolve_file()` で base 配下・hidden・`.md`・symlink 差し替えを検証する。一方、watcher 経由のディレクトリ更新は `collect_directory_changes()` の事前検証後、`resolve_change_target()` が `changed_file` をそのまま `ResolvedTarget` に包み、`read_and_render_file()` が読み込む
-  - 対応: `resolve_change_target()` でもディレクトリモード時は watcher 由来の絶対/字句パスから base 相対を復元し、`resolve_file(base_dir, relative)` 相当の検証を最終読込前に通す。HTTP/API 用の404統一は維持しつつ、watcher変更通知用の内部経路だけはcanonicalizeの `NotFound` 以外のI/O種別を保持する。ディレクトリモードのbase 配下の削除済み・一時不在ファイルとwatcher由来の非UTF-8 pathは通知なしでスキップし、単一ファイルモードの監視対象消失は検証エラーとして通知する。既存base外・hidden・非 Markdown・非通常ファイル・base 外 symlinkは error broadcast する境界テストを追加
-  - 理由: watcher 側の `is_within_base_dir()` は canonicalize 失敗時に字句パスへフォールバックする。入口の防御に加えて読込直前の防御を置くことで、TOCTOU・symlink・削除競合時のセキュリティ境界を HTTP 経路と揃える
-
-- [x] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
-  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`
-  - 現状: HTTP は各 handler 直下の手動呼び出し、WebSocket は `ws_handler()` 内の専用分岐で Host/Origin を検証している。`create_router()` に route が集約されている一方、Host 検証は opt-in になっている
-  - 対応: Host 検証を axum middleware/layer として HTTP route 全体に適用し、WebSocket は Host middleware + Origin 検証の二段構えにする。`/api/files` や `/api/search` と同等の拒否テストに加え、新規 route が middleware を通る構造をテストで固定する
-  - 理由: DNS Rebinding 対策はルート横断のセキュリティポリシーであり、handler ごとの呼び忘れを設計上起こりにくくする必要がある
-
-- [x] ディレクトリ検索の負荷制御をサーバ側に追加する
-  - ファイル: `src/server/routes.rs`, `src/server/files/search.rs`, `src/server/files/catalog.rs`
-  - 現状: PR #121 で検索結果数・検索対象ファイル数・総読込 byte 数の打ち切りが API/UI に明示され、今回の blocking 隔離でディレクトリ走査、ファイル読込、Markdown パース、検索一致抽出をリクエスト単位の `spawn_blocking` 内へ移した
-  - 対応: 完了。残る改善候補は、クライアント世代と対応するサーバ側キャンセルまたは古い検索の破棄、検索結果コンテキストの allocation 削減、検索インデックス導入の必要性評価として BACKLOG.md へ分離する
-  - 理由: 横断検索は Markdown workspace の中核機能だが、localhost 前提でも巨大ディレクトリや連続検索で Tokio worker を圧迫し、本文表示・メモ・WebSocket の応答性に影響する可能性がある
+現時点で未完了の High Priority はなし。
 
 ## Medium Priority
-
-- [x] Host middleware の構造契約と WebSocket bypass 観測性を強化する
-  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`
-  - 現状: `build_routes()` へ route 定義を閉じ込め、`create_router()` 側で Host middleware と security header layer を適用する構造にした。ただし `build_routes()` の戻り値は通常の `Router<Arc<AppState>>` なので、将来この関数内へ共通 `.layer(...)` を追加しても型では検知できない。また `ws_handler` 後段の `is_allowed_ws_origin()` 内 Host 再検証は defense-in-depth として残しているが、middleware bypass が将来発生した場合でも、現状は WebSocket Origin 拒否の汎用 403 として見えやすい
-  - 対応: `build_routes()` へ共通 layer を混ぜない契約を、型またはテストでより強く固定する。例として private newtype、route 定義専用 helper の命名強化、または Host 拒否前に動いてはいけない layer の回帰テストを検討する。WebSocket 経路では `WsOriginRejection` の Host 系拒否を bypass 検知として `error!` へ上げる、または debug build で明示的に検知できる境界を追加する
-  - 完了根拠: PR #123 で `RouteDefinitions` private newtype、WS Host 系 rejection の `error!` ログ化、`/ws` 不正 Host の security headers 統合テスト、MissingHost の traced log test を追加した
-  - 理由: DNS Rebinding 対策は route 横断のセキュリティ境界であり、middleware 化後も「構造上の守り忘れ」や「bypass の無音化」を将来リファクタで再導入しないようにする
 
 - [ ] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
   - ファイル: `src/server/guards.rs`, `docs/todo/TODO.md`
   - 現状: PR #123 で Host 系 `WsOriginRejection::{MissingHost, HostMalformed, UntrustedHost}` を bypass 兆候として `error!` に上げ、MissingHost の traced log test を追加した。一方、`is_allowed_ws_origin()` の非 Host 系ログ分類は `_ => warn!()` に残っており、新しい rejection variant が追加された場合にコンパイラで分類漏れを検出できない。`is_host_middleware_bypass_indicator()` も `matches!` の false 側へ暗黙に落ちるため、variant 追加時の意図確認が弱い。HostMalformed / UntrustedHost の実ログ出力は helper 分類テストで間接的に守られているが、traced log test では直接固定していない
   - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`tracing::event!` でログ分岐を平坦化する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
   - 理由: DNS Rebinding 防御の判定自体は変えずに、将来 variant 追加時の silent fallback とログ分類漏れをコンパイル時・テスト時に検出しやすくする
-
-- [x] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
-  - ファイル: `src/server/files/catalog.rs` L39/60/83/157, `src/server/files/memo.rs` L439, `src/watcher/strategy.rs` L186-210/L262-275
-  - 現状: tokio worker thread をブロックしうる経路が 3 箇所に散在する: (a) `list_markdown_files_recursive` が `std::fs::read_dir` / `entry.file_type()` / `path.canonicalize()` を毎再帰呼び出し（さらに `base_dir.canonicalize()` を再帰内で繰り返す）、(b) `ensure_safe_memo_path` から呼ばれる `first_symlink_component` が `std::fs::symlink_metadata` を async 関数の中で実行（他は `tokio::fs::*` で揃えているのに非対称）、(c) debouncer コールバック（notify 内部スレッド）内で `is_within_base_dir` / `try_strip_base` が `path.canonicalize()` を毎イベント呼び出し
-  - 対応: `base_dir` の canonicalize は起動時 1 回に固定し、`list_markdown_files_recursive` と `is_within_base_dir` / `try_strip_base` には canonicalized base を引き回す（lexical strip_prefix 中心）。`first_symlink_component` は `tokio::fs::symlink_metadata` に置き換え、必要なら `MemoFs` トレイトに `symlink_metadata` を追加。`list_markdown_files` 自体を `spawn_blocking` ラップする選択肢も検討
-  - 完了根拠: catalog は canonical base API へ分離し、再帰中の base 再 canonicalize を廃止。route target 解決・検索候補列挙・ファイル一覧取得は blocking 境界と canonical base API へ寄せた。memo symlink component 検査は `tokio::fs::symlink_metadata` 化し、rename 直前検査も async callback 化。watcher directory 判定は存在する path の canonical base 確認と削除済み path の lexical fallback に分離した
-  - 理由: 個人ツールでも大ディレクトリ・大量保存時に応答性が落ちる。CLAUDE.md の「ブロッキング I/O が async コンテキストで実行されていないか」という設計規律と整合させる
 
 - [ ] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
   - ファイル: `src/watcher/strategy.rs` L43-48, `src/watcher/runtime.rs` L192-198
@@ -67,12 +27,6 @@
   - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能
   - 対応: 2 つのタイムアウト定数を共通化し、`abort` 直前に `(elapsed_ms, last_event_kind, receiver_count)` を含む warn ログを 1 行追加。`spawn_watch_event_forwarder` 終了時のログにも `state.tx().receiver_count()` と最後のイベント種別を含めて、シャットダウン時に dropped events があった場合に検知できるようにする
   - 理由: HTTP サーバー再起動経路でのファイルハンドルリークを再現性のあるログで切り分けられるようにする
-
-- [ ] `toc.rs` の `build_toc_html` で `level=0` インデックス OOB ガードを入れる
-  - ファイル: `src/renderer/toc.rs` L43-46/L53, `src/renderer/mod.rs` L142
-  - 現状: `open_li_at_level[(current_level - 1) as usize]` の素のインデックスアクセス。`current_level: u8` を `as usize` してから `-1` する流れは正規化に依存し、`HeadingInfo.level: u8` が 0 を許す型定義のため将来の改修で OOB panic が再導入されやすい
-  - 対応: `level: NonZeroU8` への型昇格、または `open_li_at_level.last_mut()` 経由のガードに置換。`#[cfg(test)] mod tests` を toc.rs に追加し level=0 入力で panic しないことを境界テストで固定
-  - 理由: panic 経路を型レベルで閉じる。現状到達不能だが「不変条件を型で表現する」原則を満たすため
 
 - [ ] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
   - ファイル: `src/server/state.rs` L202-258, `src/main.rs` L105
@@ -115,3 +69,22 @@
   - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。一方、`content.js` は検索、リンク解決、履歴、描画反映、スクロール、引用ジャンプをまとめて扱う巨大ファイルのままで、`appContext` 直接参照も多い。`innerHTML` はサーバー生成の `SanitizedHtml` を信頼する設計だが、信頼境界は型やモジュール境界としてはまだ表現されていない
   - 対応: `content-renderer` / `document-search` / `navigation` / `live-update-buffer` / `memo-citation` のように責務単位で分割し、分割後の境界では `ctx` 注入や小さな controller API で依存を明示する。`updateContent` の入力型・`SanitizedHtml` 前提・`innerHTML` 使用箇所を契約テストで固定する。メモや検索を削る、または純プレビューモードへ戻すことは非目標
   - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。production グローバル露出は解消したが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で XSS 境界や状態遷移を壊しやすい
+
+## Done Summary
+
+- [x] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
+  - 完了根拠: `render_document` が同一 `headings` から本文と TOC を生成する構成になっている
+- [x] Markdown 方言オプションを共通化し、表示・TOC・検索の差分を明示する
+  - 完了根拠: 現行実装と関連テストで用途別 profile の差分が固定されている
+- [x] 監視イベント経由の変更ファイルを最終読込前に再検証する
+  - 完了根拠: watcher 経路が canonical base API と読込直前検証へ寄っている
+- [x] Host 検証を router middleware 化して新規 route の守り忘れを防ぐ
+  - 完了根拠: Host middleware が router 全体へ適用され、WS は Host + Origin の二段検証になっている
+- [x] ディレクトリ検索の負荷制御をサーバ側に追加する
+  - 完了根拠: 検索結果数・対象ファイル数・総読込 byte 数の打ち切りと blocking 隔離が実装済み
+- [x] Host middleware の構造契約と WebSocket bypass 観測性を強化する
+  - 完了根拠: PR #123 で `RouteDefinitions` private newtype、WS Host 系 rejection の `error!` ログ化、`/ws` 不正 Host の security headers 統合テスト、MissingHost の traced log test を追加した
+- [x] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
+  - 完了根拠: catalog は canonical base API へ分離し、route target 解決・検索候補列挙・ファイル一覧取得は blocking 境界と canonical base API へ寄せた
+- [x] `toc.rs` の `build_toc_html` で `level=0` インデックス OOB ガードを入れる
+  - 完了根拠: `src/renderer/toc.rs` が `level` を `1..=current_level+1` に正規化し、`level=0` の境界テストを3件持つ
