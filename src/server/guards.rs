@@ -107,8 +107,8 @@ pub(super) enum WsOriginRejection {
     /// Host ヘッダーは存在するが `to_str()` に失敗（非 ASCII バイト含む）
     ///
     /// 通常のブラウザ／プロキシは ASCII のみで構成された Host を送る。
-    /// 非 ASCII バイトを含む Host は malformed header probe の兆候として
-    /// warn レベルで記録する。
+    /// Host middleware 後段で非 ASCII バイトを含む Host に到達した場合は、
+    /// middleware bypass 兆候として error レベルで記録する。
     HostMalformed,
     UntrustedHost,
     OriginParseError,
@@ -127,6 +127,15 @@ pub(super) enum WsOriginRejection {
     OriginMissingAuthority,
     UntrustedOriginAuthority,
     AuthorityMismatch,
+}
+
+fn is_host_middleware_bypass_indicator(rejection: WsOriginRejection) -> bool {
+    matches!(
+        rejection,
+        WsOriginRejection::MissingHost
+            | WsOriginRejection::HostMalformed
+            | WsOriginRejection::UntrustedHost
+    )
 }
 
 /// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
@@ -178,29 +187,38 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
 /// DNS Rebinding対策として、Host検証に加えてOriginのauthority一致も要求する。
 /// Originスキームは`http`/`https`のみ許可する。
 /// 拒否時は `check_ws_origin` の返す `WsOriginRejection` を使って
-/// info / warn の監査ログを出力する。
+/// info / warn / error の監査ログを出力する。
 pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     match check_ws_origin(headers) {
         Ok(()) => true,
         Err(rejection) => {
             let host = log_value_for_header(headers, &HOST);
             let origin = log_value_for_header(headers, &ORIGIN);
-            match rejection {
-                WsOriginRejection::MissingOrigin | WsOriginRejection::MissingHost => {
-                    tracing::info!(
-                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
-                        rejection,
-                        host,
-                        origin
-                    );
-                }
-                _ => {
-                    tracing::warn!(
-                        "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
-                        rejection,
-                        host,
-                        origin
-                    );
+            if is_host_middleware_bypass_indicator(rejection) {
+                tracing::error!(
+                    "[markdown-view] WS Host middleware bypass 兆候 ({:?}): host={:?} origin={:?}",
+                    rejection,
+                    host,
+                    origin
+                );
+            } else {
+                match rejection {
+                    WsOriginRejection::MissingOrigin => {
+                        tracing::info!(
+                            "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                            rejection,
+                            host,
+                            origin
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
+                            rejection,
+                            host,
+                            origin
+                        );
+                    }
                 }
             }
             false
@@ -311,6 +329,7 @@ mod tests {
     use axum::http::header::{HOST, ORIGIN};
     use axum::http::{HeaderMap, StatusCode};
     use axum::{middleware, routing::get, Router};
+    use tracing_test::traced_test;
 
     use super::*;
 
@@ -539,6 +558,53 @@ mod tests {
             check_ws_origin(&headers),
             Err(WsOriginRejection::MissingHost)
         );
+    }
+
+    #[test]
+    fn test_ws_host系拒否はmiddleware_bypass兆候として分類する() {
+        assert!(is_host_middleware_bypass_indicator(
+            WsOriginRejection::MissingHost
+        ));
+        assert!(is_host_middleware_bypass_indicator(
+            WsOriginRejection::HostMalformed
+        ));
+        assert!(is_host_middleware_bypass_indicator(
+            WsOriginRejection::UntrustedHost
+        ));
+
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::MissingOrigin
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::OriginMalformed
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::OriginParseError
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::UnsupportedScheme
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::OriginMissingAuthority
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::UntrustedOriginAuthority
+        ));
+        assert!(!is_host_middleware_bypass_indicator(
+            WsOriginRejection::AuthorityMismatch
+        ));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_ws_host系拒否はbypass兆候として専用ログに記録する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        assert!(!is_allowed_ws_origin(&headers));
+        assert!(logs_contain("WS Host middleware bypass 兆候"));
+        assert!(logs_contain("MissingHost"));
+        assert!(!logs_contain("WS Origin 拒否"));
     }
 
     #[test]

@@ -36,11 +36,18 @@
 
 ## Medium Priority
 
-- [ ] Host middleware の構造契約と WebSocket bypass 観測性を強化する
+- [x] Host middleware の構造契約と WebSocket bypass 観測性を強化する
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`
   - 現状: `build_routes()` へ route 定義を閉じ込め、`create_router()` 側で Host middleware と security header layer を適用する構造にした。ただし `build_routes()` の戻り値は通常の `Router<Arc<AppState>>` なので、将来この関数内へ共通 `.layer(...)` を追加しても型では検知できない。また `ws_handler` 後段の `is_allowed_ws_origin()` 内 Host 再検証は defense-in-depth として残しているが、middleware bypass が将来発生した場合でも、現状は WebSocket Origin 拒否の汎用 403 として見えやすい
   - 対応: `build_routes()` へ共通 layer を混ぜない契約を、型またはテストでより強く固定する。例として private newtype、route 定義専用 helper の命名強化、または Host 拒否前に動いてはいけない layer の回帰テストを検討する。WebSocket 経路では `WsOriginRejection` の Host 系拒否を bypass 検知として `error!` へ上げる、または debug build で明示的に検知できる境界を追加する
+  - 完了根拠: PR #123 で `RouteDefinitions` private newtype、WS Host 系 rejection の `error!` ログ化、`/ws` 不正 Host の security headers 統合テスト、MissingHost の traced log test を追加した
   - 理由: DNS Rebinding 対策は route 横断のセキュリティ境界であり、middleware 化後も「構造上の守り忘れ」や「bypass の無音化」を将来リファクタで再導入しないようにする
+
+- [ ] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
+  - ファイル: `src/server/guards.rs`, `docs/todo/TODO.md`
+  - 現状: PR #123 で Host 系 `WsOriginRejection::{MissingHost, HostMalformed, UntrustedHost}` を bypass 兆候として `error!` に上げ、MissingHost の traced log test を追加した。一方、`is_allowed_ws_origin()` の非 Host 系ログ分類は `_ => warn!()` に残っており、新しい rejection variant が追加された場合にコンパイラで分類漏れを検出できない。`is_host_middleware_bypass_indicator()` も `matches!` の false 側へ暗黙に落ちるため、variant 追加時の意図確認が弱い。HostMalformed / UntrustedHost の実ログ出力は helper 分類テストで間接的に守られているが、traced log test では直接固定していない
+  - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`tracing::event!` でログ分岐を平坦化する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
+  - 理由: DNS Rebinding 防御の判定自体は変えずに、将来 variant 追加時の silent fallback とログ分類漏れをコンパイル時・テスト時に検出しやすくする
 
 - [ ] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
   - ファイル: `src/server/files/catalog.rs` L39/60/83/157, `src/server/files/memo.rs` L439, `src/watcher/strategy.rs` L186-210/L262-275
