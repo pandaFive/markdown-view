@@ -130,12 +130,52 @@ pub(super) enum WsOriginRejection {
 }
 
 fn is_host_middleware_bypass_indicator(rejection: WsOriginRejection) -> bool {
-    matches!(
-        rejection,
+    match rejection {
         WsOriginRejection::MissingHost
-            | WsOriginRejection::HostMalformed
-            | WsOriginRejection::UntrustedHost
-    )
+        | WsOriginRejection::HostMalformed
+        | WsOriginRejection::UntrustedHost => true,
+        WsOriginRejection::MissingOrigin
+        | WsOriginRejection::OriginMalformed
+        | WsOriginRejection::OriginParseError
+        | WsOriginRejection::UnsupportedScheme
+        | WsOriginRejection::OriginMissingAuthority
+        | WsOriginRejection::UntrustedOriginAuthority
+        | WsOriginRejection::AuthorityMismatch => false,
+    }
+}
+
+// Task 2 でログ出力へ接続するまでの一時許可。
+#[allow(dead_code)]
+fn ws_rejection_log_level(rejection: WsOriginRejection) -> tracing::Level {
+    match rejection {
+        WsOriginRejection::MissingHost
+        | WsOriginRejection::HostMalformed
+        | WsOriginRejection::UntrustedHost => tracing::Level::ERROR,
+        WsOriginRejection::MissingOrigin => tracing::Level::INFO,
+        WsOriginRejection::OriginMalformed
+        | WsOriginRejection::OriginParseError
+        | WsOriginRejection::UnsupportedScheme
+        | WsOriginRejection::OriginMissingAuthority
+        | WsOriginRejection::UntrustedOriginAuthority
+        | WsOriginRejection::AuthorityMismatch => tracing::Level::WARN,
+    }
+}
+
+// Task 2 でログ出力へ接続するまでの一時許可。
+#[allow(dead_code)]
+fn ws_rejection_log_message(rejection: WsOriginRejection) -> &'static str {
+    match rejection {
+        WsOriginRejection::MissingHost
+        | WsOriginRejection::HostMalformed
+        | WsOriginRejection::UntrustedHost => "WS Host 検証異常",
+        WsOriginRejection::MissingOrigin
+        | WsOriginRejection::OriginMalformed
+        | WsOriginRejection::OriginParseError
+        | WsOriginRejection::UnsupportedScheme
+        | WsOriginRejection::OriginMissingAuthority
+        | WsOriginRejection::UntrustedOriginAuthority
+        | WsOriginRejection::AuthorityMismatch => "WS Origin 拒否",
+    }
 }
 
 /// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
@@ -561,38 +601,87 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_host系拒否はmiddleware_bypass兆候として分類する() {
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::MissingHost
-        ));
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::HostMalformed
-        ));
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::UntrustedHost
-        ));
+    fn test_ws_origin拒否ログ分類は全variantを明示する() {
+        let cases = [
+            (
+                WsOriginRejection::MissingHost,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::HostMalformed,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::UntrustedHost,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::MissingOrigin,
+                false,
+                tracing::Level::INFO,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginMalformed,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginParseError,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::UnsupportedScheme,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginMissingAuthority,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::UntrustedOriginAuthority,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::AuthorityMismatch,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+        ];
 
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::MissingOrigin
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginMalformed
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginParseError
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::UnsupportedScheme
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginMissingAuthority
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::UntrustedOriginAuthority
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::AuthorityMismatch
-        ));
+        for (rejection, is_bypass_indicator, level, message) in cases {
+            assert_eq!(
+                is_host_middleware_bypass_indicator(rejection),
+                is_bypass_indicator,
+                "{rejection:?} の Host bypass 分類が不正"
+            );
+            assert_eq!(
+                ws_rejection_log_level(rejection),
+                level,
+                "{rejection:?} のログレベル分類が不正"
+            );
+            assert_eq!(
+                ws_rejection_log_message(rejection),
+                message,
+                "{rejection:?} のログメッセージ分類が不正"
+            );
+        }
     }
 
     #[test]
