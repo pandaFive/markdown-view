@@ -88,7 +88,7 @@ mod tests {
         let file_path = dir.path().join("watch.md");
         std::fs::write(&file_path, "# watch").unwrap();
         let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
             AppMode::new_single_file(&file_path).unwrap(),
             false,
             None,
