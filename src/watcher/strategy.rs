@@ -550,6 +550,31 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_collect_directory_changes_base外symlinkディレクトリ配下markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let outside_file = outside.path().join("out.md");
+        std::fs::write(&outside_file, "# outside").unwrap();
+        let link_dir = canonical_base.as_path().join("link");
+        symlink(outside.path(), &link_dir).unwrap();
+        let events = vec![debounced_event(
+            link_dir.join("out.md"),
+            DebouncedEventKind::Any,
+        )];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_collect_directory_changes_hidden_symlink先markdownを除外する() {
         use std::os::unix::fs::symlink;
 
