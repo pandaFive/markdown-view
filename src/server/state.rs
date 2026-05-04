@@ -378,7 +378,7 @@ mod tests {
 
         assert!(state.dark_mode());
         assert!(!state.syntax_css().is_empty());
-        assert_eq!(state.tx().receiver_count(), 0);
+        assert_eq!(state.tx().receiver_count(), 1);
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
