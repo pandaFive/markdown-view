@@ -1380,6 +1380,48 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_save_route_memo_空白保存_required_legacy安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    workspace
+        .write_file(Path::new("README.md"), "# README")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".README.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/README.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let locked_dir = workspace.path().join(".markdown-view/memos");
+
+    let state = create_directory_state(workspace.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let Some(permission_guard) = make_dir_unsearchable(&locked_dir, &legacy_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) =
+        result.expect_err("required legacy safety inspection failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
+    drop(permission_guard);
+    assert!(legacy_path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_空白保存_safe_legacy削除失敗は500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     workspace

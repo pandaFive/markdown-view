@@ -458,8 +458,9 @@ pub(super) fn revalidate_single_file_target(
     let canonical = expected_path.canonicalize().map_err(|error| {
         let error_kind = error.kind();
         tracing::warn!(
-            "[markdown-view] 単一ファイルパス正規化失敗: {} ({})",
+            "[markdown-view] 単一ファイルパス正規化失敗: {} ({:?}: {})",
             sanitize_path_for_logging(expected_path, base_dir),
+            error_kind,
             error
         );
         resolve_canonicalize_error(error_kind)

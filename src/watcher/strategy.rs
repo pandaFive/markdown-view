@@ -203,6 +203,10 @@ struct BaseRelativeCheckPath {
 ///
 /// 存在するパスはcanonical targetでbase配下を確認する。削除済みなどNotFoundの場合は
 /// lexicalなbase配下判定にfallbackし、それ以外のI/O失敗は通知対象から除外する。
+/// 存在するパスではevent名とcanonical先の両方で隠しcomponentを確認し、隠しsymlink名と
+/// 隠しsymlink先のどちらも通知しない。
+/// event名のcase差分を落とさないため、canonicalでbase配下を証明した後だけ
+/// component数によるsuffix fallbackを使う。
 fn path_for_base_relative_checks(
     path: &Path,
     canonical_base: &Path,

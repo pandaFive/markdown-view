@@ -406,6 +406,16 @@ async fn cleanup_memo_path_required(
     fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
     if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
+        if error.0 != StatusCode::FORBIDDEN {
+            tracing::warn!(
+                "[markdown-view] {}{}メモ必須cleanup安全確認失敗 ({}): {:?}",
+                request.read_error_log_label(),
+                label,
+                target.file_label(),
+                error
+            );
+            return Err(error);
+        }
         tracing::warn!(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),

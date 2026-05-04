@@ -79,6 +79,8 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
 /// `Err` を返すと tmp は削除され、最終保存先は置換されない。
 /// 実装は async で final/tmp の親ディレクトリ一致と symlink component 不在など、
 /// rename 直前に再確認すべき保存先不変条件を検査する。
+/// async block で引数を使う場合は `to_path_buf()` で値化してから捕捉し、
+/// 借用した `&Path` を future 内へ直接持ち込まない。
 pub(crate) type BeforeRenameFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a>>;
 pub(crate) type BeforeRenameCheck<'a> =
