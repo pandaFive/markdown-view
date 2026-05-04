@@ -706,6 +706,21 @@ fn test_list_markdown_files_空ディレクトリ() {
     assert!(files.is_empty());
 }
 
+#[tokio::test]
+async fn test_search_directory_canonical_base_再canonicalizeなしで検索する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+    let response = search_directory(canonical.as_path(), "target")
+        .await
+        .unwrap();
+
+    assert_eq!(response.query, "target");
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].file, "guide.md");
+}
+
 #[test]
 fn test_list_markdown_files_ソート済み() {
     let dir = create_test_dir();

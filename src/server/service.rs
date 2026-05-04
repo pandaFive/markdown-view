@@ -202,17 +202,19 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
 
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
-    let Some(base_dir) = state.mode().directory() else {
+    let Some(base_dir) = state.mode().directory_canonical() else {
         return Ok(SearchResponse::empty(query.trim().to_string()));
     };
 
-    search_directory(base_dir, &query).await.map_err(|error| {
-        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ディレクトリ検索に失敗しました",
-        )
-    })
+    search_directory(base_dir.as_path(), &query)
+        .await
+        .map_err(|error| {
+            tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ディレクトリ検索に失敗しました",
+            )
+        })
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
