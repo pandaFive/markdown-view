@@ -661,12 +661,23 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
 }
 
 #[test]
-fn test_list_markdown_files_symlink判定でpath_is_dirを使わない() {
-    let source = include_str!("catalog.rs");
-    assert!(
-        !source.contains("path.is_dir()"),
-        "symlink directory 判定で path.is_dir() を使ってはいけない"
-    );
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレクトリだけ辿る() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    std::fs::write(base.path().join(".target.md"), "# hidden target").unwrap();
+    symlink(base.path().join(".target.md"), base.path().join("linked_file.md")).unwrap();
+
+    let hidden_dir = base.path().join(".target-dir");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    std::fs::write(hidden_dir.join("doc.md"), "# doc").unwrap();
+    symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+
+    assert_eq!(files, vec!["linked_dir/doc.md".to_string()]);
 }
 
 #[test]
