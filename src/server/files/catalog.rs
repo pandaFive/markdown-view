@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::server::log_path::sanitize_path_for_logging;
+use crate::server::CanonicalPath;
 
 /// ファイル一覧の最大件数
 pub(super) const MAX_FILE_LIST: usize = 1000;
@@ -14,17 +15,25 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     list_markdown_files_with_limit(base_dir, MAX_FILE_LIST)
 }
 
-pub(super) fn list_markdown_files_with_limit(
-    base_dir: &Path,
+#[allow(dead_code)]
+pub(super) fn list_markdown_files_from_canonical_base(
+    base_dir: &CanonicalPath,
+) -> std::io::Result<Vec<String>> {
+    list_markdown_files_with_limit_from_canonical_base(base_dir, MAX_FILE_LIST)
+}
+
+pub(super) fn list_markdown_files_with_limit_from_canonical_base(
+    base_dir: &CanonicalPath,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
+    let base_path = base_dir.as_path();
     let mut files = Vec::new();
     let mut visited_dirs = HashSet::new();
-    let canonical_base = base_dir.canonicalize()?;
-    visited_dirs.insert(canonical_base);
+    visited_dirs.insert(base_path.to_path_buf());
     list_markdown_files_recursive(
-        base_dir,
-        base_dir,
+        base_path,
+        base_path,
+        base_path,
         &mut files,
         &mut visited_dirs,
         0,
@@ -35,8 +44,18 @@ pub(super) fn list_markdown_files_with_limit(
     Ok(files)
 }
 
-fn list_markdown_files_recursive(
+pub(super) fn list_markdown_files_with_limit(
     base_dir: &Path,
+    max_files: usize,
+) -> std::io::Result<Vec<String>> {
+    let canonical = CanonicalPath::try_from_path(base_dir)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::NotFound, error))?;
+    list_markdown_files_with_limit_from_canonical_base(&canonical, max_files)
+}
+
+fn list_markdown_files_recursive(
+    log_base_dir: &Path,
+    canonical_base_dir: &Path,
     current_dir: &Path,
     files: &mut Vec<String>,
     visited_dirs: &mut HashSet<PathBuf>,
@@ -46,7 +65,7 @@ fn list_markdown_files_recursive(
     if depth >= MAX_DIR_DEPTH {
         tracing::warn!(
             "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
-            sanitize_path_for_logging(current_dir, base_dir)
+            sanitize_path_for_logging(current_dir, log_base_dir)
         );
         return Ok(());
     }
@@ -58,7 +77,7 @@ fn list_markdown_files_recursive(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
-                    sanitize_path_for_logging(current_dir, base_dir),
+                    sanitize_path_for_logging(current_dir, log_base_dir),
                     error
                 );
                 continue;
@@ -77,7 +96,7 @@ fn list_markdown_files_recursive(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
-                    sanitize_path_for_logging(&path, base_dir),
+                    sanitize_path_for_logging(&path, log_base_dir),
                     error
                 );
                 continue;
@@ -91,39 +110,28 @@ fn list_markdown_files_recursive(
 
             if file_type.is_symlink() {
                 let Some(resolved) =
-                    canonicalize_dir_for_cycle(&path, "シンボリックリンク", base_dir)
+                    canonicalize_dir_for_cycle(&path, "シンボリックリンク", log_base_dir)
                 else {
                     continue;
                 };
-                let canonical_base = match base_dir.canonicalize() {
-                    Ok(path) => path,
-                    Err(error) => {
-                        tracing::warn!(
-                            "[markdown-view] ベースディレクトリの正規化に失敗（スキップ）: {} ({})",
-                            base_dir.display(),
-                            error
-                        );
-                        continue;
-                    }
-                };
-                if !resolved.starts_with(&canonical_base) {
+                if !resolved.starts_with(canonical_base_dir) {
                     tracing::warn!(
                         "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
-                        sanitize_path_for_logging(&path, base_dir),
-                        sanitize_path_for_logging(&resolved, base_dir)
+                        sanitize_path_for_logging(&path, log_base_dir),
+                        sanitize_path_for_logging(&resolved, log_base_dir)
                     );
                     continue;
                 }
                 if !visited_dirs.insert(resolved) {
                     tracing::warn!(
                         "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
-                        sanitize_path_for_logging(&path, base_dir)
+                        sanitize_path_for_logging(&path, log_base_dir)
                     );
                     continue;
                 }
             } else {
                 let Some(canonical) =
-                    canonicalize_dir_for_cycle(&path, "通常ディレクトリ", base_dir)
+                    canonicalize_dir_for_cycle(&path, "通常ディレクトリ", log_base_dir)
                 else {
                     continue;
                 };
@@ -133,7 +141,8 @@ fn list_markdown_files_recursive(
             }
 
             list_markdown_files_recursive(
-                base_dir,
+                log_base_dir,
+                canonical_base_dir,
                 &path,
                 files,
                 visited_dirs,
@@ -145,7 +154,7 @@ fn list_markdown_files_recursive(
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         {
-            match path.strip_prefix(base_dir) {
+            match path.strip_prefix(log_base_dir) {
                 Ok(relative) => {
                     let relative_str = relative
                         .components()
@@ -160,8 +169,8 @@ fn list_markdown_files_recursive(
                 Err(_) => {
                     tracing::warn!(
                         "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
-                        sanitize_path_for_logging(&path, base_dir),
-                        base_dir.display()
+                        sanitize_path_for_logging(&path, log_base_dir),
+                        log_base_dir.display()
                     );
                 }
             }

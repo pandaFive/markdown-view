@@ -12,7 +12,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
-use super::catalog::{canonicalize_dir_for_cycle, MAX_DIR_DEPTH, MAX_FILE_LIST};
+use super::catalog::{
+    canonicalize_dir_for_cycle, list_markdown_files_from_canonical_base, MAX_DIR_DEPTH,
+    MAX_FILE_LIST,
+};
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 #[cfg(unix)]
@@ -22,7 +25,7 @@ use super::memo_sidecar::SidecarMemoName;
 use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
 use super::*;
-use crate::server::{AppMode, AppState, BroadcastMessage};
+use crate::server::{AppMode, AppState, BroadcastMessage, CanonicalPath};
 
 fn assert_plain_sidecar_filename(name: &str) {
     let path = Path::new(name);
@@ -626,6 +629,35 @@ fn test_list_markdown_files_基本動作() {
     assert!(files.contains(&"README.md".to_string()));
     assert!(files.contains(&"guide.md".to_string()));
     assert!(files.contains(&"docs/api.md".to_string()));
+}
+
+#[test]
+fn test_list_markdown_files_from_canonical_base_基本動作() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("b.md"), "# b").unwrap();
+    std::fs::write(dir.path().join("a.md"), "# a").unwrap();
+    std::fs::write(dir.path().join("skip.txt"), "skip").unwrap();
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+
+    assert_eq!(files, vec!["a.md".to_string(), "b.md".to_string()]);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレクトリは除外() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "# secret").unwrap();
+    symlink(outside.path(), base.path().join("linked")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+
+    assert!(files.is_empty());
 }
 
 #[test]
