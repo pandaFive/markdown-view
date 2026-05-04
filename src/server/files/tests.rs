@@ -712,9 +712,7 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(canonical.as_path(), "target")
-        .await
-        .unwrap();
+    let response = search_directory(&canonical, "target").await.unwrap();
 
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);

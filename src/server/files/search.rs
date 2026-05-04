@@ -153,11 +153,10 @@ struct SearchContext {
 
 /// ディレクトリ内のMarkdownを横断検索する。
 pub(in crate::server) async fn search_directory(
-    base_dir: &Path,
+    base_dir: &CanonicalPath,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
-    let base_dir = CanonicalPath::try_from_path(base_dir)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::NotFound, error))?;
+    let base_dir = base_dir.clone();
     let raw_query = raw_query.to_owned();
 
     tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
@@ -934,7 +933,8 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
 
-        let response = search_directory(dir.path(), "needle").await.unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert_eq!(response.query, "needle");
         assert!(!response.truncated);
@@ -961,7 +961,8 @@ mod tests {
             .join("\n\n");
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
 
-        let response = search_directory(dir.path(), "needle").await.unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert!(response.truncated);
         assert_eq!(

@@ -206,15 +206,13 @@ pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResp
         return Ok(SearchResponse::empty(query.trim().to_string()));
     };
 
-    search_directory(base_dir.as_path(), &query)
-        .await
-        .map_err(|error| {
-            tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ディレクトリ検索に失敗しました",
-            )
-        })
+    search_directory(base_dir, &query).await.map_err(|error| {
+        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ディレクトリ検索に失敗しました",
+        )
+    })
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
