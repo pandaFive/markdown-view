@@ -226,7 +226,7 @@ impl MemoFs for MockMemoFs {
 /// 新仕様でメモ用 `MemoFs` を差し替えるテストは本ヘルパーを経由する。
 pub(crate) fn make_test_app_state(mode: AppMode, memo_fs: Arc<dyn MemoFs>) -> AppState {
     let (tx, _rx) = broadcast::channel::<BroadcastMessage>(4);
-    AppState::new(mode, false, None, tx).with_memo_fs(memo_fs)
+    AppState::new(mode, false, None, tx, memo_fs)
 }
 
 #[cfg(test)]
