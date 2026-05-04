@@ -29,10 +29,18 @@ use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams
 // 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 
+/// Host middleware 適用前の route 定義だけを保持する。
+///
+/// 裸の `Router` と区別することで、route 定義と共通 security layer 適用を
+/// `create_router` 側へ集約する契約を型で表現する。
+struct RouteDefinitions(Router<Arc<AppState>>);
+
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
-    build_routes()
+    let RouteDefinitions(routes) = build_routes();
+
+    routes
         // `Router::layer` は呼び出し時点で存在する route にだけ適用される。
         // 新規 route は必ず build_routes() 内へ追加し、ここより後ろへ
         // `.route(...)` を足して Host middleware を完全に bypass させないこと。
@@ -63,19 +71,21 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 ///
 /// ここでは route 登録だけを行い、共通 `.layer(...)` は追加しない。
 /// 共通 security layer は `create_router` 側で route 群全体へ適用する。
-fn build_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/", get(index_handler))
-        .route("/ws", get(ws_handler))
-        .route("/api/content", get(api_content_handler))
-        .route("/api/search", get(api_search_handler))
-        .route(
-            "/api/memo",
-            get(api_memo_handler)
-                .put(api_memo_save_handler)
-                .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
-        )
-        .route("/api/files", get(api_files_handler))
+fn build_routes() -> RouteDefinitions {
+    RouteDefinitions(
+        Router::new()
+            .route("/", get(index_handler))
+            .route("/ws", get(ws_handler))
+            .route("/api/content", get(api_content_handler))
+            .route("/api/search", get(api_search_handler))
+            .route(
+                "/api/memo",
+                get(api_memo_handler)
+                    .put(api_memo_save_handler)
+                    .layer(DefaultBodyLimit::max(MEMO_JSON_BODY_LIMIT)),
+            )
+            .route("/api/files", get(api_files_handler)),
+    )
 }
 
 /// クエリパラメータ
