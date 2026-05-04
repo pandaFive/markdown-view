@@ -751,7 +751,26 @@ fn test_list_markdown_files_最大1000件で打ち切る() {
 fn test_list_markdown_files_ベースディレクトリ正規化失敗はエラーを返す() {
     let missing = PathBuf::from("/path/that/does/not/exist");
     let result = list_markdown_files(&missing);
-    assert!(result.is_err());
+
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_ベースディレクトリ正規化失敗のio_error_kindを保持する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("blocked");
+    std::fs::create_dir(&base).unwrap();
+    let Some(_guard) = make_dir_unsearchable(parent.path(), &base) else {
+        return;
+    };
+
+    let result = list_markdown_files(&base);
+
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
 }
 
 #[cfg(unix)]

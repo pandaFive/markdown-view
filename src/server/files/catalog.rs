@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::server::log_path::sanitize_path_for_logging;
-use crate::server::CanonicalPath;
+use crate::server::{CanonicalPath, CanonicalPathError};
 
 /// ファイル一覧の最大件数
 pub(super) const MAX_FILE_LIST: usize = 1000;
@@ -48,8 +48,9 @@ pub(super) fn list_markdown_files_with_limit(
     base_dir: &Path,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
-    let canonical = CanonicalPath::try_from_path(base_dir)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::NotFound, error))?;
+    let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
+        CanonicalPathError::Canonicalize(error) => error,
+    })?;
     list_markdown_files_with_limit_from_canonical_base(&canonical, max_files)
 }
 

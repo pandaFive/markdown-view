@@ -130,14 +130,15 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         if !is_md {
             continue;
         }
-        if !is_within_canonical_base(&event.path, base_path) {
+        let Some(base_relative_check_path) = path_for_base_relative_checks(&event.path, base_path)
+        else {
             tracing::warn!(
                 "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                 sanitize_path_for_logging(&event.path, base_path)
             );
             continue;
-        }
-        if is_hidden_relative_to_canonical_base(&event.path, base_path) {
+        };
+        if is_hidden_relative_to_canonical_base(&base_relative_check_path, base_path) {
             continue;
         }
         let normalized_event_path = normalize_lexical_path(&event.path);
@@ -189,11 +190,14 @@ fn is_within_canonical_base_lexical(path: &Path, canonical_base: &Path) -> bool 
     try_strip_canonical_base_lexical(path, canonical_base).is_some()
 }
 
-fn is_within_canonical_base(path: &Path, canonical_base: &Path) -> bool {
+fn path_for_base_relative_checks(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
     match path.canonicalize() {
-        Ok(canonical_path) => canonical_path.starts_with(canonical_base),
+        Ok(canonical_path) => canonical_path
+            .starts_with(canonical_base)
+            .then_some(canonical_path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             is_within_canonical_base_lexical(path, canonical_base)
+                .then(|| normalize_lexical_path(path))
         }
         Err(error) => {
             tracing::warn!(
@@ -201,7 +205,7 @@ fn is_within_canonical_base(path: &Path, canonical_base: &Path) -> bool {
                 sanitize_path_for_logging(path, canonical_base),
                 error
             );
-            false
+            None
         }
     }
 }
@@ -471,6 +475,29 @@ mod tests {
         std::fs::write(&outside_file, "# secret").unwrap();
         let link = canonical_base.as_path().join("link.md");
         symlink(&outside_file, &link).unwrap();
+        let events = vec![debounced_event(link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_hidden_symlink先markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let hidden_dir = canonical_base.as_path().join(".secret");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        let hidden_file = hidden_dir.join("hidden.md");
+        std::fs::write(&hidden_file, "# secret").unwrap();
+        let link = canonical_base.as_path().join("link.md");
+        symlink(&hidden_file, &link).unwrap();
         let events = vec![debounced_event(link, DebouncedEventKind::Any)];
 
         let changes = WatchStrategy::Directory {
