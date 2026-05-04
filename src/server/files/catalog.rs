@@ -17,7 +17,7 @@ pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     list_markdown_files_from_canonical_base(&canonical)
 }
 
-pub(super) fn list_markdown_files_from_canonical_base(
+pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
 ) -> std::io::Result<Vec<String>> {
     list_markdown_files_with_limit_from_canonical_base(base_dir, MAX_FILE_LIST)

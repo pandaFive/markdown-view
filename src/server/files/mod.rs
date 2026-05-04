@@ -15,6 +15,7 @@ mod test_support;
 mod tests;
 
 pub use self::catalog::list_markdown_files;
+pub(in crate::server) use self::catalog::list_markdown_files_from_canonical_base;
 pub use self::content::MAX_FILE_SIZE;
 pub use self::resolve::{resolve_file, ResolveFileError};
 
