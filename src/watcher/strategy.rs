@@ -208,24 +208,37 @@ fn path_for_base_relative_checks(
     canonical_base: &Path,
 ) -> Option<BaseRelativeCheckPath> {
     let normalized_event_path = normalize_lexical_path(path);
-    let relative_event = normalized_event_path
-        .strip_prefix(normalize_lexical_path(canonical_base))
-        .ok()?
-        .to_path_buf();
+    let normalized_base = normalize_lexical_path(canonical_base);
 
     match path.canonicalize() {
         Ok(canonical_path) => {
-            let relative_canonical = canonical_path.strip_prefix(canonical_base).ok()?;
+            let relative_canonical = canonical_path.strip_prefix(&normalized_base).ok()?;
+            let relative_event = normalized_event_path
+                .strip_prefix(&normalized_base)
+                .ok()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    path_suffix_by_component_count(
+                        &normalized_event_path,
+                        relative_canonical.components().count(),
+                    )
+                })?;
             Some(BaseRelativeCheckPath {
                 normalized_event_path,
                 is_hidden: has_hidden_component(&relative_event)
                     || has_hidden_component(relative_canonical),
             })
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(BaseRelativeCheckPath {
-            normalized_event_path,
-            is_hidden: has_hidden_component(&relative_event),
-        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let relative_event = normalized_event_path
+                .strip_prefix(&normalized_base)
+                .ok()?
+                .to_path_buf();
+            Some(BaseRelativeCheckPath {
+                normalized_event_path,
+                is_hidden: has_hidden_component(&relative_event),
+            })
+        }
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] ベース配下判定: パス正規化失敗（スキップ）: {} ({})",
@@ -235,6 +248,19 @@ fn path_for_base_relative_checks(
             None
         }
     }
+}
+
+fn path_suffix_by_component_count(path: &Path, component_count: usize) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    if component_count > components.len() {
+        return None;
+    }
+    Some(
+        components[components.len().saturating_sub(component_count)..]
+            .iter()
+            .map(|component| component.as_os_str())
+            .collect(),
+    )
 }
 
 fn has_hidden_component(relative: &Path) -> bool {
@@ -302,8 +328,8 @@ mod tests {
 
     use super::{
         is_content_change_event, is_hidden_relative_to_canonical_base, is_target_file,
-        is_within_canonical_base_lexical, normalize_lexical_path, try_strip_canonical_base_lexical,
-        WatchStrategy,
+        is_within_canonical_base_lexical, normalize_lexical_path, path_for_base_relative_checks,
+        try_strip_canonical_base_lexical, WatchStrategy,
     };
     use crate::server::CanonicalPath;
 
@@ -723,5 +749,23 @@ mod tests {
         let result = try_strip_canonical_base_lexical(unrelated, base);
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_path_for_base_relative_checks_正規化でbase配下確定後はlexical_prefix失敗でも許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = dir.path().canonicalize().unwrap();
+        let file_path = canonical_base.join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+        let lexical_mismatch_base = canonical_base.join("child").join("..");
+
+        let result = path_for_base_relative_checks(&file_path, &lexical_mismatch_base)
+            .expect("canonical in-base path should be accepted");
+
+        assert_eq!(
+            result.normalized_event_path,
+            normalize_lexical_path(&file_path)
+        );
+        assert!(!result.is_hidden);
     }
 }
