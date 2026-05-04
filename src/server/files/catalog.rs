@@ -103,7 +103,7 @@ fn list_markdown_files_recursive(
             }
         };
 
-        if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
+        if file_type.is_dir() || file_type.is_symlink() {
             if files.len() >= max_files {
                 return Ok(());
             }
@@ -120,6 +120,9 @@ fn list_markdown_files_recursive(
                         sanitize_path_for_logging(&path, log_base_dir),
                         sanitize_path_for_logging(&resolved, log_base_dir)
                     );
+                    continue;
+                }
+                if !resolved.is_dir() {
                     continue;
                 }
                 if !visited_dirs.insert(resolved) {

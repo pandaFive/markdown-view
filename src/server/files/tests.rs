@@ -661,6 +661,15 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
 }
 
 #[test]
+fn test_list_markdown_files_symlink判定でpath_is_dirを使わない() {
+    let source = include_str!("catalog.rs");
+    assert!(
+        !source.contains("path.is_dir()"),
+        "symlink directory 判定で path.is_dir() を使ってはいけない"
+    );
+}
+
+#[test]
 fn test_list_markdown_files_非md除外() {
     let dir = create_test_dir();
     let files = list_markdown_files(dir.path()).unwrap();
