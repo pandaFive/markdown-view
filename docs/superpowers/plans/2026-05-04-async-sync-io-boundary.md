@@ -1,10 +1,8 @@
 # Async Sync I/O Boundary Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** async HTTP/API 経路から同期 I/O を外し、catalog と watcher が起動時 canonical base を再利用する構造へ整理する。
-
-**Status:** Completed. This file is retained as the implementation record for the async/sync I/O boundary cleanup.
 
 **Architecture:** `AppMode` が保持する `CanonicalPath` を catalog/search/resolve/watcher の境界へ渡す。同期ディレクトリ走査は `spawn_blocking` に閉じ、メモ symlink 検査は `tokio::fs::symlink_metadata` へ移す。watcher のディレクトリイベント判定は削除済みパスを扱える lexical helper を主経路にする。
 
@@ -39,7 +37,7 @@
 - Modify: `src/server/files/catalog.rs`
 - Modify: `src/server/files/tests.rs`
 
-- [x] **Step 1: failing test を追加する**
+- [ ] **Step 1: failing test を追加する**
 
 `src/server/files/tests.rs` の catalog tests 付近に、canonical base API を直接使うテストを追加する。
 
@@ -81,7 +79,7 @@ use crate::server::CanonicalPath;
 use super::catalog::list_markdown_files_from_canonical_base;
 ```
 
-- [x] **Step 2: test が失敗することを確認する**
+- [ ] **Step 2: test が失敗することを確認する**
 
 Run:
 
@@ -91,7 +89,7 @@ cargo test --all-targets --all-features test_list_markdown_files_from_canonical_
 
 Expected: `list_markdown_files_from_canonical_base` が未定義で FAIL。
 
-- [x] **Step 3: catalog の最小実装を追加する**
+- [ ] **Step 3: catalog の最小実装を追加する**
 
 `src/server/files/catalog.rs` を次の形へ整理する。既存関数は残し、canonical base API に委譲する。
 
@@ -177,7 +175,7 @@ list_markdown_files_recursive(
 )?;
 ```
 
-- [x] **Step 4: targeted test を通す**
+- [ ] **Step 4: targeted test を通す**
 
 Run:
 
@@ -187,7 +185,7 @@ cargo test --all-targets --all-features test_list_markdown_files_from_canonical_
 
 Expected: PASS。
 
-- [x] **Step 5: catalog 既存テストを通す**
+- [ ] **Step 5: catalog 既存テストを通す**
 
 Run:
 
@@ -197,7 +195,7 @@ cargo test --all-targets --all-features list_markdown_files -- --nocapture
 
 Expected: PASS。既存の hidden、上限、cycle、canonicalize 失敗テストが維持される。
 
-- [x] **Step 6: commit**
+- [ ] **Step 6: commit**
 
 ```bash
 git add src/server/files/catalog.rs src/server/files/tests.rs
@@ -214,7 +212,7 @@ git commit -m "refactor: catalogでcanonical baseを再利用する"
 - Modify: `src/server/files/tests.rs`
 - Modify: `tests/integration_test.rs`
 
-- [x] **Step 1: async 化の呼び出し元を確認する**
+- [ ] **Step 1: async 化の呼び出し元を確認する**
 
 Run:
 
@@ -224,7 +222,7 @@ rg -n "resolve_route_target\\(" src tests
 
 Expected: `src/server/service.rs` と `src/server/files` 内の呼び出しが表示される。
 
-- [x] **Step 2: failing compile を作るテスト変更を入れる**
+- [ ] **Step 2: failing compile を作るテスト変更を入れる**
 
 `src/server/files/tests.rs` にある `resolve_route_target` 呼び出しテストを async test に変更する。既存の同名テストがあればその body を以下の呼び方へ更新する。
 
@@ -258,7 +256,7 @@ fn test_directory_state(path: &Path) -> AppState {
 }
 ```
 
-- [x] **Step 3: test が失敗することを確認する**
+- [ ] **Step 3: test が失敗することを確認する**
 
 Run:
 
@@ -268,7 +266,7 @@ cargo test --all-targets --all-features test_resolve_route_target_ディレク�
 
 Expected: `Result<ResolvedTarget, ApiError> is not a future` または async 化前提の compile error。
 
-- [x] **Step 4: resolve の blocking helper を追加する**
+- [ ] **Step 4: resolve の blocking helper を追加する**
 
 `src/server/files/resolve.rs` の import を更新する。
 
@@ -307,7 +305,7 @@ async fn list_markdown_files_blocking(
 }
 ```
 
-- [x] **Step 5: `resolve_route_target` と下位関数を async 化する**
+- [ ] **Step 5: `resolve_route_target` と下位関数を async 化する**
 
 signature を次に変更する。
 
@@ -355,7 +353,7 @@ file list 同梱時の追加取得も次にする。
 None => Some(list_markdown_files_blocking(base_dir).await?),
 ```
 
-- [x] **Step 6: service の呼び出しに `.await` を追加する**
+- [ ] **Step 6: service の呼び出しに `.await` を追加する**
 
 `src/server/service.rs` の `resolve_route_target` 呼び出しを全て以下の形にする。
 
@@ -365,7 +363,7 @@ let target = resolve_route_target(state, route_request).await?;
 
 対象は `load_page`、`load_content`、`load_memo`、`save_memo`。
 
-- [x] **Step 7: `service::list_files` を canonical base helper に寄せる**
+- [ ] **Step 7: `service::list_files` を canonical base helper に寄せる**
 
 `src/server/service.rs` の import を `list_markdown_files_from_canonical_base` へ寄せる。
 
@@ -383,7 +381,7 @@ if let Some(base) = state.mode().directory_canonical().cloned() {
     tokio::task::spawn_blocking(move || list_markdown_files_from_canonical_base(&base))
 ```
 
-- [x] **Step 8: targeted tests を通す**
+- [ ] **Step 8: targeted tests を通す**
 
 Run:
 
@@ -401,7 +399,7 @@ cargo test --all-targets --all-features api_files -- --nocapture
 
 Expected: PASS または matching test がない場合は `0 passed; 0 failed`。
 
-- [x] **Step 9: commit**
+- [ ] **Step 9: commit**
 
 ```bash
 git add src/server/files/resolve.rs src/server/service.rs src/server/files/tests.rs tests/integration_test.rs
@@ -418,9 +416,9 @@ git commit -m "refactor: route target解決の一覧取得をblocking化する"
 - Modify: `src/server/files/tests.rs`
 - Modify: `tests/integration_test.rs`
 
-- [x] **Step 1: failing test を追加する**
+- [ ] **Step 1: failing test を追加する**
 
-`src/server/files/tests.rs` の search tests 付近に、`CanonicalPath` を直接受け取って検索できることを固定するテストを追加する。`Path` 入口で再 `canonicalize` する互換 API ではなく、呼び出し側が保持している起動時 canonical base を渡す契約をテスト名で明示する。
+`src/server/files/tests.rs` の search tests 付近に、canonical base 経由で検索できることを固定するテストを追加する。
 
 ```rust
 #[tokio::test]
@@ -429,7 +427,7 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "target").await.unwrap();
+    let response = search_directory(canonical.as_path(), "target").await.unwrap();
 
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);
@@ -437,11 +435,11 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
 }
 ```
 
-Expected: 既存 API では `search_directory` が `&Path` を受けるため型不一致で FAIL。
+この時点ではまだ既存 API でも通る可能性がある。実装の compile safety を作るため、次 step で search 内 import を canonical base API 前提へ変更する。
 
-- [x] **Step 2: search の import を canonical base API 前提へ変更する**
+- [ ] **Step 2: search の import を変更して compile failure を確認する**
 
-`src/server/files/search.rs` の import を次へ変更する。
+`src/server/files/search.rs` の import を一時的に次へ変更する。
 
 ```rust
 use super::catalog::list_markdown_files_with_limit_from_canonical_base;
@@ -453,26 +451,27 @@ Run:
 cargo test --all-targets --all-features test_search_directory_canonical_base_再canonicalizeなしで検索する -- --nocapture
 ```
 
-Expected: `search_directory` の signature 変更前なので型不一致で FAIL。
+Expected: `list_markdown_files_with_limit` が未定義、または型不一致で FAIL。
 
-- [x] **Step 3: search blocking core へ canonical base を渡す**
+- [ ] **Step 3: search blocking core へ canonical base を渡す**
 
-`src/server/files/search.rs` の imports を次にする。`Path` は `read_markdown_with_limit_blocking` などのファイル読込 helper で使うため残す。
+`src/server/files/search.rs` の imports を次にする。
 
 ```rust
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use super::catalog::list_markdown_files_with_limit_from_canonical_base;
 use crate::server::CanonicalPath;
 ```
 
-`search_directory` は canonical base を直接受ける。
+`search_directory` 入口で canonical base を作る。
 
 ```rust
 pub(in crate::server) async fn search_directory(
-    base_dir: &CanonicalPath,
+    base_dir: &Path,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
-    let base_dir = base_dir.clone();
+    let base_dir = CanonicalPath::try_from_path(base_dir)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::NotFound, error))?;
     let raw_query = raw_query.to_owned();
 
     tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
@@ -512,7 +511,7 @@ let base_path = base_dir.as_path();
 let file_path = match resolve_file(base_path, &relative) {
 ```
 
-- [x] **Step 4: service の search 呼び出しを canonical path へ寄せる**
+- [ ] **Step 4: service の search 呼び出しを canonical path へ寄せる**
 
 `src/server/service.rs` の search 関数を次に変更する。
 
@@ -521,10 +520,10 @@ let Some(base_dir) = state.mode().directory_canonical() else {
     return Ok(SearchResponse::empty(query.trim().to_string()));
 };
 
-search_directory(base_dir, &query).await.map_err(|error| {
+search_directory(base_dir.as_path(), &query).await.map_err(|error| {
 ```
 
-- [x] **Step 5: targeted tests を通す**
+- [ ] **Step 5: targeted tests を通す**
 
 Run:
 
@@ -542,7 +541,7 @@ cargo test --all-targets --all-features search -- --nocapture
 
 Expected: PASS。
 
-- [x] **Step 6: commit**
+- [ ] **Step 6: commit**
 
 ```bash
 git add src/server/files/search.rs src/server/service.rs src/server/files/tests.rs tests/integration_test.rs
@@ -557,7 +556,7 @@ git commit -m "refactor: 検索候補列挙でcanonical baseを使う"
 - Modify: `src/server/files/memo.rs`
 - Modify: `src/server/files/tests.rs`
 
-- [x] **Step 1: 既存 symlink 拒否テストを targeted 実行する**
+- [ ] **Step 1: 既存 symlink 拒否テストを targeted 実行する**
 
 Run:
 
@@ -567,7 +566,7 @@ cargo test --all-targets --all-features memo symlink -- --nocapture
 
 Expected: 既存の symlink 関連テストが PASS。該当テストが名前一致しない場合は `0 passed; 0 failed` ではなく、`rg -n "symlink|シンボリック" src/server/files/tests.rs` で対象名を探して実行する。
 
-- [x] **Step 2: async 化で compile failure を作る**
+- [ ] **Step 2: async 化で compile failure を作る**
 
 `src/server/files/memo.rs` の `first_unsafe_memo_path_component` signature を先に変更する。
 
@@ -586,7 +585,7 @@ cargo test --all-targets --all-features memo -- --nocapture
 
 Expected: 呼び出し元が `.await` していない compile error。
 
-- [x] **Step 3: unsafe path 検査の呼び出し元を async 化する**
+- [ ] **Step 3: unsafe path 検査の呼び出し元を async 化する**
 
 `ensure_safe_memo_path` を変更する。
 
@@ -646,7 +645,7 @@ ensure_safe_memo_path(path, state, target, request).await
 ensure_safe_memo_rename_paths(&final_path, &tmp_path, state, target, request).await?;
 ```
 
-- [x] **Step 4: `tokio::fs::symlink_metadata` へ置換する**
+- [ ] **Step 4: `tokio::fs::symlink_metadata` へ置換する**
 
 `first_unsafe_memo_path_component` 内を次に変更する。
 
@@ -668,7 +667,7 @@ match tokio::fs::symlink_metadata(&current).await {
 }
 ```
 
-- [x] **Step 5: targeted tests を通す**
+- [ ] **Step 5: targeted tests を通す**
 
 Run:
 
@@ -678,7 +677,7 @@ cargo test --all-targets --all-features memo -- --nocapture
 
 Expected: PASS。
 
-- [x] **Step 6: commit**
+- [ ] **Step 6: commit**
 
 ```bash
 git add src/server/files/memo.rs src/server/files/tests.rs
@@ -692,7 +691,7 @@ git commit -m "refactor: メモパス安全確認をasync metadataへ寄せる"
 **Files:**
 - Modify: `src/watcher/strategy.rs`
 
-- [x] **Step 1: failing tests を追加する**
+- [ ] **Step 1: failing tests を追加する**
 
 `src/watcher/strategy.rs` の tests に追加する。
 
@@ -729,7 +728,7 @@ fn test_collect_directory_changes_base外markdownを除外する() {
 }
 ```
 
-- [x] **Step 2: tests を実行して現状を確認する**
+- [ ] **Step 2: tests を実行して現状を確認する**
 
 Run:
 
@@ -739,7 +738,7 @@ cargo test --all-targets --all-features collect_directory_changes -- --nocapture
 
 Expected: 追加テストが PASS する場合がある。その場合も次 step で canonicalize fallback を削除する refactor を行い、既存テストを更新する。
 
-- [x] **Step 3: directory helper を lexical base 前提に変更する**
+- [ ] **Step 3: directory helper を lexical base 前提に変更する**
 
 `collect_directory_changes` の signature を変更する。
 
@@ -803,7 +802,7 @@ if is_hidden_relative_to_canonical_base(&event.path, base_path) {
 
 既存 `try_strip_base` と `is_within_base_dir` は、単体テストが不要になれば削除する。削除する場合は tests import からも外す。
 
-- [x] **Step 4: watcher tests を通す**
+- [ ] **Step 4: watcher tests を通す**
 
 Run:
 
@@ -821,7 +820,7 @@ cargo test --all-targets --all-features collect_directory_changes -- --nocapture
 
 Expected: PASS。
 
-- [x] **Step 5: commit**
+- [ ] **Step 5: commit**
 
 ```bash
 git add src/watcher/strategy.rs
@@ -835,7 +834,7 @@ git commit -m "refactor: watcherのdirectory判定をlexical化する"
 **Files:**
 - Modify: `docs/todo/TODO.md`
 
-- [x] **Step 1: formatting を確認する**
+- [ ] **Step 1: formatting を確認する**
 
 Run:
 
@@ -851,7 +850,7 @@ cargo fmt --all
 
 その後 `cargo fmt --all -- --check` を再実行して PASS を確認する。
 
-- [x] **Step 2: clippy を通す**
+- [ ] **Step 2: clippy を通す**
 
 Run:
 
@@ -861,7 +860,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Expected: PASS。
 
-- [x] **Step 3: full test を通す**
+- [ ] **Step 3: full test を通す**
 
 Run:
 
@@ -871,7 +870,7 @@ cargo test --all-targets --all-features
 
 Expected: PASS。
 
-- [x] **Step 4: full verification を通す**
+- [ ] **Step 4: full verification を通す**
 
 Run:
 
@@ -881,7 +880,7 @@ Run:
 
 Expected: PASS。
 
-- [x] **Step 5: TODO を完了更新する**
+- [ ] **Step 5: TODO を完了更新する**
 
 `docs/todo/TODO.md` の該当項目を `[x]` に変更し、完了根拠を1行追加する。
 
@@ -892,7 +891,7 @@ Expected: PASS。
 
 既存の詳細説明は削らず、完了根拠を `対応:` または `完了根拠:` として追記する。
 
-- [x] **Step 6: final status を確認する**
+- [ ] **Step 6: final status を確認する**
 
 Run:
 
@@ -902,7 +901,7 @@ git status --short
 
 Expected: 変更対象が今回の files のみ。
 
-- [x] **Step 7: final commit**
+- [ ] **Step 7: final commit**
 
 ```bash
 git add docs/todo/TODO.md
@@ -932,5 +931,4 @@ Type consistency:
 
 - catalog canonical API は `list_markdown_files_from_canonical_base` と `list_markdown_files_with_limit_from_canonical_base` に統一。
 - canonical base 型は `crate::server::CanonicalPath` に統一。
-- `search_directory` は `&CanonicalPath` を直接受け、入口で `Path` から再 `canonicalize` しない。
 - watcher lexical helper は `try_strip_canonical_base_lexical`、`is_within_canonical_base_lexical`、`is_hidden_relative_to_canonical_base` に統一。

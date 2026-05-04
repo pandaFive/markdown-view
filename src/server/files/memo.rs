@@ -4,7 +4,8 @@ use axum::http::StatusCode;
 
 use super::content::MAX_FILE_SIZE;
 use super::memo_fs::{
-    BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError, MemoWriteError,
+    before_rename_future, BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError,
+    MemoWriteError,
 };
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
@@ -67,7 +68,11 @@ pub(in crate::server) async fn save_route_memo(
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
     let before_rename = |final_path: &Path, tmp_path: &Path| {
-        ensure_safe_memo_rename_paths_blocking(final_path, tmp_path, state, target, request)
+        let final_path = final_path.to_path_buf();
+        let tmp_path = tmp_path.to_path_buf();
+        before_rename_future(async move {
+            ensure_safe_memo_rename_paths(&final_path, &tmp_path, state, target, request).await
+        })
     };
     fs.write_atomic(
         memo_path,
@@ -401,6 +406,16 @@ async fn cleanup_memo_path_required(
     fs: &dyn MemoFs,
 ) -> Result<(), ApiError> {
     if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
+        if error.0 != StatusCode::FORBIDDEN {
+            tracing::warn!(
+                "[markdown-view] {}{}メモ必須cleanup安全確認失敗 ({}): {:?}",
+                request.read_error_log_label(),
+                label,
+                target.file_label(),
+                error
+            );
+            return Err(error);
+        }
         tracing::warn!(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),
@@ -428,14 +443,14 @@ async fn ensure_safe_memo_path(
     if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
         return Err(json_error(
-            StatusCode::FORBIDDEN,
+            unsafe_component.status_code(),
             unsafe_component.user_message(),
         ));
     }
     Ok(())
 }
 
-fn ensure_safe_memo_rename_paths_blocking(
+async fn ensure_safe_memo_rename_paths(
     final_path: &Path,
     tmp_path: &Path,
     state: &AppState,
@@ -456,21 +471,21 @@ fn ensure_safe_memo_rename_paths_blocking(
         ));
     }
 
-    ensure_safe_memo_rename_path_blocking(final_path, state, target, request)?;
-    ensure_safe_memo_rename_path_blocking(tmp_path, state, target, request)?;
+    ensure_safe_memo_rename_path(final_path, state, target, request).await?;
+    ensure_safe_memo_rename_path(tmp_path, state, target, request).await?;
     Ok(())
 }
 
-fn ensure_safe_memo_rename_path_blocking(
+async fn ensure_safe_memo_rename_path(
     memo_path: &Path,
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<(), MemoBeforeRenameError> {
     let base_dir = state.mode().base_dir();
-    if let Some(unsafe_component) = first_unsafe_memo_path_component_blocking(base_dir, memo_path) {
+    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
-        return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
+        return Err(unsafe_component.before_rename_error());
     }
     Ok(())
 }
@@ -490,7 +505,21 @@ impl UnsafeMemoPathComponent {
     fn user_message(&self) -> &'static str {
         match self {
             Self::Symlink(_) => "メモ保存先にシンボリックリンクが含まれているため操作できません",
-            Self::InspectionError(_) => "メモ保存先の安全確認に失敗したため操作できません",
+            Self::InspectionError(_) => "メモ保存先の安全確認に失敗しました",
+        }
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Symlink(_) => StatusCode::FORBIDDEN,
+            Self::InspectionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn before_rename_error(&self) -> MemoBeforeRenameError {
+        match self {
+            Self::Symlink(_) => MemoBeforeRenameError::new(self.user_message()),
+            Self::InspectionError(_) => MemoBeforeRenameError::internal(self.user_message()),
         }
     }
 }
@@ -524,7 +553,19 @@ async fn first_unsafe_memo_path_component(
     base_dir: &Path,
     target: &Path,
 ) -> Option<UnsafeMemoPathComponent> {
-    let relative = target.strip_prefix(base_dir).ok()?;
+    let relative = match target.strip_prefix(base_dir) {
+        Ok(relative) => relative,
+        Err(_) => {
+            tracing::warn!(
+                "[markdown-view] メモパスがbase外のため安全側で拒否します: {} (base: {})",
+                sanitize_path_for_logging(target, base_dir),
+                base_dir.display()
+            );
+            return Some(UnsafeMemoPathComponent::InspectionError(
+                target.to_path_buf(),
+            ));
+        }
+    };
     let mut current = base_dir.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
@@ -537,33 +578,6 @@ async fn first_unsafe_memo_path_component(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] メモパス要素のsymlink検査に失敗したため安全側で拒否します ({}): {}",
-                    sanitize_path_for_logging(&current, base_dir),
-                    error
-                );
-                return Some(UnsafeMemoPathComponent::InspectionError(current));
-            }
-        }
-    }
-    None
-}
-
-fn first_unsafe_memo_path_component_blocking(
-    base_dir: &Path,
-    target: &Path,
-) -> Option<UnsafeMemoPathComponent> {
-    let relative = target.strip_prefix(base_dir).ok()?;
-    let mut current = base_dir.to_path_buf();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Some(UnsafeMemoPathComponent::Symlink(current));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] メモパス要素のrename直前symlink検査に失敗したため安全側で拒否します ({}): {}",
                     sanitize_path_for_logging(&current, base_dir),
                     error
                 );
@@ -635,7 +649,7 @@ fn memo_write_error_to_api_error(
                 target.file_label(),
                 error.user_message()
             );
-            json_error(StatusCode::FORBIDDEN, error.user_message())
+            json_error(error.status_code(), error.user_message())
         }
     }
 }
@@ -705,6 +719,18 @@ mod unsafe_memo_path_component_tests {
         match first_unsafe_memo_path_component(dir.path(), &target).await {
             Some(UnsafeMemoPathComponent::InspectionError(path)) => assert_eq!(path, target),
             _ => panic!("メタデータエラーは安全確認失敗として返すべき"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_first_unsafe_memo_path_component_base外pathは安全確認失敗として拒否する() {
+        let base = tempfile::tempdir().expect("base tempdirを作成できる");
+        let outside = tempfile::tempdir().expect("outside tempdirを作成できる");
+        let target = outside.path().join("memo.md");
+
+        match first_unsafe_memo_path_component(base.path(), &target).await {
+            Some(UnsafeMemoPathComponent::InspectionError(path)) => assert_eq!(path, target),
+            _ => panic!("base外pathは安全確認失敗として返すべき"),
         }
     }
 }

@@ -20,7 +20,9 @@ use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 #[cfg(unix)]
 use super::memo_fs::MemoBeforeRenameError;
-use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
+use super::memo_fs::{
+    before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
@@ -44,13 +46,6 @@ struct SymlinkBeforeRenameMemoFs {
 }
 
 #[cfg(unix)]
-#[derive(Debug)]
-struct TmpSymlinkBeforeRenameMemoFs {
-    inner: TokioMemoFs,
-    link_target: PathBuf,
-}
-
-#[cfg(unix)]
 impl SymlinkBeforeRenameMemoFs {
     fn new(link_target: PathBuf) -> Arc<Self> {
         Arc::new(Self {
@@ -58,6 +53,13 @@ impl SymlinkBeforeRenameMemoFs {
             link_target,
         })
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct TmpSymlinkBeforeRenameMemoFs {
+    inner: TokioMemoFs,
+    link_target: PathBuf,
 }
 
 #[cfg(unix)]
@@ -110,7 +112,7 @@ impl MemoFs for MismatchedTmpParentMemoFs {
             .expect("memo path should have a parent")
             .join(".other-tmp-dir")
             .join("memo.tmp");
-        match before_rename(path, &tmp_path) {
+        match before_rename(path, &tmp_path).await {
             Ok(()) => Err(MemoWriteError::Io(std::io::Error::other(
                 "mismatched tmp parent should be rejected before rename",
             ))),
@@ -151,21 +153,26 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
         let link_target = self.link_target.clone();
         self.inner
             .write_atomic(path, content, &move |final_path, tmp_path| {
-                match std::fs::remove_file(final_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(MemoBeforeRenameError::new(format!(
-                            "テスト用メモ差し替えに失敗しました: {error}"
-                        )));
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                before_rename_future(async move {
+                    match std::fs::remove_file(&final_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用メモ差し替えに失敗しました: {error}"
+                            )));
+                        }
                     }
-                }
-                symlink(&link_target, final_path).map_err(|error| {
-                    MemoBeforeRenameError::new(format!(
-                        "テスト用メモsymlink作成に失敗しました: {error}"
-                    ))
-                })?;
-                before_rename(final_path, tmp_path)
+                    symlink(&link_target, &final_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用メモsymlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                })
             })
             .await
     }
@@ -203,21 +210,26 @@ impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
         let link_target = self.link_target.clone();
         self.inner
             .write_atomic(path, content, &move |final_path, tmp_path| {
-                match std::fs::remove_file(tmp_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(MemoBeforeRenameError::new(format!(
-                            "テスト用メモtmp差し替えに失敗しました: {error}"
-                        )));
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                before_rename_future(async move {
+                    match std::fs::remove_file(&tmp_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用tmp差し替えに失敗しました: {error}"
+                            )));
+                        }
                     }
-                }
-                symlink(&link_target, tmp_path).map_err(|error| {
-                    MemoBeforeRenameError::new(format!(
-                        "テスト用メモtmp symlink作成に失敗しました: {error}"
-                    ))
-                })?;
-                before_rename(final_path, tmp_path)
+                    symlink(&link_target, &tmp_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用tmp symlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                })
             })
             .await
     }
@@ -691,6 +703,26 @@ fn test_resolve_file_シンボリックリンクによるトラバーサル拒�
     assert_eq!(result, Err(ResolveFileError::Traversal));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = resolve_file(dir.path(), "locked/secret.md");
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
+}
+
 #[test]
 fn test_list_markdown_files_基本動作() {
     let dir = create_test_dir();
@@ -708,7 +740,7 @@ fn test_list_markdown_files_from_canonical_base_基本動作() {
     std::fs::write(dir.path().join("skip.txt"), "skip").unwrap();
 
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
-    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert_eq!(files, vec!["a.md".to_string(), "b.md".to_string()]);
 }
@@ -724,9 +756,38 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
     symlink(outside.path(), base.path().join("linked")).unwrap();
 
     let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
-    let files = list_markdown_files_from_canonical_base(&canonical).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
+fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレクトリだけ辿る() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    std::fs::write(base.path().join(".target.md"), "# hidden target").unwrap();
+    symlink(
+        base.path().join(".target.md"),
+        base.path().join("linked_file.md"),
+    )
+    .unwrap();
+
+    let hidden_dir = base.path().join(".target-dir");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    std::fs::write(hidden_dir.join("doc.md"), "# doc").unwrap();
+    symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert_eq!(files, vec!["linked_dir/doc.md".to_string()]);
+    assert!(logs_contain(
+        "シンボリックリンクが通常ファイルを指すためスキップ"
+    ));
+    assert!(logs_contain("linked_file.md"));
 }
 
 #[test]
@@ -749,6 +810,19 @@ fn test_list_markdown_files_空ディレクトリ() {
     let dir = tempfile::tempdir().unwrap();
     let files = list_markdown_files(dir.path()).unwrap();
     assert!(files.is_empty());
+}
+
+#[tokio::test]
+async fn test_search_directory_canonical_base_再canonicalizeなしで検索する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+    let response = search_directory(&canonical, "target").await.unwrap();
+
+    assert_eq!(response.query, "target");
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].file, "guide.md");
 }
 
 #[test]
@@ -776,7 +850,26 @@ fn test_list_markdown_files_最大1000件で打ち切る() {
 fn test_list_markdown_files_ベースディレクトリ正規化失敗はエラーを返す() {
     let missing = PathBuf::from("/path/that/does/not/exist");
     let result = list_markdown_files(&missing);
-    assert!(result.is_err());
+
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_ベースディレクトリ正規化失敗のio_error_kindを保持する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("blocked");
+    std::fs::create_dir(&base).unwrap();
+    let Some(_guard) = make_dir_unsearchable(parent.path(), &base) else {
+        return;
+    };
+
+    let result = list_markdown_files(&base);
+
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
 }
 
 #[cfg(unix)]
@@ -935,6 +1028,7 @@ async fn test_resolve_route_target_api_contentはfile_listを含まない() {
 #[tokio::test]
 async fn test_resolve_route_target_ディレクトリ既定ファイルを返す() {
     let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();
     std::fs::write(dir.path().join("README.md"), "# readme").unwrap();
     let state = create_directory_state(dir.path());
 
@@ -943,9 +1037,10 @@ async fn test_resolve_route_target_ディレクトリ既定ファイルを返す
         .unwrap();
 
     assert_eq!(target.relative_path(), Some("README.md"));
+    assert!(target.file_path().ends_with("README.md"));
     assert_eq!(
-        target.file_list(),
-        Some(["README.md".to_string()].as_slice())
+        target.file_list().unwrap(),
+        &["README.md".to_string(), "z-last.md".to_string()]
     );
 }
 
@@ -1281,6 +1376,48 @@ async fn test_save_route_memo_空白保存はunsafeなlegacyがあってもsidec
     assert_eq!(memo.raw(), "");
     assert!(!dir.path().join(".README.md.memo.md").exists());
     assert!(dir.path().join(".markdown-view").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空白保存_required_legacy安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    workspace
+        .write_file(Path::new("README.md"), "# README")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".README.md.memo.md"), "memo")
+        .expect("sidecar memo should be written");
+    let legacy_path = workspace.path().join(".markdown-view/memos/README.md");
+    workspace
+        .write_file(Path::new(".markdown-view/memos/README.md"), "legacy memo")
+        .expect("legacy memo should be written");
+    let locked_dir = workspace.path().join(".markdown-view/memos");
+
+    let state = create_directory_state(workspace.path());
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let Some(permission_guard) = make_dir_unsearchable(&locked_dir, &legacy_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   \n".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) =
+        result.expect_err("required legacy safety inspection failure should be fatal");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(fs::read_to_string(&sidecar_path).unwrap(), "memo");
+    drop(permission_guard);
+    assert!(legacy_path.exists());
 }
 
 #[cfg(unix)]
@@ -2070,15 +2207,14 @@ async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると4
     let file_path = workspace
         .write_md(Path::new("note.md"), "# note")
         .expect("target markdown should be written");
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
     let outside_dir = tempfile::tempdir().expect("outside dir should be created");
-    let outside_memo = outside_dir.path().join("outside.md");
-    std::fs::write(&outside_memo, "outside memo").expect("outside memo should be written");
+    let outside_tmp = outside_dir.path().join("outside.tmp");
+    std::fs::write(&outside_tmp, "outside tmp").expect("outside tmp should be written");
 
     let mode = AppMode::new_single_file(&file_path).unwrap();
-    let state = make_test_app_state(
-        mode,
-        TmpSymlinkBeforeRenameMemoFs::new(outside_memo.clone()),
-    );
+    let state = make_test_app_state(mode, TmpSymlinkBeforeRenameMemoFs::new(outside_tmp.clone()));
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
         .await
         .unwrap();
@@ -2091,7 +2227,7 @@ async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると4
     )
     .await;
 
-    let (status, body) = result.expect_err("rename precheck should reject tmp symlink replacement");
+    let (status, body) = result.expect_err("tmp precheck should reject symlink replacement");
     assert_eq!(status, StatusCode::FORBIDDEN);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(
@@ -2099,9 +2235,43 @@ async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると4
         "メモ保存先にシンボリックリンクが含まれているため操作できません"
     );
     assert_eq!(
-        std::fs::read_to_string(&outside_memo).expect("outside memo should remain readable"),
-        "outside memo"
+        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        "old memo"
     );
+    assert_eq!(
+        std::fs::read_to_string(&outside_tmp).expect("outside tmp should remain readable"),
+        "outside tmp"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_安全確認io失敗は500を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let state = create_single_file_state(&file_path);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+    let sidecar_path = workspace.path().join(".note.md.memo.md");
+    let Some(_guard) = make_dir_unsearchable(workspace.path(), &sidecar_path) else {
+        return;
+    };
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("inspection failure should be surfaced as 500");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
 }
 
 #[tokio::test]
@@ -3018,6 +3188,27 @@ fn test_revalidate_single_file_target_存在しないファイルはnotfoundを�
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&file_path, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("locked");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let target = locked_dir.join("secret.md");
+    std::fs::write(&target, "# secret").unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
+        return;
+    };
+
+    let result = revalidate_single_file_target(&target, &base_dir);
+
+    assert!(matches!(
+        result,
+        Err(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied))
+    ));
 }
 
 #[test]

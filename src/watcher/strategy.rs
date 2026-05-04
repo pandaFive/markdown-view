@@ -130,17 +130,18 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         if !is_md {
             continue;
         }
-        if !is_within_canonical_base_lexical(&event.path, base_path) {
+        let Some(base_relative_check) = path_for_base_relative_checks(&event.path, base_path)
+        else {
             tracing::warn!(
                 "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
                 sanitize_path_for_logging(&event.path, base_path)
             );
             continue;
-        }
-        if is_hidden_relative_to_canonical_base(&event.path, base_path) {
+        };
+        if base_relative_check.is_hidden {
             continue;
         }
-        let normalized_event_path = normalize_lexical_path(&event.path);
+        let normalized_event_path = base_relative_check.normalized_event_path;
         if notified.insert(normalized_event_path.clone()) {
             changed_paths.push(normalized_event_path);
         }
@@ -153,19 +154,16 @@ fn is_content_change_event(kind: &DebouncedEventKind) -> bool {
     matches!(kind, DebouncedEventKind::Any)
 }
 
-fn try_strip_canonical_base_lexical(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
-    let normalized_path = normalize_lexical_path(path);
-    let normalized_base = normalize_lexical_path(canonical_base);
-    normalized_path
-        .strip_prefix(&normalized_base)
-        .ok()
-        .map(Path::to_path_buf)
-}
-
-fn is_within_canonical_base_lexical(path: &Path, canonical_base: &Path) -> bool {
-    try_strip_canonical_base_lexical(path, canonical_base).is_some()
-}
-
+/// ベースディレクトリからの相対パスに隠しコンポーネントが含まれるか判定する
+///
+/// ベースディレクトリ自体が`.`で始まるパスに含まれる場合でも
+/// 正しく動作するよう、相対パス部分のみをチェックする。
+///
+/// ## Fail-safe動作
+/// production経路ではbase配下判定後のパスを受け取る想定だが、テストや将来の呼び出し
+/// 変更で `try_strip_canonical_base_lexical` が `None` を返した場合は `true` を返し、
+/// 安全側に倒す（隠しファイルとして扱い処理をスキップする）。
+#[cfg(test)]
 fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> bool {
     match try_strip_canonical_base_lexical(path, canonical_base) {
         Some(relative) => relative
@@ -179,6 +177,100 @@ fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> b
             true
         }
     }
+}
+
+#[cfg(test)]
+fn try_strip_canonical_base_lexical(path: &Path, canonical_base: &Path) -> Option<PathBuf> {
+    let normalized_path = normalize_lexical_path(path);
+    let normalized_base = normalize_lexical_path(canonical_base);
+    normalized_path
+        .strip_prefix(&normalized_base)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+fn is_within_canonical_base_lexical(path: &Path, canonical_base: &Path) -> bool {
+    try_strip_canonical_base_lexical(path, canonical_base).is_some()
+}
+
+struct BaseRelativeCheckPath {
+    normalized_event_path: PathBuf,
+    is_hidden: bool,
+}
+
+/// base相対の追加検査に使うパスを返す。
+///
+/// 存在するパスはcanonical targetでbase配下を確認する。削除済みなどNotFoundの場合は
+/// lexicalなbase配下判定にfallbackし、それ以外のI/O失敗は通知対象から除外する。
+/// 存在するパスではevent名とcanonical先の両方で隠しcomponentを確認し、隠しsymlink名と
+/// 隠しsymlink先のどちらも通知しない。
+/// event名のcase差分を落とさないため、canonicalでbase配下を証明した後だけ
+/// component数によるsuffix fallbackを使う。
+fn path_for_base_relative_checks(
+    path: &Path,
+    canonical_base: &Path,
+) -> Option<BaseRelativeCheckPath> {
+    let normalized_event_path = normalize_lexical_path(path);
+    let normalized_base = normalize_lexical_path(canonical_base);
+
+    match path.canonicalize() {
+        Ok(canonical_path) => {
+            let relative_canonical = canonical_path.strip_prefix(&normalized_base).ok()?;
+            let relative_event = normalized_event_path
+                .strip_prefix(&normalized_base)
+                .ok()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    path_suffix_by_component_count(
+                        &normalized_event_path,
+                        relative_canonical.components().count(),
+                    )
+                })?;
+            Some(BaseRelativeCheckPath {
+                normalized_event_path,
+                is_hidden: has_hidden_component(&relative_event)
+                    || has_hidden_component(relative_canonical),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let relative_event = normalized_event_path
+                .strip_prefix(&normalized_base)
+                .ok()?
+                .to_path_buf();
+            Some(BaseRelativeCheckPath {
+                normalized_event_path,
+                is_hidden: has_hidden_component(&relative_event),
+            })
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] ベース配下判定: パス正規化失敗（スキップ）: {} ({})",
+                sanitize_path_for_logging(path, canonical_base),
+                error
+            );
+            None
+        }
+    }
+}
+
+fn path_suffix_by_component_count(path: &Path, component_count: usize) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    if component_count > components.len() {
+        return None;
+    }
+    Some(
+        components[components.len().saturating_sub(component_count)..]
+            .iter()
+            .map(|component| component.as_os_str())
+            .collect(),
+    )
+}
+
+fn has_hidden_component(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 /// パスが監視対象ファイルと一致するか判定する
@@ -240,8 +332,8 @@ mod tests {
 
     use super::{
         is_content_change_event, is_hidden_relative_to_canonical_base, is_target_file,
-        is_within_canonical_base_lexical, normalize_lexical_path, try_strip_canonical_base_lexical,
-        WatchStrategy,
+        is_within_canonical_base_lexical, normalize_lexical_path, path_for_base_relative_checks,
+        try_strip_canonical_base_lexical, WatchStrategy,
     };
     use crate::server::CanonicalPath;
 
@@ -404,22 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_changed_paths_ディレクトリモードでベース外を無視する() {
-        let base_dir = tempfile::tempdir().unwrap();
-        let outside_dir = tempfile::tempdir().unwrap();
-        let outside_file = outside_dir.path().join("outside.md");
-        std::fs::write(&outside_file, "# outside").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(base_dir.path()).unwrap(),
-        };
-
-        let received = strategy
-            .collect_changed_paths(&[debounced_event(outside_file, DebouncedEventKind::Any)]);
-
-        assert!(received.is_empty(), "ベース外パスは通知されないはず");
-    }
-
-    #[test]
     fn test_collect_directory_changes_削除済みbase配下markdownを通知する() {
         let dir = tempfile::tempdir().unwrap();
         let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
@@ -448,6 +524,108 @@ mod tests {
         .collect_changed_paths(&events);
 
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_base外symlink先markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let outside_file = outside.path().join("secret.md");
+        std::fs::write(&outside_file, "# secret").unwrap();
+        let link = canonical_base.as_path().join("link.md");
+        symlink(&outside_file, &link).unwrap();
+        let events = vec![debounced_event(link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_hidden_symlink先markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let hidden_dir = canonical_base.as_path().join(".secret");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        let hidden_file = hidden_dir.join("hidden.md");
+        std::fs::write(&hidden_file, "# secret").unwrap();
+        let link = canonical_base.as_path().join("link.md");
+        symlink(&hidden_file, &link).unwrap();
+        let events = vec![debounced_event(link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_hidden_symlink名markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let visible_file = canonical_base.as_path().join("visible.md");
+        std::fs::write(&visible_file, "# visible").unwrap();
+        let hidden_link = canonical_base.as_path().join(".secret.md");
+        symlink(&visible_file, &hidden_link).unwrap();
+        let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_directory_changes_broken_hidden_symlink名markdownを除外する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = CanonicalPath::try_from_path(dir.path()).unwrap();
+        let missing_target = canonical_base.as_path().join("missing.md");
+        let hidden_link = canonical_base.as_path().join(".missing.md");
+        symlink(&missing_target, &hidden_link).unwrap();
+        let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
+
+        let changes = WatchStrategy::Directory {
+            base_dir: canonical_base,
+        }
+        .collect_changed_paths(&events);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_collect_changed_paths_ディレクトリモードでベース外を無視する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = outside_dir.path().join("outside.md");
+        std::fs::write(&outside_file, "# outside").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(base_dir.path()).unwrap(),
+        };
+
+        let received = strategy
+            .collect_changed_paths(&[debounced_event(outside_file, DebouncedEventKind::Any)]);
+
+        assert!(received.is_empty(), "ベース外パスは通知されないはず");
     }
 
     #[test]
@@ -537,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_strip_canonical_base_lexical_strip_prefix直接成功() {
+    fn test_try_strip_canonical_base_lexical_直接成功() {
         let dir = tempfile::tempdir().unwrap();
         let canonical_dir = dir.path().canonicalize().unwrap();
         let sub = canonical_dir.join("sub");
@@ -551,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_strip_canonical_base_lexical_字句正規化で成功() {
+    fn test_try_strip_canonical_base_lexical_非正規化baseをlexicalに処理する() {
         let dir = tempfile::tempdir().unwrap();
         let canonical_dir = dir.path().canonicalize().unwrap();
         let sub = canonical_dir.join("sub");
@@ -575,5 +753,23 @@ mod tests {
         let result = try_strip_canonical_base_lexical(unrelated, base);
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_path_for_base_relative_checks_正規化でbase配下確定後はlexical_prefix失敗でも許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_base = dir.path().canonicalize().unwrap();
+        let file_path = canonical_base.join("guide.md");
+        std::fs::write(&file_path, "# guide").unwrap();
+        let lexical_mismatch_base = canonical_base.join("child").join("..");
+
+        let result = path_for_base_relative_checks(&file_path, &lexical_mismatch_base)
+            .expect("canonical in-base path should be accepted");
+
+        assert_eq!(
+            result.normalized_event_path,
+            normalize_lexical_path(&file_path)
+        );
+        assert!(!result.is_hidden);
     }
 }

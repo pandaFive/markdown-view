@@ -4,7 +4,7 @@ use std::path::Path;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::catalog::list_markdown_files_with_limit_from_canonical_base;
+use super::catalog::list_markdown_files_from_canonical_base;
 use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
@@ -181,10 +181,8 @@ fn search_directory_with_limits_blocking(
         return Ok(SearchResponse::empty(query));
     }
 
-    let files = list_markdown_files_with_limit_from_canonical_base(
-        base_dir,
-        limits.max_files.saturating_add(1),
-    )?;
+    let files =
+        list_markdown_files_from_canonical_base(base_dir, limits.max_files.saturating_add(1))?;
     let base_path = base_dir.as_path();
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
@@ -727,7 +725,6 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::CanonicalPath;
 
     #[test]
     fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
@@ -928,13 +925,17 @@ mod tests {
         assert_eq!(results[0].current, "İstanbul is here.");
     }
 
+    fn canonical_of(path: &Path) -> CanonicalPath {
+        CanonicalPath::try_from_path(path).unwrap()
+    }
+
     #[tokio::test]
     async fn test_search_directory_通常検索は打ち切りなしの統計を返す() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert_eq!(response.query, "needle");
@@ -954,19 +955,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_directory_canonical_base_再canonicalizeなしで検索する() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
-
-        let response = search_directory(&canonical, "target").await.unwrap();
-
-        assert_eq!(response.query, "target");
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(response.results[0].file, "guide.md");
-    }
-
-    #[tokio::test]
     async fn test_search_directory_読込失敗ファイルをスキップして検索を継続する() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle is here").unwrap();
@@ -975,8 +963,8 @@ mod tests {
             [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'],
         )
         .unwrap();
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert!(!response.truncated);
@@ -995,8 +983,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory(&canonical, "needle").await.unwrap();
 
         assert!(response.truncated);
@@ -1018,8 +1006,8 @@ mod tests {
             )
             .unwrap();
         }
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory_with_limits_blocking(
             &canonical,
             "needle",
@@ -1050,8 +1038,8 @@ mod tests {
             )
             .unwrap();
         }
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory_with_limits_blocking(
             &canonical,
             "needle",
@@ -1074,8 +1062,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle").unwrap();
         std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
-        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
+        let canonical = canonical_of(dir.path());
         let response = search_directory_with_limits_blocking(
             &canonical,
             "needle",
