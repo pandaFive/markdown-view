@@ -6,10 +6,12 @@
 //! 特定パスの I/O エラーを決定論的に再現する。
 
 use std::fs::Metadata;
+use std::future::Future;
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -64,8 +66,12 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
 /// `Err` を返すと tmp は削除され、最終保存先は置換されない。
 /// 呼び出し側は、final/tmp の親ディレクトリ一致と symlink component 不在など、
 /// rename 直前に再確認すべき保存先不変条件をここで検査する。
-pub(crate) type BeforeRenameCheck<'a> =
-    dyn Fn(&Path, &Path) -> Result<(), MemoBeforeRenameError> + Send + Sync + 'a;
+pub(crate) type BeforeRenameFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a>>;
+pub(crate) type BeforeRenameCheck<'a> = dyn for<'final_path, 'tmp_path> Fn(&'final_path Path, &'tmp_path Path) -> BeforeRenameFuture<'a>
+    + Send
+    + Sync
+    + 'a;
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TMP_ATTEMPTS: u8 = 8;
@@ -187,7 +193,7 @@ async fn write_atomic_with_counter(
         }
         drop(tmp_file);
 
-        if let Err(error) = before_rename(path, &tmp_path) {
+        if let Err(error) = before_rename(path, &tmp_path).await {
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::BeforeRename(error));
         }
@@ -376,17 +382,23 @@ mod tests {
 
         TokioMemoFs
             .write_atomic(&path, b"new", &move |final_path, tmp_path| {
-                assert_eq!(final_path, path_for_check.as_path());
-                assert!(tmp_path.exists(), "tmp file should exist before rename");
-                assert_eq!(
-                    std::fs::read(final_path).expect("final path should still be readable"),
-                    b"old"
-                );
-                *observed_tmp_for_check
-                    .lock()
-                    .expect("observed tmp mutex should not be poisoned") =
-                    Some(tmp_path.to_path_buf());
-                Ok(())
+                let observed_tmp_for_check = Arc::clone(&observed_tmp_for_check);
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let path_for_check = path_for_check.clone();
+                Box::pin(async move {
+                    assert_eq!(final_path.as_path(), path_for_check.as_path());
+                    assert!(tmp_path.exists(), "tmp file should exist before rename");
+                    assert_eq!(
+                        std::fs::read(&final_path).expect("final path should still be readable"),
+                        b"old"
+                    );
+                    *observed_tmp_for_check
+                        .lock()
+                        .expect("observed tmp mutex should not be poisoned") =
+                        Some(tmp_path.to_path_buf());
+                    Ok(())
+                })
             })
             .await
             .expect("atomic write should succeed");
@@ -422,7 +434,8 @@ mod tests {
             let path = path.clone();
             let content = format!("parallel-memo-{index:02}-{}", "x".repeat(index + 1));
             handles.push(tokio::spawn(async move {
-                let before_rename = |_: &Path, _: &Path| Ok(());
+                let before_rename =
+                    |_: &Path, _: &Path| Box::pin(async { Ok(()) }) as BeforeRenameFuture<'_>;
                 fs.write_atomic(&path, content.as_bytes(), &before_rename)
                     .await
                     .expect("parallel atomic write should succeed");
@@ -472,12 +485,16 @@ mod tests {
 
         let err = TokioMemoFs
             .write_atomic(&path, b"new", &move |_, tmp_path| {
-                assert!(tmp_path.exists(), "tmp file should exist before check");
-                *observed_tmp_for_check
-                    .lock()
-                    .expect("observed tmp mutex should not be poisoned") =
-                    Some(tmp_path.to_path_buf());
-                Err(MemoBeforeRenameError::new("conflict"))
+                let observed_tmp_for_check = Arc::clone(&observed_tmp_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                Box::pin(async move {
+                    assert!(tmp_path.exists(), "tmp file should exist before check");
+                    *observed_tmp_for_check
+                        .lock()
+                        .expect("observed tmp mutex should not be poisoned") =
+                        Some(tmp_path.to_path_buf());
+                    Err(MemoBeforeRenameError::new("conflict"))
+                })
             })
             .await
             .expect_err("before_rename error should be returned");
@@ -514,15 +531,19 @@ mod tests {
 
         TokioMemoFs
             .write_atomic(&path, b"secret", &move |_, tmp_path| {
-                let mode = std::fs::metadata(tmp_path)
-                    .expect("tmp metadata should be readable")
-                    .permissions()
-                    .mode()
-                    & 0o777;
-                *observed_mode_for_check
-                    .lock()
-                    .expect("observed mode mutex should not be poisoned") = Some(mode);
-                Ok(())
+                let observed_mode_for_check = Arc::clone(&observed_mode_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                Box::pin(async move {
+                    let mode = std::fs::metadata(&tmp_path)
+                        .expect("tmp metadata should be readable")
+                        .permissions()
+                        .mode()
+                        & 0o777;
+                    *observed_mode_for_check
+                        .lock()
+                        .expect("observed mode mutex should not be poisoned") = Some(mode);
+                    Ok(())
+                })
             })
             .await
             .expect("atomic write should succeed");
@@ -553,9 +574,14 @@ mod tests {
         }
 
         // counter 0 の全 attempt を占有し、retry 枯渇時も最終ファイルを壊さないことを固定する。
-        let err = write_atomic_with_counter(&path, b"new", &|_, _| Ok(()), counter)
-            .await
-            .expect_err("occupied tmp attempts should exhaust");
+        let err = write_atomic_with_counter(
+            &path,
+            b"new",
+            &|_, _| Box::pin(async { Ok(()) }) as BeforeRenameFuture<'_>,
+            counter,
+        )
+        .await
+        .expect_err("occupied tmp attempts should exhaust");
 
         match err {
             MemoWriteError::Io(error) => {

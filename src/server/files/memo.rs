@@ -1,11 +1,11 @@
-use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
 use super::content::MAX_FILE_SIZE;
 use super::memo_fs::{
-    BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError, MemoWriteError,
+    BeforeRenameCheck, BeforeRenameFuture, MemoBeforeRenameError, MemoFs, MemoReadError,
+    MemoWriteError,
 };
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
@@ -68,9 +68,11 @@ pub(in crate::server) async fn save_route_memo(
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
     let before_rename = |final_path: &Path, tmp_path: &Path| {
-        run_before_rename_check(ensure_safe_memo_rename_paths(
-            final_path, tmp_path, state, target, request,
-        ))
+        let final_path = final_path.to_path_buf();
+        let tmp_path = tmp_path.to_path_buf();
+        Box::pin(async move {
+            ensure_safe_memo_rename_paths(&final_path, &tmp_path, state, target, request).await
+        }) as BeforeRenameFuture<'_>
     };
     fs.write_atomic(
         memo_path,
@@ -476,33 +478,6 @@ async fn ensure_safe_memo_rename_path(
         return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
     }
     Ok(())
-}
-
-fn run_before_rename_check<F>(future: F) -> Result<(), MemoBeforeRenameError>
-where
-    F: Future<Output = Result<(), MemoBeforeRenameError>> + Send,
-{
-    std::thread::scope(|scope| {
-        let handle = scope.spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .build()
-                .map_err(|error| {
-                    tracing::error!(
-                        "[markdown-view] メモrename直前検証用runtimeの作成に失敗しました: {}",
-                        error
-                    );
-                    MemoBeforeRenameError::new("メモ保存の内部状態が不正なため操作を中止しました")
-                })?;
-            runtime.block_on(future)
-        });
-        handle.join().unwrap_or_else(|_| {
-            tracing::error!("[markdown-view] メモrename直前検証スレッドがpanicしました");
-            Err(MemoBeforeRenameError::new(
-                "メモ保存の内部状態が不正なため操作を中止しました",
-            ))
-        })
-    })
 }
 
 enum UnsafeMemoPathComponent {

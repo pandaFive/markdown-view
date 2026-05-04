@@ -13,7 +13,9 @@ use tokio::sync::broadcast;
 use crate::server::messages::BroadcastMessage;
 use crate::server::state::{AppMode, AppState};
 
-use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
+use super::memo_fs::{
+    BeforeRenameCheck, BeforeRenameFuture, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+};
 
 /// tempdir ベースのテスト用ワークスペース。
 pub(crate) struct TempWorkspace {
@@ -183,7 +185,7 @@ impl MemoFs for MockMemoFs {
             .expect("atomic write observer mutex poisoned")
             .push((path.to_path_buf(), content.to_vec()));
 
-        if let Err(error) = before_rename(path, &tmp_path) {
+        if let Err(error) = before_rename(path, &tmp_path).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(MemoWriteError::BeforeRename(error));
         }
@@ -261,10 +263,15 @@ mod tests {
 
         memo_fs
             .write_atomic(&memo_path, b"new", &move |final_path, tmp_path| {
-                assert_eq!(final_path, memo_path_for_check.as_path());
-                assert_eq!(tmp_path.parent(), final_path.parent());
-                assert!(tmp_path.exists(), "tmp file should exist before rename");
-                Ok(())
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let memo_path_for_check = memo_path_for_check.clone();
+                Box::pin(async move {
+                    assert_eq!(final_path.as_path(), memo_path_for_check.as_path());
+                    assert_eq!(tmp_path.parent(), final_path.parent());
+                    assert!(tmp_path.exists(), "tmp file should exist before rename");
+                    Ok(())
+                }) as BeforeRenameFuture<'_>
             })
             .await
             .expect("atomic write should succeed");
@@ -306,11 +313,11 @@ mod tests {
         memo_fs.fail_at(Op::AtomicRename, &rename_path, io::ErrorKind::AlreadyExists);
 
         let write_err = memo_fs
-            .write_atomic(&write_path, b"new", &|_, _| Ok(()))
+            .write_atomic(&write_path, b"new", &|_, _| Box::pin(async { Ok(()) }))
             .await
             .expect_err("write_atomic failure should be injected");
         let rename_err = memo_fs
-            .write_atomic(&rename_path, b"new", &|_, _| Ok(()))
+            .write_atomic(&rename_path, b"new", &|_, _| Box::pin(async { Ok(()) }))
             .await
             .expect_err("atomic rename failure should be injected");
 

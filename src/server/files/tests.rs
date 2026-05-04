@@ -20,7 +20,9 @@ use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
 #[cfg(unix)]
 use super::memo_fs::MemoBeforeRenameError;
-use super::memo_fs::{BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs};
+use super::memo_fs::{
+    BeforeRenameCheck, BeforeRenameFuture, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+};
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::{resolve_change_target, revalidate_single_file_target};
 use super::test_support::{make_test_app_state, MockMemoFs, Op, OpEvent, TempWorkspace};
@@ -93,7 +95,7 @@ impl MemoFs for MismatchedTmpParentMemoFs {
             .expect("memo path should have a parent")
             .join(".other-tmp-dir")
             .join("memo.tmp");
-        match before_rename(path, &tmp_path) {
+        match before_rename(path, &tmp_path).await {
             Ok(()) => Err(MemoWriteError::Io(std::io::Error::other(
                 "mismatched tmp parent should be rejected before rename",
             ))),
@@ -134,21 +136,26 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
         let link_target = self.link_target.clone();
         self.inner
             .write_atomic(path, content, &move |final_path, tmp_path| {
-                match std::fs::remove_file(final_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(MemoBeforeRenameError::new(format!(
-                            "テスト用メモ差し替えに失敗しました: {error}"
-                        )));
+                let final_path = final_path.to_path_buf();
+                let tmp_path = tmp_path.to_path_buf();
+                let link_target = link_target.clone();
+                Box::pin(async move {
+                    match std::fs::remove_file(&final_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(MemoBeforeRenameError::new(format!(
+                                "テスト用メモ差し替えに失敗しました: {error}"
+                            )));
+                        }
                     }
-                }
-                symlink(&link_target, final_path).map_err(|error| {
-                    MemoBeforeRenameError::new(format!(
-                        "テスト用メモsymlink作成に失敗しました: {error}"
-                    ))
-                })?;
-                before_rename(final_path, tmp_path)
+                    symlink(&link_target, &final_path).map_err(|error| {
+                        MemoBeforeRenameError::new(format!(
+                            "テスト用メモsymlink作成に失敗しました: {error}"
+                        ))
+                    })?;
+                    before_rename(&final_path, &tmp_path).await
+                }) as BeforeRenameFuture<'_>
             })
             .await
     }
