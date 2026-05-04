@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
-use super::catalog::list_markdown_files_from_canonical_base;
+use super::list_markdown_files_blocking;
 use crate::server::guards::json_error;
 use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
-use crate::server::state::{AppState, CanonicalPath};
+use crate::server::state::AppState;
 use crate::template::UpdateMessage;
 
 #[derive(Debug, Clone)]
@@ -221,7 +221,7 @@ async fn resolve_request_target(
             error.status_code()
         })?
     } else {
-        let files = list_markdown_files_blocking(base_dir).await?;
+        let files = list_markdown_files_blocking_for_route(base_dir).await?;
         precomputed_files = Some(files.clone());
 
         let default_file = files
@@ -241,7 +241,7 @@ async fn resolve_request_target(
     let file_list = if request.include_file_list() {
         match precomputed_files {
             Some(files) => Some(files),
-            None => Some(list_markdown_files_blocking(base_dir).await?),
+            None => Some(list_markdown_files_blocking_for_route(base_dir).await?),
         }
     } else {
         None
@@ -250,24 +250,11 @@ async fn resolve_request_target(
     Ok((file_path, file_list))
 }
 
-async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
-    let base_dir = base_dir.clone();
-    tokio::task::spawn_blocking(move || list_markdown_files_from_canonical_base(&base_dir))
+async fn list_markdown_files_blocking_for_route(
+    base_dir: &crate::server::CanonicalPath,
+) -> Result<Vec<String>, StatusCode> {
+    list_markdown_files_blocking(base_dir)
         .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!(
-                    "[markdown-view] ファイル一覧取得タスクがpanicしました: {}",
-                    error
-                );
-            } else {
-                tracing::warn!(
-                    "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
-                    error
-                );
-            }
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
         .map_err(|error| {
             tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
             StatusCode::INTERNAL_SERVER_ERROR

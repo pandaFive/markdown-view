@@ -67,9 +67,7 @@ pub(in crate::server) async fn save_route_memo(
             .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
     }
     let before_rename = |final_path: &Path, tmp_path: &Path| {
-        run_memo_before_rename_check(ensure_safe_memo_rename_paths(
-            final_path, tmp_path, state, target, request,
-        ))
+        ensure_safe_memo_rename_paths_blocking(final_path, tmp_path, state, target, request)
     };
     fs.write_atomic(
         memo_path,
@@ -437,7 +435,7 @@ async fn ensure_safe_memo_path(
     Ok(())
 }
 
-async fn ensure_safe_memo_rename_paths(
+fn ensure_safe_memo_rename_paths_blocking(
     final_path: &Path,
     tmp_path: &Path,
     state: &AppState,
@@ -458,56 +456,23 @@ async fn ensure_safe_memo_rename_paths(
         ));
     }
 
-    ensure_safe_memo_rename_path(final_path, state, target, request).await?;
-    ensure_safe_memo_rename_path(tmp_path, state, target, request).await?;
+    ensure_safe_memo_rename_path_blocking(final_path, state, target, request)?;
+    ensure_safe_memo_rename_path_blocking(tmp_path, state, target, request)?;
     Ok(())
 }
 
-async fn ensure_safe_memo_rename_path(
+fn ensure_safe_memo_rename_path_blocking(
     memo_path: &Path,
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<(), MemoBeforeRenameError> {
     let base_dir = state.mode().base_dir();
-    if let Some(unsafe_component) = first_unsafe_memo_path_component(base_dir, memo_path).await {
+    if let Some(unsafe_component) = first_unsafe_memo_path_component_blocking(base_dir, memo_path) {
         log_unsafe_memo_path(&unsafe_component, memo_path, base_dir, target, request);
         return Err(MemoBeforeRenameError::new(unsafe_component.user_message()));
     }
     Ok(())
-}
-
-fn run_memo_before_rename_check<F>(future: F) -> Result<(), MemoBeforeRenameError>
-where
-    F: std::future::Future<Output = Result<(), MemoBeforeRenameError>> + Send,
-{
-    std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| {
-                        tracing::warn!(
-                            "[markdown-view] メモrename直前の安全確認runtime作成に失敗したため拒否します: {}",
-                            error
-                        );
-                        MemoBeforeRenameError::new(
-                            "メモ保存先の安全確認に失敗したため操作できません",
-                        )
-                    })?;
-                runtime.block_on(future)
-            })
-            .join()
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    "[markdown-view] メモrename直前の安全確認threadがpanicしたため拒否します"
-                );
-                Err(MemoBeforeRenameError::new(
-                    "メモ保存先の安全確認に失敗したため操作できません",
-                ))
-            })
-    })
 }
 
 enum UnsafeMemoPathComponent {
@@ -572,6 +537,33 @@ async fn first_unsafe_memo_path_component(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] メモパス要素のsymlink検査に失敗したため安全側で拒否します ({}): {}",
+                    sanitize_path_for_logging(&current, base_dir),
+                    error
+                );
+                return Some(UnsafeMemoPathComponent::InspectionError(current));
+            }
+        }
+    }
+    None
+}
+
+fn first_unsafe_memo_path_component_blocking(
+    base_dir: &Path,
+    target: &Path,
+) -> Option<UnsafeMemoPathComponent> {
+    let relative = target.strip_prefix(base_dir).ok()?;
+    let mut current = base_dir.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Some(UnsafeMemoPathComponent::Symlink(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] メモパス要素のrename直前symlink検査に失敗したため安全側で拒否します ({}): {}",
                     sanitize_path_for_logging(&current, base_dir),
                     error
                 );

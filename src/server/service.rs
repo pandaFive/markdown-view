@@ -1,9 +1,8 @@
 use axum::http::StatusCode;
 
 use super::files::{
-    list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
-    resolve_route_target, save_route_memo, search_directory, ResolvedTarget, RouteTargetRequest,
-    SearchResponse,
+    list_markdown_files_blocking, load_route_memo, load_route_update, resolve_route_target,
+    save_route_memo, search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -169,32 +168,13 @@ pub(super) async fn save_memo(
 /// ディレクトリモードのMarkdownファイル一覧を返す。単一ファイルモードでは空配列を返す。
 pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError> {
     if let Some(base) = state.mode().directory_canonical().cloned() {
-        tokio::task::spawn_blocking(move || list_markdown_files_from_canonical_base(&base))
-            .await
-            .map_err(|error| {
-                if error.is_panic() {
-                    tracing::error!(
-                        "[markdown-view] ファイル一覧取得タスクがpanicしました: {}",
-                        error
-                    );
-                } else {
-                    tracing::warn!(
-                        "[markdown-view] ファイル一覧取得タスクのjoinエラー: {}",
-                        error
-                    );
-                }
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ファイル一覧の取得に失敗しました",
-                )
-            })?
-            .map_err(|error| {
-                tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ファイル一覧の取得に失敗しました",
-                )
-            })
+        list_markdown_files_blocking(&base).await.map_err(|error| {
+            tracing::warn!("[markdown-view] ファイル一覧取得エラー: {}", error);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ファイル一覧の取得に失敗しました",
+            )
+        })
     } else {
         Ok(Vec::new())
     }

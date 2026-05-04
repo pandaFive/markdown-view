@@ -967,6 +967,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_directory_読込失敗ファイルをスキップして検索を継続する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle is here").unwrap();
+        std::fs::write(
+            dir.path().join("b.md"),
+            [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'],
+        )
+        .unwrap();
+        let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+        let response = search_directory(&canonical, "needle").await.unwrap();
+
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+    }
+
+    #[tokio::test]
     async fn test_search_directory_結果数上限到達を明示する() {
         let dir = tempfile::tempdir().unwrap();
         let markdown = (0..120)
