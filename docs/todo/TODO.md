@@ -49,10 +49,11 @@
   - 対応: `WsOriginRejection` 全 variant を match で明示列挙し、Host 系 / MissingOrigin / その他 Origin 系の分類を compiler-enforced にする。可能なら `level_for_ws_rejection(rejection) -> tracing::Level` と `message_for_ws_rejection(rejection)` 相当の小 helper へ分け、`tracing::event!` でログ分岐を平坦化する。HostMalformed / UntrustedHost の traced log test も追加し、コメントは「middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない」に更新する
   - 理由: DNS Rebinding 防御の判定自体は変えずに、将来 variant 追加時の silent fallback とログ分類漏れをコンパイル時・テスト時に検出しやすくする
 
-- [ ] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
+- [x] async ハンドラ内の同期 I/O を `spawn_blocking` ないし起動時固定化で解消する
   - ファイル: `src/server/files/catalog.rs` L39/60/83/157, `src/server/files/memo.rs` L439, `src/watcher/strategy.rs` L186-210/L262-275
   - 現状: tokio worker thread をブロックしうる経路が 3 箇所に散在する: (a) `list_markdown_files_recursive` が `std::fs::read_dir` / `entry.file_type()` / `path.canonicalize()` を毎再帰呼び出し（さらに `base_dir.canonicalize()` を再帰内で繰り返す）、(b) `ensure_safe_memo_path` から呼ばれる `first_symlink_component` が `std::fs::symlink_metadata` を async 関数の中で実行（他は `tokio::fs::*` で揃えているのに非対称）、(c) debouncer コールバック（notify 内部スレッド）内で `is_within_base_dir` / `try_strip_base` が `path.canonicalize()` を毎イベント呼び出し
   - 対応: `base_dir` の canonicalize は起動時 1 回に固定し、`list_markdown_files_recursive` と `is_within_base_dir` / `try_strip_base` には canonicalized base を引き回す（lexical strip_prefix 中心）。`first_symlink_component` は `tokio::fs::symlink_metadata` に置き換え、必要なら `MemoFs` トレイトに `symlink_metadata` を追加。`list_markdown_files` 自体を `spawn_blocking` ラップする選択肢も検討
+  - 完了根拠: catalog は canonical base API で再帰中の base 再 canonicalize を廃止し、resolve/search のディレクトリ走査は blocking 境界へ隔離。memo symlink 検査は async metadata 化し、watcher directory 判定は削除イベント対応の lexical helper へ整理した
   - 理由: 個人ツールでも大ディレクトリ・大量保存時に応答性が落ちる。CLAUDE.md の「ブロッキング I/O が async コンテキストで実行されていないか」という設計規律と整合させる
 
 - [ ] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
