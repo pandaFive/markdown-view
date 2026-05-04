@@ -216,11 +216,12 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Host は router middleware で先に検証済み。ここでは WS 固有の
-    // Origin authority 一致だけを検証する。
+    // Origin authority 一致を検証する。
     // `is_allowed_ws_origin` 内の Host 再検証は middleware 後段では
-    // 構造上到達不能だが、将来の bypass に対する defense-in-depth として残す。
-    // ログ分類の主眼は MissingOrigin/UnsupportedScheme/AuthorityMismatch など
-    // Origin 系拒否の段階化。
+    // 通常到達しないが、middleware bypass、または Host 検証通過後の
+    // malformed/untrusted probe を検知する defense-in-depth として残す。
+    // 通常の Origin 系拒否は MissingOrigin/UnsupportedScheme/AuthorityMismatch
+    // などとして段階化して記録する。
     if !is_allowed_ws_origin(&headers) {
         return json_error(StatusCode::FORBIDDEN, "WebSocket接続元が許可されていません")
             .into_response();

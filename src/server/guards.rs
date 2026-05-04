@@ -108,7 +108,8 @@ pub(super) enum WsOriginRejection {
     ///
     /// 通常のブラウザ／プロキシは ASCII のみで構成された Host を送る。
     /// Host middleware 後段で非 ASCII バイトを含む Host に到達した場合は、
-    /// middleware bypass 兆候として error レベルで記録する。
+    /// middleware bypass、または Host 検証通過後の malformed probe として
+    /// error レベルで記録する。通常運用では到達しない。
     HostMalformed,
     UntrustedHost,
     OriginParseError,
@@ -130,12 +131,111 @@ pub(super) enum WsOriginRejection {
 }
 
 fn is_host_middleware_bypass_indicator(rejection: WsOriginRejection) -> bool {
-    matches!(
-        rejection,
+    match rejection {
         WsOriginRejection::MissingHost
+        | WsOriginRejection::HostMalformed
+        | WsOriginRejection::UntrustedHost => true,
+        WsOriginRejection::MissingOrigin
+        | WsOriginRejection::OriginMalformed
+        | WsOriginRejection::OriginParseError
+        | WsOriginRejection::UnsupportedScheme
+        | WsOriginRejection::OriginMissingAuthority
+        | WsOriginRejection::UntrustedOriginAuthority
+        | WsOriginRejection::AuthorityMismatch => false,
+    }
+}
+
+fn ws_rejection_log_level(rejection: WsOriginRejection) -> tracing::Level {
+    if is_host_middleware_bypass_indicator(rejection) {
+        tracing::Level::ERROR
+    } else {
+        match rejection {
+            WsOriginRejection::MissingOrigin => tracing::Level::INFO,
+            WsOriginRejection::OriginMalformed
+            | WsOriginRejection::OriginParseError
+            | WsOriginRejection::UnsupportedScheme
+            | WsOriginRejection::OriginMissingAuthority
+            | WsOriginRejection::UntrustedOriginAuthority
+            | WsOriginRejection::AuthorityMismatch => tracing::Level::WARN,
+            WsOriginRejection::MissingHost
             | WsOriginRejection::HostMalformed
-            | WsOriginRejection::UntrustedHost
-    )
+            | WsOriginRejection::UntrustedHost => tracing::Level::ERROR,
+        }
+    }
+}
+
+fn ws_rejection_log_message(rejection: WsOriginRejection) -> &'static str {
+    match rejection {
+        WsOriginRejection::MissingHost
+        | WsOriginRejection::HostMalformed
+        | WsOriginRejection::UntrustedHost => "WS Host 検証異常",
+        WsOriginRejection::MissingOrigin
+        | WsOriginRejection::OriginMalformed
+        | WsOriginRejection::OriginParseError
+        | WsOriginRejection::UnsupportedScheme
+        | WsOriginRejection::OriginMissingAuthority
+        | WsOriginRejection::UntrustedOriginAuthority
+        | WsOriginRejection::AuthorityMismatch => "WS Origin 拒否",
+    }
+}
+
+fn emit_ws_rejection_log(
+    level: tracing::Level,
+    message: &'static str,
+    host_recheck_anomaly: bool,
+    rejection: WsOriginRejection,
+    host: &str,
+    origin: &str,
+) {
+    macro_rules! emit_ws_rejection_event {
+        ($macro_name:ident) => {
+            if host_recheck_anomaly {
+                tracing::$macro_name!(
+                    rejection = ?rejection,
+                    host = ?host,
+                    origin = ?origin,
+                    ws_rejection_class = message,
+                    host_recheck_anomaly = host_recheck_anomaly,
+                    "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
+                    message,
+                    rejection,
+                    host,
+                    origin
+                );
+            } else {
+                tracing::$macro_name!(
+                    rejection = ?rejection,
+                    host = ?host,
+                    origin = ?origin,
+                    ws_rejection_class = message,
+                    host_recheck_anomaly = host_recheck_anomaly,
+                    "[markdown-view] {} ({:?}): host={:?} origin={:?}",
+                    message,
+                    rejection,
+                    host,
+                    origin
+                );
+            }
+        };
+    }
+
+    match level {
+        tracing::Level::ERROR => {
+            emit_ws_rejection_event!(error);
+        }
+        tracing::Level::WARN => {
+            emit_ws_rejection_event!(warn);
+        }
+        tracing::Level::INFO => {
+            emit_ws_rejection_event!(info);
+        }
+        tracing::Level::DEBUG => {
+            emit_ws_rejection_event!(debug);
+        }
+        tracing::Level::TRACE => {
+            emit_ws_rejection_event!(trace);
+        }
+    }
 }
 
 /// WebSocket Origin 検証を行い、許可時は `Ok(())`、拒否時は理由を返す
@@ -194,33 +294,17 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
         Err(rejection) => {
             let host = log_value_for_header(headers, &HOST);
             let origin = log_value_for_header(headers, &ORIGIN);
-            if is_host_middleware_bypass_indicator(rejection) {
-                tracing::error!(
-                    "[markdown-view] WS Host middleware bypass 兆候 ({:?}): host={:?} origin={:?}",
-                    rejection,
-                    host,
-                    origin
-                );
-            } else {
-                match rejection {
-                    WsOriginRejection::MissingOrigin => {
-                        tracing::info!(
-                            "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
-                            rejection,
-                            host,
-                            origin
-                        );
-                    }
-                    _ => {
-                        tracing::warn!(
-                            "[markdown-view] WS Origin 拒否 ({:?}): host={:?} origin={:?}",
-                            rejection,
-                            host,
-                            origin
-                        );
-                    }
-                }
-            }
+            let level = ws_rejection_log_level(rejection);
+            let message = ws_rejection_log_message(rejection);
+            let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
+            emit_ws_rejection_log(
+                level,
+                message,
+                host_recheck_anomaly,
+                rejection,
+                host,
+                origin,
+            );
             false
         }
     }
@@ -326,12 +410,81 @@ pub(super) fn normalize_authority(authority: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+
     use axum::http::header::{HOST, ORIGIN};
     use axum::http::{HeaderMap, StatusCode};
     use axum::{middleware, routing::get, Router};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
     use tracing_test::traced_test;
 
     use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedEvent {
+        level: Level,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct CapturedFields {
+        values: BTreeMap<String, String>,
+    }
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.values
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.values
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.values
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .expect("event capture lock")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields: fields.values,
+                });
+        }
+    }
+
+    fn capture_ws_rejection_events(headers: &HeaderMap) -> Vec<CapturedEvent> {
+        let capture = EventCapture::default();
+        let events = Arc::clone(&capture.0);
+        let subscriber = Registry::default().with(capture);
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!is_allowed_ws_origin(headers));
+        });
+
+        let captured = events.lock().expect("event capture lock").clone();
+        captured
+    }
 
     #[test]
     fn test_trusted_host_localhost() {
@@ -561,50 +714,260 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_host系拒否はmiddleware_bypass兆候として分類する() {
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::MissingHost
-        ));
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::HostMalformed
-        ));
-        assert!(is_host_middleware_bypass_indicator(
-            WsOriginRejection::UntrustedHost
-        ));
+    fn test_ws_origin拒否ログ分類は全variantを明示する() {
+        let cases = [
+            (
+                WsOriginRejection::MissingHost,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::HostMalformed,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::UntrustedHost,
+                true,
+                tracing::Level::ERROR,
+                "WS Host 検証異常",
+            ),
+            (
+                WsOriginRejection::MissingOrigin,
+                false,
+                tracing::Level::INFO,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginMalformed,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginParseError,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::UnsupportedScheme,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::OriginMissingAuthority,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::UntrustedOriginAuthority,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+            (
+                WsOriginRejection::AuthorityMismatch,
+                false,
+                tracing::Level::WARN,
+                "WS Origin 拒否",
+            ),
+        ];
 
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::MissingOrigin
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginMalformed
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginParseError
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::UnsupportedScheme
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::OriginMissingAuthority
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::UntrustedOriginAuthority
-        ));
-        assert!(!is_host_middleware_bypass_indicator(
-            WsOriginRejection::AuthorityMismatch
-        ));
+        for (rejection, is_bypass_indicator, level, message) in cases {
+            assert_eq!(
+                is_host_middleware_bypass_indicator(rejection),
+                is_bypass_indicator,
+                "{rejection:?} の Host bypass 分類が不正"
+            );
+            assert_eq!(
+                ws_rejection_log_level(rejection),
+                level,
+                "{rejection:?} のログレベル分類が不正"
+            );
+            assert_eq!(
+                ws_rejection_log_message(rejection),
+                message,
+                "{rejection:?} のログメッセージ分類が不正"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ws_origin拒否実ログは分類levelと構造化fieldを出力する() {
+        let mut missing_host = HeaderMap::new();
+        missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        let mut host_malformed = HeaderMap::new();
+        host_malformed.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        host_malformed.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+
+        let mut untrusted_host = HeaderMap::new();
+        untrusted_host.insert(HOST, "evil.example:3000".parse().unwrap());
+        untrusted_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        let mut missing_origin = HeaderMap::new();
+        missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
+
+        let mut authority_mismatch = HeaderMap::new();
+        authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
+        authority_mismatch.insert(ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+
+        let cases = [
+            (
+                missing_host,
+                Level::ERROR,
+                "MissingHost",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                host_malformed,
+                Level::ERROR,
+                "HostMalformed",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                untrusted_host,
+                Level::ERROR,
+                "UntrustedHost",
+                "WS Host 検証異常",
+                "true",
+            ),
+            (
+                missing_origin,
+                Level::INFO,
+                "MissingOrigin",
+                "WS Origin 拒否",
+                "false",
+            ),
+            (
+                authority_mismatch,
+                Level::WARN,
+                "AuthorityMismatch",
+                "WS Origin 拒否",
+                "false",
+            ),
+        ];
+
+        for (headers, expected_level, expected_rejection, expected_class, expected_anomaly) in cases
+        {
+            let events = capture_ws_rejection_events(&headers);
+            assert_eq!(
+                events.len(),
+                1,
+                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+            );
+
+            let event = &events[0];
+            assert_eq!(
+                event.level, expected_level,
+                "{expected_rejection} の実ログ level が不正"
+            );
+            assert!(
+                event
+                    .fields
+                    .get("rejection")
+                    .is_some_and(|actual| actual.contains(expected_rejection)),
+                "{expected_rejection} の rejection field が不正: {:?}",
+                event.fields
+            );
+            assert_eq!(
+                event.fields.get("ws_rejection_class").map(String::as_str),
+                Some(expected_class),
+                "{expected_rejection} の分類 field が不正"
+            );
+            assert_eq!(
+                event.fields.get("host_recheck_anomaly").map(String::as_str),
+                Some(expected_anomaly),
+                "{expected_rejection} の Host 再検証異常 field が不正"
+            );
+            assert!(
+                event.fields.contains_key("host"),
+                "{expected_rejection} の host field が欠落: {:?}",
+                event.fields
+            );
+            assert!(
+                event.fields.contains_key("origin"),
+                "{expected_rejection} の origin field が欠落: {:?}",
+                event.fields
+            );
+        }
     }
 
     #[test]
     #[traced_test]
-    fn test_ws_host系拒否はbypass兆候として専用ログに記録する() {
+    fn test_ws_missing_hostはhost検証異常ログに記録する() {
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
 
         assert!(!is_allowed_ws_origin(&headers));
-        assert!(logs_contain("WS Host middleware bypass 兆候"));
+        assert!(logs_contain("WS Host 検証異常"));
+        assert!(logs_contain(
+            "middleware bypass、または Host 検証通過後の malformed/untrusted probe"
+        ));
         assert!(logs_contain("MissingHost"));
         assert!(!logs_contain("WS Origin 拒否"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_ws_host_malformedはhost検証異常ログに記録する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+
+        assert!(!is_allowed_ws_origin(&headers));
+        assert!(logs_contain("WS Host 検証異常"));
+        assert!(logs_contain(
+            "middleware bypass、または Host 検証通過後の malformed/untrusted probe"
+        ));
+        assert!(logs_contain("HostMalformed"));
+        assert!(logs_contain("<non-ascii>"));
+        assert!(!logs_contain("WS Origin 拒否"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_ws_untrusted_hostはhost検証異常ログに記録する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "evil.example:3000".parse().unwrap());
+        headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+        assert!(!is_allowed_ws_origin(&headers));
+        assert!(logs_contain("WS Host 検証異常"));
+        assert!(logs_contain(
+            "middleware bypass、または Host 検証通過後の malformed/untrusted probe"
+        ));
+        assert!(logs_contain("UntrustedHost"));
+        assert!(logs_contain("evil.example:3000"));
+        assert!(!logs_contain("WS Origin 拒否"));
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_ws_missing_originは通常origin拒否ログに記録する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+
+        assert!(!is_allowed_ws_origin(&headers));
+        assert!(logs_contain("WS Origin 拒否"));
+        assert!(logs_contain("MissingOrigin"));
+        assert!(!logs_contain(
+            "middleware bypass、または Host 検証通過後の malformed/untrusted probe"
+        ));
+        assert!(!logs_contain("WS Host 検証異常"));
     }
 
     #[test]
