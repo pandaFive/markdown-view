@@ -95,44 +95,16 @@ fn list_markdown_files_recursive(
                 return Ok(());
             }
 
-            if file_type.is_symlink() {
-                let Some(resolved) =
-                    canonicalize_dir_for_cycle(&path, "シンボリックリンク", log_base_dir)
-                else {
-                    continue;
-                };
-                if !resolved.starts_with(canonical_base_dir) {
-                    tracing::warn!(
-                        "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
-                        sanitize_path_for_logging(&path, log_base_dir),
-                        sanitize_path_for_logging(&resolved, log_base_dir)
-                    );
-                    continue;
-                }
-                if !resolved.is_dir() {
-                    tracing::debug!(
-                        "[markdown-view] シンボリックリンクが通常ファイルを指すためスキップ: {} -> {}",
-                        name_str,
-                        sanitize_path_for_logging(&resolved, log_base_dir)
-                    );
-                    continue;
-                }
-                if !visited_dirs.insert(resolved) {
-                    tracing::warn!(
-                        "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
-                        sanitize_path_for_logging(&path, log_base_dir)
-                    );
-                    continue;
-                }
-            } else {
-                let Some(canonical) =
-                    canonicalize_dir_for_cycle(&path, "通常ディレクトリ", log_base_dir)
-                else {
-                    continue;
-                };
-                if !visited_dirs.insert(canonical) {
-                    continue;
-                }
+            if resolve_recursable_directory(
+                &path,
+                file_type.is_symlink(),
+                canonical_base_dir,
+                visited_dirs,
+                log_base_dir,
+            )
+            .is_none()
+            {
+                continue;
             }
 
             list_markdown_files_recursive(
@@ -175,7 +147,6 @@ fn list_markdown_files_recursive(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(super) fn resolve_recursable_directory(
     path: &Path,
     is_symlink: bool,
