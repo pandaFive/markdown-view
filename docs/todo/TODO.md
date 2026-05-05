@@ -22,12 +22,6 @@
   - 対応: 2 つのタイムアウト定数を共通化し、`abort` 直前に `(elapsed_ms, last_event_kind, receiver_count)` を含む warn ログを 1 行追加。`spawn_watch_event_forwarder` 終了時のログにも `state.tx().receiver_count()` と最後のイベント種別を含めて、シャットダウン時に dropped events があった場合に検知できるようにする
   - 理由: HTTP サーバー再起動経路でのファイルハンドルリークを再現性のあるログで切り分けられるようにする
 
-- [ ] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
-  - ファイル: `src/server/state.rs` L202-258, `src/main.rs` L105
-  - 現状: `AppState: Clone` でフィールド単位に `Arc` を持つにも関わらず、`main.rs:105` が `Arc::new(AppState::new(...))` で外側でも Arc 化している。`with_memo_fs` は `cfg(test)` で `mut self` を取るが、`Arc<AppState>` をテスト本体で扱う API（`api_files_handler` 等）と相互運用できないハーフサポート状態
-  - 対応: `AppState: !Clone` にして `Arc<AppState>` 一本に統一。`MemoFs` を `AppState::new` の引数にする builder パターンに変更し、`with_memo_fs` を削除。テストは `Arc::clone` に書き換え
-  - 理由: 「Clone とフィールド Arc の二重投資」を解消し、ライフサイクルを単一化する
-
 - [ ] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
   - ファイル: `src/server/messages.rs` L38-40, `src/server/routes.rs` L188-220
   - 現状: `Refresh` variant は `serde_json::json!({ "refresh": true })` を返すだけで、ディレクトリモードの遅延回復経路（`content.rs:133`）が memo の再取得指示を欠く。一方 `index_handler` のメモ読込失敗は `MemoResponse::empty` に silent fallback し、ユーザーには「メモが消えた」ように見える
@@ -66,6 +60,8 @@
 
 ## Done Summary
 
+- [x] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
+  - 完了根拠: `AppState` の共有単位を外側の `Arc<AppState>` に統一し、`with_memo_fs` を削除した。`MemoFs` は生成時注入の constructor へ寄せ、production 経路は Tokio 実装を使う構成になっている
 - [x] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
   - 完了根拠: `WsOriginRejection` のログ分類を wildcard なしの helper に分離し、Host 系 3 variant の traced log test とログ helper 経由の単一出力で固定した
 - [x] 見出し ID 生成を単一パス化し render と toc で `HeadingInfo` を共有する
