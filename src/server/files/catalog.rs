@@ -175,6 +175,74 @@ fn list_markdown_files_recursive(
     Ok(())
 }
 
+#[allow(dead_code)]
+pub(super) fn resolve_recursable_directory(
+    path: &Path,
+    is_symlink: bool,
+    canonical_base_dir: &Path,
+    visited_dirs: &mut HashSet<PathBuf>,
+    log_base_dir: &Path,
+) -> Option<PathBuf> {
+    let label = if is_symlink {
+        "シンボリックリンク"
+    } else {
+        "通常ディレクトリ"
+    };
+    let resolved = canonicalize_dir_for_cycle(path, label, log_base_dir)?;
+
+    if is_symlink && !resolved.starts_with(canonical_base_dir) {
+        tracing::warn!(
+            "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+            sanitize_path_for_logging(path, log_base_dir),
+            sanitize_path_for_logging(&resolved, log_base_dir)
+        );
+        return None;
+    }
+
+    match std::fs::metadata(&resolved) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) if is_symlink => {
+            tracing::debug!(
+                "[markdown-view] シンボリックリンクが通常ファイルを指すためスキップ: {} -> {}",
+                path.file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_else(|| path.as_os_str().to_string_lossy()),
+                sanitize_path_for_logging(&resolved, log_base_dir)
+            );
+            return None;
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "[markdown-view] 通常ディレクトリの正規化先がディレクトリではないためスキップ: {} -> {}",
+                sanitize_path_for_logging(path, log_base_dir),
+                sanitize_path_for_logging(&resolved, log_base_dir)
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] {}のメタデータ取得に失敗（スキップ）: {} ({})",
+                label,
+                sanitize_path_for_logging(&resolved, log_base_dir),
+                error
+            );
+            return None;
+        }
+    }
+
+    if !visited_dirs.insert(resolved.clone()) {
+        if is_symlink {
+            tracing::warn!(
+                "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                sanitize_path_for_logging(path, log_base_dir)
+            );
+        }
+        return None;
+    }
+
+    Some(resolved)
+}
+
 pub(super) fn canonicalize_dir_for_cycle(
     path: &Path,
     label: &str,

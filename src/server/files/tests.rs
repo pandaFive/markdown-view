@@ -933,6 +933,52 @@ fn test_list_markdown_files_recursive_通常ディレクトリcanonicalize失敗
     assert!(canonicalize_dir_for_cycle(&missing, "通常ディレクトリ", dir.path()).is_none());
 }
 
+#[test]
+fn test_resolve_recursable_directory_通常ディレクトリをvisitedに登録する() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = dir.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    let canonical_base = dir.path().canonicalize().unwrap();
+    let mut visited_dirs = std::collections::HashSet::new();
+    visited_dirs.insert(canonical_base.clone());
+
+    let resolved = super::catalog::resolve_recursable_directory(
+        &child,
+        false,
+        &canonical_base,
+        &mut visited_dirs,
+        dir.path(),
+    )
+    .expect("通常ディレクトリは再帰対象になる");
+
+    assert_eq!(resolved, child.canonicalize().unwrap());
+    assert!(visited_dirs.contains(&resolved));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_recursable_directory_base外symlinkはvisitedに登録しない() {
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let link = base.path().join("linked");
+    symlink(outside.path(), &link).unwrap();
+    let canonical_base = base.path().canonicalize().unwrap();
+    let outside_canonical = outside.path().canonicalize().unwrap();
+    let mut visited_dirs = std::collections::HashSet::new();
+    visited_dirs.insert(canonical_base.clone());
+
+    let resolved = super::catalog::resolve_recursable_directory(
+        &link,
+        true,
+        &canonical_base,
+        &mut visited_dirs,
+        base.path(),
+    );
+
+    assert!(resolved.is_none());
+    assert!(!visited_dirs.contains(&outside_canonical));
+}
+
 #[tokio::test]
 async fn test_read_bytes_with_limit_takeによる第2段階チェックで超過を検出する() {
     let dir = tempfile::tempdir().unwrap();
