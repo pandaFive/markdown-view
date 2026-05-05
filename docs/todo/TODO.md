@@ -46,12 +46,6 @@
   - 対応: テストを各サブモジュール（page/tree/assets/message）の `#[cfg(test)] mod tests` に局所化し、`mod.rs` には公開 API 契約テスト（CSP 整合性など）のみ残す。`render_page` は `render_head` / `render_body` / `attr(name, value)` ヘルパーへ分割
   - 理由: CLAUDE.md「300 行を超えたファイルは分割を提案」に該当。エスケープ漏れの一発リスクを集約しないために属性挿入をヘルパー化する
 
-- [ ] `canonicalize` 失敗時の再帰挙動の非対称を解消する
-  - ファイル: `src/server/files/catalog.rs` L72/L83/L109-118/L152-169
-  - 現状: 通常ディレクトリ枝とシンボリックリンク枝で `canonicalize_dir_for_cycle` が `None` を返した時の扱いは揃っているが、`(file_type.is_symlink() && path.is_dir())` 判定で同期 `is_dir()` syscall を呼び、TOCTOU と性能の双方で穴が残る。テスト名 `canonicalize失敗時はスキップ扱い` が「失敗＝素通り」を仕様化している
-  - 対応: visited 集合経由のループ防止を symlink/通常ディレクトリで完全対称にし、`is_dir()` の同期呼び出しは canonicalize の結果から導く。「canonicalize 失敗時に visited を経由せず再帰しない」ことをテストで固定
-  - 理由: ループ防止のセキュリティ境界が「素通り経路」で破綻しないことを担保する
-
 - [ ] ブラウザ JS の責務境界を小モジュールへ分割する
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
   - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。一方、`content.js` は検索、リンク解決、履歴、描画反映、スクロール、引用ジャンプをまとめて扱う巨大ファイルのままで、`appContext` 直接参照も多い。`innerHTML` はサーバー生成の `SanitizedHtml` を信頼する設計だが、信頼境界は型やモジュール境界としてはまだ表現されていない
@@ -60,6 +54,8 @@
 
 ## Done Summary
 
+- [x] `canonicalize` 失敗時の再帰挙動の非対称を解消する
+  - 完了根拠: `catalog.rs` の通常ディレクトリとシンボリックリンクディレクトリの再帰可否判定を `resolve_recursable_directory` へ集約し、正規化、base 配下確認、metadata によるディレクトリ判定、visited 登録を同じ経路に揃えた。base 外 symlink、通常ファイル symlink、symlink cycle、基本列挙の回帰テストで固定している
 - [x] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
   - 完了根拠: `AppState` の共有単位を外側の `Arc<AppState>` に統一し、`with_memo_fs` を削除した。`MemoFs` は生成時注入の constructor へ寄せ、production 経路は Tokio 実装を使う構成になっている
 - [x] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する
