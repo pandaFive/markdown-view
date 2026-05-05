@@ -207,7 +207,7 @@ fn relative_path_to_display_string(relative: &Path) -> String {
 }
 
 /// サーバー共有状態
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppState {
     mode: AppMode,
     dark_mode: bool,
@@ -217,19 +217,30 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// `AppState` を生成する
-    pub fn new(
+    /// 本番用のメモファイルシステムで`AppState`を生成する
+    pub fn new_with_tokio_memo_fs(
         mode: AppMode,
         dark_mode: bool,
         theme: Option<String>,
         tx: broadcast::Sender<BroadcastMessage>,
+    ) -> Self {
+        Self::new(mode, dark_mode, theme, tx, Arc::new(TokioMemoFs))
+    }
+
+    /// メモファイルシステムを注入して`AppState`を生成する
+    pub(crate) fn new(
+        mode: AppMode,
+        dark_mode: bool,
+        theme: Option<String>,
+        tx: broadcast::Sender<BroadcastMessage>,
+        memo_fs: Arc<dyn MemoFs>,
     ) -> Self {
         Self {
             syntax_css: syntax_theme_css(theme.as_deref()),
             mode,
             dark_mode,
             tx,
-            memo_fs: Arc::new(TokioMemoFs),
+            memo_fs,
         }
     }
 
@@ -256,13 +267,6 @@ impl AppState {
     /// メモ保存・読み込みで使用するファイルシステム抽象を返す
     pub(crate) fn memo_fs(&self) -> &Arc<dyn MemoFs> {
         &self.memo_fs
-    }
-
-    /// テスト用にメモ用ファイルシステムを差し替える
-    #[cfg(test)]
-    pub(crate) fn with_memo_fs(mut self, memo_fs: Arc<dyn MemoFs>) -> Self {
-        self.memo_fs = memo_fs;
-        self
     }
 }
 
@@ -349,6 +353,32 @@ mod tests {
         let (_dir, file_path) = create_markdown_fixture("note.md", "# note");
         let result = AppMode::new_directory(&file_path);
         assert!(matches!(result, Err(AppModeBuildError::NotDirectory(_))));
+    }
+
+    #[test]
+    fn test_app_state_newはmemo_fsを生成時注入する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let memo_fs: Arc<dyn MemoFs> = Arc::new(TokioMemoFs);
+
+        let state = AppState::new(mode, false, None, tx, Arc::clone(&memo_fs));
+
+        assert!(Arc::ptr_eq(&memo_fs, state.memo_fs()));
+    }
+
+    #[test]
+    fn test_app_state_new_with_tokio_memo_fsは本番用memo_fsを組み込む() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+
+        let state =
+            AppState::new_with_tokio_memo_fs(mode, true, Some("base16-ocean.dark".to_string()), tx);
+
+        assert!(state.dark_mode());
+        assert!(!state.syntax_css().is_empty());
+        assert_eq!(state.tx().receiver_count(), 1);
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {

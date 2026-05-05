@@ -461,7 +461,7 @@ mod tests {
 
     fn create_single_file_state(file_path: &Path) -> AppState {
         let (tx, _rx) = broadcast::channel(16);
-        AppState::new(
+        AppState::new_with_tokio_memo_fs(
             AppMode::new_single_file(file_path).unwrap(),
             false,
             None,
@@ -471,7 +471,7 @@ mod tests {
 
     fn create_directory_state(dir_path: &Path) -> AppState {
         let (tx, _rx) = broadcast::channel(16);
-        AppState::new(AppMode::new_directory(dir_path).unwrap(), false, None, tx)
+        AppState::new_with_tokio_memo_fs(AppMode::new_directory(dir_path).unwrap(), false, None, tx)
     }
 
     fn create_single_file_state_with_fixture(

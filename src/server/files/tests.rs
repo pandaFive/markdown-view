@@ -3297,13 +3297,16 @@ fn make_dir_unsearchable(dir: &Path, probe: &Path) -> Option<PermissionGuard> {
 }
 
 fn create_single_file_state(file_path: &std::path::Path) -> AppState {
-    let mode = AppMode::new_single_file(file_path).unwrap();
     let (tx, _rx) = broadcast::channel(4);
-    AppState::new(mode, false, None, tx)
+    AppState::new_with_tokio_memo_fs(
+        AppMode::new_single_file(file_path).unwrap(),
+        false,
+        None,
+        tx,
+    )
 }
 
 fn create_directory_state(dir_path: &std::path::Path) -> AppState {
-    let mode = AppMode::new_directory(dir_path).unwrap();
     let (tx, _rx) = broadcast::channel(4);
-    AppState::new(mode, false, None, tx)
+    AppState::new_with_tokio_memo_fs(AppMode::new_directory(dir_path).unwrap(), false, None, tx)
 }

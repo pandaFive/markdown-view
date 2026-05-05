@@ -246,12 +246,12 @@ mod tests {
 
     fn create_directory_state(base_dir: &std::path::Path) -> AppState {
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
-        AppState::new(AppMode::new_directory(base_dir).unwrap(), false, None, tx)
+        AppState::new_with_tokio_memo_fs(AppMode::new_directory(base_dir).unwrap(), false, None, tx)
     }
 
     fn create_single_file_state(file_path: &std::path::Path) -> AppState {
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
-        AppState::new(
+        AppState::new_with_tokio_memo_fs(
             AppMode::new_single_file(file_path).unwrap(),
             false,
             None,
@@ -402,7 +402,14 @@ mod tests {
             &sidecar_path,
             std::io::ErrorKind::PermissionDenied,
         );
-        let state = create_directory_state(dir.path()).with_memo_fs(memo_fs);
+        let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
+        let state = AppState::new(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+            memo_fs,
+        );
 
         let page = load_page(
             &state,
@@ -475,7 +482,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
-        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let state = AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        );
         let mut rx = state.tx().subscribe();
 
         let memo = save_memo(
@@ -504,7 +516,12 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
         std::fs::write(dir.path().join("notes.md"), "# Notes").unwrap();
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
-        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let state = AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        );
         let mut rx = state.tx().subscribe();
 
         let (readme, notes) = tokio::join!(
@@ -545,7 +562,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home").unwrap();
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
-        let state = AppState::new(AppMode::new_directory(dir.path()).unwrap(), false, None, tx);
+        let state = AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        );
         let mut rx = state.tx().subscribe();
 
         let error = save_memo(

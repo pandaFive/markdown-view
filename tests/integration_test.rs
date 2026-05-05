@@ -1510,7 +1510,7 @@ async fn test_ディレクトリモード_ファイル名のhtmlエスケープ(
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_directory(tmp_dir.path()).unwrap(),
         false,
         None,
@@ -1541,7 +1541,7 @@ async fn test_ディレクトリモード_空ディレクトリで404を返す()
     // .mdファイルを1つも置かない
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_directory(tmp_dir.path()).unwrap(),
         false,
         None,
@@ -1599,7 +1599,7 @@ async fn test_ディレクトリモード_readmeなし時はアルファベッ�
         .unwrap();
 
     let (tx, _rx) = broadcast::channel(16);
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_directory(tmp_dir.path()).unwrap(),
         false,
         None,
@@ -1913,7 +1913,7 @@ async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する(
 
 fn build_single_file_state(file_path: &Path) -> Arc<AppState> {
     let (tx, _rx) = broadcast::channel(16);
-    Arc::new(AppState::new(
+    Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_single_file(file_path).unwrap(),
         false,
         None,
@@ -1923,7 +1923,7 @@ fn build_single_file_state(file_path: &Path) -> Arc<AppState> {
 
 fn build_dir_state(base_dir: &Path) -> Arc<AppState> {
     let (tx, _rx) = broadcast::channel(16);
-    Arc::new(AppState::new(
+    Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_directory(base_dir).unwrap(),
         false,
         None,

@@ -102,7 +102,12 @@ async fn main() -> Result<()> {
     // broadcast チャネル
     let (tx, _rx) = broadcast::channel(16);
 
-    let state = Arc::new(AppState::new(mode.clone(), args.dark, args.theme, tx));
+    let state = Arc::new(AppState::new_with_tokio_memo_fs(
+        mode.clone(),
+        args.dark,
+        args.theme,
+        tx,
+    ));
 
     // ファイル/ディレクトリ監視開始
     let watch_service = WatchService::start(state.clone())
@@ -208,7 +213,7 @@ mod tests {
         std::fs::write(&file_path, "# watch").expect("Markdown作成");
         let mode = AppMode::new_single_file(&file_path).expect("単一ファイルモード");
         let (tx, _rx) = broadcast::channel(16);
-        let state = Arc::new(AppState::new(mode, false, None, tx));
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(mode, false, None, tx));
 
         let service = WatchService::start(state).await.expect("監視開始");
         service.shutdown().await;
