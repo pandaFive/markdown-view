@@ -36,6 +36,22 @@ pub(crate) fn sanitize_path_for_logging<'a>(path: &'a Path, base: &Path) -> Cow<
     }
 }
 
+/// 監査ログ用 path を相対化し、制御文字を可視化する。
+pub(crate) fn sanitize_path_for_logging_escaped(path: &Path, base: &Path) -> String {
+    sanitize_path_for_logging(path, base)
+        .as_ref()
+        .escape_debug()
+        .to_string()
+}
+
+/// 監査ログ用 path を字句的に相対化し、制御文字を可視化する。
+pub(crate) fn sanitize_path_for_logging_lexical_escaped(path: &Path, base: &Path) -> String {
+    sanitize_path_for_logging_lexical(path, base)
+        .as_ref()
+        .escape_debug()
+        .to_string()
+}
+
 enum CanonicalizeStatus {
     Relative(PathBuf),
     OutsideBase,
@@ -238,5 +254,17 @@ mod tests {
         // to_string_lossy が U+FFFD を挿入しても panic しないこと
         assert!(sanitized.starts_with("<outside-base>/bad"));
         assert!(sanitized.ends_with(".md"));
+    }
+
+    #[test]
+    fn test_sanitize_escapedは制御文字を可視化する() {
+        let base = PathBuf::from("/base");
+        let path = base.join("line\n\x1b.md");
+
+        let sanitized = sanitize_path_for_logging_escaped(&path, &base);
+
+        assert_eq!(sanitized, "line\\n\\u{1b}.md");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\x1b'));
     }
 }
