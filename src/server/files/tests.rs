@@ -783,7 +783,14 @@ fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレ�
     let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
-    assert_eq!(files, vec!["linked_dir/doc.md".to_string()]);
+    // read_dirの順序は未保証のため、canonical重複排除で実体側かsymlink側のどちらが残るかは環境依存。
+    assert_eq!(files.len(), 1);
+    assert!(
+        files == vec!["linked_dir/doc.md".to_string()]
+            || files == vec!["target-dir/doc.md".to_string()],
+        "base内の同一canonicalディレクトリからdoc.mdが1件だけ返る必要がある: {:?}",
+        files
+    );
     assert!(logs_contain(
         "シンボリックリンクが通常ファイルを指すためスキップ"
     ));
@@ -1011,6 +1018,32 @@ fn test_resolve_recursable_directory_通常ディレクトリ扱いの非ディ�
     .expect_err("通常ディレクトリ扱いなら非ディレクトリ正規化先はエラー");
 
     assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_recursable_directory_base内symlinkディレクトリをvisitedに登録する() {
+    let base = tempfile::tempdir().unwrap();
+    let target = base.path().join("target-dir");
+    std::fs::create_dir(&target).unwrap();
+    let link = base.path().join("linked_dir");
+    symlink(&target, &link).unwrap();
+    let canonical_base = base.path().canonicalize().unwrap();
+    let mut visited_dirs = std::collections::HashSet::new();
+    visited_dirs.insert(canonical_base.clone());
+
+    let resolved = super::catalog::resolve_recursable_directory(
+        &link,
+        true,
+        &canonical_base,
+        &mut visited_dirs,
+        base.path(),
+    )
+    .expect("base内symlinkディレクトリの再帰判定は成功する")
+    .expect("base内symlinkディレクトリは再帰対象になる");
+
+    assert_eq!(resolved, target.canonicalize().unwrap());
+    assert!(visited_dirs.contains(&resolved));
 }
 
 #[cfg(unix)]
