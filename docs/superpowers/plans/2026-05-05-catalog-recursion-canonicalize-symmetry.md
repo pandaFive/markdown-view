@@ -10,6 +10,8 @@
 
 ---
 
+> **Post-review follow-ups (2026-05-06):** この plan の初期手順は `Option<PathBuf>` helper と元の symlink path での再帰を前提にしている。multi-review 後の実装では、通常ディレクトリ扱いの metadata / 非ディレクトリ不整合は `Err` として伝播し、symlink の走査実体は検証済み canonical path、表示用相対パスは symlink 名側に分離する。隠し canonical target を指す symlink は一覧から除外する。さらに `read_dir` 直前に走査中ディレクトリを再 canonicalize し、検証済み canonical path と一致しない場合はエラーにする。catalog のログ用 path は制御文字を escape して出力する。inode swap など filesystem race 全般と openat/no-follow 走査は範囲外。
+
 ## File Structure
 
 - Modify: `src/server/files/catalog.rs`

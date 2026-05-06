@@ -55,7 +55,7 @@
 ## Done Summary
 
 - [x] `canonicalize` 失敗時の再帰挙動の非対称を解消する
-  - 完了根拠: `catalog.rs` の通常ディレクトリとシンボリックリンクディレクトリの再帰可否判定を `resolve_recursable_directory` へ集約し、正規化、base 配下確認、metadata によるディレクトリ判定、visited 登録を同じ経路に揃えた。base 外 symlink、通常ファイル symlink、symlink cycle、基本列挙の回帰テストで固定している
+  - 完了根拠: `catalog.rs` の通常ディレクトリとシンボリックリンクディレクトリの再帰可否判定を `resolve_recursable_directory` へ集約し、正規化、base 配下確認、metadata によるディレクトリ判定、visited 登録を同じ経路に揃えた。走査実体は検証済み canonical path を使い、表示用相対パスは symlink 名を維持する。`read_dir` 直前の再検証とログ path の制御文字 escape も追加した。base 外 symlink、隠し target symlink、通常ファイル symlink、symlink cycle、基本列挙、差し替え検出の回帰テストで固定している。filesystem race 全般の完全解消は非目標
 - [x] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
   - 完了根拠: `AppState` の共有単位を外側の `Arc<AppState>` に統一し、`with_memo_fs` を削除した。`MemoFs` は生成時注入の constructor へ寄せ、production 経路は Tokio 実装を使う構成になっている
 - [x] `WsOriginRejection` ログ分類を完全列挙し、Host bypass 観測性テストを補強する

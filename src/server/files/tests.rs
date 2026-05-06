@@ -13,8 +13,8 @@ use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
 use super::catalog::{
-    canonicalize_dir_for_cycle, list_markdown_files_from_canonical_base, MAX_DIR_DEPTH,
-    MAX_FILE_LIST,
+    canonicalize_dir_for_cycle, ensure_current_dir_still_canonical,
+    list_markdown_files_from_canonical_base, MAX_DIR_DEPTH, MAX_FILE_LIST,
 };
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 use super::memo::{sidecar_parent_for_target_path, sidecar_parent_or_base};
@@ -768,17 +768,17 @@ fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレ�
     use std::os::unix::fs::symlink;
 
     let base = tempfile::tempdir().unwrap();
-    std::fs::write(base.path().join(".target.md"), "# hidden target").unwrap();
+    std::fs::write(base.path().join("target.txt"), "target").unwrap();
     symlink(
-        base.path().join(".target.md"),
+        base.path().join("target.txt"),
         base.path().join("linked_file.md"),
     )
     .unwrap();
 
-    let hidden_dir = base.path().join(".target-dir");
-    std::fs::create_dir_all(&hidden_dir).unwrap();
-    std::fs::write(hidden_dir.join("doc.md"), "# doc").unwrap();
-    symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
+    let visible_dir = base.path().join("target-dir");
+    std::fs::create_dir_all(&visible_dir).unwrap();
+    std::fs::write(visible_dir.join("doc.md"), "# doc").unwrap();
+    symlink(&visible_dir, base.path().join("linked_dir")).unwrap();
 
     let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
@@ -788,6 +788,42 @@ fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレ�
         "シンボリックリンクが通常ファイルを指すためスキップ"
     ));
     assert!(logs_contain("linked_file.md"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_隠しsymlink先ディレクトリは除外() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let hidden_dir = base.path().join(".target-dir");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    std::fs::write(hidden_dir.join("secret.md"), "# secret").unwrap();
+    symlink(&hidden_dir, base.path().join("linked_dir")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
+fn test_list_markdown_files_from_canonical_base_制御文字入りsymlink名をescapeしてログ出力する() {
+    let base = tempfile::tempdir().unwrap();
+    let hidden_dir = base.path().join(".target-dir");
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    std::fs::write(hidden_dir.join("secret.md"), "# secret").unwrap();
+    let link_name = std::ffi::OsString::from_vec(b"linked\n\x1b_dir".to_vec());
+    symlink(&hidden_dir, base.path().join(&link_name)).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(files.is_empty());
+    assert!(logs_contain("linked\\n\\u{1b}_dir"));
+    assert!(!logs_contain("linked\n\x1b_dir"));
 }
 
 #[test]
@@ -949,10 +985,51 @@ fn test_resolve_recursable_directory_通常ディレクトリをvisitedに登録
         &mut visited_dirs,
         dir.path(),
     )
+    .expect("通常ディレクトリの再帰判定は成功する")
     .expect("通常ディレクトリは再帰対象になる");
 
     assert_eq!(resolved, child.canonicalize().unwrap());
     assert!(visited_dirs.contains(&resolved));
+}
+
+#[test]
+fn test_resolve_recursable_directory_通常ディレクトリ扱いの非ディレクトリ正規化先はエラー() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-dir.md");
+    std::fs::write(&file, "# file").unwrap();
+    let canonical_base = dir.path().canonicalize().unwrap();
+    let mut visited_dirs = std::collections::HashSet::new();
+    visited_dirs.insert(canonical_base.clone());
+
+    let error = super::catalog::resolve_recursable_directory(
+        &file,
+        false,
+        &canonical_base,
+        &mut visited_dirs,
+        dir.path(),
+    )
+    .expect_err("通常ディレクトリ扱いなら非ディレクトリ正規化先はエラー");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_ensure_current_dir_still_canonical_差し替えでbase外になったらエラー() {
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "# secret").unwrap();
+    let child = base.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    let canonical_base = base.path().canonicalize().unwrap();
+    let canonical_child = child.canonicalize().unwrap();
+    std::fs::remove_dir(&child).unwrap();
+    symlink(outside.path(), &child).unwrap();
+
+    let error = ensure_current_dir_still_canonical(&canonical_child, &canonical_base, base.path())
+        .expect_err("base外への差し替えは拒否する");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
 #[cfg(unix)]
@@ -975,7 +1052,7 @@ fn test_resolve_recursable_directory_base外symlinkはvisitedに登録しない(
         base.path(),
     );
 
-    assert!(resolved.is_none());
+    assert!(resolved.expect("symlinkの再帰判定は成功する").is_none());
     assert!(!visited_dirs.contains(&outside_canonical));
 }
 
