@@ -110,7 +110,7 @@ mod tests {
     use super::{shutdown_watch_forwarder, WatchService};
     use crate::server::AppMode;
     use crate::server::AppState;
-    use crate::watcher::WatcherHealth;
+    use crate::watcher::{WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
 
     #[tokio::test]
     async fn test_watch_service_開始と停止ができる() {
@@ -180,7 +180,10 @@ mod tests {
             "監視イベント転送タスク停止がタイムアウトしたためabortします"
         ));
         assert!(logs_contain("elapsed_ms="));
-        assert!(logs_contain("timeout_secs=2"));
+        assert!(logs_contain(&format!(
+            "timeout_secs={}",
+            WATCH_SHUTDOWN_TIMEOUT_SECS
+        )));
         assert!(logs_contain("last_event_kind=Some(FileChanged)"));
         assert!(logs_contain("receiver_count=1"));
     }
