@@ -19,10 +19,12 @@ const internalGlobalNames = Array.from(new Set(
 )).sort();
 
 test('内部グローバル名抽出は実ファイルから十分な宣言数を拾う', async () => {
-  expect(internalGlobalNames.length).toBeGreaterThan(20);
+  expect(internalGlobalNames.length).toBeGreaterThan(25);
   expect(internalGlobalNames).toContain('startMarkdownViewApp');
   expect(internalGlobalNames).toContain('updateContent');
   expect(internalGlobalNames).toContain('createWebSocketController');
+  expect(internalGlobalNames).toContain('validateUpdatePayload');
+  expect(internalGlobalNames).toContain('applyValidatedUpdateHtml');
 });
 
 async function ownWindowPropertyNames(page: import('@playwright/test').Page) {
@@ -66,6 +68,8 @@ test('production実行では内部APIを公開しない', async ({ page }) => {
     return names.filter((name) => typeof win[name] !== 'undefined');
   }, internalGlobalNames);
   expect(exposed).toEqual([]);
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).validateUpdatePayload)).resolves.toBe('undefined');
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).applyValidatedUpdateHtml)).resolves.toBe('undefined');
   const addedWindowProps = (await ownWindowPropertyNames(page)).filter((name) => !baseline.has(name));
   expect(addedWindowProps).toEqual([]);
   await expect(page.evaluate(() => typeof window.markdownViewTestHooks)).resolves.toBe('undefined');
