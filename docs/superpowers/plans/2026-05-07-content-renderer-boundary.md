@@ -1,6 +1,7 @@
 # Content Renderer Boundary Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Repository instructions, direct user approval, and branch/worktree safety checks take precedence over the example commands in this plan.
 
 **Goal:** Move `updateContent` payload validation and `#content` / `#toc` HTML application into a focused browser JS content renderer boundary.
 
@@ -109,7 +110,7 @@ function normalizeTocHtml(html) {
 }
 
 // サーバーサイドでサニタイズ済みのHTMLだけを #content に反映する境界。
-// XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）。
+// XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み。
 function applySanitizedContentHtml(ctx, contentEl, content) {
   if (!contentEl || typeof content !== 'string') {
     return false;
@@ -221,7 +222,7 @@ In `src/template/assets/js/content.js`, replace the start of `updateContent` thr
 
 ```js
 // サーバーサイドでサニタイズ済みのHTMLを反映する
-// XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
+// XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み
 let updateContent = function updateContent(data, options) {
   options = options || {};
   var validation = validateUpdatePayload(data);

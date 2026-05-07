@@ -26,10 +26,17 @@ function normalizeTocHtml(html) {
   return (html || '').replace(/>\s+</g, '><').trim();
 }
 
+function requireUpdateTarget(element, selector) {
+  if (!element) {
+    throw new Error('updateContent target missing: ' + selector);
+  }
+}
+
 // サーバーサイドでサニタイズ済みのHTMLだけを #content に反映する境界。
-// XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）。
+// XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み。
 function applySanitizedContentHtml(ctx, contentEl, content) {
-  if (!contentEl || typeof content !== 'string') {
+  requireUpdateTarget(contentEl, '#content');
+  if (typeof content !== 'string') {
     return false;
   }
   if (content === ctx.state.lastAppliedContent) {
@@ -42,7 +49,8 @@ function applySanitizedContentHtml(ctx, contentEl, content) {
 
 // サーバー生成済みTOC HTMLだけを #toc に反映する境界。
 function applySanitizedTocHtml(tocEl, toc) {
-  if (!tocEl || typeof toc !== 'string') {
+  requireUpdateTarget(tocEl, '#toc');
+  if (typeof toc !== 'string') {
     return false;
   }
   if (normalizeTocHtml(tocEl.innerHTML) === normalizeTocHtml(toc)) {

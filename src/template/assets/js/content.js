@@ -1253,7 +1253,7 @@ function applyPendingUpdate() {
 }
 
 // サーバーサイドでサニタイズ済みのHTMLを反映する
-// XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
+// XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み
 let updateContent = function updateContent(data, options) {
   options = options || {};
   var validation = validateUpdatePayload(data);

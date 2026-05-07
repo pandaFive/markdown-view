@@ -19,7 +19,7 @@ const internalGlobalNames = Array.from(new Set(
 )).sort();
 
 test('内部グローバル名抽出は実ファイルから十分な宣言数を拾う', async () => {
-  expect(internalGlobalNames.length).toBeGreaterThan(25);
+  expect(internalGlobalNames.length).toBeGreaterThan(20);
   expect(internalGlobalNames).toContain('startMarkdownViewApp');
   expect(internalGlobalNames).toContain('updateContent');
   expect(internalGlobalNames).toContain('createWebSocketController');

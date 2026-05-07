@@ -11,6 +11,15 @@ function buildUpdateSignature(data) {
   });
 }
 
+function summarizeBufferedUpdateForLog(data) {
+  return {
+    file: typeof data.file === 'string' ? data.file : '',
+    refresh: Boolean(data.refresh),
+    contentLength: typeof data.content === 'string' ? data.content.length : null,
+    tocLength: typeof data.toc === 'string' ? data.toc.length : null
+  };
+}
+
 // WebSocket の再接続・buffer 状態は closure に閉じ、他機能は controller API 経由で操作する。
 function createWebSocketController(ctx, deps) {
   var socket = null;
@@ -29,7 +38,7 @@ function createWebSocketController(ctx, deps) {
     if (pendingWsUpdate) {
       console.warn('[markdown-view] buffer済み更新を破棄しました。', {
         reason: reason || 'unspecified',
-        signature: pendingWsUpdateSignature
+        update: summarizeBufferedUpdateForLog(pendingWsUpdate)
       });
     }
     pendingWsUpdate = null;
