@@ -1,9 +1,11 @@
 //! WebSocket向けの更新ブロードキャストを管理する。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::files::{
     build_change_broadcast_message, build_change_error_log_message_without_receivers,
@@ -11,6 +13,66 @@ use super::files::{
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::watcher::{WatchError, WatchEvent};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatchForwarderEventKind {
+    FileChanged,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WatchForwarderSnapshot {
+    pub last_event_kind: Option<WatchForwarderEventKind>,
+    pub receiver_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct WatchForwarderDiagnostics {
+    last_event_kind: Arc<AtomicU8>,
+    tx: tokio::sync::broadcast::Sender<BroadcastMessage>,
+}
+
+impl WatchForwarderDiagnostics {
+    const NONE: u8 = 0;
+    const FILE_CHANGED: u8 = 1;
+    const ERROR: u8 = 2;
+
+    pub(super) fn new(tx: tokio::sync::broadcast::Sender<BroadcastMessage>) -> Self {
+        Self {
+            last_event_kind: Arc::new(AtomicU8::new(Self::NONE)),
+            tx,
+        }
+    }
+
+    pub(super) fn record(&self, kind: WatchForwarderEventKind) {
+        let raw = match kind {
+            WatchForwarderEventKind::FileChanged => Self::FILE_CHANGED,
+            WatchForwarderEventKind::Error => Self::ERROR,
+        };
+        self.last_event_kind.store(raw, Ordering::Release);
+    }
+
+    pub(super) fn snapshot(&self) -> WatchForwarderSnapshot {
+        let last_event_kind = match self.last_event_kind.load(Ordering::Acquire) {
+            Self::NONE => None,
+            Self::FILE_CHANGED => Some(WatchForwarderEventKind::FileChanged),
+            Self::ERROR => Some(WatchForwarderEventKind::Error),
+            invalid => {
+                debug_assert!(false, "不正なforwarder event kind: {}", invalid);
+                None
+            }
+        };
+        WatchForwarderSnapshot {
+            last_event_kind,
+            receiver_count: self.tx.receiver_count(),
+        }
+    }
+}
+
+pub(super) struct WatchForwarderHandle {
+    pub(super) task: JoinHandle<()>,
+    pub(super) diagnostics: WatchForwarderDiagnostics,
+}
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
@@ -49,9 +111,10 @@ fn send_broadcast_message(
     message: BroadcastMessage,
 ) {
     if let Err(error) = tx.send(message) {
-        let failed_message = error.0;
+        let summary = error.0.log_summary();
         tracing::warn!(
-            failed_message = ?failed_message,
+            message_kind = summary.message_kind,
+            has_file = summary.has_file,
             "[markdown-view] ファイル変更通知の送信に失敗しました"
         );
     }
@@ -67,20 +130,30 @@ fn send_broadcast_message(
 pub(super) fn spawn_watch_event_forwarder(
     state: Arc<AppState>,
     mut rx: mpsc::Receiver<WatchEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> WatchForwarderHandle {
+    let diagnostics = WatchForwarderDiagnostics::new(state.tx().clone());
+    let task_diagnostics = diagnostics.clone();
+    let task = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 WatchEvent::FileChanged(changed_path) => {
+                    task_diagnostics.record(WatchForwarderEventKind::FileChanged);
                     notify_update(&state, &changed_path).await;
                 }
                 WatchEvent::Error(error) => {
+                    task_diagnostics.record(WatchForwarderEventKind::Error);
                     broadcast_error(&state, &error);
                 }
             }
         }
-        tracing::info!("[markdown-view] ファイル変更通知タスクが終了しました");
-    })
+        let snapshot = task_diagnostics.snapshot();
+        tracing::info!(
+            last_event_kind = ?snapshot.last_event_kind,
+            receiver_count = snapshot.receiver_count,
+            "[markdown-view] ファイル変更通知タスクが終了しました"
+        );
+    });
+    WatchForwarderHandle { task, diagnostics }
 }
 
 /// ファイル監視エラーをブロードキャストする
@@ -106,28 +179,101 @@ mod tests {
     use super::*;
     use crate::server::{AppMode, AppState, MAX_FILE_SIZE};
 
-    #[traced_test]
     #[test]
-    fn test_send_broadcast_message_送信失敗はwarnログに残す() {
-        let (tx, rx) = broadcast::channel(1);
-        drop(rx);
+    fn test_watch_forwarder_diagnostics_初期状態は最後のイベントなし() {
+        let (tx, rx1) = broadcast::channel(4);
+        let rx2 = tx.subscribe();
+        let rx3 = tx.subscribe();
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
 
-        send_broadcast_message(&tx, BroadcastMessage::Error("test error".to_string()));
+        let snapshot = diagnostics.snapshot();
+        drop((rx1, rx2, rx3));
 
-        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
-        assert!(logs_contain("test error"));
+        assert_eq!(snapshot.last_event_kind, None);
+        assert_eq!(snapshot.receiver_count, 3);
+    }
+
+    #[test]
+    fn test_watch_forwarder_diagnostics_filechangedを記録できる() {
+        let (tx, _rx) = broadcast::channel(4);
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+
+        diagnostics.record(WatchForwarderEventKind::FileChanged);
+        let snapshot = diagnostics.snapshot();
+
+        assert_eq!(
+            snapshot.last_event_kind,
+            Some(WatchForwarderEventKind::FileChanged)
+        );
+        assert_eq!(snapshot.receiver_count, 1);
+    }
+
+    #[test]
+    fn test_watch_forwarder_diagnostics_errorを記録できる() {
+        let (tx, _rx) = broadcast::channel(4);
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+
+        diagnostics.record(WatchForwarderEventKind::Error);
+        let snapshot = diagnostics.snapshot();
+
+        assert_eq!(
+            snapshot.last_event_kind,
+            Some(WatchForwarderEventKind::Error)
+        );
+        assert_eq!(snapshot.receiver_count, 1);
     }
 
     #[traced_test]
     #[test]
-    fn test_broadcast_error_送信失敗はwarnログに残す() {
+    fn test_send_broadcast_message_送信失敗は本文を伏せてwarnログに残す() {
+        let (tx, rx) = broadcast::channel(1);
+        drop(rx);
+
+        send_broadcast_message(
+            &tx,
+            BroadcastMessage::Error("secret broadcast error".to_string()),
+        );
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("error"));
+        assert!(!logs_contain("secret broadcast error"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_send_broadcast_message_update送信失敗はhtml本文をログに出さない() {
+        let (tx, rx) = broadcast::channel(1);
+        drop(rx);
+        let message = BroadcastMessage::Update(crate::template::UpdateMessage::new(
+            crate::renderer::render_markdown("secret markdown body"),
+            crate::toc::generate_toc("# secret heading"),
+            Some("secret/path.md".to_string()),
+        ));
+
+        send_broadcast_message(&tx, message);
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("update"));
+        assert!(logs_contain("has_file=true"));
+        assert!(!logs_contain("secret markdown body"));
+        assert!(!logs_contain("secret heading"));
+        assert!(!logs_contain("secret/path.md"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_broadcast_error_送信失敗はエラー詳細をログに出さない() {
         let base_dir = tempfile::tempdir().unwrap();
         let state = create_directory_state(base_dir.path());
 
-        broadcast_error(&state, &WatchError::notify("watch failure"));
+        broadcast_error(&state, &WatchError::notify("secret watch failure"));
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
-        assert!(logs_contain("watch failure"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("error"));
+        assert!(!logs_contain("secret watch failure"));
     }
 
     #[tokio::test]
@@ -425,6 +571,53 @@ mod tests {
         }
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_watch_forwarder_自然終了ログに診断情報を含める() {
+        let base_dir = tempfile::tempdir().unwrap();
+        std::fs::write(base_dir.path().join("README.md"), "# before").unwrap();
+        let state = Arc::new(create_directory_state(base_dir.path()));
+        let (tx, rx) = mpsc::channel(4);
+        let handle = spawn_watch_event_forwarder(state, rx);
+
+        tx.send(WatchEvent::Error(WatchError::notify("forwarder-log-test")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        handle.task.await.unwrap();
+
+        assert!(logs_contain("ファイル変更通知タスクが終了しました"));
+        assert!(logs_contain("last_event_kind=Some(Error)"));
+        assert!(logs_contain("receiver_count=0"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_forwarder_filechanged実経路で診断状態を更新する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let target = base_dir.path().join("README.md");
+        std::fs::write(&target, "# changed").unwrap();
+        let state = Arc::new(create_directory_state(base_dir.path()));
+        let mut broadcast_rx = state.tx().subscribe();
+        let (tx, rx) = mpsc::channel(4);
+        let handle = spawn_watch_event_forwarder(state, rx);
+
+        tx.send(WatchEvent::FileChanged(target)).await.unwrap();
+
+        let received = timeout(Duration::from_secs(1), broadcast_rx.recv())
+            .await
+            .expect("Updateのbroadcastを期待")
+            .unwrap();
+        assert!(matches!(received, BroadcastMessage::Update(_)));
+        assert_eq!(
+            handle.diagnostics.snapshot().last_event_kind,
+            Some(WatchForwarderEventKind::FileChanged)
+        );
+
+        drop(tx);
+        handle.task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_spawn_watch_event_forwarder_監視エラーをbroadcastする() {
         let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
@@ -449,7 +642,7 @@ mod tests {
             other => panic!("Errorメッセージを期待したが {:?} を受信", other),
         }
 
-        forwarder.await.unwrap();
+        forwarder.task.await.unwrap();
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {

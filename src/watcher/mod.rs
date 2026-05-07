@@ -3,6 +3,7 @@ mod runtime;
 mod strategy;
 
 pub use self::error::{WatchError, WatchErrorKind};
+pub(crate) use self::runtime::WATCH_SHUTDOWN_TIMEOUT_SECS;
 pub use self::runtime::{Watcher, WatcherFailureKind, WatcherHealth};
 
 use std::path::PathBuf;

@@ -18,7 +18,7 @@ const WATCHER_THREAD_PARK_MS: u64 = 250;
 /// notify から tokio へ橋渡しするチャネル容量
 const WATCHER_MESSAGE_BUFFER: usize = 32;
 /// shutdown() のグレースフル停止待機秒数
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+pub(crate) const WATCH_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 type InitResult = std::result::Result<(), WatchError>;
 
@@ -153,9 +153,16 @@ struct WatchRuntime {
 impl WatchRuntime {
     /// 監視スレッドに停止を通知し、完了を待機する
     ///
-    /// `SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
+    /// `WATCH_SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
     /// （プロセス終了時にOSが回収する）。
     fn stop(self) -> WatcherHealth {
+        self.stop_with_timeout(
+            Duration::from_secs(WATCH_SHUTDOWN_TIMEOUT_SECS),
+            Duration::from_millis(50),
+        )
+    }
+
+    fn stop_with_timeout(self, timeout: Duration, poll_interval: Duration) -> WatcherHealth {
         let before_stop = self.health_state.load();
         if matches!(before_stop, WatcherHealth::Failed(_)) {
             tracing::warn!(
@@ -169,14 +176,16 @@ impl WatchRuntime {
 
         let start = std::time::Instant::now();
         while !self.watcher_thread.is_finished() {
-            if start.elapsed() > Duration::from_secs(SHUTDOWN_TIMEOUT_SECS) {
+            if start.elapsed() > timeout {
+                let elapsed_ms = start.elapsed().as_millis();
                 tracing::warn!(
-                    "[markdown-view] 監視スレッドの停止がタイムアウトしました（{}秒）",
-                    SHUTDOWN_TIMEOUT_SECS
+                    elapsed_ms,
+                    timeout_secs = timeout.as_secs(),
+                    "[markdown-view] 監視スレッドの停止がタイムアウトしました"
                 );
                 return self.health_state.load();
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(poll_interval);
         }
         if let Err(panic_payload) = self.watcher_thread.join() {
             handle_watcher_panic(
@@ -450,6 +459,7 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::mpsc;
+    use tracing_test::traced_test;
 
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, keep_watcher_thread_alive,
@@ -727,6 +737,36 @@ mod tests {
 
         assert_eq!(health_state.load(), WatcherHealth::Stopped);
         assert_eq!(shutdown_health, WatcherHealth::Stopped);
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_watch_runtime_stop_timeoutログに診断情報を含める() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::new(AtomicBool::new(false));
+        let thread_release_flag = release_flag.clone();
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
+        let watcher_thread = std::thread::spawn(move || {
+            while !thread_release_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        });
+        let runtime = super::WatchRuntime {
+            shutdown_flag,
+            watcher_thread,
+            health_state,
+            error_tx: tx,
+        };
+
+        let shutdown_health =
+            runtime.stop_with_timeout(Duration::from_secs(0), Duration::from_millis(1));
+        release_flag.store(true, Ordering::Release);
+
+        assert_eq!(shutdown_health, WatcherHealth::Stopping);
+        assert!(logs_contain("監視スレッドの停止がタイムアウトしました"));
+        assert!(logs_contain("elapsed_ms="));
+        assert!(logs_contain("timeout_secs=0"));
     }
 
     #[tokio::test]
