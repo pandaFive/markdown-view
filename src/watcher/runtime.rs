@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +22,94 @@ const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 type InitResult = std::result::Result<(), WatchError>;
 
+/// watcher の稼働状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatcherHealth {
+    /// watcher thread 起動から init 完了まで
+    Starting,
+    /// watcher は正常に稼働中
+    Alive,
+    /// watcher は監視品質が劣化、または停止している
+    Failed(WatcherFailureKind),
+    /// 停止処理中
+    Stopping,
+    /// 停止完了
+    Stopped,
+}
+
+/// watcher failure の分類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatcherFailureKind {
+    /// notify callback がエラーを返した
+    Notify,
+    /// watcher thread が panic した
+    ThreadPanic,
+}
+
+#[derive(Debug, Clone)]
+struct WatcherHealthState {
+    state: Arc<AtomicU8>,
+}
+
+impl WatcherHealthState {
+    const STARTING: u8 = 0;
+    const ALIVE: u8 = 1;
+    const FAILED_NOTIFY: u8 = 2;
+    const FAILED_THREAD_PANIC: u8 = 3;
+    const STOPPING: u8 = 4;
+    const STOPPED: u8 = 5;
+
+    fn new_starting() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(Self::STARTING)),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_alive() -> Self {
+        let state = Self::new_starting();
+        state.store(WatcherHealth::Alive);
+        state
+    }
+
+    fn load(&self) -> WatcherHealth {
+        match self.state.load(Ordering::Acquire) {
+            Self::STARTING => WatcherHealth::Starting,
+            Self::ALIVE => WatcherHealth::Alive,
+            Self::FAILED_NOTIFY => WatcherHealth::Failed(WatcherFailureKind::Notify),
+            Self::FAILED_THREAD_PANIC => WatcherHealth::Failed(WatcherFailureKind::ThreadPanic),
+            Self::STOPPING => WatcherHealth::Stopping,
+            Self::STOPPED => WatcherHealth::Stopped,
+            _ => WatcherHealth::Failed(WatcherFailureKind::ThreadPanic),
+        }
+    }
+
+    fn store(&self, health: WatcherHealth) {
+        let raw = match health {
+            WatcherHealth::Starting => Self::STARTING,
+            WatcherHealth::Alive => Self::ALIVE,
+            WatcherHealth::Failed(WatcherFailureKind::Notify) => Self::FAILED_NOTIFY,
+            WatcherHealth::Failed(WatcherFailureKind::ThreadPanic) => Self::FAILED_THREAD_PANIC,
+            WatcherHealth::Stopping => Self::STOPPING,
+            WatcherHealth::Stopped => Self::STOPPED,
+        };
+        self.state.store(raw, Ordering::Release);
+    }
+
+    fn store_alive_if_starting(&self) {
+        let _ = self.state.compare_exchange(
+            Self::STARTING,
+            Self::ALIVE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn store_failed(&self, kind: WatcherFailureKind) {
+        self.store(WatcherHealth::Failed(kind));
+    }
+}
+
 /// 監視実行中ランタイム
 ///
 /// `shutdown()` および `Drop` は同じ停止処理（タイムアウト付き待機）を行う。
@@ -33,6 +121,7 @@ pub struct Watcher {
 struct WatchRuntime {
     shutdown_flag: Arc<AtomicBool>,
     watcher_thread: std::thread::JoinHandle<()>,
+    health_state: WatcherHealthState,
 }
 
 impl WatchRuntime {
@@ -41,6 +130,7 @@ impl WatchRuntime {
     /// `SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
     /// （プロセス終了時にOSが回収する）。
     fn stop(self) {
+        self.health_state.store(WatcherHealth::Stopping);
         self.shutdown_flag.store(true, Ordering::Release);
         self.watcher_thread.thread().unpark();
 
@@ -56,11 +146,15 @@ impl WatchRuntime {
             std::thread::sleep(Duration::from_millis(50));
         }
         if let Err(e) = self.watcher_thread.join() {
+            self.health_state
+                .store_failed(WatcherFailureKind::ThreadPanic);
             tracing::warn!(
                 "[markdown-view] 監視スレッドの停止中にパニックを検出: {:?}",
                 e
             );
+            return;
         }
+        self.health_state.store(WatcherHealth::Stopped);
     }
 }
 
@@ -73,21 +167,48 @@ impl Watcher {
         let (init_tx, init_rx) = oneshot::channel::<InitResult>();
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_shutdown_flag = shutdown_flag.clone();
+        let health_state = WatcherHealthState::new_starting();
+        let thread_health_state = health_state.clone();
         let unexpected_exit = strategy.unexpected_exit_message();
-        let watcher_thread =
-            spawn_watcher_thread(strategy, watch_dir, tx, init_tx, thread_shutdown_flag)?;
+        let watcher_thread = spawn_watcher_thread(
+            strategy,
+            watch_dir,
+            tx,
+            init_tx,
+            thread_shutdown_flag,
+            thread_health_state,
+        )?;
 
         await_watcher_init(init_rx, unexpected_exit).await?;
-        Ok((Self::new(shutdown_flag, watcher_thread), rx))
+        health_state.store_alive_if_starting();
+        Ok((Self::new(shutdown_flag, watcher_thread, health_state), rx))
     }
 
-    fn new(shutdown_flag: Arc<AtomicBool>, watcher_thread: std::thread::JoinHandle<()>) -> Self {
+    fn new(
+        shutdown_flag: Arc<AtomicBool>,
+        watcher_thread: std::thread::JoinHandle<()>,
+        health_state: WatcherHealthState,
+    ) -> Self {
         Self {
             runtime: Some(WatchRuntime {
                 shutdown_flag,
                 watcher_thread,
+                health_state,
             }),
         }
+    }
+
+    /// watcher の現在状態を返す
+    pub fn health(&self) -> WatcherHealth {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.health_state.load())
+            .unwrap_or(WatcherHealth::Stopped)
+    }
+
+    /// watcher が正常稼働中なら true
+    pub fn is_alive(&self) -> bool {
+        matches!(self.health(), WatcherHealth::Alive)
     }
 
     /// 監視スレッドを停止する
@@ -132,6 +253,7 @@ fn spawn_watcher_thread(
     tx: mpsc::Sender<WatchEvent>,
     init_tx: oneshot::Sender<InitResult>,
     thread_shutdown_flag: Arc<AtomicBool>,
+    health_state: WatcherHealthState,
 ) -> Result<std::thread::JoinHandle<()>> {
     let thread_name = strategy.thread_name().to_string();
     let spawn_context = format!("監視スレッド {} の起動に失敗", strategy.thread_name());
@@ -147,6 +269,7 @@ fn spawn_watcher_thread(
             let panic_message = strategy.panic_message();
             let error_label = strategy.error_label();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let callback_health_state = health_state.clone();
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
                     move |res: std::result::Result<
@@ -163,6 +286,7 @@ fn spawn_watcher_thread(
                             }
                         }
                         Err(e) => {
+                            callback_health_state.store_failed(WatcherFailureKind::Notify);
                             let watch_error = WatchError::notify(e.to_string());
                             tracing::warn!(
                                 "[markdown-view] {}: {}",
@@ -209,6 +333,7 @@ fn spawn_watcher_thread(
                 } else {
                     "不明なパニック".to_string()
                 };
+                health_state.store_failed(WatcherFailureKind::ThreadPanic);
                 let watch_error = WatchError::thread_panic(panic_detail.clone());
                 tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
                 send_watch_event(&panic_tx, WatchEvent::Error(watch_error), error_label);
@@ -255,7 +380,10 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use super::{keep_watcher_thread_alive, send_watch_event, Watcher};
+    use super::{
+        keep_watcher_thread_alive, send_watch_event, Watcher, WatcherFailureKind, WatcherHealth,
+        WatcherHealthState,
+    };
     use crate::server::AppMode;
     use crate::watcher::{WatchError, WatchEvent};
 
@@ -343,11 +471,63 @@ mod tests {
         watcher.shutdown();
     }
 
+    #[test]
+    fn test_watcher_health_生成直後はaliveを返す() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
+        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state);
+
+        assert_eq!(watcher.health(), WatcherHealth::Alive);
+        assert!(watcher.is_alive());
+
+        watcher.shutdown();
+    }
+
+    #[test]
+    fn test_watcher_health_threadpanicはaliveではない() {
+        let health_state = WatcherHealthState::new_starting();
+
+        health_state.store_failed(WatcherFailureKind::ThreadPanic);
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
+        );
+        assert!(!matches!(health_state.load(), WatcherHealth::Alive));
+    }
+
+    #[test]
+    fn test_watcher_health_notifyエラーはaliveではない() {
+        let health_state = WatcherHealthState::new_starting();
+
+        health_state.store_failed(WatcherFailureKind::Notify);
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        assert!(!matches!(health_state.load(), WatcherHealth::Alive));
+    }
+
+    #[test]
+    fn test_watcher_shutdown後はstoppedを記録する() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
+        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state.clone());
+
+        watcher.shutdown();
+
+        assert_eq!(health_state.load(), WatcherHealth::Stopped);
+    }
+
     #[tokio::test]
     async fn test_watcher_shutdownで監視スレッドを停止できる() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread);
+        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread, health_state);
         watcher.shutdown();
         assert!(shutdown_flag.load(Ordering::Acquire));
     }
@@ -355,8 +535,9 @@ mod tests {
     #[tokio::test]
     async fn test_watcher_dropはフォールバック停止を行う() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread);
+        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread, health_state);
 
         drop(watcher);
         assert!(shutdown_flag.load(Ordering::Acquire));
