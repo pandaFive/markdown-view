@@ -109,10 +109,17 @@ function normalizeTocHtml(html) {
   return (html || '').replace(/>\s+</g, '><').trim();
 }
 
+function requireUpdateTarget(element, selector) {
+  if (!element) {
+    throw new Error('updateContent target missing: ' + selector);
+  }
+}
+
 // サーバーサイドでサニタイズ済みのHTMLだけを #content に反映する境界。
 // XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み。
 function applySanitizedContentHtml(ctx, contentEl, content) {
-  if (!contentEl || typeof content !== 'string') {
+  requireUpdateTarget(contentEl, '#content');
+  if (typeof content !== 'string') {
     return false;
   }
   if (content === ctx.state.lastAppliedContent) {
@@ -125,7 +132,8 @@ function applySanitizedContentHtml(ctx, contentEl, content) {
 
 // サーバー生成済みTOC HTMLだけを #toc に反映する境界。
 function applySanitizedTocHtml(tocEl, toc) {
-  if (!tocEl || typeof toc !== 'string') {
+  requireUpdateTarget(tocEl, '#toc');
+  if (typeof toc !== 'string') {
     return false;
   }
   if (normalizeTocHtml(tocEl.innerHTML) === normalizeTocHtml(toc)) {
@@ -136,6 +144,8 @@ function applySanitizedTocHtml(tocEl, toc) {
 }
 
 function applyValidatedUpdateHtml(ctx, targets, validation) {
+  requireUpdateTarget(targets.contentEl, '#content');
+  requireUpdateTarget(targets.tocEl, '#toc');
   var safeData = validation.safeData;
   return {
     contentChanged: applySanitizedContentHtml(ctx, targets.contentEl, safeData.content),
@@ -377,6 +387,21 @@ Expected: `#content` and `#toc` assignment matches are only in `src/template/ass
 ```bash
 git add docs/todo/TODO.md
 git commit -m "docs: ブラウザJS分割TODOをcontent renderer後に整理"
+```
+
+## Review Follow-up: Fail-fast And WebSocket Payload Hardening
+
+追加レビューで見つかった境界の穴を埋める。実装時点のリポジトリ指示、ユーザー指示、ブランチ状態、未コミット差分はこの plan の古い手順より優先する。
+
+- `applyValidatedUpdateHtml` は `#content` と `#toc` を mutation 前に両方検証する。片方でも欠ける場合は `innerHTML` 代入も `lastAppliedContent` 更新も行わない。
+- `tests/e2e/memo_jump.spec.ts` に `#toc` 欠落時の fail-fast E2E を追加し、本文の部分適用と cache 更新が起きないことを検証する。
+- `src/template/assets/js/websocket.js` は `JSON.parse` 後、`data.error` などに触る前に object payload か検証する。`null` や配列は TypeError にせず、parse error banner と `data-state="error"` に寄せて接続を閉じる。
+- `tests/e2e/helpers.spec.ts` に `null` / 配列 JSON の WebSocket E2E を追加する。
+- `tests/e2e/text_selection_defer.spec.ts` の stale buffered update ログ検証は、warning context の非同期取得を `expect.poll` で待ってから、HTML 本体ではなく `{ file, refresh, contentLength, tocLength }` が出ることを肯定検証する。
+- 追加対象 E2E:
+
+```bash
+npm run test:e2e -- tests/e2e/memo_jump.spec.ts tests/e2e/helpers.spec.ts tests/e2e/text_selection_defer.spec.ts
 ```
 
 ## Completion Report Requirements

@@ -61,6 +61,8 @@ function applySanitizedTocHtml(tocEl, toc) {
 }
 
 function applyValidatedUpdateHtml(ctx, targets, validation) {
+  requireUpdateTarget(targets.contentEl, '#content');
+  requireUpdateTarget(targets.tocEl, '#toc');
   var safeData = validation.safeData;
   return {
     contentChanged: applySanitizedContentHtml(ctx, targets.contentEl, safeData.content),

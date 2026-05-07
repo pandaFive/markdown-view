@@ -175,7 +175,17 @@ test('選択中はrefreshが古いバッファ更新より優先される', asyn
   await expect(page.locator('#content')).toContainText('Refresh wins after selection');
   await expect(page.locator('#content')).not.toContainText('Stale buffered update');
   await expect.poll(() => warnings.some((text) => text.includes('buffer済み更新を破棄しました'))).toBe(true);
-  expect(JSON.stringify(warningContexts)).not.toContain('Stale buffered update');
+  await expect.poll(() => warningContexts.length).toBeGreaterThan(0);
+  expect(warningContexts[0]).toMatchObject({
+    reason: 'refresh通知を優先',
+    update: {
+      file: 'README.md',
+      refresh: false,
+      contentLength: expect.any(Number),
+      tocLength: expect.any(Number)
+    }
+  });
+  expect(JSON.stringify(warningContexts[0])).not.toContain('Stale buffered update');
 });
 
 test('fileなしrefreshの保留更新を適用できない場合は警告する', async ({ page }) => {

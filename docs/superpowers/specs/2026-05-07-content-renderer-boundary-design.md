@@ -78,17 +78,23 @@ WebSocket/API から届いた update payload を検証する。
 
 `content` が文字列で、`ctx.state.lastAppliedContent` と異なる場合だけ `contentEl.innerHTML = content` を行う。反映した場合は `ctx.state.lastAppliedContent` を更新する。
 
+`contentEl` が欠落している場合は `updateContent target missing: #content` で例外にする。必須DOM欠落を no-op として黙殺すると cache とDOMの整合性を崩すため、fail-fast を契約にする。
+
 この関数名は、入力 HTML がサーバー側で sanitize 済みである契約を明示するために `Sanitized` を含める。
 
 ### `applySanitizedTocHtml(tocEl, toc)`
 
 `toc` が文字列で、正規化後に現在の `tocEl.innerHTML` と異なる場合だけ `tocEl.innerHTML = toc` を行う。
 
+`tocEl` が欠落している場合は `updateContent target missing: #toc` で例外にする。
+
 ### `applyValidatedUpdateHtml(ctx, targets, validation)`
 
 `content` と `toc` の DOM 反映をまとめる薄い関数にする。
 
 想定する `targets` は `{ contentEl, tocEl }`。戻り値は `{ contentChanged, tocChanged }` とする。`updateContent` は初期実装では戻り値を副作用分岐に使わないが、後続の `createContentController(ctx, deps)` 化で副作用を条件分岐しやすくするために返す。
+
+この関数は `#content` と `#toc` の両方を mutation 前に検証する。片方でも欠けていれば `innerHTML` 代入も `lastAppliedContent` 更新も行わず fail-fast する。
 
 ## `updateContent` Integration
 
@@ -113,6 +119,7 @@ WebSocket/API から届いた update payload を検証する。
 - 契約違反ログには HTML 本体を含めない。ログ経由の情報漏えいと巨大ログ化を避ける。
 - production の `window` へ `content-renderer` 内部関数を露出しない。
 - `#content` / `#toc` への直接 `innerHTML` 代入を renderer 境界に集約し、将来の XSS レビュー対象を狭める。
+- WebSocket の JSON payload は object 境界を検証してから読む。`null` や配列は TypeError ではなく安全な parse error 状態へ寄せ、payload 本体はログに出さない。
 
 ## Tests And Verification
 
@@ -123,13 +130,16 @@ WebSocket/API から届いた update payload を検証する。
 - `updateContent` の契約違反 warn が既存と同等に出る。
 - 同一 `data.content` の 2 回目 `updateContent` は no-op cache により一時 DOM 状態を壊さない。
 - `data.content` が変わると再描画される。
+- `#content` または `#toc` 欠落時は部分適用せず、適用済み cache も更新しない。
+- WebSocket が `null` や配列 JSON を受信しても TypeError を出さず、安全なエラー状態になる。
+- stale buffered update の warning context は HTML 本体ではなく、長さなどのメタデータだけを出す。
 - production では `window.updateContent`、`window.markdownViewTestHooks`、`content-renderer` 内部関数が露出しない。
 - E2E opt-in 時だけ `window.markdownViewTestHooks.updateContent` が使える。
 
 必須の対象 E2E:
 
 ```bash
-npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts
+npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts tests/e2e/helpers.spec.ts tests/e2e/text_selection_defer.spec.ts
 ```
 
 ### Rust
@@ -154,7 +164,7 @@ rg "innerHTML\\s*=" src/template/assets/js
 
 ```bash
 ./verify.sh
-npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts
+npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts tests/e2e/helpers.spec.ts tests/e2e/text_selection_defer.spec.ts
 ```
 
 ## TODO Update
@@ -174,6 +184,8 @@ npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jum
 - `updateContent` の外部挙動、E2E hook、production 非露出契約が維持される。
 - 契約違反 warn は HTML 本体を出さず、既存と同等のメタデータだけを出す。
 - 同一 `data.content` の no-op cache が維持される。
+- 必須DOM欠落時は `#content` / `#toc` の両方を mutation 前に検証し、部分適用しない。
+- WebSocket の object でない JSON payload は TypeError ではなく安全なエラー状態で止める。
 - `docs/todo/TODO.md` のブラウザ JS 項目が、今回完了範囲と後続範囲に整理される。
 - `./verify.sh` と対象 E2E の結果が completion report に記録される。
 

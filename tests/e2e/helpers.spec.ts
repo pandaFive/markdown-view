@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
 import {
   dispatchWsMessage,
@@ -212,7 +212,7 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続しな�
   await page.reload();
   await stabilizeWebSocketHarness(page);
 
-  const parseResult = await page.evaluate(() => {
+  const parseResult = await page.evaluate((messageData) => {
     const lastWs = window.__lastWs;
     const realWsOnmessage = window.__realWsOnmessage;
     if (!lastWs || !realWsOnmessage) {
@@ -245,6 +245,60 @@ test('WebSocketが不正JSONを受信したら接続を閉じて再接続しな�
   await expect.poll(() => page.evaluate(() => {
     return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
   })).toBe(false);
+});
+
+async function expectInvalidJsonValueClosesWebSocket(page: Page, data: string) {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message);
+  });
+
+  const parseResult = await page.evaluate((messageData) => {
+    const lastWs = window.__lastWs;
+    const realWsOnmessage = window.__realWsOnmessage;
+    if (!lastWs || !realWsOnmessage) {
+      throw new Error('WebSocket test harness is not initialized');
+    }
+    const originalClose = lastWs.close.bind(lastWs);
+    window.__parseErrorWs = lastWs;
+    window.__wsCloseCalls = 0;
+    lastWs.close = function(...args: Parameters<WebSocket['close']>) {
+      window.__wsCloseCalls = (window.__wsCloseCalls ?? 0) + 1;
+      return originalClose(...args);
+    };
+
+    realWsOnmessage({ data: messageData });
+    return {
+      closeCalls: window.__wsCloseCalls ?? 0,
+      liveState: document.getElementById('live-status')?.dataset.state ?? '',
+      bannerText: document.getElementById('ws-parse-error-banner')?.textContent ?? ''
+    };
+  }, data);
+
+  expect(parseResult).toEqual(expect.objectContaining({
+    closeCalls: 1,
+    liveState: 'error'
+  }));
+  expect(parseResult.bannerText).toContain('形式が不正');
+  expect(pageErrors).toEqual([]);
+
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
+  await page.waitForTimeout(1300);
+  await expect.poll(() => page.evaluate(() => {
+    return Boolean(window.__lastWs && window.__parseErrorWs && window.__lastWs !== window.__parseErrorWs);
+  })).toBe(false);
+}
+
+test('WebSocketがobjectでないJSONを受信したらTypeErrorを出さず接続を閉じる', async ({ page }) => {
+  await expectInvalidJsonValueClosesWebSocket(page, 'null');
+});
+
+test('WebSocketが配列JSONを受信したらTypeErrorを出さず接続を閉じる', async ({ page }) => {
+  await expectInvalidJsonValueClosesWebSocket(page, '[]');
 });
 
 test('WebSocket parse errorバナー表示中でも通常切断なら再接続する', async ({ page }) => {

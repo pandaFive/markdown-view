@@ -560,6 +560,40 @@ test('updateContentは必須DOM欠落時にfail-fastし適用済みcacheを更�
   expect(result.lastAppliedContent).toBe(beforeLastApplied);
 });
 
+test('updateContentはtoc欠落時に本文もcacheも部分更新しない', async ({ page }) => {
+  await expect(page.locator('#content h2').first()).toBeVisible();
+  const primeContent = await fetchLongContent(page, 'missing toc prime');
+  await updateContent(page, primeContent, {});
+  const beforeLastApplied = await page.evaluate(() => window.markdownViewTestHooks.lastAppliedContent);
+  expect(beforeLastApplied).toBe(primeContent.content);
+
+  const result = await page.evaluate(() => {
+    const toc = document.getElementById('toc');
+    toc?.remove();
+    try {
+      window.markdownViewTestHooks.updateContent({
+        content: '<h1 data-missing-toc>should not apply</h1>',
+        toc: '<ul></ul>'
+      });
+      return {
+        errorMessage: null,
+        lastAppliedContent: window.markdownViewTestHooks.lastAppliedContent,
+        appliedPartialContent: Boolean(document.querySelector('#content [data-missing-toc]'))
+      };
+    } catch (error) {
+      return {
+        errorMessage: error instanceof Error ? error.message : String(error),
+        lastAppliedContent: window.markdownViewTestHooks.lastAppliedContent,
+        appliedPartialContent: Boolean(document.querySelector('#content [data-missing-toc]'))
+      };
+    }
+  });
+
+  expect(result.errorMessage).toContain('updateContent target missing: #toc');
+  expect(result.lastAppliedContent).toBe(beforeLastApplied);
+  expect(result.appliedPartialContent).toBe(false);
+});
+
 test('updateContentはdata.content/toc欠落時に契約違反warnを出す', async ({ page }) => {
   // beforeEach で /?file=long.md へ goto 済み
   await expect(page.locator('#content h2').first()).toBeVisible();

@@ -20,6 +20,16 @@ function summarizeBufferedUpdateForLog(data) {
   };
 }
 
+function isObjectWebSocketMessage(data) {
+  return data && typeof data === 'object' && !Array.isArray(data);
+}
+
+function describeInvalidWebSocketPayload(data) {
+  if (data === null) return 'null';
+  if (Array.isArray(data)) return 'array';
+  return typeof data;
+}
+
 // WebSocket の再接続・buffer 状態は closure に閉じ、他機能は controller API 経由で操作する。
 function createWebSocketController(ctx, deps) {
   var socket = null;
@@ -108,6 +118,16 @@ function createWebSocketController(ctx, deps) {
       } catch (e) {
         console.error('[markdown-view] JSONパースエラー:', e);
         showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
+        setLiveStatus('error');
+        suppressNextReconnect = true;
+        socket.close();
+        return;
+      }
+      if (!isObjectWebSocketMessage(data)) {
+        console.error('[markdown-view] WebSocketメッセージ形式エラー:', {
+          payloadType: describeInvalidWebSocketPayload(data)
+        });
+        showWsParseErrorBanner('サーバーから形式が不正なWebSocketメッセージを受信しました。ページを再読み込みしてください。');
         setLiveStatus('error');
         suppressNextReconnect = true;
         socket.close();
