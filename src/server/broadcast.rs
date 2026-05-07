@@ -134,20 +134,30 @@ fn send_broadcast_message(
 pub(super) fn spawn_watch_event_forwarder(
     state: Arc<AppState>,
     mut rx: mpsc::Receiver<WatchEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> WatchForwarderHandle {
+    let diagnostics = WatchForwarderDiagnostics::new(state.tx().clone());
+    let task_diagnostics = diagnostics.clone();
+    let task = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 WatchEvent::FileChanged(changed_path) => {
+                    task_diagnostics.record(WatchForwarderEventKind::FileChanged);
                     notify_update(&state, &changed_path).await;
                 }
                 WatchEvent::Error(error) => {
+                    task_diagnostics.record(WatchForwarderEventKind::Error);
                     broadcast_error(&state, &error);
                 }
             }
         }
-        tracing::info!("[markdown-view] ファイル変更通知タスクが終了しました");
-    })
+        let snapshot = task_diagnostics.snapshot();
+        tracing::info!(
+            last_event_kind = ?snapshot.last_event_kind,
+            receiver_count = snapshot.receiver_count,
+            "[markdown-view] ファイル変更通知タスクが終了しました"
+        );
+    });
+    WatchForwarderHandle { task, diagnostics }
 }
 
 /// ファイル監視エラーをブロードキャストする
@@ -536,6 +546,27 @@ mod tests {
         }
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_watch_forwarder_自然終了ログに診断情報を含める() {
+        let base_dir = tempfile::tempdir().unwrap();
+        std::fs::write(base_dir.path().join("README.md"), "# before").unwrap();
+        let state = Arc::new(create_directory_state(base_dir.path()));
+        let (tx, rx) = mpsc::channel(4);
+        let handle = spawn_watch_event_forwarder(state, rx);
+
+        tx.send(WatchEvent::Error(WatchError::notify("forwarder-log-test")))
+            .await
+            .unwrap();
+        drop(tx);
+
+        handle.task.await.unwrap();
+
+        assert!(logs_contain("ファイル変更通知タスクが終了しました"));
+        assert!(logs_contain("last_event_kind=Some(Error)"));
+        assert!(logs_contain("receiver_count=0"));
+    }
+
     #[tokio::test]
     async fn test_spawn_watch_event_forwarder_監視エラーをbroadcastする() {
         let (_dir, file_path, state) = create_single_file_state_with_fixture("test.md", "# test");
@@ -560,7 +591,7 @@ mod tests {
             other => panic!("Errorメッセージを期待したが {:?} を受信", other),
         }
 
-        forwarder.await.unwrap();
+        forwarder.task.await.unwrap();
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {

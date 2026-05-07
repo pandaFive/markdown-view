@@ -2,16 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::task::JoinHandle;
 
-use super::broadcast::spawn_watch_event_forwarder;
+use super::broadcast::{spawn_watch_event_forwarder, WatchForwarderHandle};
 use super::state::AppState;
 use crate::watcher::{Watcher, WatcherHealth};
 
 /// 監視スレッドと転送タスクを束ねるサービス
 pub struct WatchService {
     watcher: Option<Watcher>,
-    watch_forwarder: Option<JoinHandle<()>>,
+    watch_forwarder: Option<WatchForwarderHandle>,
 }
 
 /// 監視イベント転送タスクの停止待機秒数
@@ -61,10 +60,14 @@ impl WatchService {
     }
 }
 
-async fn shutdown_watch_forwarder(mut watch_forwarder: JoinHandle<()>) {
+async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
+    let WatchForwarderHandle {
+        mut task,
+        diagnostics: _,
+    } = watch_forwarder;
     match tokio::time::timeout(
         Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS),
-        &mut watch_forwarder,
+        &mut task,
     )
     .await
     {
@@ -80,8 +83,8 @@ async fn shutdown_watch_forwarder(mut watch_forwarder: JoinHandle<()>) {
             tracing::warn!(
                 "[markdown-view] 監視イベント転送タスク停止がタイムアウトしたためabortします"
             );
-            watch_forwarder.abort();
-            if let Err(e) = watch_forwarder.await {
+            task.abort();
+            if let Err(e) = task.await {
                 if e.is_cancelled() {
                     return;
                 }
