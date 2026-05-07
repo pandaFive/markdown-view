@@ -28,12 +28,6 @@
   - 対応: `Refresh` variant に `memo_refresh: bool` を追加するか、仕様コメントを `messages.rs` に明記。`MemoResponse` に degrade flag を追加し、HTML 側でバナー表示できるよう情報を渡す
   - 理由: 仕様契約を型・コメントに固定し、UI が「メモ機能の一時的な機能低下」を区別できるようにする
 
-- [ ] watcher の `WatchEvent::Error` 後の健全性 API と atomic save 耐性 E2E を追加する
-  - ファイル: `src/watcher/runtime.rs` L165-178, `src/watcher/strategy.rs` L109-116/L216-246, `tests/integration_test.rs`
-  - 現状: notify 由来エラーをブロードキャストした後も watcher は停止しないが、`ThreadPanic` 時は実際にはスレッドが死んでいる。HTTP 側からは無音と区別できない。エディタの atomic save（rename / 削除→作成）は inode 切り替えで notify が古い inode を見失う可能性があるが、tempfile で再現する E2E が無い
-  - 対応: `WatchService` に `is_alive()` 相当の健全性フラグを追加し、`ThreadPanic` 受信で立てる。tempfile で「`target.md.swp` → `target.md~` → rename」のシーケンスを E2E に追加し、保存後の WS update 受信を確認
-  - 理由: 監視機能が silent に死ぬパターンを観測可能にする
-
 - [ ] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
   - ファイル: `src/renderer/state.rs` L42-336, `src/renderer/render.rs` L33-55
   - 現状: 14 個の `pub(super)` メソッド（`push_html`/`push_soft_break`/`finish_heading`/`finish_code_block` 等）で State Machine が implicit。`finish_heading` は `debug_assert! + take().?` で release fallback、`finish_code_block` は release でも `unreachable!`、と契約強制が混在
@@ -54,6 +48,8 @@
 
 ## Done Summary
 
+- [x] watcher の `WatchEvent::Error` 後の健全性 API と atomic save 耐性 E2E を追加する
+  - 完了根拠: `WatcherHealth` を追加し、`WatchService::health()` と `WatchService::is_alive()` から watcher 状態を内部 API として取得できるようにした。`ThreadPanic` と notify error は `Failed(...)` として分類され、`is_alive()` は `Alive` の場合だけ true を返す。単一ファイルモードとディレクトリモードの atomic save 相当の rename シーケンス後に WebSocket update を受け取る統合テストで固定した。HTTP API、UI、WebSocket エラー JSON の外部契約は増やしていない
 - [x] `canonicalize` 失敗時の再帰挙動の非対称を解消する
   - 完了根拠: `catalog.rs` の通常ディレクトリとシンボリックリンクディレクトリの再帰可否判定を `resolve_recursable_directory` へ集約し、正規化、base 配下確認、metadata によるディレクトリ判定、visited 登録を同じ経路に揃えた。走査実体は検証済み canonical path を使い、表示用相対パスは symlink 名を維持する。`read_dir` 直前の再検証とログ path の制御文字 escape も追加した。base 外 symlink、隠し target symlink、通常ファイル symlink、symlink cycle、基本列挙、差し替え検出の回帰テストで固定している。filesystem race 全般の完全解消は非目標
 - [x] `AppState` の Arc 二重ラップと `with_memo_fs` の API 整合を解消する
