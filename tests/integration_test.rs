@@ -1476,6 +1476,42 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
     watch_service.shutdown().await;
 }
 
+#[tokio::test]
+async fn test_ディレクトリモード_atomic_save後にwebsocket更新() {
+    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let watch_service = markdown_view::server::WatchService::start(state.clone())
+        .await
+        .unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let initial = tokio::time::timeout(Duration::from_millis(500), read.next()).await;
+    assert!(
+        initial.is_err(),
+        "ディレクトリモードでは更新前に初期WebSocketメッセージを送信しない"
+    );
+
+    let file_path = tmp_dir.path().join("README.md");
+    atomic_save_markdown_file(&file_path, "# README\n\nAfter Atomic Save");
+
+    let msg = next_ws_message(&mut read).await;
+
+    let text = msg
+        .into_text()
+        .expect("WebSocketメッセージのテキスト変換に失敗");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("JSONパースに失敗");
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("After Atomic Save"));
+    assert_eq!(json["file"].as_str().unwrap(), "README.md");
+    assert!(watch_service.is_alive());
+
+    watch_service.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ディレクトリモード_websocket更新はbackslashファイル名を保持する() {
