@@ -876,6 +876,38 @@ async fn test_ファイル変更でwebsocket更新() {
     drop(tmp_dir);
 }
 
+#[tokio::test]
+async fn test_単一ファイルモード_atomic_save後にwebsocket更新() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let file_path = tmp_dir.path().join("atomic_single.md");
+    tokio::fs::write(&file_path, "# Before Atomic Save")
+        .await
+        .unwrap();
+
+    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let watch_service = WatchService::start(state.clone()).await.unwrap();
+
+    let url = format!("ws://{}/ws", addr);
+    let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
+    let (_write, mut read) = ws_stream.split();
+
+    let _initial_message = next_ws_message(&mut read).await;
+
+    atomic_save_markdown_file(&file_path, "# After Atomic Save");
+
+    let msg = next_ws_message(&mut read).await;
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("After Atomic Save"));
+    assert!(watch_service.is_alive());
+
+    watch_service.shutdown().await;
+    drop(tmp_dir);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
@@ -1947,6 +1979,16 @@ async fn setup_single_file_server_from_path(
     let state = build_single_file_state(file_path);
     let addr = spawn_test_server(state.clone()).await;
     (state, addr)
+}
+
+fn atomic_save_markdown_file(path: &Path, new_content: &str) {
+    let swp_path = path.with_extension("md.swp");
+    let backup_path = path.with_extension("md~");
+
+    std::fs::write(&swp_path, new_content).unwrap();
+    std::fs::rename(path, &backup_path).unwrap();
+    std::fs::rename(&swp_path, path).unwrap();
+    std::fs::remove_file(&backup_path).unwrap();
 }
 
 async fn setup_single_file_server_with_bytes(
