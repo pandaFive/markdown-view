@@ -275,30 +275,13 @@ fn spawn_watcher_thread(
                     move |res: std::result::Result<
                         Vec<notify_debouncer_mini::DebouncedEvent>,
                         notify::Error,
-                    >| match res {
-                        Ok(events) => {
-                            for changed_path in callback_strategy.collect_changed_paths(&events) {
-                                send_watch_event(
-                                    &rt_tx,
-                                    WatchEvent::FileChanged(changed_path),
-                                    callback_strategy.change_label(),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            callback_health_state.store_failed(WatcherFailureKind::Notify);
-                            let watch_error = WatchError::notify(e.to_string());
-                            tracing::warn!(
-                                "[markdown-view] {}: {}",
-                                callback_strategy.watch_error_prefix(),
-                                watch_error.detail()
-                            );
-                            send_watch_event(
-                                &rt_tx,
-                                WatchEvent::Error(watch_error),
-                                callback_strategy.error_label(),
-                            );
-                        }
+                    >| {
+                        handle_debounced_watch_result(
+                            res,
+                            &callback_strategy,
+                            &rt_tx,
+                            &callback_health_state,
+                        );
                     },
                 );
 
@@ -326,20 +309,65 @@ fn spawn_watcher_thread(
             }));
 
             if let Err(panic_payload) = result {
-                let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "不明なパニック".to_string()
-                };
-                health_state.store_failed(WatcherFailureKind::ThreadPanic);
-                let watch_error = WatchError::thread_panic(panic_detail.clone());
-                tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
-                send_watch_event(&panic_tx, WatchEvent::Error(watch_error), error_label);
+                handle_watcher_panic(
+                    panic_payload,
+                    panic_message,
+                    error_label,
+                    &health_state,
+                    &panic_tx,
+                );
             }
         })
         .context(spawn_context)
+}
+
+fn handle_debounced_watch_result(
+    result: std::result::Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>,
+    strategy: &WatchStrategy,
+    tx: &mpsc::Sender<WatchEvent>,
+    health_state: &WatcherHealthState,
+) {
+    match result {
+        Ok(events) => {
+            for changed_path in strategy.collect_changed_paths(&events) {
+                send_watch_event(
+                    tx,
+                    WatchEvent::FileChanged(changed_path),
+                    strategy.change_label(),
+                );
+            }
+        }
+        Err(e) => {
+            health_state.store_failed(WatcherFailureKind::Notify);
+            let watch_error = WatchError::notify(e.to_string());
+            tracing::warn!(
+                "[markdown-view] {}: {}",
+                strategy.watch_error_prefix(),
+                watch_error.detail()
+            );
+            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
+        }
+    }
+}
+
+fn handle_watcher_panic(
+    panic_payload: Box<dyn std::any::Any + Send>,
+    panic_message: &str,
+    error_label: &str,
+    health_state: &WatcherHealthState,
+    tx: &mpsc::Sender<WatchEvent>,
+) {
+    let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "不明なパニック".to_string()
+    };
+    health_state.store_failed(WatcherFailureKind::ThreadPanic);
+    let watch_error = WatchError::thread_panic(panic_detail.clone());
+    tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
+    send_watch_event(tx, WatchEvent::Error(watch_error), error_label);
 }
 
 fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: InitResult) {
@@ -381,11 +409,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        keep_watcher_thread_alive, send_watch_event, Watcher, WatcherFailureKind, WatcherHealth,
-        WatcherHealthState,
+        handle_debounced_watch_result, handle_watcher_panic, keep_watcher_thread_alive,
+        send_watch_event, Watcher, WatcherFailureKind, WatcherHealth, WatcherHealthState,
     };
     use crate::server::AppMode;
-    use crate::watcher::{WatchError, WatchEvent};
+    use crate::watcher::strategy::WatchStrategy;
+    use crate::watcher::{WatchError, WatchErrorKind, WatchEvent};
 
     fn create_markdown_fixture(
         name: &str,
@@ -485,29 +514,63 @@ mod tests {
     }
 
     #[test]
-    fn test_watcher_health_threadpanicはaliveではない() {
+    fn test_watcher_panic経路はhealth_failedとerror_eventを記録する() {
         let health_state = WatcherHealthState::new_starting();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
 
-        health_state.store_failed(WatcherFailureKind::ThreadPanic);
+        handle_watcher_panic(
+            Box::new(String::from("panic detail")),
+            "panic message",
+            "panic label",
+            &health_state,
+            &tx,
+        );
 
         assert_eq!(
             health_state.load(),
             WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
         );
         assert!(!matches!(health_state.load(), WatcherHealth::Alive));
+        match rx.try_recv().expect("panic error eventを期待") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::ThreadPanic);
+                assert_eq!(error.detail(), "panic detail");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
     }
 
     #[test]
-    fn test_watcher_health_notifyエラーはaliveではない() {
+    fn test_notify_error経路はhealth_failedとerror_eventを記録する() {
+        let (_dir, file_path) = create_markdown_fixture("watch.md", "# before");
+        let strategy = WatchStrategy::from_mode(&AppMode::new_single_file(&file_path).unwrap())
+            .expect("watch strategyを作成できる");
         let health_state = WatcherHealthState::new_starting();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
 
-        health_state.store_failed(WatcherFailureKind::Notify);
+        handle_debounced_watch_result(
+            Err(notify::Error::generic("notify detail")),
+            &strategy,
+            &tx,
+            &health_state,
+        );
 
         assert_eq!(
             health_state.load(),
             WatcherHealth::Failed(WatcherFailureKind::Notify)
         );
         assert!(!matches!(health_state.load(), WatcherHealth::Alive));
+        match rx.try_recv().expect("notify error eventを期待") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "notify detail");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
     }
 
     #[test]
