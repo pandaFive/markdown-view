@@ -16,12 +16,6 @@
   - 対応: `notify` に渡す前段で `.git`/`node_modules`/`target` を最低限除外する。`debouncer.watcher().watch(...)` のエラーが `ENOSPC` 相当のときは `inotify` 上限引き上げ手順を含む user_message に置き換える。CLI/README にも上限の存在を明記
   - 理由: 巨大リポジトリで再現性のある起動失敗を、原因不明の panic ではなく操作可能なメッセージで案内する
 
-- [ ] shutdown チェーンの観測性を統合する
-  - ファイル: `src/watcher/runtime.rs` L21/L47-57, `src/server/watch.rs` L18/L42-72, `src/server/broadcast.rs` L36-65
-  - 現状: 2 段階のタイムアウトが連鎖（`SHUTDOWN_TIMEOUT_SECS=2` と `WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS=2`）し、`abort()` 前のログは「abort された」だけで「watcher 側が close しないのか forwarder 側が drop しないのか」が判別不能
-  - 対応: 2 つのタイムアウト定数を共通化し、`abort` 直前に `(elapsed_ms, last_event_kind, receiver_count)` を含む warn ログを 1 行追加。`spawn_watch_event_forwarder` 終了時のログにも `state.tx().receiver_count()` と最後のイベント種別を含めて、シャットダウン時に dropped events があった場合に検知できるようにする
-  - 理由: HTTP サーバー再起動経路でのファイルハンドルリークを再現性のあるログで切り分けられるようにする
-
 - [ ] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
   - ファイル: `src/server/messages.rs` L38-40, `src/server/routes.rs` L188-220
   - 現状: `Refresh` variant は `serde_json::json!({ "refresh": true })` を返すだけで、ディレクトリモードの遅延回復経路（`content.rs:133`）が memo の再取得指示を欠く。一方 `index_handler` のメモ読込失敗は `MemoResponse::empty` に silent fallback し、ユーザーには「メモが消えた」ように見える
@@ -48,6 +42,8 @@
 
 ## Done Summary
 
+- [x] shutdown チェーンの観測性を統合する
+  - 完了根拠: watcher thread と forwarder task の shutdown timeout 秒数を共通化し、forwarder の最後のイベント種別と WebSocket receiver 数を診断 snapshot として記録する構成にした。forwarder の自然終了ログと timeout / abort 直前ログに `last_event_kind` / `receiver_count` / `elapsed_ms` / `timeout_secs` を含め、停止遅延時にログだけで切り分けられるようにした。HTTP API、WebSocket payload、UI 表示の外部契約は変更していない
 - [x] watcher の `WatchEvent::Error` 後の健全性 API と atomic save 耐性 E2E を追加する
   - 完了根拠: `WatcherHealth` を追加し、`WatchService::health()` と `WatchService::is_alive()` から watcher 状態を内部 API として取得できるようにした。`ThreadPanic` と notify error は `Failed(...)` として分類され、`is_alive()` は `Alive` の場合だけ true を返す。単一ファイルモードとディレクトリモードの atomic save 相当の rename シーケンス後に WebSocket update を受け取る統合テストで固定した。HTTP API、UI、WebSocket エラー JSON の外部契約は増やしていない
 - [x] `canonicalize` 失敗時の再帰挙動の非対称を解消する
