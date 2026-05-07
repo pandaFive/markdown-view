@@ -1,8 +1,10 @@
 # Shutdown Chain Observability Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Reference for agentic workers:** This is an implementation record and reference plan. Repository policy, current user approval, and `AGENTS.md` instructions take precedence over any command examples below.
 
 **Goal:** watcher shutdown と forwarder shutdown の timeout 診断ログを統合し、abort 直前と自然終了時に最後のイベント種別と receiver 数を確認できるようにする。
+
+**Command safety:** `git add` / `git commit` snippets in this document are historical execution examples. Run mutating commands only after confirming the current user request, branch, and repository policy.
 
 **Architecture:** `broadcast.rs` に forwarder 専用 diagnostics と handle を追加し、`WatchService` は `JoinHandle<()>` ではなく diagnostics 付き handle を保持する。shutdown timeout 秒数は watcher runtime から `pub(crate)` に再公開し、watcher thread と forwarder task が同じ定数を参照する。
 

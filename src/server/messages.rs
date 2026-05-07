@@ -42,6 +42,11 @@ pub enum BroadcastMessage {
     Error(String),
 }
 
+pub(super) struct BroadcastMessageLogSummary {
+    pub message_kind: &'static str,
+    pub has_file: bool,
+}
+
 impl BroadcastMessage {
     pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
         match self {
@@ -52,6 +57,31 @@ impl BroadcastMessage {
                 "refresh": true
             })),
             BroadcastMessage::Error(message) => serde_json::to_string(&error_message_json(message)),
+        }
+    }
+
+    pub(super) fn log_summary(&self) -> BroadcastMessageLogSummary {
+        match self {
+            BroadcastMessage::Update(update) => BroadcastMessageLogSummary {
+                message_kind: "update",
+                has_file: update.file().is_some(),
+            },
+            BroadcastMessage::MemoUpdate(_) => BroadcastMessageLogSummary {
+                message_kind: "memo_update",
+                has_file: true,
+            },
+            BroadcastMessage::LaggedRecovery(message) => BroadcastMessageLogSummary {
+                message_kind: "lagged_recovery",
+                has_file: message.memo_file.is_some(),
+            },
+            BroadcastMessage::Refresh => BroadcastMessageLogSummary {
+                message_kind: "refresh",
+                has_file: false,
+            },
+            BroadcastMessage::Error(_) => BroadcastMessageLogSummary {
+                message_kind: "error",
+                has_file: false,
+            },
         }
     }
 }
@@ -112,5 +142,67 @@ mod tests {
         assert!(value["toc"].as_str().unwrap().contains("title"));
         assert_eq!(value["memo_refresh"], true);
         assert!(value.get("memo_file").is_none());
+    }
+
+    #[test]
+    fn test_broadcast_message_log_summaryは全variantの種別とfile有無を返す() {
+        let update_with_file = BroadcastMessage::Update(UpdateMessage::new(
+            crate::renderer::render_markdown("# title"),
+            crate::toc::generate_toc("# title"),
+            Some("docs/guide.md".to_string()),
+        ));
+        assert_log_summary(update_with_file, "update", true);
+
+        let update_without_file = BroadcastMessage::Update(UpdateMessage::new(
+            crate::renderer::render_markdown("# title"),
+            crate::toc::generate_toc("# title"),
+            None,
+        ));
+        assert_log_summary(update_without_file, "update", false);
+
+        assert_log_summary(
+            BroadcastMessage::MemoUpdate(MemoUpdateMessage::new("docs/guide.md".to_string())),
+            "memo_update",
+            true,
+        );
+
+        let recovery_with_memo_file = BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(
+            UpdateMessage::new(
+                crate::renderer::render_markdown("# title"),
+                crate::toc::generate_toc("# title"),
+                None,
+            ),
+            Some("docs/guide.md".to_string()),
+        ));
+        assert_log_summary(recovery_with_memo_file, "lagged_recovery", true);
+
+        let recovery_without_memo_file =
+            BroadcastMessage::LaggedRecovery(LaggedRecoveryMessage::new(
+                UpdateMessage::new(
+                    crate::renderer::render_markdown("# title"),
+                    crate::toc::generate_toc("# title"),
+                    None,
+                ),
+                None,
+            ));
+        assert_log_summary(recovery_without_memo_file, "lagged_recovery", false);
+
+        assert_log_summary(BroadcastMessage::Refresh, "refresh", false);
+        assert_log_summary(
+            BroadcastMessage::Error("secret error detail".to_string()),
+            "error",
+            false,
+        );
+    }
+
+    fn assert_log_summary(
+        message: BroadcastMessage,
+        expected_message_kind: &'static str,
+        expected_has_file: bool,
+    ) {
+        let summary = message.log_summary();
+
+        assert_eq!(summary.message_kind, expected_message_kind);
+        assert_eq!(summary.has_file, expected_has_file);
     }
 }

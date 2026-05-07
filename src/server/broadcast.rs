@@ -111,9 +111,10 @@ fn send_broadcast_message(
     message: BroadcastMessage,
 ) {
     if let Err(error) = tx.send(message) {
-        let failed_message = error.0;
+        let summary = error.0.log_summary();
         tracing::warn!(
-            failed_message = ?failed_message,
+            message_kind = summary.message_kind,
+            has_file = summary.has_file,
             "[markdown-view] ファイル変更通知の送信に失敗しました"
         );
     }
@@ -224,26 +225,55 @@ mod tests {
 
     #[traced_test]
     #[test]
-    fn test_send_broadcast_message_送信失敗はwarnログに残す() {
+    fn test_send_broadcast_message_送信失敗は本文を伏せてwarnログに残す() {
         let (tx, rx) = broadcast::channel(1);
         drop(rx);
 
-        send_broadcast_message(&tx, BroadcastMessage::Error("test error".to_string()));
+        send_broadcast_message(
+            &tx,
+            BroadcastMessage::Error("secret broadcast error".to_string()),
+        );
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
-        assert!(logs_contain("test error"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("error"));
+        assert!(!logs_contain("secret broadcast error"));
     }
 
     #[traced_test]
     #[test]
-    fn test_broadcast_error_送信失敗はwarnログに残す() {
+    fn test_send_broadcast_message_update送信失敗はhtml本文をログに出さない() {
+        let (tx, rx) = broadcast::channel(1);
+        drop(rx);
+        let message = BroadcastMessage::Update(crate::template::UpdateMessage::new(
+            crate::renderer::render_markdown("secret markdown body"),
+            crate::toc::generate_toc("# secret heading"),
+            Some("secret/path.md".to_string()),
+        ));
+
+        send_broadcast_message(&tx, message);
+
+        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("update"));
+        assert!(logs_contain("has_file=true"));
+        assert!(!logs_contain("secret markdown body"));
+        assert!(!logs_contain("secret heading"));
+        assert!(!logs_contain("secret/path.md"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_broadcast_error_送信失敗はエラー詳細をログに出さない() {
         let base_dir = tempfile::tempdir().unwrap();
         let state = create_directory_state(base_dir.path());
 
-        broadcast_error(&state, &WatchError::notify("watch failure"));
+        broadcast_error(&state, &WatchError::notify("secret watch failure"));
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
-        assert!(logs_contain("watch failure"));
+        assert!(logs_contain("message_kind"));
+        assert!(logs_contain("error"));
+        assert!(!logs_contain("secret watch failure"));
     }
 
     #[tokio::test]
@@ -560,6 +590,32 @@ mod tests {
         assert!(logs_contain("ファイル変更通知タスクが終了しました"));
         assert!(logs_contain("last_event_kind=Some(Error)"));
         assert!(logs_contain("receiver_count=0"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_forwarder_filechanged実経路で診断状態を更新する() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let target = base_dir.path().join("README.md");
+        std::fs::write(&target, "# changed").unwrap();
+        let state = Arc::new(create_directory_state(base_dir.path()));
+        let mut broadcast_rx = state.tx().subscribe();
+        let (tx, rx) = mpsc::channel(4);
+        let handle = spawn_watch_event_forwarder(state, rx);
+
+        tx.send(WatchEvent::FileChanged(target)).await.unwrap();
+
+        let received = timeout(Duration::from_secs(1), broadcast_rx.recv())
+            .await
+            .expect("Updateのbroadcastを期待")
+            .unwrap();
+        assert!(matches!(received, BroadcastMessage::Update(_)));
+        assert_eq!(
+            handle.diagnostics.snapshot().last_event_kind,
+            Some(WatchForwarderEventKind::FileChanged)
+        );
+
+        drop(tx);
+        handle.task.await.unwrap();
     }
 
     #[tokio::test]

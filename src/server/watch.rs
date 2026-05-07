@@ -58,12 +58,27 @@ impl WatchService {
 }
 
 async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
+    shutdown_watch_forwarder_with_timeout_secs(
+        watch_forwarder,
+        watch_forwarder_shutdown_timeout_secs(),
+    )
+    .await;
+}
+
+fn watch_forwarder_shutdown_timeout_secs() -> u64 {
+    WATCH_SHUTDOWN_TIMEOUT_SECS
+}
+
+async fn shutdown_watch_forwarder_with_timeout_secs(
+    watch_forwarder: WatchForwarderHandle,
+    timeout_secs: u64,
+) {
     let WatchForwarderHandle {
         mut task,
         diagnostics,
     } = watch_forwarder;
     let start = Instant::now();
-    match tokio::time::timeout(Duration::from_secs(WATCH_SHUTDOWN_TIMEOUT_SECS), &mut task).await {
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), &mut task).await {
         Ok(join_result) => {
             if let Err(e) = join_result {
                 tracing::warn!(
@@ -77,7 +92,7 @@ async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
             let snapshot = diagnostics.snapshot();
             tracing::warn!(
                 elapsed_ms,
-                timeout_secs = WATCH_SHUTDOWN_TIMEOUT_SECS,
+                timeout_secs,
                 last_event_kind = ?snapshot.last_event_kind,
                 receiver_count = snapshot.receiver_count,
                 "[markdown-view] 監視イベント転送タスク停止がタイムアウトしたためabortします"
@@ -107,7 +122,10 @@ mod tests {
     use super::super::broadcast::{
         WatchForwarderDiagnostics, WatchForwarderEventKind, WatchForwarderHandle,
     };
-    use super::{shutdown_watch_forwarder, WatchService};
+    use super::{
+        shutdown_watch_forwarder_with_timeout_secs, watch_forwarder_shutdown_timeout_secs,
+        WatchService,
+    };
     use crate::server::AppMode;
     use crate::server::AppState;
     use crate::watcher::{WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
@@ -161,6 +179,14 @@ mod tests {
         assert!(!service.is_alive());
     }
 
+    #[test]
+    fn test_shutdown_watch_forwarderはwatcher共通timeout秒数を使う() {
+        assert_eq!(
+            watch_forwarder_shutdown_timeout_secs(),
+            WATCH_SHUTDOWN_TIMEOUT_SECS
+        );
+    }
+
     #[traced_test]
     #[tokio::test]
     async fn test_shutdown_watch_forwarder_timeoutログに診断情報を含める() {
@@ -174,16 +200,13 @@ mod tests {
             diagnostics,
         };
 
-        shutdown_watch_forwarder(handle).await;
+        shutdown_watch_forwarder_with_timeout_secs(handle, 0).await;
 
         assert!(logs_contain(
             "監視イベント転送タスク停止がタイムアウトしたためabortします"
         ));
         assert!(logs_contain("elapsed_ms="));
-        assert!(logs_contain(&format!(
-            "timeout_secs={}",
-            WATCH_SHUTDOWN_TIMEOUT_SECS
-        )));
+        assert!(logs_contain("timeout_secs=0"));
         assert!(logs_contain("last_event_kind=Some(FileChanged)"));
         assert!(logs_contain("receiver_count=1"));
     }
