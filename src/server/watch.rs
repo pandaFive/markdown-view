@@ -1,20 +1,17 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use super::broadcast::{spawn_watch_event_forwarder, WatchForwarderHandle};
 use super::state::AppState;
-use crate::watcher::{Watcher, WatcherHealth};
+use crate::watcher::{Watcher, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
 
 /// 監視スレッドと転送タスクを束ねるサービス
 pub struct WatchService {
     watcher: Option<Watcher>,
     watch_forwarder: Option<WatchForwarderHandle>,
 }
-
-/// 監視イベント転送タスクの停止待機秒数
-const WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 impl WatchService {
     /// 状態に対応するファイル監視と転送タスクを起動する
@@ -63,14 +60,10 @@ impl WatchService {
 async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
     let WatchForwarderHandle {
         mut task,
-        diagnostics: _,
+        diagnostics,
     } = watch_forwarder;
-    match tokio::time::timeout(
-        Duration::from_secs(WATCH_FORWARDER_SHUTDOWN_TIMEOUT_SECS),
-        &mut task,
-    )
-    .await
-    {
+    let start = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(WATCH_SHUTDOWN_TIMEOUT_SECS), &mut task).await {
         Ok(join_result) => {
             if let Err(e) = join_result {
                 tracing::warn!(
@@ -80,7 +73,13 @@ async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
             }
         }
         Err(_) => {
+            let elapsed_ms = start.elapsed().as_millis();
+            let snapshot = diagnostics.snapshot();
             tracing::warn!(
+                elapsed_ms,
+                timeout_secs = WATCH_SHUTDOWN_TIMEOUT_SECS,
+                last_event_kind = ?snapshot.last_event_kind,
+                receiver_count = snapshot.receiver_count,
                 "[markdown-view] 監視イベント転送タスク停止がタイムアウトしたためabortします"
             );
             task.abort();
@@ -102,8 +101,13 @@ mod tests {
     use std::sync::Arc;
 
     use tokio::sync::broadcast;
+    use tokio::task;
+    use tracing_test::traced_test;
 
-    use super::WatchService;
+    use super::super::broadcast::{
+        WatchForwarderDiagnostics, WatchForwarderEventKind, WatchForwarderHandle,
+    };
+    use super::{shutdown_watch_forwarder, WatchService};
     use crate::server::AppMode;
     use crate::server::AppState;
     use crate::watcher::WatcherHealth;
@@ -155,5 +159,29 @@ mod tests {
 
         assert_eq!(service.health(), WatcherHealth::Stopped);
         assert!(!service.is_alive());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_shutdown_watch_forwarder_timeoutログに診断情報を含める() {
+        let (tx, _rx) = broadcast::channel(4);
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+        diagnostics.record(WatchForwarderEventKind::FileChanged);
+        let handle = WatchForwarderHandle {
+            task: task::spawn(async {
+                std::future::pending::<()>().await;
+            }),
+            diagnostics,
+        };
+
+        shutdown_watch_forwarder(handle).await;
+
+        assert!(logs_contain(
+            "監視イベント転送タスク停止がタイムアウトしたためabortします"
+        ));
+        assert!(logs_contain("elapsed_ms="));
+        assert!(logs_contain("timeout_secs=2"));
+        assert!(logs_contain("last_event_kind=Some(FileChanged)"));
+        assert!(logs_contain("receiver_count=1"));
     }
 }
