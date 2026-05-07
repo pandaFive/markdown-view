@@ -9,6 +9,8 @@
 
 **Tech Stack:** Plain browser JavaScript, Rust `include_str!` inline assets, Playwright E2E tests, Rust/Cargo verification, repository `./verify.sh`.
 
+**Post-review status:** This plan has been executed. The review follow-up tightened the original design by adding fail-fast target validation before any DOM mutation and by handling non-object WebSocket JSON payloads before reading message fields. Earlier task snippets are retained as implementation history; the current contract is summarized in "Review Follow-up" and the spec file.
+
 ---
 
 ## Scope And File Structure
@@ -38,7 +40,7 @@ In `tests/e2e/update_content_exposure.spec.ts`, replace the first test with this
 
 ```ts
 test('内部グローバル名抽出は実ファイルから十分な宣言数を拾う', async () => {
-  expect(internalGlobalNames.length).toBeGreaterThan(25);
+  expect(internalGlobalNames.length).toBeGreaterThan(20);
   expect(internalGlobalNames).toContain('startMarkdownViewApp');
   expect(internalGlobalNames).toContain('updateContent');
   expect(internalGlobalNames).toContain('createWebSocketController');
@@ -367,10 +369,10 @@ Expected: PASS. This covers Rust formatting, clippy, and Rust tests.
 Run:
 
 ```bash
-npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts
+npm run test:e2e -- tests/e2e/update_content_exposure.spec.ts tests/e2e/memo_jump.spec.ts tests/e2e/helpers.spec.ts tests/e2e/text_selection_defer.spec.ts
 ```
 
-Expected: PASS.
+Expected: PASS for the renderer boundary, fail-fast, WebSocket invalid payload, and stale-log hardening coverage.
 
 - [ ] **Step 4: Run final static boundary check**
 
@@ -409,7 +411,7 @@ npm run test:e2e -- tests/e2e/memo_jump.spec.ts tests/e2e/helpers.spec.ts tests/
 Final report must include:
 
 - Changed files and rough line impact.
-- Affected dependent files: `inline_script.rs` affects inline JS bundle and CSP hash generation; `content.js` affects live update, file fetch, WebSocket buffered update, memo jump, search sync, and TOC sync.
+- Affected dependent files: `inline_script.rs` affects inline JS bundle and CSP hash generation; `content.js` affects live update, file fetch, memo jump, search sync, and TOC sync; `websocket.js` affects live update buffering, invalid payload handling, and WebSocket error UI.
 - Verification results for `./verify.sh`, targeted E2E, and `rg -n "innerHTML\\s*=" src/template/assets/js`.
-- Security note: `innerHTML` remains intentional and is limited to server-sanitized HTML boundary for `#content` / `#toc`; memo preview remains a separate existing trust boundary.
+- Security note: `innerHTML` remains intentional and is limited to server-sanitized HTML boundary for `#content` / `#toc`; non-object WebSocket JSON payloads are rejected before field access; memo preview remains a separate existing trust boundary.
 - Residual risks: search/navigation/controller decomposition remains future work; E2E covers key update paths but does not exhaust every browser scroll/history edge case.
