@@ -15,27 +15,23 @@ use super::state::AppState;
 use crate::watcher::{WatchError, WatchEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) enum WatchForwarderEventKind {
     FileChanged,
     Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) struct WatchForwarderSnapshot {
     pub last_event_kind: Option<WatchForwarderEventKind>,
     pub receiver_count: usize,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) struct WatchForwarderDiagnostics {
     last_event_kind: Arc<AtomicU8>,
     tx: tokio::sync::broadcast::Sender<BroadcastMessage>,
 }
 
-#[allow(dead_code)]
 impl WatchForwarderDiagnostics {
     const NONE: u8 = 0;
     const FILE_CHANGED: u8 = 1;
@@ -73,7 +69,6 @@ impl WatchForwarderDiagnostics {
     }
 }
 
-#[allow(dead_code)]
 pub(super) struct WatchForwarderHandle {
     pub(super) task: JoinHandle<()>,
     pub(super) diagnostics: WatchForwarderDiagnostics,
