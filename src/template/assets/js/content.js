@@ -1252,32 +1252,15 @@ function applyPendingUpdate() {
   setLiveStatus('live');
 }
 
-function normalizeTocHtml(html) {
-  return (html || '').replace(/>\s+</g, '><').trim();
-}
-
 // サーバーサイドでサニタイズ済みのHTMLを反映する
-// XSS防止: pulldown-cmarkでraw HTML無効化済み（renderer.rs参照）
+// XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み
 let updateContent = function updateContent(data, options) {
   options = options || {};
-  // null/配列は UpdateMessage ではないため、空 object として契約違反扱いに寄せる。
-  var safeData = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  var validation = validateUpdatePayload(data);
+  var safeData = validation.safeData;
 
-  // サーバー契約として content/toc は常に文字列で届く。欠落や型不一致は中継プロキシ
-  // 改変やサーバー実装の契約違反のサインで、サイレントに no-op になるとデバッグ困難。
-  // warn を出した上で、TOC 更新等の既存副作用は早期 return せず継続する（部分回復ケース許容）。
-  var missing = [];
-  if (typeof safeData.content !== 'string') missing.push('content');
-  if (typeof safeData.toc !== 'string') missing.push('toc');
-  var hasContractViolation = missing.length > 0;
-  if (hasContractViolation) {
-    // 長大なHTML本体をログに出さず、調査に必要な要約メタデータだけを残す。
-    console.warn('[markdown-view] updateContent: ' + missing.join(', ') + ' が欠落または不正 (契約違反)', {
-      missing: missing.slice(),
-      file: typeof safeData.file === 'string' ? safeData.file : null,
-      contentLength: typeof safeData.content === 'string' ? safeData.content.length : null,
-      tocLength: typeof safeData.toc === 'string' ? safeData.toc.length : null
-    });
+  if (validation.hasContractViolation) {
+    logUpdatePayloadContractViolation(validation);
   }
 
   if (appContext.state.pendingUpdateTimer) {
@@ -1291,16 +1274,10 @@ let updateContent = function updateContent(data, options) {
   var contentEl = document.getElementById('content');
   var tocEl = document.getElementById('toc');
 
-  // 比較対象は contentEl の現在 HTML ではなく appContext.state.lastAppliedContent (キャッシュ変数)。
-  // enhanceContentInteractions が描画後に DOM を改変するため DOM 比較は常に mismatch する。
-  // 詳細は bootstrap.js の appContext.state.lastAppliedContent 宣言コメント参照。
-  if (typeof safeData.content === 'string' && safeData.content !== appContext.state.lastAppliedContent) {
-    contentEl.innerHTML = safeData.content;
-    appContext.state.lastAppliedContent = safeData.content;
-  }
-  if (typeof safeData.toc === 'string' && normalizeTocHtml(tocEl.innerHTML) !== normalizeTocHtml(safeData.toc)) {
-    tocEl.innerHTML = safeData.toc;
-  }
+  applyValidatedUpdateHtml(appContext, {
+    contentEl: contentEl,
+    tocEl: tocEl
+  }, validation);
 
   setupTocTracking();
   suppressTocTrackingFor(120);
@@ -1336,7 +1313,7 @@ let updateContent = function updateContent(data, options) {
   syncDocumentSearchAfterContentUpdate(options);
   setupTocFilter();
   hideQuoteSelectionAction();
-  if (!hasContractViolation && appContext.websocket) {
+  if (!validation.hasContractViolation && appContext.websocket) {
     appContext.websocket.rememberAppliedLiveUpdate(safeData);
   }
 };

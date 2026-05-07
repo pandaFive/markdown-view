@@ -35,10 +35,10 @@
   - 理由: CLAUDE.md「300 行を超えたファイルは分割を提案」に該当。エスケープ漏れの一発リスクを集約しないために属性挿入をヘルパー化する
 
 - [ ] ブラウザ JS の責務境界を小モジュールへ分割する
-  - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
-  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。一方、`content.js` は検索、リンク解決、履歴、描画反映、スクロール、引用ジャンプをまとめて扱う巨大ファイルのままで、`appContext` 直接参照も多い。`innerHTML` はサーバー生成の `SanitizedHtml` を信頼する設計だが、信頼境界は型やモジュール境界としてはまだ表現されていない
-  - 対応: `content-renderer` / `document-search` / `navigation` / `live-update-buffer` / `memo-citation` のように責務単位で分割し、分割後の境界では `ctx` 注入や小さな controller API で依存を明示する。`updateContent` の入力型・`SanitizedHtml` 前提・`innerHTML` 使用箇所を契約テストで固定する。メモや検索を削る、または純プレビューモードへ戻すことは非目標
-  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。production グローバル露出は解消したが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で XSS 境界や状態遷移を壊しやすい
+  - ファイル: `src/template/assets/js/{bootstrap,content,content-renderer,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
+  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。さらに `content-renderer.js` で `updateContent` の payload 契約、契約違反 warn、`#content` / `#toc` への sanitize 済み HTML 反映、TOC HTML 正規化を明示境界へ切り出した。一方、`content.js` は検索、リンク解決、履歴、スクロール、引用ジャンプ、描画後副作用をまだまとめて扱う巨大ファイルのままで、controller API と依存境界は未整理
+  - 対応: 次の分割単位を `document-search` / `directory-search`、`navigation` / `link-resolution`、`createContentController(ctx, deps)` の順で切る。`innerHTML` 使用箇所は引き続き信頼境界を明示し、検索やメモを削る、または純プレビューモードへ戻すことは非目標
+  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。`content-renderer` により最重要の XSS 信頼境界は狭まったが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で状態遷移を壊しやすい
 
 ## Done Summary
 

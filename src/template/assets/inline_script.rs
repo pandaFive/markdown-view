@@ -4,6 +4,8 @@ const TEMPLATE: &str = concat!(
     "\n",
     include_str!("js/selection.js"),
     "\n",
+    include_str!("js/content-renderer.js"),
+    "\n",
     include_str!("js/content.js"),
     "\n",
     include_str!("js/memo.js"),
