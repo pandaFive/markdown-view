@@ -1,9 +1,11 @@
 //! WebSocket向けの更新ブロードキャストを管理する。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::files::{
     build_change_broadcast_message, build_change_error_log_message_without_receivers,
@@ -11,6 +13,71 @@ use super::files::{
 use super::messages::BroadcastMessage;
 use super::state::AppState;
 use crate::watcher::{WatchError, WatchEvent};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum WatchForwarderEventKind {
+    FileChanged,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) struct WatchForwarderSnapshot {
+    pub last_event_kind: Option<WatchForwarderEventKind>,
+    pub receiver_count: usize,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(super) struct WatchForwarderDiagnostics {
+    last_event_kind: Arc<AtomicU8>,
+    tx: tokio::sync::broadcast::Sender<BroadcastMessage>,
+}
+
+#[allow(dead_code)]
+impl WatchForwarderDiagnostics {
+    const NONE: u8 = 0;
+    const FILE_CHANGED: u8 = 1;
+    const ERROR: u8 = 2;
+
+    pub(super) fn new(tx: tokio::sync::broadcast::Sender<BroadcastMessage>) -> Self {
+        Self {
+            last_event_kind: Arc::new(AtomicU8::new(Self::NONE)),
+            tx,
+        }
+    }
+
+    pub(super) fn record(&self, kind: WatchForwarderEventKind) {
+        let raw = match kind {
+            WatchForwarderEventKind::FileChanged => Self::FILE_CHANGED,
+            WatchForwarderEventKind::Error => Self::ERROR,
+        };
+        self.last_event_kind.store(raw, Ordering::Release);
+    }
+
+    pub(super) fn snapshot(&self) -> WatchForwarderSnapshot {
+        let last_event_kind = match self.last_event_kind.load(Ordering::Acquire) {
+            Self::NONE => None,
+            Self::FILE_CHANGED => Some(WatchForwarderEventKind::FileChanged),
+            Self::ERROR => Some(WatchForwarderEventKind::Error),
+            invalid => {
+                debug_assert!(false, "不正なforwarder event kind: {}", invalid);
+                None
+            }
+        };
+        WatchForwarderSnapshot {
+            last_event_kind,
+            receiver_count: self.tx.receiver_count(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(super) struct WatchForwarderHandle {
+    pub(super) task: JoinHandle<()>,
+    pub(super) diagnostics: WatchForwarderDiagnostics,
+}
 
 /// ファイル変更時にbroadcastで全クライアントに通知する
 ///
@@ -105,6 +172,50 @@ mod tests {
 
     use super::*;
     use crate::server::{AppMode, AppState, MAX_FILE_SIZE};
+
+    #[test]
+    fn test_watch_forwarder_diagnostics_初期状態は最後のイベントなし() {
+        let (tx, rx1) = broadcast::channel(4);
+        let rx2 = tx.subscribe();
+        let rx3 = tx.subscribe();
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+
+        let snapshot = diagnostics.snapshot();
+        drop((rx1, rx2, rx3));
+
+        assert_eq!(snapshot.last_event_kind, None);
+        assert_eq!(snapshot.receiver_count, 3);
+    }
+
+    #[test]
+    fn test_watch_forwarder_diagnostics_filechangedを記録できる() {
+        let (tx, _rx) = broadcast::channel(4);
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+
+        diagnostics.record(WatchForwarderEventKind::FileChanged);
+        let snapshot = diagnostics.snapshot();
+
+        assert_eq!(
+            snapshot.last_event_kind,
+            Some(WatchForwarderEventKind::FileChanged)
+        );
+        assert_eq!(snapshot.receiver_count, 1);
+    }
+
+    #[test]
+    fn test_watch_forwarder_diagnostics_errorを記録できる() {
+        let (tx, _rx) = broadcast::channel(4);
+        let diagnostics = WatchForwarderDiagnostics::new(tx);
+
+        diagnostics.record(WatchForwarderEventKind::Error);
+        let snapshot = diagnostics.snapshot();
+
+        assert_eq!(
+            snapshot.last_event_kind,
+            Some(WatchForwarderEventKind::Error)
+        );
+        assert_eq!(snapshot.receiver_count, 1);
+    }
 
     #[traced_test]
     #[test]
