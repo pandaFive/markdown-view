@@ -18,7 +18,7 @@ const WATCHER_THREAD_PARK_MS: u64 = 250;
 /// notify から tokio へ橋渡しするチャネル容量
 const WATCHER_MESSAGE_BUFFER: usize = 32;
 /// shutdown() のグレースフル停止待機秒数
-const SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+pub(crate) const WATCH_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 type InitResult = std::result::Result<(), WatchError>;
 
@@ -153,7 +153,7 @@ struct WatchRuntime {
 impl WatchRuntime {
     /// 監視スレッドに停止を通知し、完了を待機する
     ///
-    /// `SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
+    /// `WATCH_SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
     /// （プロセス終了時にOSが回収する）。
     fn stop(self) -> WatcherHealth {
         let before_stop = self.health_state.load();
@@ -169,10 +169,12 @@ impl WatchRuntime {
 
         let start = std::time::Instant::now();
         while !self.watcher_thread.is_finished() {
-            if start.elapsed() > Duration::from_secs(SHUTDOWN_TIMEOUT_SECS) {
+            if start.elapsed() > Duration::from_secs(WATCH_SHUTDOWN_TIMEOUT_SECS) {
+                let elapsed_ms = start.elapsed().as_millis();
                 tracing::warn!(
-                    "[markdown-view] 監視スレッドの停止がタイムアウトしました（{}秒）",
-                    SHUTDOWN_TIMEOUT_SECS
+                    elapsed_ms,
+                    timeout_secs = WATCH_SHUTDOWN_TIMEOUT_SECS,
+                    "[markdown-view] 監視スレッドの停止がタイムアウトしました"
                 );
                 return self.health_state.load();
             }
