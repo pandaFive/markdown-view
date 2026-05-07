@@ -3,7 +3,7 @@ mod runtime;
 mod strategy;
 
 pub use self::error::{WatchError, WatchErrorKind};
-pub use self::runtime::Watcher;
+pub use self::runtime::{Watcher, WatcherHealth};
 
 use std::path::PathBuf;
 

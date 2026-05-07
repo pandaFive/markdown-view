@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 use super::broadcast::spawn_watch_event_forwarder;
 use super::state::AppState;
-use crate::watcher::Watcher;
+use crate::watcher::{Watcher, WatcherHealth};
 
 /// 監視スレッドと転送タスクを束ねるサービス
 pub struct WatchService {
@@ -26,6 +26,19 @@ impl WatchService {
             watcher: Some(watcher),
             watch_forwarder: Some(watch_forwarder),
         })
+    }
+
+    /// watcher の現在状態を返す
+    pub fn health(&self) -> WatcherHealth {
+        self.watcher
+            .as_ref()
+            .map(Watcher::health)
+            .unwrap_or(WatcherHealth::Stopped)
+    }
+
+    /// watcher が正常稼働中なら true
+    pub fn is_alive(&self) -> bool {
+        matches!(self.health(), WatcherHealth::Alive)
     }
 
     /// 監視スレッドと転送タスクを停止する
@@ -81,6 +94,7 @@ mod tests {
     use super::WatchService;
     use crate::server::AppMode;
     use crate::server::AppState;
+    use crate::watcher::WatcherHealth;
 
     #[tokio::test]
     async fn test_watch_service_開始と停止ができる() {
@@ -97,5 +111,37 @@ mod tests {
 
         let service = WatchService::start(state).await.unwrap();
         service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_watch_service_health_開始後はaliveを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("watch-health.md");
+        std::fs::write(&file_path, "# watch").unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_single_file(&file_path).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+
+        let service = WatchService::start(state).await.unwrap();
+
+        assert_eq!(service.health(), WatcherHealth::Alive);
+        assert!(service.is_alive());
+
+        service.shutdown().await;
+    }
+
+    #[test]
+    fn test_watch_service_health_watcherなしはstoppedを返す() {
+        let service = WatchService {
+            watcher: None,
+            watch_forwarder: None,
+        };
+
+        assert_eq!(service.health(), WatcherHealth::Stopped);
+        assert!(!service.is_alive());
     }
 }
