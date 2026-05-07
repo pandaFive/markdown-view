@@ -10,6 +10,8 @@
 
 ## Medium Priority
 
+以下はリスク低減順に実行する。起動不能や silent failure に近い項目を先に扱い、変更範囲が大きい構造変更は後ろへ置く。
+
 - [ ] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
   - ファイル: `src/watcher/strategy.rs` L43-48, `src/watcher/runtime.rs` L192-198
   - 現状: ディレクトリモードは `RecursiveMode::Recursive` を無条件で適用し、`is_hidden_relative` でイベント受信後にフィルタする。Linux 既定の `fs.inotify.max_user_watches` (8192) を `node_modules`/`target`/`.git` を含む大規模ツリーで枯渇させ、`ENOSPC` 時に `WatchError::init` がそのまま漏れる
@@ -22,11 +24,11 @@
   - 対応: `Refresh` variant に `memo_refresh: bool` を追加するか、仕様コメントを `messages.rs` に明記。`MemoResponse` に degrade flag を追加し、HTML 側でバナー表示できるよう情報を渡す
   - 理由: 仕様契約を型・コメントに固定し、UI が「メモ機能の一時的な機能低下」を区別できるようにする
 
-- [ ] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
-  - ファイル: `src/renderer/state.rs` L42-336, `src/renderer/render.rs` L33-55
-  - 現状: 14 個の `pub(super)` メソッド（`push_html`/`push_soft_break`/`finish_heading`/`finish_code_block` 等）で State Machine が implicit。`finish_heading` は `debug_assert! + take().?` で release fallback、`finish_code_block` は release でも `unreachable!`、と契約強制が混在
-  - 対応: `enum BlockContext { Heading(HeadingState), CodeBlock(CodeBlockState), Image(ImageState), TableCell(TableCellState), ... }` のスタックを `RenderState` に持たせ、`finish_*` を `Result<_, RenderStateMismatch>` 化。`render::dispatch_event` 側は match で完全列挙
-  - 理由: 状態機械の不変条件をコメントではなく型で表現し、open/close 不整合を型エラーで弾く
+- [ ] ブラウザ JS の責務境界を小モジュールへ分割する
+  - ファイル: `src/template/assets/js/{bootstrap,content,content-renderer,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
+  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。さらに `content-renderer.js` で `updateContent` の payload 契約、契約違反 warn、`#content` / `#toc` への sanitize 済み HTML 反映、TOC HTML 正規化を明示境界へ切り出した。一方、`content.js` は検索、リンク解決、履歴、スクロール、引用ジャンプ、描画後副作用をまだまとめて扱う巨大ファイルのままで、controller API と依存境界は未整理
+  - 対応: 次の分割単位を `document-search` / `directory-search`、`navigation` / `link-resolution`、`createContentController(ctx, deps)` の順で切る。`innerHTML` 使用箇所は引き続き信頼境界を明示し、検索やメモを削る、または純プレビューモードへ戻すことは非目標
+  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。`content-renderer` により最重要の XSS 信頼境界は狭まったが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で状態遷移を壊しやすい
 
 - [ ] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
   - ファイル: `src/template/mod.rs` (740 行), `src/template/page.rs` L45-104
@@ -34,11 +36,11 @@
   - 対応: テストを各サブモジュール（page/tree/assets/message）の `#[cfg(test)] mod tests` に局所化し、`mod.rs` には公開 API 契約テスト（CSP 整合性など）のみ残す。`render_page` は `render_head` / `render_body` / `attr(name, value)` ヘルパーへ分割
   - 理由: CLAUDE.md「300 行を超えたファイルは分割を提案」に該当。エスケープ漏れの一発リスクを集約しないために属性挿入をヘルパー化する
 
-- [ ] ブラウザ JS の責務境界を小モジュールへ分割する
-  - ファイル: `src/template/assets/js/{bootstrap,content,content-renderer,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
-  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。さらに `content-renderer.js` で `updateContent` の payload 契約、契約違反 warn、`#content` / `#toc` への sanitize 済み HTML 反映、TOC HTML 正規化を明示境界へ切り出した。一方、`content.js` は検索、リンク解決、履歴、スクロール、引用ジャンプ、描画後副作用をまだまとめて扱う巨大ファイルのままで、controller API と依存境界は未整理
-  - 対応: 次の分割単位を `document-search` / `directory-search`、`navigation` / `link-resolution`、`createContentController(ctx, deps)` の順で切る。`innerHTML` 使用箇所は引き続き信頼境界を明示し、検索やメモを削る、または純プレビューモードへ戻すことは非目標
-  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。`content-renderer` により最重要の XSS 信頼境界は狭まったが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で状態遷移を壊しやすい
+- [ ] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
+  - ファイル: `src/renderer/state.rs` L42-336, `src/renderer/render.rs` L33-55
+  - 現状: 14 個の `pub(super)` メソッド（`push_html`/`push_soft_break`/`finish_heading`/`finish_code_block` 等）で State Machine が implicit。`finish_heading` は `debug_assert! + take().?` で release fallback、`finish_code_block` は release でも `unreachable!`、と契約強制が混在
+  - 対応: `enum BlockContext { Heading(HeadingState), CodeBlock(CodeBlockState), Image(ImageState), TableCell(TableCellState), ... }` のスタックを `RenderState` に持たせ、`finish_*` を `Result<_, RenderStateMismatch>` 化。`render::dispatch_event` 側は match で完全列挙
+  - 理由: 状態機械の不変条件をコメントではなく型で表現し、open/close 不整合を型エラーで弾く
 
 ## Done Summary
 
