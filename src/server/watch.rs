@@ -41,14 +41,23 @@ impl WatchService {
         matches!(self.health(), WatcherHealth::Alive)
     }
 
-    /// 監視スレッドと転送タスクを停止する
-    pub async fn shutdown(mut self) {
-        if let Some(watcher) = self.watcher.take() {
-            watcher.shutdown();
+    /// 監視スレッドと転送タスクを停止し、watcher の最終状態を返す
+    pub async fn shutdown(mut self) -> WatcherHealth {
+        let health = if let Some(watcher) = self.watcher.take() {
+            watcher.shutdown()
+        } else {
+            WatcherHealth::Stopped
+        };
+        if matches!(health, WatcherHealth::Failed(_)) {
+            tracing::warn!(
+                "[markdown-view] 失敗状態のwatcher serviceを停止しました: {:?}",
+                health
+            );
         }
         if let Some(watch_forwarder) = self.watch_forwarder.take() {
             shutdown_watch_forwarder(watch_forwarder).await;
         }
+        health
     }
 }
 
@@ -110,7 +119,7 @@ mod tests {
         ));
 
         let service = WatchService::start(state).await.unwrap();
-        service.shutdown().await;
+        assert_eq!(service.shutdown().await, WatcherHealth::Stopped);
     }
 
     #[tokio::test]
@@ -131,7 +140,7 @@ mod tests {
         assert_eq!(service.health(), WatcherHealth::Alive);
         assert!(service.is_alive());
 
-        service.shutdown().await;
+        assert_eq!(service.shutdown().await, WatcherHealth::Stopped);
     }
 
     #[test]

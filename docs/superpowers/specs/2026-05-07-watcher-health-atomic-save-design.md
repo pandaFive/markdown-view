@@ -64,7 +64,9 @@ pub enum WatcherFailureKind {
 
 停止タイムアウトで join できない場合は `Stopping` のまま残す。プロセス終了時に OS が回収する既存挙動は変えない。
 
-`WatchService::health()` は service が保持する `Watcher::health()` を返す。現行の `WatchService::shutdown(self)` は service を消費するため、shutdown 後の `Stopped` は `WatchService` 利用者が後から問い合わせる状態ではなく、共有 health state とユニットテストで確認する停止完了状態として扱う。`WatchService::is_alive()` は `matches!(self.health(), WatcherHealth::Alive)` の convenience API とする。
+`Failed(_)` は latch する。一度 failure を記録した後は、後続の `Stopping` / `Stopped` / 別種の failure で上書きしない。これにより shutdown や Drop が「停止前に既に監視品質が劣化していた」事実を消さない。
+
+`WatchService::health()` は service が保持する `Watcher::health()` を返す。`WatchService::shutdown(self)` と `Watcher::shutdown(self)` は self を消費し、停止処理後の最終 `WatcherHealth` を返す。`WatchService::is_alive()` は `matches!(self.health(), WatcherHealth::Alive)` の convenience API とする。
 
 ## atomic save 統合テスト
 
@@ -92,6 +94,8 @@ pub enum WatcherFailureKind {
 - `Watcher` のユニットテストで、生成直後 `Alive`、shutdown 後 `Stopped` を確認する。
 - `Watcher` の内部 helper またはテスト用構成で `Failed(ThreadPanic)` への遷移を固定する。
 - `Watcher` の notify error 経路で `Failed(Notify)` への遷移を固定する。
+- `Failed(_)` が shutdown 後も `Stopped` で上書きされないことを固定する。
+- `shutdown()` が停止後の `WatcherHealth` を返すことを固定する。
 - `WatchService::health()` と `WatchService::is_alive()` のユニットテストを追加する。
 - 単一ファイルモードの atomic save WebSocket 統合テストを追加する。
 - ディレクトリモードの atomic save WebSocket 統合テストを追加する。
@@ -109,6 +113,8 @@ cargo test --all-targets --all-features
 - `WatchService::is_alive()` が `Alive` の場合のみ true を返す。
 - `ThreadPanic` が `Failed(ThreadPanic)` として表現される。
 - notify error が `Failed(Notify)` として表現される。
+- failure 状態が latch され、shutdown / Drop で失われない。
+- shutdown 呼び出し側が最終 `WatcherHealth` を取得できる。
 - 単一ファイルモードで atomic save 後に WebSocket update が届く。
 - ディレクトリモードで atomic save 後に WebSocket update が届き、`file` が対象 Markdown ファイルを指す。
 - HTTP API、UI、WebSocket エラー JSON の外部契約が増えない。
