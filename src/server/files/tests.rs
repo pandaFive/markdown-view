@@ -616,7 +616,9 @@ fn test_resolve_file_バックスラッシュ型トラバーサルを拒否() {
     let result = resolve_file(dir.path(), "..\\..\\..\\etc\\passwd");
     assert!(matches!(
         result,
-        Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+        Err(ResolveFileError::Hidden)
+            | Err(ResolveFileError::NotFound)
+            | Err(ResolveFileError::Traversal)
     ));
 }
 
@@ -681,6 +683,32 @@ fn test_resolve_file_生成物ディレクトリ配下は拒否する() {
         resolve_file(dir.path(), "target/debug/build.md"),
         Err(ResolveFileError::Hidden)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_除外componentのsymlink経由は拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/readme.md"), "# docs").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("docs"), dir.path().join("node_modules")).unwrap();
+
+    let result = resolve_file(dir.path(), "node_modules/readme.md");
+
+    assert_eq!(result, Err(ResolveFileError::Hidden));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_canonical先が除外componentならsymlink経由も拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("target/debug/build.md"), "# build").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("target"), dir.path().join("linked")).unwrap();
+
+    let result = resolve_file(dir.path(), "linked/debug/build.md");
+
+    assert_eq!(result, Err(ResolveFileError::Hidden));
 }
 
 #[test]

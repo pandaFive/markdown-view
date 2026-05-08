@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Component, Path};
 
 /// workspace内で生成物または内部管理領域として扱うパスの除外理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,9 +14,10 @@ pub(crate) enum WorkspaceExclusionReason {
 pub(crate) fn exclusion_reason_for_relative_path(
     relative: &Path,
 ) -> Option<WorkspaceExclusionReason> {
-    relative
-        .components()
-        .find_map(|component| exclusion_reason_for_name(component.as_os_str()))
+    relative.components().find_map(|component| match component {
+        Component::Normal(name) => exclusion_reason_for_name(name),
+        _ => None,
+    })
 }
 
 /// 単一のファイル名またはディレクトリ名が除外対象か判定する。

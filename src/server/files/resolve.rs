@@ -406,6 +406,9 @@ fn resolve_file_with_canonicalize_error(
     if relative_path.is_absolute() {
         return Err(ResolveFileError::InvalidPath);
     }
+    if exclusion_reason_for_relative_path(relative_path).is_some() {
+        return Err(ResolveFileError::Hidden);
+    }
 
     let candidate = base_dir.join(relative_path);
     let canonical = candidate.canonicalize().map_err(|error| {
