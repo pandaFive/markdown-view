@@ -649,6 +649,36 @@ mod tests {
         }
     }
 
+    async fn expect_note_md_file_changed(
+        rx: &mut mpsc::Receiver<WatchEvent>,
+        context: &str,
+    ) -> std::path::PathBuf {
+        const MAX_EVENTS: usize = 10;
+
+        for _ in 0..MAX_EVENTS {
+            let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{}: watch eventを受信できる", context))
+                .unwrap_or_else(|| panic!("{}: watch event channelが閉じていない", context));
+
+            match event {
+                WatchEvent::FileChanged(path) => {
+                    if path.file_name() == Some(std::ffi::OsStr::new("note.md")) {
+                        return path;
+                    }
+                }
+                WatchEvent::Error(error) => {
+                    panic!("{}: FileChangedを期待したがError({})を受信", context, error);
+                }
+            }
+        }
+
+        panic!(
+            "{}: 最大{}件のwatch event内にnote.mdのFileChangedがない",
+            context, MAX_EVENTS
+        );
+    }
+
     #[test]
     fn test_register_watch_plan_全entryをnonrecursiveで登録する() {
         let dir = tempfile::tempdir().unwrap();
@@ -999,6 +1029,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(received, WatchEvent::FileChanged(file_path.clone()));
+
+        watcher.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_watcher_spawn_ディレクトリモードで起動後新規サブディレクトリを監視する() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = dir.path().join("initial.md");
+        tokio::fs::write(&initial, "# initial").await.unwrap();
+        let mode = AppMode::new_directory(dir.path()).unwrap();
+        let (watcher, mut rx) = Watcher::spawn(mode).await.unwrap();
+
+        let new_dir = dir.path().join("new-section");
+        tokio::fs::create_dir_all(&new_dir).await.unwrap();
+        let new_file = new_dir.join("note.md");
+        tokio::fs::write(&new_file, "# before").await.unwrap();
+
+        let first =
+            expect_note_md_file_changed(&mut rx, "新規ディレクトリ作成後の回復通知または更新通知")
+                .await;
+        assert_eq!(first.file_name(), Some(std::ffi::OsStr::new("note.md")));
+
+        tokio::fs::write(&new_file, "# after").await.unwrap();
+
+        let second =
+            expect_note_md_file_changed(&mut rx, "新規サブディレクトリ配下の更新通知").await;
+        assert_eq!(second.file_name(), Some(std::ffi::OsStr::new("note.md")));
 
         watcher.shutdown();
     }
