@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -31,6 +31,149 @@ type InternalWatchResult =
 struct WatchRegistrationFailure {
     registered_paths: Vec<PathBuf>,
     source: notify::Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchDirectoryIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(windows)]
+    volume_serial_number: Option<u32>,
+    #[cfg(windows)]
+    file_index: Option<u64>,
+}
+
+impl WatchDirectoryIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            Some(Self {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                ctime: metadata.ctime(),
+                ctime_nsec: metadata.ctime_nsec(),
+            })
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            Some(Self {
+                volume_serial_number: metadata.volume_serial_number(),
+                file_index: metadata.file_index(),
+            })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
+
+    fn from_path(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&metadata)
+    }
+}
+
+#[derive(Debug, Default)]
+struct WatchDirectoryRegistry {
+    entries: HashMap<PathBuf, WatchDirectoryEntry>,
+}
+
+#[derive(Debug)]
+struct WatchDirectoryEntry {
+    identity: Option<WatchDirectoryIdentity>,
+    #[cfg(unix)]
+    _handle: Option<std::fs::File>,
+}
+
+impl WatchDirectoryEntry {
+    fn from_path(path: &Path) -> Self {
+        #[cfg(unix)]
+        {
+            let handle = std::fs::File::open(path).ok();
+            let identity = handle
+                .as_ref()
+                .and_then(|handle| handle.metadata().ok())
+                .and_then(|metadata| WatchDirectoryIdentity::from_metadata(&metadata))
+                .or_else(|| WatchDirectoryIdentity::from_path(path));
+            Self {
+                identity,
+                _handle: handle,
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Self {
+                identity: WatchDirectoryIdentity::from_path(path),
+            }
+        }
+    }
+}
+
+impl WatchDirectoryRegistry {
+    fn insert(&mut self, path: PathBuf) {
+        let normalized_path = normalize_watch_registry_path(&path);
+        self.entries.insert(
+            normalized_path.clone(),
+            WatchDirectoryEntry::from_path(&normalized_path),
+        );
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.entries
+            .contains_key(&normalize_watch_registry_path(path))
+    }
+
+    fn contains_active(&self, path: &Path) -> bool {
+        let normalized_path = normalize_watch_registry_path(path);
+        match self.entries.get(&normalized_path) {
+            Some(WatchDirectoryEntry {
+                identity: Some(registered_identity),
+                ..
+            }) => WatchDirectoryIdentity::from_path(&normalized_path) == Some(*registered_identity),
+            Some(WatchDirectoryEntry { identity: None, .. }) => {
+                WatchDirectoryIdentity::from_path(&normalized_path).is_none()
+            }
+            None => false,
+        }
+    }
+
+    fn remove_subtree(&mut self, root: &Path) {
+        let normalized_root = normalize_watch_registry_path(root);
+        self.entries
+            .retain(|path, _| !normalize_watch_registry_path(path).starts_with(&normalized_root));
+    }
+
+    fn path_set(&self) -> HashSet<PathBuf> {
+        self.entries.keys().cloned().collect()
+    }
+}
+
+fn normalize_watch_registry_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// watcher の稼働状態
@@ -361,7 +504,7 @@ fn spawn_watcher_thread(
                     }
                 };
 
-                let mut registered_paths = HashSet::new();
+                let mut registered_paths = WatchDirectoryRegistry::default();
                 if let Err(failure) =
                     register_watch_plan_with(&watch_plan, &mut registered_paths, |path, mode| {
                         debouncer.watcher().watch(path, mode)
@@ -404,7 +547,7 @@ fn spawn_watcher_thread(
 
 fn register_watch_plan_with<F>(
     plan: &super::strategy::WatchPlan,
-    registered_paths: &mut HashSet<PathBuf>,
+    registered_paths: &mut WatchDirectoryRegistry,
     mut watch: F,
 ) -> std::result::Result<Vec<PathBuf>, WatchRegistrationFailure>
 where
@@ -497,7 +640,7 @@ fn process_debounced_events_with_watch<F>(
     strategy: &WatchStrategy,
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
-    registered_paths: &mut HashSet<PathBuf>,
+    registered_paths: &mut WatchDirectoryRegistry,
     mut watch: F,
 ) where
     F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
@@ -511,20 +654,26 @@ fn process_debounced_events_with_watch<F>(
     }
 
     for candidate in strategy.collect_new_directory_candidates(&events) {
-        if registered_paths.contains(&candidate) {
+        if registered_paths.contains_active(&candidate) {
             continue;
         }
 
-        let plan = match super::strategy::WatchPlan::for_new_subtree(&candidate, registered_paths) {
-            Ok(plan) => plan,
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] 新規ディレクトリの監視計画生成に失敗: {}",
-                    error
-                );
-                continue;
-            }
-        };
+        if registered_paths.contains(&candidate) {
+            registered_paths.remove_subtree(&candidate);
+        }
+
+        let registered_path_set = registered_paths.path_set();
+        let plan =
+            match super::strategy::WatchPlan::for_new_subtree(&candidate, &registered_path_set) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] 新規ディレクトリの監視計画生成に失敗: {}",
+                        error
+                    );
+                    continue;
+                }
+            };
 
         if plan.entries().is_empty() {
             continue;
@@ -610,7 +759,7 @@ fn run_watcher_event_loop(
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
     shutdown_flag: &AtomicBool,
-    registered_paths: &mut HashSet<PathBuf>,
+    registered_paths: &mut WatchDirectoryRegistry,
 ) {
     while !shutdown_flag.load(Ordering::Acquire) {
         match internal_rx.recv_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS)) {
@@ -678,8 +827,8 @@ mod tests {
 
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
-        register_watch_plan_with, send_watch_event, Watcher, WatcherFailureKind, WatcherHealth,
-        WatcherHealthState,
+        register_watch_plan_with, send_watch_event, WatchDirectoryRegistry, Watcher,
+        WatcherFailureKind, WatcherHealth, WatcherHealthState,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -767,7 +916,7 @@ mod tests {
             ),
         ]);
         let mut registrar = FakeWatchRegistrar::default();
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
 
         register_watch_plan_with(&plan, &mut registered, |path, mode| {
             registrar.watch(path, mode)
@@ -797,7 +946,7 @@ mod tests {
             fail_on: Some(fail_path),
             watched: Vec::new(),
         };
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
 
         let error = register_watch_plan_with(&plan, &mut registered, |path, mode| {
             registrar.watch(path, mode)
@@ -830,7 +979,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
         let mut watched = Vec::new();
 
@@ -869,7 +1018,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
 
         process_debounced_events_with_watch(
@@ -916,7 +1065,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
 
         process_debounced_events_with_watch(
@@ -973,7 +1122,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
 
         process_debounced_events_with_watch(
@@ -1018,7 +1167,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
         registered.insert(existing_dir.canonicalize().unwrap());
         let mut watched = Vec::new();
@@ -1041,6 +1190,52 @@ mod tests {
     }
 
     #[test]
+    fn test_process_internal_events_再作成された登録済みディレクトリは再watchする() {
+        let dir = tempfile::tempdir().unwrap();
+        let recreated_dir = dir.path().join("recreated");
+        std::fs::create_dir(&recreated_dir).unwrap();
+        let mut registered = WatchDirectoryRegistry::default();
+        registered.insert(dir.path().canonicalize().unwrap());
+        registered.insert(recreated_dir.canonicalize().unwrap());
+        std::fs::remove_dir(&recreated_dir).unwrap();
+        std::fs::create_dir(&recreated_dir).unwrap();
+        let md = recreated_dir.join("created.md");
+        std::fs::write(&md, "# recreated").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            recreated_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut watched = Vec::new();
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |path, mode| {
+                watched.push((path.to_path_buf(), mode));
+                Ok(())
+            },
+        );
+
+        let recreated_canonical = recreated_dir.canonicalize().unwrap();
+        assert!(watched.iter().any(|(path, mode)| {
+            path == &recreated_canonical && *mode == notify::RecursiveMode::NonRecursive
+        }));
+        assert_eq!(
+            rx.try_recv()
+                .expect("recreated recovery notificationを期待"),
+            WatchEvent::FileChanged(md.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
     fn test_process_internal_events_recoveryは新規登録rootだけを通知する() {
         let dir = tempfile::tempdir().unwrap();
         let existing_dir = dir.path().join("existing");
@@ -1059,7 +1254,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
         registered.insert(existing_dir.canonicalize().unwrap());
 
@@ -1099,7 +1294,7 @@ mod tests {
         )];
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
-        let mut registered = std::collections::HashSet::new();
+        let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
 
         process_debounced_events_with_watch(
