@@ -5,6 +5,7 @@ use crate::server::log_path::{
     sanitize_path_for_logging_escaped, sanitize_path_for_logging_lexical_escaped,
 };
 use crate::server::{CanonicalPath, CanonicalPathError};
+use crate::workspace_exclusion::{exclusion_reason_for_name, exclusion_reason_for_relative_path};
 
 /// ファイル一覧の最大件数
 pub(in crate::server) const MAX_FILE_LIST: usize = 1000;
@@ -90,8 +91,7 @@ fn list_markdown_files_recursive(
         };
 
         let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') {
+        if exclusion_reason_for_name(&name).is_some() {
             continue;
         }
 
@@ -234,9 +234,9 @@ pub(super) fn resolve_recursable_directory(
 
     if is_symlink {
         if let Ok(relative) = resolved.strip_prefix(canonical_base_dir) {
-            if has_hidden_component(relative) {
+            if exclusion_reason_for_relative_path(relative).is_some() {
                 tracing::debug!(
-                    "[markdown-view] シンボリックリンクが隠しディレクトリを指すためスキップ: {} -> {}",
+                    "[markdown-view] シンボリックリンクが除外ディレクトリを指すためスキップ: {} -> {}",
                     sanitize_path_for_logging_lexical_escaped(path, log_base_dir),
                     sanitize_path_for_logging_escaped(&resolved, log_base_dir)
                 );
@@ -297,12 +297,6 @@ pub(super) fn resolve_recursable_directory(
     }
 
     Ok(Some(resolved))
-}
-
-fn has_hidden_component(relative: &Path) -> bool {
-    relative
-        .components()
-        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 pub(super) fn canonicalize_dir_for_cycle(

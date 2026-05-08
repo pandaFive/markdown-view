@@ -15,7 +15,8 @@
 
 - ユーザー指定の除外パターン CLI / config を追加しない。
 - `.gitignore` を解釈しない。
-- Markdown ファイル一覧、検索、HTTP/API、WebSocket JSON の外部契約を変更しない。
+- WebSocket JSON shape、memo API、renderer/template の外部契約を変更しない。
+- 除外対象ディレクトリ配下の Markdown がプレビュー一覧、検索、直接表示から外れる契約変更はこの設計に含める。
 - watcher の自動再起動機構を追加しない。
 - Linux 以外の OS に inotify 固有の対処を押し付けない。
 - 除外ディレクトリ配下の変更を検出するオプションは追加しない。
@@ -28,7 +29,7 @@
 
 起動後のディレクトリ作成に追従するため、watcher thread は debouncer callback から受け取ったイベントを自分の制御ループで処理する。許可対象の新規ディレクトリを検出したら、その subtree を除外規則つきで走査し、追加 watch と既存 Markdown の回復通知を行う。これにより recursive watch から non-recursive 複数 watch へ変えても、通常の Markdown workspace 利用で新規ディレクトリが無視され続ける退行を避ける。
 
-最初に除外するディレクトリ名は `.git`、`node_modules`、`target`、隠しディレクトリである。これは個人向け Markdown workspace の設計思想に合う。生成物、依存パッケージ、VCS 内部、隠し作業領域は Markdown preview / memo / search の主要対象ではなく、監視資源を消費してユーザー体験を悪化させやすい。
+最初に除外するディレクトリ名は `.git`、`node_modules`、`target`、隠しディレクトリである。これは個人向け Markdown workspace の設計思想に合う。生成物、依存パッケージ、VCS 内部、隠し作業領域は Markdown preview / memo / search の主要対象ではなく、監視資源を消費してユーザー体験を悪化させやすい。実装時のレビューを受け、これらは watcher だけでなくプレビュー一覧・検索・直接表示からも同じ共通除外規則で外す。
 
 ## 代替案
 
@@ -99,7 +100,7 @@ debouncer callback は `notify` イベントを直接 `WatchEvent` に変換し�
 
 callback から `debouncer.watcher()` を直接触らない。`notify-debouncer-mini` の `Debouncer::watcher()` は `&mut dyn Watcher` を返すため、watcher を mutate する処理は debouncer を所有する watcher thread 本体に閉じる。
 
-登録済み path は `HashSet<PathBuf>` で保持し、同じディレクトリを二重登録しない。追加登録に失敗した場合は `WatchEvent::Error(WatchError::notify(...))` と health `Failed(Notify)` にし、既存 watcher は継続する。起動後の追加失敗は init failure ではないが、監視品質の劣化として扱う。
+登録済み path は `HashSet<PathBuf>` で保持し、同じディレクトリを二重登録しない。追加登録に失敗した場合は `WatchEvent::Error(...)` と health `Failed(Notify)` にし、既存 watcher は継続する。ENOSPC 相当なら `WatchErrorKind::ResourceExhausted`、それ以外なら `WatchErrorKind::Notify` に分類する。起動後の追加失敗は init failure ではないが、監視品質の劣化として扱う。
 
 登録成功数、除外 subtree 数、除外理由別件数は `tracing::debug!` に出す。通常利用で騒がしくしないため、詳細な excluded path 一覧は出さない。
 
@@ -111,7 +112,7 @@ callback から `debouncer.watcher()` を直接触らない。`notify-debouncer-
 
 - Linux の inotify watch 上限に到達した可能性を明記する。
 - `fs.inotify.max_user_watches` を確認する対象として示す。
-- 一時変更と永続化は「例」として示し、自動実行しない。
+- README では現在値の確認対象を示し、環境方針に従った調整へ誘導する。自動実行しない。
 - notify error detail はログや補足に残すが、ユーザーに実行すべきコマンドとして解釈させない。
 
 ENOSPC 判定は `notify::ErrorKind::MaxFilesWatch` を主経路にする。補助として `notify::ErrorKind::Io` の `raw_os_error() == Some(28)`、`No space left on device`、`ENOSPC` 文字列を helper に集約する。誤検知しても対処案は安全な説明に留まる。
@@ -186,7 +187,7 @@ TDD で進める。
 
 notify event、filesystem path、error detail は未信頼入力として扱う。ログには既存方針どおり sanitize 済み path を出す。
 
-除外 plan は監視資源の節約であり、読み込み許可の境界ではない。実際の Markdown 読み込みは引き続き `resolve_change_target()`、`resolve_file()`、canonical base 検証、HTML sanitize、CSP で守る。
+除外 plan は監視資源の節約と表示契約の統一であり、セキュリティ境界は引き続き `resolve_change_target()`、`resolve_file()`、canonical base 検証、HTML sanitize、CSP で守る。除外対象への直接指定は 404 相当に畳み、存在推測の材料を増やさない。
 
 symlink directory を起動時 plan で辿らないことで、base 外 subtree を大量監視する事故を避ける。symlink file や race は後段の再検証で扱う。
 

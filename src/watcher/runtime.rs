@@ -18,12 +18,20 @@ const DEBOUNCE_MS: u64 = 300;
 const WATCHER_THREAD_PARK_MS: u64 = 250;
 /// notify から tokio へ橋渡しするチャネル容量
 const WATCHER_MESSAGE_BUFFER: usize = 32;
+/// notify callback から watcher thread へ橋渡しする内部チャネル容量
+const WATCHER_INTERNAL_EVENT_BUFFER: usize = 64;
 /// shutdown() のグレースフル停止待機秒数
 pub(crate) const WATCH_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 type InitResult = std::result::Result<(), WatchError>;
 type InternalWatchResult =
     std::result::Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>;
+
+#[derive(Debug)]
+struct WatchRegistrationFailure {
+    registered_paths: Vec<PathBuf>,
+    source: notify::Error,
+}
 
 /// watcher の稼働状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,15 +330,23 @@ fn spawn_watcher_thread(
             let panic_message = strategy.panic_message();
             let error_label = strategy.error_label();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let (internal_tx, internal_rx) = std::sync::mpsc::channel::<InternalWatchResult>();
+                let (internal_tx, internal_rx) =
+                    std::sync::mpsc::sync_channel::<InternalWatchResult>(
+                        WATCHER_INTERNAL_EVENT_BUFFER,
+                    );
+                let callback_strategy = strategy.clone();
+                let callback_tx = rt_tx.clone();
+                let callback_health_state = health_state.clone();
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
                     move |res: InternalWatchResult| {
-                        if internal_tx.send(res).is_err() {
-                            tracing::warn!(
-                                "[markdown-view] watcher internal channel が閉じています"
-                            );
-                        }
+                        send_internal_watch_result(
+                            &internal_tx,
+                            res,
+                            &callback_strategy,
+                            &callback_tx,
+                            &callback_health_state,
+                        );
                     },
                 );
 
@@ -346,14 +362,17 @@ fn spawn_watcher_thread(
                 };
 
                 let mut registered_paths = HashSet::new();
-                if let Err(e) =
+                if let Err(failure) =
                     register_watch_plan_with(&watch_plan, &mut registered_paths, |path, mode| {
                         debouncer.watcher().watch(path, mode)
                     })
                 {
                     send_init_result(
                         &mut init_tx,
-                        Err(WatchError::from_watch_init_error(start_error_prefix, &e)),
+                        Err(WatchError::from_watch_init_error(
+                            start_error_prefix,
+                            &failure.source,
+                        )),
                     );
                     return;
                 }
@@ -387,20 +406,61 @@ fn register_watch_plan_with<F>(
     plan: &super::strategy::WatchPlan,
     registered_paths: &mut HashSet<PathBuf>,
     mut watch: F,
-) -> notify::Result<()>
+) -> std::result::Result<Vec<PathBuf>, WatchRegistrationFailure>
 where
     F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
 {
+    let mut newly_registered = Vec::new();
     for entry in plan.entries() {
-        watch(entry.path(), entry.recursive_mode())?;
-        registered_paths.insert(entry.path().to_path_buf());
+        if let Err(source) = watch(entry.path(), entry.recursive_mode()) {
+            return Err(WatchRegistrationFailure {
+                registered_paths: newly_registered,
+                source,
+            });
+        }
+        let path = entry.path().to_path_buf();
+        registered_paths.insert(path.clone());
+        newly_registered.push(path);
     }
     tracing::debug!(
         registered_candidates = plan.diagnostics().registered_candidates(),
         excluded_subtrees = plan.diagnostics().excluded_subtrees(),
+        excluded_by_reason = ?plan.diagnostics().excluded_by_reason(),
         "[markdown-view] watcher監視計画を登録しました"
     );
-    Ok(())
+    Ok(newly_registered)
+}
+
+fn send_internal_watch_result(
+    internal_tx: &std::sync::mpsc::SyncSender<InternalWatchResult>,
+    result: InternalWatchResult,
+    strategy: &WatchStrategy,
+    tx: &mpsc::Sender<WatchEvent>,
+    health_state: &WatcherHealthState,
+) {
+    match internal_tx.try_send(result) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            tracing::warn!("[markdown-view] watcher internal channel が満杯です");
+            health_state.store_failed(WatcherFailureKind::Notify);
+            send_watch_event(
+                tx,
+                WatchEvent::Error(WatchError::notify("watcher internal channel が満杯です")),
+                strategy.error_label(),
+            );
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            tracing::warn!("[markdown-view] watcher internal channel が閉じています");
+            health_state.store_failed(WatcherFailureKind::Notify);
+            send_watch_event(
+                tx,
+                WatchEvent::Error(WatchError::notify(
+                    "watcher internal channel が閉じています",
+                )),
+                strategy.error_label(),
+            );
+        }
+    }
 }
 
 fn handle_debounced_watch_result(
@@ -470,21 +530,31 @@ fn process_debounced_events_with_watch<F>(
             continue;
         }
 
-        if let Err(error) =
-            register_watch_plan_with(&plan, registered_paths, |path, mode| watch(path, mode))
-        {
-            health_state.store_failed(WatcherFailureKind::Notify);
-            let watch_error = WatchError::notify(error.to_string());
-            tracing::warn!(
-                "[markdown-view] 新規ディレクトリの監視追加に失敗: {}",
-                watch_error.detail()
-            );
-            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
-            continue;
-        }
+        let (registered_now, registration_error) =
+            match register_watch_plan_with(&plan, registered_paths, |path, mode| watch(path, mode))
+            {
+                Ok(registered_now) => (registered_now, None),
+                Err(failure) => {
+                    health_state.store_failed(WatcherFailureKind::Notify);
+                    let watch_error = WatchError::from_watch_registration_error(
+                        "新規ディレクトリの監視追加に失敗",
+                        &failure.source,
+                    );
+                    tracing::warn!(
+                        "[markdown-view] 新規ディレクトリの監視追加に失敗: candidate={}, {}",
+                        strategy.path_for_log(&candidate),
+                        watch_error.detail()
+                    );
+                    (failure.registered_paths, Some(watch_error))
+                }
+            };
 
         let mut recovered = HashSet::new();
-        for markdown in super::strategy::collect_markdown_files_for_recovery(&candidate) {
+        let registered_now = registered_now.into_iter().collect::<HashSet<_>>();
+        for markdown in super::strategy::collect_markdown_files_for_recovery_under_watched_dirs(
+            &candidate,
+            &registered_now,
+        ) {
             if recovered.insert(markdown.clone()) {
                 send_watch_event(
                     tx,
@@ -492,6 +562,10 @@ fn process_debounced_events_with_watch<F>(
                     strategy.change_label(),
                 );
             }
+        }
+
+        if let Some(watch_error) = registration_error {
+            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
         }
     }
 }
@@ -730,7 +804,13 @@ mod tests {
         })
         .expect_err("partial registration should fail");
 
-        assert!(error.to_string().contains("watch registration failed"));
+        assert!(error
+            .source
+            .to_string()
+            .contains("watch registration failed"));
+        assert_eq!(error.registered_paths, vec![dir.path().join("a")]);
+        assert!(registered.contains(&dir.path().join("a")));
+        assert!(!registered.contains(&dir.path().join("b")));
         assert_eq!(registrar.watched.len(), 1);
     }
 
@@ -809,6 +889,113 @@ mod tests {
             WatchEvent::Error(error) => {
                 assert_eq!(error.kind(), WatchErrorKind::Notify);
                 assert!(error.detail().contains("dynamic watch failed"));
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_internal_events_追加watch部分失敗は成功済みrootだけrecovery通知する() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        let nested = new_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let root_md = new_dir.join("root.md");
+        let nested_md = nested.join("child.md");
+        std::fs::write(&root_md, "# root").unwrap();
+        std::fs::write(&nested_md, "# child").unwrap();
+        let nested_canonical = nested.canonicalize().unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |path, _mode| {
+                if path == nested_canonical {
+                    Err(notify::Error::generic("nested watch failed"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        assert!(registered.contains(&new_dir.canonicalize().unwrap()));
+        assert!(!registered.contains(&nested_canonical));
+        assert_eq!(
+            rx.try_recv().expect("root recovery notificationを期待"),
+            WatchEvent::FileChanged(root_md.canonicalize().unwrap())
+        );
+        match rx.try_recv().expect("partial watch error eventを期待") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert!(error.detail().contains("nested watch failed"));
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("nested配下のrecovery通知は期待しない: {:?}", path)
+            }
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "未登録nested配下のMarkdownは通知しない"
+        );
+    }
+
+    #[test]
+    fn test_process_internal_events_追加watchのmax_files_watchはresource_exhaustedを送る() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir,
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |_path, _mode| Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch)),
+        );
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        match rx
+            .try_recv()
+            .expect("dynamic watch resource exhausted eventを期待")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::ResourceExhausted);
+                assert!(error.detail().contains("新規ディレクトリの監視追加に失敗"));
             }
             WatchEvent::FileChanged(path) => {
                 panic!("Errorを期待したがFileChanged({:?})を受信", path)
@@ -956,6 +1143,46 @@ mod tests {
             WatchEvent::Error(error) => {
                 assert_eq!(error.kind(), WatchErrorKind::Notify);
                 assert!(error.detail().contains("internal channel"));
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
+    }
+
+    #[test]
+    fn test_send_internal_watch_result_満杯時はhealth_failedとerror_eventを送る() {
+        let dir = tempfile::tempdir().unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let (internal_tx, _internal_rx) =
+            std::sync::mpsc::sync_channel::<super::InternalWatchResult>(1);
+        internal_tx
+            .send(Ok(Vec::new()))
+            .expect("internal channelを満杯にできる");
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+
+        super::send_internal_watch_result(
+            &internal_tx,
+            Ok(Vec::new()),
+            &strategy,
+            &tx,
+            &health_state,
+        );
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        match rx
+            .try_recv()
+            .expect("internal channel full error eventを期待")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert!(error.detail().contains("internal channel が満杯"));
             }
             WatchEvent::FileChanged(path) => {
                 panic!("Errorを期待したがFileChanged({:?})を受信", path)

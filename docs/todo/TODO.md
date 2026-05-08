@@ -39,7 +39,7 @@
 ## Done Summary
 
 - [x] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
-  - 完了根拠: ディレクトリモードの監視登録を `WatchPlan` 経由にし、`.git`、`node_modules`、`target`、隠しディレクトリ、symlink directory を notify 登録前に除外する構成にした。起動後に作成された通常サブディレクトリは internal event loop で動的に `NonRecursive` watch へ追加し、既存 Markdown の回復通知も送る。watch 登録の部分成功は init failure とし、起動後の追加 watch 失敗は health failure と `WatchEvent::Error` に分類する。ENOSPC 相当は `WatchErrorKind::ResourceExhausted` として Linux inotify 上限の確認へ進める日本語メッセージを返す。README に既定除外と inotify 上限を明記した
+  - 完了根拠: ディレクトリモードの監視登録を `WatchPlan` 経由にし、`.git`、`node_modules`、`target`、隠しディレクトリ、symlink directory を notify 登録前に除外する構成にした。起動後に作成された通常サブディレクトリは internal event loop で動的に `NonRecursive` watch へ追加し、既存 Markdown の回復通知も送る。watch 登録の部分成功は init failure とし、起動後の追加 watch 失敗は health failure と `WatchEvent::Error` に分類する。ENOSPC 相当は `WatchErrorKind::ResourceExhausted` として Linux inotify 上限の確認へ進める日本語メッセージを返す。レビュー反映で `.git`、`node_modules`、`target`、隠しディレクトリはプレビュー一覧・検索・直接表示からも共通除外し、README に既定除外と inotify 上限を明記した
 - [x] shutdown チェーンの観測性を統合する
   - 完了根拠: watcher thread と forwarder task の shutdown timeout 秒数を共通化し、forwarder の最後のイベント種別と WebSocket receiver 数を診断 snapshot として記録する構成にした。forwarder の自然終了ログと timeout / abort 直前ログに `last_event_kind` / `receiver_count` / `elapsed_ms` / `timeout_secs` を含め、停止遅延時にログだけで切り分けられるようにした。HTTP API、WebSocket payload、UI 表示の外部契約は変更していない
 - [x] watcher の `WatchEvent::Error` 後の健全性 API と atomic save 耐性 E2E を追加する

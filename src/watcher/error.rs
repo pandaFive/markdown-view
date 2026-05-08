@@ -48,6 +48,16 @@ impl WatchError {
         }
     }
 
+    /// 監視登録中のnotifyエラーを分類して生成する
+    pub fn from_watch_registration_error(prefix: &str, error: &notify::Error) -> Self {
+        let detail = format!("{prefix}: {error}");
+        if is_watch_resource_exhausted(error) {
+            Self::resource_exhausted(detail)
+        } else {
+            Self::notify(detail)
+        }
+    }
+
     /// エラー種別を返す
     pub fn kind(&self) -> WatchErrorKind {
         self.kind
@@ -212,6 +222,35 @@ mod tests {
         assert_eq!(
             error.user_message(),
             "監視の初期化に失敗しました: ディレクトリ監視の開始に失敗: generic watch failure"
+        );
+    }
+
+    #[test]
+    fn test_notify_error_動的watch追加のmax_files_watchはresource_exhaustedに変換される() {
+        let notify_error = notify::Error::new(notify::ErrorKind::MaxFilesWatch);
+
+        let error = WatchError::from_watch_registration_error(
+            "新規ディレクトリの監視追加に失敗",
+            &notify_error,
+        );
+
+        assert_eq!(error.kind(), WatchErrorKind::ResourceExhausted);
+        assert!(error.detail().contains("新規ディレクトリの監視追加に失敗"));
+    }
+
+    #[test]
+    fn test_notify_error_動的watch追加の通常エラーはnotifyに変換される() {
+        let notify_error = notify::Error::generic("dynamic watch failure");
+
+        let error = WatchError::from_watch_registration_error(
+            "新規ディレクトリの監視追加に失敗",
+            &notify_error,
+        );
+
+        assert_eq!(error.kind(), WatchErrorKind::Notify);
+        assert_eq!(
+            error.user_message(),
+            "通知ライブラリエラーが発生しました: 新規ディレクトリの監視追加に失敗: dynamic watch failure"
         );
     }
 }

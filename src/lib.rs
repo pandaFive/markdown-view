@@ -5,3 +5,4 @@ pub mod server;
 pub mod template;
 pub use renderer::toc;
 pub mod watcher;
+pub(crate) mod workspace_exclusion;

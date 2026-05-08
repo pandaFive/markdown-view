@@ -52,7 +52,7 @@ markdown-view docs/
 
 ### ディレクトリ監視と Linux inotify 上限
 
-ディレクトリモードでは、監視リソースを節約するため `.git`、`node_modules`、`target`、隠しディレクトリを既定で監視対象から除外します。通常の Markdown workspace で作成した新しいサブディレクトリは起動後も自動で監視対象に追加されます。
+ディレクトリモードでは、監視リソースを節約しライブ更新の対象と表示対象を一致させるため、`.git`、`node_modules`、`target`、隠しディレクトリを既定でプレビュー一覧・検索・直接表示・監視対象から除外します。通常の Markdown workspace で作成した新しいサブディレクトリは起動後も自動で監視対象に追加されます。
 
 Linux で「監視対象が多すぎるため監視を開始できません」と表示された場合は、inotify の `fs.inotify.max_user_watches` 上限に到達している可能性があります。現在値は `sysctl fs.inotify.max_user_watches` で確認できます。上限を変更する場合は、利用環境の方針に従って一時変更または永続設定を行ってください。
 
