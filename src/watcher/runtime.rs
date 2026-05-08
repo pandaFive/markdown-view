@@ -22,6 +22,8 @@ const WATCHER_MESSAGE_BUFFER: usize = 32;
 pub(crate) const WATCH_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 type InitResult = std::result::Result<(), WatchError>;
+type InternalWatchResult =
+    std::result::Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>;
 
 /// watcher の稼働状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,24 +318,19 @@ fn spawn_watcher_thread(
             let rt_tx = tx;
             let panic_tx = rt_tx.clone();
             let mut init_tx = Some(init_tx);
-            let callback_strategy = strategy.clone();
             let start_error_prefix = strategy.start_error_prefix();
             let panic_message = strategy.panic_message();
             let error_label = strategy.error_label();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let callback_health_state = health_state.clone();
+                let (internal_tx, internal_rx) = std::sync::mpsc::channel::<InternalWatchResult>();
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
-                    move |res: std::result::Result<
-                        Vec<notify_debouncer_mini::DebouncedEvent>,
-                        notify::Error,
-                    >| {
-                        handle_debounced_watch_result(
-                            res,
-                            &callback_strategy,
-                            &rt_tx,
-                            &callback_health_state,
-                        );
+                    move |res: InternalWatchResult| {
+                        if internal_tx.send(res).is_err() {
+                            tracing::warn!(
+                                "[markdown-view] watcher internal channel が閉じています"
+                            );
+                        }
                     },
                 );
 
@@ -362,7 +359,15 @@ fn spawn_watcher_thread(
                 }
 
                 send_init_result(&mut init_tx, Ok(()));
-                keep_watcher_thread_alive(&thread_shutdown_flag);
+                run_watcher_event_loop(
+                    &mut debouncer,
+                    internal_rx,
+                    &strategy,
+                    &rt_tx,
+                    &health_state,
+                    &thread_shutdown_flag,
+                    &mut registered_paths,
+                );
             }));
 
             if let Err(panic_payload) = result {
@@ -427,6 +432,70 @@ fn handle_debounced_watch_result(
     }
 }
 
+fn process_debounced_events_with_watch<F>(
+    events: Vec<notify_debouncer_mini::DebouncedEvent>,
+    strategy: &WatchStrategy,
+    tx: &mpsc::Sender<WatchEvent>,
+    health_state: &WatcherHealthState,
+    registered_paths: &mut HashSet<PathBuf>,
+    mut watch: F,
+) where
+    F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
+{
+    for changed_path in strategy.collect_changed_paths(&events) {
+        send_watch_event(
+            tx,
+            WatchEvent::FileChanged(changed_path),
+            strategy.change_label(),
+        );
+    }
+
+    for candidate in strategy.collect_new_directory_candidates(&events) {
+        if registered_paths.contains(&candidate) {
+            continue;
+        }
+
+        let plan = match super::strategy::WatchPlan::for_new_subtree(&candidate, registered_paths) {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] 新規ディレクトリの監視計画生成に失敗: {}",
+                    error
+                );
+                continue;
+            }
+        };
+
+        if plan.entries().is_empty() {
+            continue;
+        }
+
+        if let Err(error) =
+            register_watch_plan_with(&plan, registered_paths, |path, mode| watch(path, mode))
+        {
+            health_state.store_failed(WatcherFailureKind::Notify);
+            let watch_error = WatchError::notify(error.to_string());
+            tracing::warn!(
+                "[markdown-view] 新規ディレクトリの監視追加に失敗: {}",
+                watch_error.detail()
+            );
+            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
+            continue;
+        }
+
+        let mut recovered = HashSet::new();
+        for markdown in super::strategy::collect_markdown_files_for_recovery(&candidate) {
+            if recovered.insert(markdown.clone()) {
+                send_watch_event(
+                    tx,
+                    WatchEvent::FileChanged(markdown),
+                    strategy.change_label(),
+                );
+            }
+        }
+    }
+}
+
 fn handle_watcher_panic(
     panic_payload: Box<dyn std::any::Any + Send>,
     panic_message: &str,
@@ -460,10 +529,57 @@ fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: I
     }
 }
 
-fn keep_watcher_thread_alive(shutdown_flag: &AtomicBool) {
+fn run_watcher_event_loop(
+    debouncer: &mut notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>,
+    internal_rx: std::sync::mpsc::Receiver<InternalWatchResult>,
+    strategy: &WatchStrategy,
+    tx: &mpsc::Sender<WatchEvent>,
+    health_state: &WatcherHealthState,
+    shutdown_flag: &AtomicBool,
+    registered_paths: &mut HashSet<PathBuf>,
+) {
     while !shutdown_flag.load(Ordering::Acquire) {
-        std::thread::park_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS));
+        match internal_rx.recv_timeout(Duration::from_millis(WATCHER_THREAD_PARK_MS)) {
+            Ok(Ok(events)) => {
+                process_debounced_events_with_watch(
+                    events,
+                    strategy,
+                    tx,
+                    health_state,
+                    registered_paths,
+                    |path, mode| debouncer.watcher().watch(path, mode),
+                );
+            }
+            Ok(Err(error)) => {
+                handle_debounced_watch_result(Err(error), strategy, tx, health_state);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                handle_internal_channel_disconnected(strategy, tx, health_state, shutdown_flag);
+                break;
+            }
+        }
     }
+}
+
+fn handle_internal_channel_disconnected(
+    strategy: &WatchStrategy,
+    tx: &mpsc::Sender<WatchEvent>,
+    health_state: &WatcherHealthState,
+    shutdown_flag: &AtomicBool,
+) {
+    tracing::warn!("[markdown-view] watcher internal channel が切断されました");
+    if shutdown_flag.load(Ordering::Acquire) {
+        return;
+    }
+    health_state.store_failed(WatcherFailureKind::Notify);
+    send_watch_event(
+        tx,
+        WatchEvent::Error(WatchError::notify(
+            "watcher internal channel が切断されました",
+        )),
+        strategy.error_label(),
+    );
 }
 
 async fn await_watcher_init(
@@ -487,7 +603,7 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::{
-        handle_debounced_watch_result, handle_watcher_panic, keep_watcher_thread_alive,
+        handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         register_watch_plan_with, send_watch_event, Watcher, WatcherFailureKind, WatcherHealth,
         WatcherHealthState,
     };
@@ -506,7 +622,11 @@ mod tests {
     }
 
     fn spawn_idle_watcher_thread(shutdown_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || keep_watcher_thread_alive(&shutdown_flag))
+        std::thread::spawn(move || {
+            while !shutdown_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        })
     }
 
     #[derive(Default)]
@@ -582,6 +702,235 @@ mod tests {
 
         assert!(error.to_string().contains("watch registration failed"));
         assert_eq!(registrar.watched.len(), 1);
+    }
+
+    #[test]
+    fn test_process_internal_events_新規ディレクトリをwatch追加して既存markdownを通知する() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let md = new_dir.join("created.md");
+        std::fs::write(&md, "# created").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+        let mut watched = Vec::new();
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |path, mode| {
+                watched.push((path.to_path_buf(), mode));
+                Ok(())
+            },
+        );
+
+        assert!(watched.iter().any(|(path, mode)| {
+            path == &new_dir.canonicalize().unwrap() && *mode == notify::RecursiveMode::NonRecursive
+        }));
+        assert_eq!(
+            rx.try_recv().expect("recovery markdown notificationを期待"),
+            WatchEvent::FileChanged(md.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_process_internal_events_追加watch失敗はhealth_failedとerror_eventを送る() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir,
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |_path, _mode| Err(notify::Error::generic("dynamic watch failed")),
+        );
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        match rx.try_recv().expect("dynamic watch error eventを期待") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert!(error.detail().contains("dynamic watch failed"));
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_internal_events_登録済みディレクトリではrecovery通知しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing_dir = dir.path().join("existing");
+        std::fs::create_dir_all(&existing_dir).unwrap();
+        std::fs::write(existing_dir.join("created.md"), "# created").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            existing_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+        registered.insert(existing_dir.canonicalize().unwrap());
+        let mut watched = Vec::new();
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |path, mode| {
+                watched.push((path.to_path_buf(), mode));
+                Ok(())
+            },
+        );
+
+        assert!(watched.is_empty());
+        assert!(rx.try_recv().is_err(), "recovery通知は不要");
+        assert_eq!(health_state.load(), WatcherHealth::Alive);
+    }
+
+    #[test]
+    fn test_process_internal_events_recoveryは新規登録rootだけを通知する() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing_dir = dir.path().join("existing");
+        let new_dir = existing_dir.join("new");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let old_md = existing_dir.join("old.md");
+        let new_md = new_dir.join("created.md");
+        std::fs::write(&old_md, "# old").unwrap();
+        std::fs::write(&new_md, "# created").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+        registered.insert(existing_dir.canonicalize().unwrap());
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |_path, _mode| Ok(()),
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("new root recovery notificationを期待"),
+            WatchEvent::FileChanged(new_md.canonicalize().unwrap())
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "登録済み親ディレクトリ直下のMarkdownは再通知しない"
+        );
+    }
+
+    #[test]
+    fn test_process_internal_events_recoveryは新規subtreeを一度だけ走査する() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        let nested = new_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let md = nested.join("created.md");
+        std::fs::write(&md, "# created").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            new_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut registered = std::collections::HashSet::new();
+        registered.insert(dir.path().canonicalize().unwrap());
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |_path, _mode| Ok(()),
+        );
+
+        assert_eq!(
+            rx.try_recv().expect("nested recovery notificationを期待"),
+            WatchEvent::FileChanged(md.canonicalize().unwrap())
+        );
+        assert!(rx.try_recv().is_err(), "重複recovery通知は不要");
+    }
+
+    #[test]
+    fn test_run_watcher_event_loop_internal_channel切断はhealth_failedとerror_eventを送る() {
+        let (_dir, file_path) = create_markdown_fixture("watch.md", "# before");
+        let strategy = WatchStrategy::from_mode(&AppMode::new_single_file(&file_path).unwrap())
+            .expect("watch strategyを作成できる");
+        let (internal_tx, internal_rx) = std::sync::mpsc::channel::<super::InternalWatchResult>();
+        drop(internal_tx);
+        let health_state = WatcherHealthState::new_alive();
+        let shutdown_flag = AtomicBool::new(false);
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+
+        assert!(matches!(
+            internal_rx.recv_timeout(Duration::from_millis(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+        super::handle_internal_channel_disconnected(&strategy, &tx, &health_state, &shutdown_flag);
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify)
+        );
+        match rx.try_recv().expect("internal channel error eventを期待") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert!(error.detail().contains("internal channel"));
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({:?})を受信", path)
+            }
+        }
     }
 
     #[test]

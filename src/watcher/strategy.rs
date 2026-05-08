@@ -229,6 +229,16 @@ impl WatchStrategy {
             Self::Directory { base_dir } => collect_directory_changes(base_dir, events),
         }
     }
+
+    pub(super) fn collect_new_directory_candidates(
+        &self,
+        events: &[DebouncedEvent],
+    ) -> Vec<PathBuf> {
+        match self {
+            Self::SingleFile { .. } => Vec::new(),
+            Self::Directory { base_dir } => collect_directory_candidates(base_dir, events),
+        }
+    }
 }
 
 fn collect_single_file_changes(target_path: &Path, events: &[DebouncedEvent]) -> Vec<PathBuf> {
@@ -272,6 +282,39 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         }
     }
     changed_paths
+}
+
+fn collect_directory_candidates(
+    base_dir: &CanonicalPath,
+    events: &[DebouncedEvent],
+) -> Vec<PathBuf> {
+    let mut candidates = HashSet::new();
+    let base_path = base_dir.as_path();
+    for event in events {
+        if !is_content_change_event(&event.kind) {
+            continue;
+        }
+
+        let path = normalize_lexical_path(&event.path);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+
+        let Some(base_relative_check) = path_for_base_relative_checks(&path, base_path) else {
+            continue;
+        };
+        if base_relative_check.is_hidden {
+            continue;
+        }
+        candidates.insert(base_relative_check.normalized_event_path);
+    }
+
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort();
+    candidates
 }
 
 #[allow(dead_code)]
@@ -1070,6 +1113,82 @@ mod tests {
             received.is_empty(),
             "連続更新イベントのみでは通知されないはず"
         );
+    }
+
+    #[test]
+    fn test_collect_new_directory_candidates_単一ファイルは空を返す() {
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
+        let strategy = WatchStrategy::SingleFile {
+            target_path: CanonicalPath::try_from_path(&target).unwrap(),
+        };
+        let events = vec![debounced_event(
+            target.parent().unwrap().to_path_buf(),
+            DebouncedEventKind::Any,
+        )];
+
+        let candidates = strategy.collect_new_directory_candidates(&events);
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_collect_new_directory_candidates_通常ディレクトリだけ候補にする() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_dir = dir.path().join("new");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let markdown = new_dir.join("note.md");
+        std::fs::write(&markdown, "# note").unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![
+            debounced_event(markdown, DebouncedEventKind::Any),
+            debounced_event(new_dir.clone(), DebouncedEventKind::Any),
+        ];
+
+        let candidates = strategy.collect_new_directory_candidates(&events);
+
+        assert_eq!(candidates, vec![new_dir]);
+    }
+
+    #[test]
+    fn test_collect_new_directory_candidates_hiddenとbase外を候補にしない() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let hidden = dir.path().join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        let outside_dir = outside.path().join("new");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![
+            debounced_event(hidden, DebouncedEventKind::Any),
+            debounced_event(outside_dir, DebouncedEventKind::Any),
+        ];
+
+        let candidates = strategy.collect_new_directory_candidates(&events);
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_new_directory_candidates_シンボリックリンクディレクトリは候補にしない() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let linked = dir.path().join("linked");
+        symlink(outside.path(), &linked).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let events = vec![debounced_event(linked, DebouncedEventKind::Any)];
+
+        let candidates = strategy.collect_new_directory_candidates(&events);
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
