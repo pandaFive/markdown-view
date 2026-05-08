@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -12,6 +12,92 @@ use crate::server::{AppMode, CanonicalPath};
 pub(super) enum WatchStrategy {
     SingleFile { target_path: CanonicalPath },
     Directory { base_dir: CanonicalPath },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct WatchPlan {
+    entries: Vec<WatchPlanEntry>,
+    diagnostics: WatchPlanDiagnostics,
+}
+
+#[allow(dead_code)]
+impl WatchPlan {
+    pub(super) fn entries(&self) -> &[WatchPlanEntry] {
+        &self.entries
+    }
+
+    pub(super) fn diagnostics(&self) -> &WatchPlanDiagnostics {
+        &self.diagnostics
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WatchPlanEntry {
+    path: PathBuf,
+    recursive_mode: RecursiveMode,
+}
+
+#[allow(dead_code)]
+impl WatchPlanEntry {
+    pub(super) fn new(path: PathBuf, recursive_mode: RecursiveMode) -> Self {
+        Self {
+            path,
+            recursive_mode,
+        }
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn recursive_mode(&self) -> RecursiveMode {
+        self.recursive_mode
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct WatchPlanDiagnostics {
+    registered_candidates: usize,
+    excluded_subtrees: usize,
+    excluded_by_reason: BTreeMap<ExcludeReason, usize>,
+}
+
+#[allow(dead_code)]
+impl WatchPlanDiagnostics {
+    fn record_registered(&mut self) {
+        self.registered_candidates += 1;
+    }
+
+    fn record_excluded(&mut self, reason: ExcludeReason) {
+        self.excluded_subtrees += 1;
+        *self.excluded_by_reason.entry(reason).or_insert(0) += 1;
+    }
+
+    pub(super) fn registered_candidates(&self) -> usize {
+        self.registered_candidates
+    }
+
+    pub(super) fn excluded_subtrees(&self) -> usize {
+        self.excluded_subtrees
+    }
+
+    pub(super) fn excluded_by_reason(&self) -> &BTreeMap<ExcludeReason, usize> {
+        &self.excluded_by_reason
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ExcludeReason {
+    Git,
+    NodeModules,
+    Target,
+    Hidden,
+    Symlink,
+    MetadataError,
 }
 
 impl WatchStrategy {
@@ -44,6 +130,26 @@ impl WatchStrategy {
         match self {
             Self::SingleFile { .. } => RecursiveMode::NonRecursive,
             Self::Directory { .. } => RecursiveMode::Recursive,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn watch_plan(&self) -> Result<WatchPlan> {
+        match self {
+            Self::SingleFile { target_path } => {
+                let watch_dir = target_path
+                    .as_path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .context("親ディレクトリが取得できません")?;
+                let mut diagnostics = WatchPlanDiagnostics::default();
+                diagnostics.record_registered();
+                Ok(WatchPlan {
+                    entries: vec![WatchPlanEntry::new(watch_dir, RecursiveMode::NonRecursive)],
+                    diagnostics,
+                })
+            }
+            Self::Directory { base_dir } => build_directory_watch_plan(base_dir.as_path()),
         }
     }
 
@@ -273,6 +379,133 @@ fn has_hidden_component(relative: &Path) -> bool {
         .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
+#[allow(dead_code)]
+fn build_directory_watch_plan(base_dir: &Path) -> Result<WatchPlan> {
+    let mut entries = Vec::new();
+    let mut diagnostics = WatchPlanDiagnostics::default();
+    collect_watch_plan_entries(base_dir, base_dir, true, &mut entries, &mut diagnostics)?;
+    Ok(WatchPlan {
+        entries,
+        diagnostics,
+    })
+}
+
+#[allow(dead_code)]
+fn collect_watch_plan_entries(
+    dir: &Path,
+    log_base: &Path,
+    is_root: bool,
+    entries: &mut Vec<WatchPlanEntry>,
+    diagnostics: &mut WatchPlanDiagnostics,
+) -> Result<()> {
+    if !is_root {
+        if let Some(reason) = exclude_reason_for_dir(dir) {
+            diagnostics.record_excluded(reason);
+            return Ok(());
+        }
+    }
+
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if is_root => {
+            return Err(error).with_context(|| {
+                format!(
+                    "監視対象ディレクトリのメタデータ取得に失敗: {}",
+                    sanitize_path_for_logging(dir, log_base)
+                )
+            });
+        }
+        Err(error) => {
+            diagnostics.record_excluded(ExcludeReason::MetadataError);
+            tracing::warn!(
+                "[markdown-view] watcher監視計画: メタデータ取得失敗（除外）: {} ({})",
+                sanitize_path_for_logging(dir, log_base),
+                error
+            );
+            return Ok(());
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        if !is_root {
+            diagnostics.record_excluded(ExcludeReason::Symlink);
+            return Ok(());
+        }
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    let children = match std::fs::read_dir(dir) {
+        Ok(children) => children,
+        Err(error) if is_root => {
+            return Err(error).with_context(|| {
+                format!(
+                    "監視対象ディレクトリの読み取りに失敗: {}",
+                    sanitize_path_for_logging(dir, log_base)
+                )
+            });
+        }
+        Err(error) => {
+            diagnostics.record_excluded(ExcludeReason::MetadataError);
+            tracing::warn!(
+                "[markdown-view] watcher監視計画: ディレクトリ読み取り失敗（除外）: {} ({})",
+                sanitize_path_for_logging(dir, log_base),
+                error
+            );
+            return Ok(());
+        }
+    };
+
+    let mut child_paths = Vec::new();
+    for child in children {
+        match child {
+            Ok(child) => child_paths.push(child.path()),
+            Err(error) if is_root => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "監視対象ディレクトリのエントリ読み取りに失敗: {}",
+                        sanitize_path_for_logging(dir, log_base)
+                    )
+                });
+            }
+            Err(error) => {
+                diagnostics.record_excluded(ExcludeReason::MetadataError);
+                tracing::warn!(
+                    "[markdown-view] watcher監視計画: ディレクトリエントリ読み取り失敗（除外）: {} ({})",
+                    sanitize_path_for_logging(dir, log_base),
+                    error
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    entries.push(WatchPlanEntry::new(
+        normalize_lexical_path(dir),
+        RecursiveMode::NonRecursive,
+    ));
+    diagnostics.record_registered();
+
+    for child_path in child_paths {
+        collect_watch_plan_entries(&child_path, log_base, false, entries, diagnostics)?;
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn exclude_reason_for_dir(path: &Path) -> Option<ExcludeReason> {
+    let name = path.file_name()?.to_string_lossy();
+    match name.as_ref() {
+        ".git" => Some(ExcludeReason::Git),
+        "node_modules" => Some(ExcludeReason::NodeModules),
+        "target" => Some(ExcludeReason::Target),
+        _ if name.starts_with('.') => Some(ExcludeReason::Hidden),
+        _ => None,
+    }
+}
+
 /// パスが監視対象ファイルと一致するか判定する
 ///
 /// target_pathは起動時にcanonicalize済みの絶対パス。
@@ -346,6 +579,172 @@ mod tests {
         let file_path = dir.path().join(name);
         std::fs::write(&file_path, content).unwrap();
         (dir, file_path)
+    }
+
+    fn plan_paths(plan: &super::WatchPlan) -> Vec<PathBuf> {
+        let mut paths = plan
+            .entries()
+            .iter()
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn test_watch_plan_単一ファイルは親ディレクトリをnonrecursiveで登録する() {
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
+        let strategy = WatchStrategy::SingleFile {
+            target_path: CanonicalPath::try_from_path(&target).unwrap(),
+        };
+
+        let plan = strategy.watch_plan().unwrap();
+
+        assert_eq!(plan.entries().len(), 1);
+        assert_eq!(plan.entries()[0].path(), target.parent().unwrap());
+        assert_eq!(
+            plan.entries()[0].recursive_mode(),
+            RecursiveMode::NonRecursive
+        );
+        assert_eq!(plan.diagnostics().registered_candidates(), 1);
+        assert_eq!(plan.diagnostics().excluded_subtrees(), 0);
+    }
+
+    #[test]
+    fn test_watch_plan_ディレクトリは除外対象を登録しない() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [
+            "docs",
+            "docs/nested",
+            ".git",
+            ".git/objects",
+            "node_modules",
+            "node_modules/pkg",
+            "target",
+            "target/debug",
+            ".draft",
+            ".draft/notes",
+        ] {
+            std::fs::create_dir_all(dir.path().join(path)).unwrap();
+        }
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+
+        let plan = strategy.watch_plan().unwrap();
+        let paths = plan_paths(&plan);
+
+        assert!(paths.contains(&dir.path().canonicalize().unwrap()));
+        assert!(paths.contains(&dir.path().join("docs").canonicalize().unwrap()));
+        assert!(paths.contains(&dir.path().join("docs/nested").canonicalize().unwrap()));
+        assert!(!paths.iter().any(|path| path.ends_with(".git")));
+        assert!(!paths.iter().any(|path| path.ends_with("objects")));
+        assert!(!paths.iter().any(|path| path.ends_with("node_modules")));
+        assert!(!paths.iter().any(|path| path.ends_with("pkg")));
+        assert!(!paths.iter().any(|path| path.ends_with("target")));
+        assert!(!paths.iter().any(|path| path.ends_with("debug")));
+        assert!(!paths.iter().any(|path| path.ends_with(".draft")));
+        assert!(!paths.iter().any(|path| path.ends_with("notes")));
+        assert_eq!(plan.diagnostics().registered_candidates(), 3);
+        assert_eq!(plan.diagnostics().excluded_subtrees(), 4);
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::Git),
+            Some(&1)
+        );
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::NodeModules),
+            Some(&1)
+        );
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::Target),
+            Some(&1)
+        );
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::Hidden),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn test_watch_plan_隠しbase自体は登録する() {
+        let parent = tempfile::tempdir().unwrap();
+        let hidden_base = parent.path().join(".workspace");
+        std::fs::create_dir_all(hidden_base.join("docs")).unwrap();
+        std::fs::create_dir_all(hidden_base.join(".draft")).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(&hidden_base).unwrap(),
+        };
+
+        let plan = strategy.watch_plan().unwrap();
+        let paths = plan_paths(&plan);
+
+        assert!(paths.contains(&hidden_base.canonicalize().unwrap()));
+        assert!(paths.contains(&hidden_base.join("docs").canonicalize().unwrap()));
+        assert!(!paths.iter().any(|path| path.ends_with(".draft")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_watch_plan_シンボリックリンクディレクトリは辿らない() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("docs")).unwrap();
+        symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+
+        let plan = strategy.watch_plan().unwrap();
+        let paths = plan_paths(&plan);
+
+        assert!(paths.contains(&dir.path().canonicalize().unwrap()));
+        assert!(!paths.iter().any(|path| path.ends_with("linked")));
+        assert!(!paths.iter().any(|path| path.ends_with("docs")));
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::Symlink),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_watch_plan_読み取りエラーはmetadata_errorとして診断に記録する() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("unreadable");
+        std::fs::create_dir_all(unreadable.join("nested")).unwrap();
+        let original_permissions = std::fs::metadata(&unreadable).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&unreadable, permissions).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+
+        let plan = strategy.watch_plan().unwrap();
+        let paths = plan_paths(&plan);
+
+        std::fs::set_permissions(&unreadable, original_permissions).unwrap();
+        assert!(!paths.iter().any(|path| path.ends_with("unreadable")));
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::MetadataError),
+            Some(&1)
+        );
     }
 
     #[test]
