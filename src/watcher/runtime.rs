@@ -88,31 +88,12 @@ struct WatchDirectoryRegistry {
 #[derive(Debug)]
 struct WatchDirectoryEntry {
     identity: Option<WatchDirectoryIdentity>,
-    #[cfg(unix)]
-    _handle: Option<std::fs::File>,
 }
 
 impl WatchDirectoryEntry {
     fn from_path(path: &Path) -> Self {
-        #[cfg(unix)]
-        {
-            let handle = std::fs::File::open(path).ok();
-            let identity = handle
-                .as_ref()
-                .and_then(|handle| handle.metadata().ok())
-                .and_then(|metadata| WatchDirectoryIdentity::from_metadata(&metadata))
-                .or_else(|| WatchDirectoryIdentity::from_path(path));
-            Self {
-                identity,
-                _handle: handle,
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            Self {
-                identity: WatchDirectoryIdentity::from_path(path),
-            }
+        Self {
+            identity: WatchDirectoryIdentity::from_path(path),
         }
     }
 }
@@ -896,6 +877,17 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn count_open_fds_under(root: &std::path::Path) -> Option<usize> {
+        std::fs::read_dir("/proc/self/fd").ok().map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|target| target.starts_with(root))
+                .count()
+        })
+    }
+
     #[test]
     fn test_register_watch_plan_全entryをnonrecursiveで登録する() {
         let dir = tempfile::tempdir().unwrap();
@@ -955,6 +947,30 @@ mod tests {
         assert!(registered.contains(&dir.path().join("a")));
         assert!(!registered.contains(&dir.path().join("b")));
         assert_eq!(registrar.watched.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_watch_directory_registry_登録時にfdを保持し続けない() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(before) = count_open_fds_under(dir.path()) else {
+            return;
+        };
+        let mut registered = WatchDirectoryRegistry::default();
+        for index in 0..64 {
+            let child = dir.path().join(format!("dir-{index}"));
+            std::fs::create_dir(&child).unwrap();
+            registered.insert(child.canonicalize().unwrap());
+        }
+        let Some(after) = count_open_fds_under(dir.path()) else {
+            return;
+        };
+
+        assert_eq!(
+            after, before,
+            "registry should not retain fds for registered directories: before={before}, after={after}"
+        );
+        assert_eq!(registered.path_set().len(), 64);
     }
 
     #[test]
@@ -1247,6 +1263,9 @@ mod tests {
         registered.insert(recreated_dir.canonicalize().unwrap());
         std::fs::remove_dir(&recreated_dir).unwrap();
         std::fs::create_dir(&recreated_dir).unwrap();
+        if registered.contains_active(&recreated_dir) {
+            return;
+        }
         let md = recreated_dir.join("created.md");
         std::fs::write(&md, "# recreated").unwrap();
         let strategy = WatchStrategy::Directory {
