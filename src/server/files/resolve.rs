@@ -9,6 +9,7 @@ use crate::server::log_path::sanitize_path_for_logging;
 use crate::server::messages::ApiError;
 use crate::server::state::{AppState, CanonicalPath};
 use crate::template::UpdateMessage;
+use crate::workspace_exclusion::exclusion_reason_for_relative_path;
 
 #[derive(Debug, Clone)]
 /// ファイル解決結果。ターゲットファイルのパス、ファイル一覧、相対パス、表示用ラベルを保持する。
@@ -405,6 +406,9 @@ fn resolve_file_with_canonicalize_error(
     if relative_path.is_absolute() {
         return Err(ResolveFileError::InvalidPath);
     }
+    if exclusion_reason_for_relative_path(relative_path).is_some() {
+        return Err(ResolveFileError::Hidden);
+    }
 
     let candidate = base_dir.join(relative_path);
     let canonical = candidate.canonicalize().map_err(|error| {
@@ -429,10 +433,7 @@ fn resolve_file_with_canonicalize_error(
     }
 
     if let Ok(resolved_relative) = canonical.strip_prefix(&canonical_base) {
-        if resolved_relative
-            .components()
-            .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
-        {
+        if exclusion_reason_for_relative_path(resolved_relative).is_some() {
             return Err(ResolveFileError::Hidden);
         }
     }
@@ -493,7 +494,7 @@ pub enum ResolveFileError {
     Traversal,
     /// Markdownファイルではない
     NotMarkdown,
-    /// 隠しファイルへのアクセス
+    /// 隠しファイルまたは除外対象へのアクセス
     Hidden,
     /// watcher再検証中の一時不在ではないI/O失敗
     Io(std::io::ErrorKind),
@@ -512,9 +513,10 @@ impl std::fmt::Display for ResolveFileError {
                 write!(f, "ディレクトリ外へのアクセスは禁止されています")
             }
             ResolveFileError::NotMarkdown => write!(f, ".mdファイルのみアクセス可能です"),
-            ResolveFileError::Hidden => {
-                write!(f, "隠しファイルへのアクセスは禁止されています")
-            }
+            ResolveFileError::Hidden => write!(
+                f,
+                "隠しファイルまたは除外対象へのアクセスは禁止されています"
+            ),
             ResolveFileError::Io(kind) => {
                 write!(f, "ファイル解決中にI/Oエラーが発生しました ({kind:?})")
             }

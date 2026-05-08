@@ -616,7 +616,9 @@ fn test_resolve_file_バックスラッシュ型トラバーサルを拒否() {
     let result = resolve_file(dir.path(), "..\\..\\..\\etc\\passwd");
     assert!(matches!(
         result,
-        Err(ResolveFileError::NotFound) | Err(ResolveFileError::Traversal)
+        Err(ResolveFileError::Hidden)
+            | Err(ResolveFileError::NotFound)
+            | Err(ResolveFileError::Traversal)
     ));
 }
 
@@ -662,6 +664,50 @@ fn test_resolve_file_隠しファイル拒否() {
 fn test_resolve_file_隠しドットファイル拒否() {
     let dir = create_test_dir();
     let result = resolve_file(dir.path(), ".dotfile.md");
+    assert_eq!(result, Err(ResolveFileError::Hidden));
+}
+
+#[test]
+fn test_resolve_file_生成物ディレクトリ配下は拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("node_modules/pkg/readme.md"), "# generated").unwrap();
+    std::fs::write(dir.path().join("target/debug/build.md"), "# generated").unwrap();
+
+    assert_eq!(
+        resolve_file(dir.path(), "node_modules/pkg/readme.md"),
+        Err(ResolveFileError::Hidden)
+    );
+    assert_eq!(
+        resolve_file(dir.path(), "target/debug/build.md"),
+        Err(ResolveFileError::Hidden)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_除外componentのsymlink経由は拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/readme.md"), "# docs").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("docs"), dir.path().join("node_modules")).unwrap();
+
+    let result = resolve_file(dir.path(), "node_modules/readme.md");
+
+    assert_eq!(result, Err(ResolveFileError::Hidden));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_file_canonical先が除外componentならsymlink経由も拒否する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("target/debug/build.md"), "# build").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("target"), dir.path().join("linked")).unwrap();
+
+    let result = resolve_file(dir.path(), "linked/debug/build.md");
+
     assert_eq!(result, Err(ResolveFileError::Hidden));
 }
 
@@ -849,6 +895,21 @@ fn test_list_markdown_files_隠しファイル除外() {
 }
 
 #[test]
+fn test_list_markdown_files_生成物ディレクトリ配下を除外する() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("docs/guide.md"), "# guide").unwrap();
+    std::fs::write(dir.path().join("node_modules/pkg/readme.md"), "# generated").unwrap();
+    std::fs::write(dir.path().join("target/debug/build.md"), "# generated").unwrap();
+
+    let files = list_markdown_files(dir.path()).unwrap();
+
+    assert_eq!(files, vec!["docs/guide.md".to_string()]);
+}
+
+#[test]
 fn test_list_markdown_files_空ディレクトリ() {
     let dir = tempfile::tempdir().unwrap();
     let files = list_markdown_files(dir.path()).unwrap();
@@ -866,6 +927,28 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].file, "guide.md");
+}
+
+#[tokio::test]
+async fn test_search_directory_生成物ディレクトリ配下を検索しない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("docs/guide.md"), "needle visible").unwrap();
+    std::fs::write(
+        dir.path().join("node_modules/pkg/readme.md"),
+        "needle generated",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("target/debug/build.md"), "needle generated").unwrap();
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+
+    let response = search_directory(&canonical, "needle").await.unwrap();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].file, "docs/guide.md");
+    assert_eq!(response.searched_files, 1);
 }
 
 #[test]
@@ -3211,7 +3294,7 @@ async fn test_build_change_broadcast_message_隠しパスは検証エラーをbr
                 msg
             );
             assert!(
-                msg.contains("隠しファイルへのアクセスは禁止されています"),
+                msg.contains("隠しファイルまたは除外対象へのアクセスは禁止されています"),
                 "Hiddenのエラー文言を期待: {}",
                 msg
             );
@@ -3325,6 +3408,11 @@ fn test_resolve_file_error_io_displayはerror_kindを含む() {
     let error = ResolveFileError::Io(std::io::ErrorKind::PermissionDenied);
 
     assert!(error.to_string().contains("PermissionDenied"));
+}
+
+#[test]
+fn test_resolve_file_error_hidden_displayは除外対象を含む() {
+    assert!(ResolveFileError::Hidden.to_string().contains("除外対象"));
 }
 
 #[test]
