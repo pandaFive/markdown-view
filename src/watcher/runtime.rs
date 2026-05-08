@@ -39,10 +39,6 @@ struct WatchDirectoryIdentity {
     dev: u64,
     #[cfg(unix)]
     ino: u64,
-    #[cfg(unix)]
-    ctime: i64,
-    #[cfg(unix)]
-    ctime_nsec: i64,
     #[cfg(windows)]
     volume_serial_number: Option<u32>,
     #[cfg(windows)]
@@ -58,8 +54,6 @@ impl WatchDirectoryIdentity {
             Some(Self {
                 dev: metadata.dev(),
                 ino: metadata.ino(),
-                ctime: metadata.ctime(),
-                ctime_nsec: metadata.ctime_nsec(),
             })
         }
 
@@ -1186,6 +1180,60 @@ mod tests {
 
         assert!(watched.is_empty());
         assert!(rx.try_recv().is_err(), "recovery通知は不要");
+        assert_eq!(health_state.load(), WatcherHealth::Alive);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_internal_events_登録済みディレクトリのctime変化では再watchしない() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let existing_dir = dir.path().join("existing");
+        std::fs::create_dir_all(&existing_dir).unwrap();
+        let strategy = WatchStrategy::Directory {
+            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
+        };
+        let mut registered = WatchDirectoryRegistry::default();
+        registered.insert(dir.path().canonicalize().unwrap());
+        registered.insert(existing_dir.canonicalize().unwrap());
+        let before = std::fs::metadata(&existing_dir).unwrap();
+        let before_ctime = (before.ctime(), before.ctime_nsec());
+        std::thread::sleep(Duration::from_millis(10));
+        let mut permissions = before.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&existing_dir, permissions).unwrap();
+        let after = std::fs::metadata(&existing_dir).unwrap();
+        assert_ne!(
+            before_ctime,
+            (after.ctime(), after.ctime_nsec()),
+            "test setup should change directory ctime"
+        );
+        let events = vec![notify_debouncer_mini::DebouncedEvent::new(
+            existing_dir.clone(),
+            notify_debouncer_mini::DebouncedEventKind::Any,
+        )];
+        let health_state = WatcherHealthState::new_alive();
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let mut watched = Vec::new();
+
+        process_debounced_events_with_watch(
+            events,
+            &strategy,
+            &tx,
+            &health_state,
+            &mut registered,
+            |path, mode| {
+                watched.push((path.to_path_buf(), mode));
+                Ok(())
+            },
+        );
+
+        assert!(watched.is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "同一実体のctime変化ではrecovery通知しない"
+        );
         assert_eq!(health_state.load(), WatcherHealth::Alive);
     }
 
