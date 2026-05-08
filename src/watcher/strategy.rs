@@ -23,6 +23,18 @@ pub(super) struct WatchPlan {
 
 #[allow(dead_code)]
 impl WatchPlan {
+    #[cfg(test)]
+    pub(super) fn from_entries_for_test(entries: Vec<WatchPlanEntry>) -> Self {
+        Self {
+            diagnostics: WatchPlanDiagnostics {
+                registered_candidates: entries.len(),
+                excluded_subtrees: 0,
+                excluded_by_reason: BTreeMap::new(),
+            },
+            entries,
+        }
+    }
+
     pub(super) fn for_new_subtree(
         subtree: &Path,
         registered_paths: &HashSet<PathBuf>,
@@ -137,24 +149,6 @@ impl WatchStrategy {
             })
         } else {
             anyhow::bail!("未知のAppModeです")
-        }
-    }
-
-    pub(super) fn watch_dir(&self) -> Result<PathBuf> {
-        match self {
-            Self::SingleFile { target_path } => target_path
-                .as_path()
-                .parent()
-                .map(Path::to_path_buf)
-                .context("親ディレクトリが取得できません"),
-            Self::Directory { base_dir } => Ok(base_dir.as_path().to_path_buf()),
-        }
-    }
-
-    pub(super) fn recursive_mode(&self) -> RecursiveMode {
-        match self {
-            Self::SingleFile { .. } => RecursiveMode::NonRecursive,
-            Self::Directory { .. } => RecursiveMode::Recursive,
         }
     }
 
@@ -546,11 +540,9 @@ fn collect_watch_plan_entries(
         }
     };
 
-    if metadata.file_type().is_symlink() {
-        if !is_root {
-            diagnostics.record_excluded(ExcludeReason::Symlink);
-            return Ok(());
-        }
+    if metadata.file_type().is_symlink() && !is_root {
+        diagnostics.record_excluded(ExcludeReason::Symlink);
+        return Ok(());
     }
     if !metadata.is_dir() {
         return Ok(());
@@ -947,13 +939,10 @@ mod tests {
     #[test]
     fn test_strategy_単一ファイルモードのラベルとモードを返す() {
         let (_dir, target) = create_markdown_fixture("target.md", "# target");
-        let parent = target.parent().unwrap().to_path_buf();
         let strategy = WatchStrategy::SingleFile {
             target_path: CanonicalPath::try_from_path(&target).unwrap(),
         };
 
-        assert_eq!(strategy.watch_dir().unwrap(), parent);
-        assert_eq!(strategy.recursive_mode(), RecursiveMode::NonRecursive);
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-file");
         assert_eq!(
             strategy.unexpected_exit_message(),
@@ -976,8 +965,6 @@ mod tests {
             base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
         };
 
-        assert_eq!(strategy.watch_dir().unwrap(), dir.path());
-        assert_eq!(strategy.recursive_mode(), RecursiveMode::Recursive);
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-dir");
         assert_eq!(
             strategy.unexpected_exit_message(),

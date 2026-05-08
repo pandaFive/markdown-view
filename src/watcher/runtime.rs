@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -206,7 +207,7 @@ impl Watcher {
     /// 監視を開始し、監視イベント受信用チャネルを返す
     pub async fn spawn(mode: AppMode) -> Result<(Self, mpsc::Receiver<WatchEvent>)> {
         let strategy = WatchStrategy::from_mode(&mode)?;
-        let watch_dir = strategy.watch_dir()?;
+        let watch_plan = strategy.watch_plan()?;
         let (tx, rx) = mpsc::channel::<WatchEvent>(WATCHER_MESSAGE_BUFFER);
         let error_tx = tx.clone();
         let (init_tx, init_rx) = oneshot::channel::<InitResult>();
@@ -217,7 +218,7 @@ impl Watcher {
         let unexpected_exit = strategy.unexpected_exit_message();
         let watcher_thread = spawn_watcher_thread(
             strategy,
-            watch_dir,
+            watch_plan,
             tx,
             init_tx,
             thread_shutdown_flag,
@@ -301,7 +302,7 @@ fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &st
 
 fn spawn_watcher_thread(
     strategy: WatchStrategy,
-    watch_dir: PathBuf,
+    watch_plan: super::strategy::WatchPlan,
     tx: mpsc::Sender<WatchEvent>,
     init_tx: oneshot::Sender<InitResult>,
     thread_shutdown_flag: Arc<AtomicBool>,
@@ -316,7 +317,6 @@ fn spawn_watcher_thread(
             let panic_tx = rt_tx.clone();
             let mut init_tx = Some(init_tx);
             let callback_strategy = strategy.clone();
-            let recursive_mode = strategy.recursive_mode();
             let start_error_prefix = strategy.start_error_prefix();
             let panic_message = strategy.panic_message();
             let error_label = strategy.error_label();
@@ -348,10 +348,15 @@ fn spawn_watcher_thread(
                     }
                 };
 
-                if let Err(e) = debouncer.watcher().watch(&watch_dir, recursive_mode) {
+                let mut registered_paths = HashSet::new();
+                if let Err(e) =
+                    register_watch_plan_with(&watch_plan, &mut registered_paths, |path, mode| {
+                        debouncer.watcher().watch(path, mode)
+                    })
+                {
                     send_init_result(
                         &mut init_tx,
-                        Err(WatchError::init(format!("{}: {}", start_error_prefix, e))),
+                        Err(WatchError::from_watch_init_error(start_error_prefix, &e)),
                     );
                     return;
                 }
@@ -371,6 +376,26 @@ fn spawn_watcher_thread(
             }
         })
         .context(spawn_context)
+}
+
+fn register_watch_plan_with<F>(
+    plan: &super::strategy::WatchPlan,
+    registered_paths: &mut HashSet<PathBuf>,
+    mut watch: F,
+) -> notify::Result<()>
+where
+    F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
+{
+    for entry in plan.entries() {
+        watch(entry.path(), entry.recursive_mode())?;
+        registered_paths.insert(entry.path().to_path_buf());
+    }
+    tracing::debug!(
+        registered_candidates = plan.diagnostics().registered_candidates(),
+        excluded_subtrees = plan.diagnostics().excluded_subtrees(),
+        "[markdown-view] watcher監視計画を登録しました"
+    );
+    Ok(())
 }
 
 fn handle_debounced_watch_result(
@@ -463,7 +488,8 @@ mod tests {
 
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, keep_watcher_thread_alive,
-        send_watch_event, Watcher, WatcherFailureKind, WatcherHealth, WatcherHealthState,
+        register_watch_plan_with, send_watch_event, Watcher, WatcherFailureKind, WatcherHealth,
+        WatcherHealthState,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -481,6 +507,81 @@ mod tests {
 
     fn spawn_idle_watcher_thread(shutdown_flag: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || keep_watcher_thread_alive(&shutdown_flag))
+    }
+
+    #[derive(Default)]
+    struct FakeWatchRegistrar {
+        fail_on: Option<std::path::PathBuf>,
+        watched: Vec<(std::path::PathBuf, notify::RecursiveMode)>,
+    }
+
+    impl FakeWatchRegistrar {
+        fn watch(
+            &mut self,
+            path: &std::path::Path,
+            mode: notify::RecursiveMode,
+        ) -> notify::Result<()> {
+            if self.fail_on.as_deref() == Some(path) {
+                return Err(notify::Error::generic("watch registration failed"));
+            }
+            self.watched.push((path.to_path_buf(), mode));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_register_watch_plan_全entryをnonrecursiveで登録する() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = crate::watcher::strategy::WatchPlan::from_entries_for_test(vec![
+            crate::watcher::strategy::WatchPlanEntry::new(
+                dir.path().join("a"),
+                notify::RecursiveMode::NonRecursive,
+            ),
+            crate::watcher::strategy::WatchPlanEntry::new(
+                dir.path().join("b"),
+                notify::RecursiveMode::NonRecursive,
+            ),
+        ]);
+        let mut registrar = FakeWatchRegistrar::default();
+        let mut registered = std::collections::HashSet::new();
+
+        register_watch_plan_with(&plan, &mut registered, |path, mode| {
+            registrar.watch(path, mode)
+        })
+        .expect("watch plan registration should succeed");
+
+        assert_eq!(registrar.watched.len(), 2);
+        assert!(registered.contains(&dir.path().join("a")));
+        assert!(registered.contains(&dir.path().join("b")));
+    }
+
+    #[test]
+    fn test_register_watch_plan_一部失敗ならerrorを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let fail_path = dir.path().join("b");
+        let plan = crate::watcher::strategy::WatchPlan::from_entries_for_test(vec![
+            crate::watcher::strategy::WatchPlanEntry::new(
+                dir.path().join("a"),
+                notify::RecursiveMode::NonRecursive,
+            ),
+            crate::watcher::strategy::WatchPlanEntry::new(
+                fail_path.clone(),
+                notify::RecursiveMode::NonRecursive,
+            ),
+        ]);
+        let mut registrar = FakeWatchRegistrar {
+            fail_on: Some(fail_path),
+            watched: Vec::new(),
+        };
+        let mut registered = std::collections::HashSet::new();
+
+        let error = register_watch_plan_with(&plan, &mut registered, |path, mode| {
+            registrar.watch(path, mode)
+        })
+        .expect_err("partial registration should fail");
+
+        assert!(error.to_string().contains("watch registration failed"));
+        assert_eq!(registrar.watched.len(), 1);
     }
 
     #[test]
