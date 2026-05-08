@@ -23,6 +23,31 @@ pub(super) struct WatchPlan {
 
 #[allow(dead_code)]
 impl WatchPlan {
+    pub(super) fn for_new_subtree(
+        subtree: &Path,
+        registered_paths: &HashSet<PathBuf>,
+    ) -> Result<Self> {
+        if let Some(reason) = exclude_reason_for_dir(subtree) {
+            let mut diagnostics = WatchPlanDiagnostics::default();
+            diagnostics.record_excluded(reason);
+            return Ok(Self {
+                entries: Vec::new(),
+                diagnostics,
+            });
+        }
+
+        let mut plan = build_directory_watch_plan(subtree)?;
+        let normalized_registered_paths = registered_paths
+            .iter()
+            .map(|path| normalize_lexical_path(path))
+            .collect::<HashSet<_>>();
+
+        plan.entries
+            .retain(|entry| !normalized_registered_paths.contains(entry.path()));
+        plan.diagnostics.registered_candidates = plan.entries.len();
+        Ok(plan)
+    }
+
     pub(super) fn entries(&self) -> &[WatchPlanEntry] {
         &self.entries
     }
@@ -253,6 +278,101 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         }
     }
     changed_paths
+}
+
+#[allow(dead_code)]
+pub(super) fn collect_markdown_files_for_recovery(root: &Path) -> Vec<PathBuf> {
+    let mut markdown_files = Vec::new();
+    collect_markdown_files_for_recovery_inner(root, root, &mut markdown_files);
+    markdown_files
+}
+
+#[allow(dead_code)]
+fn collect_markdown_files_for_recovery_inner(
+    path: &Path,
+    log_base: &Path,
+    markdown_files: &mut Vec<PathBuf>,
+) {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] watcher回復列挙: メタデータ取得失敗（スキップ）: {} ({})",
+                sanitize_path_for_logging(path, log_base),
+                error
+            );
+            return;
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        tracing::warn!(
+            "[markdown-view] watcher回復列挙: シンボリックリンクをスキップ: {}",
+            sanitize_path_for_logging(path, log_base)
+        );
+        return;
+    }
+
+    if metadata.is_dir() {
+        if exclude_reason_for_dir(path).is_some() {
+            return;
+        }
+
+        let children = match std::fs::read_dir(path) {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] watcher回復列挙: ディレクトリ読み取り失敗（スキップ）: {} ({})",
+                    sanitize_path_for_logging(path, log_base),
+                    error
+                );
+                return;
+            }
+        };
+
+        for child in children {
+            match child {
+                Ok(child) => collect_markdown_files_for_recovery_inner(
+                    &child.path(),
+                    log_base,
+                    markdown_files,
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] watcher回復列挙: ディレクトリエントリ読み取り失敗（スキップ）: {} ({})",
+                        sanitize_path_for_logging(path, log_base),
+                        error
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    {
+        return;
+    }
+
+    let is_markdown = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !is_markdown {
+        return;
+    }
+
+    match path.canonicalize() {
+        Ok(canonical_path) => markdown_files.push(canonical_path),
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] watcher回復列挙: Markdownパス正規化失敗（スキップ）: {} ({})",
+                sanitize_path_for_logging(path, log_base),
+                error
+            );
+        }
+    }
 }
 
 /// レンダリング更新が必要なイベント種別か判定する
@@ -558,6 +678,7 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
     use notify::RecursiveMode;
@@ -587,6 +708,11 @@ mod tests {
             .iter()
             .map(|entry| entry.path().to_path_buf())
             .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn sorted_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
         paths.sort();
         paths
     }
@@ -714,6 +840,71 @@ mod tests {
             plan.diagnostics()
                 .excluded_by_reason()
                 .get(&super::ExcludeReason::Symlink),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn test_watch_plan_new_subtreeは既存登録済みpathを除外する() {
+        let dir = tempfile::tempdir().unwrap();
+        let subtree = dir.path().join("docs");
+        let nested = subtree.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let registered_paths = HashSet::from([subtree.canonicalize().unwrap()]);
+
+        let plan = super::WatchPlan::for_new_subtree(&subtree, &registered_paths).unwrap();
+        let paths = plan_paths(&plan);
+
+        assert_eq!(paths, vec![nested.canonicalize().unwrap()]);
+        assert_eq!(plan.diagnostics().registered_candidates(), 1);
+    }
+
+    #[test]
+    fn test_watch_plan_new_subtreeは除外対象を含めない() {
+        let dir = tempfile::tempdir().unwrap();
+        let subtree = dir.path().join("new");
+        for path in [
+            "docs",
+            "docs/nested",
+            ".git",
+            "node_modules",
+            "target",
+            ".draft",
+        ] {
+            std::fs::create_dir_all(subtree.join(path)).unwrap();
+        }
+        let registered_paths = HashSet::new();
+
+        let plan = super::WatchPlan::for_new_subtree(&subtree, &registered_paths).unwrap();
+        let paths = plan_paths(&plan);
+
+        assert!(paths.contains(&subtree.canonicalize().unwrap()));
+        assert!(paths.contains(&subtree.join("docs").canonicalize().unwrap()));
+        assert!(paths.contains(&subtree.join("docs/nested").canonicalize().unwrap()));
+        assert!(!paths.iter().any(|path| path.ends_with(".git")));
+        assert!(!paths.iter().any(|path| path.ends_with("node_modules")));
+        assert!(!paths.iter().any(|path| path.ends_with("target")));
+        assert!(!paths.iter().any(|path| path.ends_with(".draft")));
+        assert_eq!(plan.diagnostics().registered_candidates(), 3);
+        assert_eq!(plan.diagnostics().excluded_subtrees(), 4);
+    }
+
+    #[test]
+    fn test_watch_plan_new_subtreeはrootが除外対象なら登録しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let subtree = dir.path().join("node_modules");
+        std::fs::create_dir_all(subtree.join("pkg")).unwrap();
+        let registered_paths = HashSet::new();
+
+        let plan = super::WatchPlan::for_new_subtree(&subtree, &registered_paths).unwrap();
+
+        assert!(plan.entries().is_empty());
+        assert_eq!(plan.diagnostics().registered_candidates(), 0);
+        assert_eq!(plan.diagnostics().excluded_subtrees(), 1);
+        assert_eq!(
+            plan.diagnostics()
+                .excluded_by_reason()
+                .get(&super::ExcludeReason::NodeModules),
             Some(&1)
         );
     }
@@ -892,6 +1083,62 @@ mod tests {
             received.is_empty(),
             "連続更新イベントのみでは通知されないはず"
         );
+    }
+
+    #[test]
+    fn test_collect_markdown_files_for_recoveryは除外対象を読まない() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        for path in ["docs", ".git", "node_modules", "target", ".draft"] {
+            std::fs::create_dir_all(root.join(path)).unwrap();
+        }
+        let visible = root.join("docs/guide.MD");
+        std::fs::write(&visible, "# guide").unwrap();
+        for path in [
+            ".git/secret.md",
+            "node_modules/pkg.md",
+            "target/generated.md",
+            ".draft/wip.md",
+        ] {
+            std::fs::write(root.join(path), "# excluded").unwrap();
+        }
+        std::fs::write(root.join("notes.txt"), "not markdown").unwrap();
+
+        let paths = sorted_paths(super::collect_markdown_files_for_recovery(&root));
+
+        assert_eq!(paths, vec![visible.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn test_collect_markdown_files_for_recoveryはrootが除外対象なら空を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let hidden_root = dir.path().join(".hidden");
+        std::fs::create_dir_all(&hidden_root).unwrap();
+        std::fs::write(hidden_root.join("wip.md"), "# hidden").unwrap();
+
+        let paths = super::collect_markdown_files_for_recovery(&hidden_root);
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_markdown_files_for_recoveryはシンボリックリンクディレクトリを辿らない() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.md");
+        std::fs::write(&outside_file, "# secret").unwrap();
+        let visible = root.join("visible.md");
+        std::fs::write(&visible, "# visible").unwrap();
+        symlink(outside.path(), root.join("linked")).unwrap();
+
+        let paths = sorted_paths(super::collect_markdown_files_for_recovery(&root));
+
+        assert_eq!(paths, vec![visible.canonicalize().unwrap()]);
     }
 
     #[test]
