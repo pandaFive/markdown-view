@@ -82,23 +82,17 @@ impl RenderState {
     }
 
     fn heading(&self) -> Option<&HeadingState> {
-        self.contexts
-            .iter()
-            .rev()
-            .find_map(|context| match context {
-                BlockContext::Heading(heading) => Some(heading),
-                _ => None,
-            })
+        match self.top_context() {
+            Some(BlockContext::Heading(heading)) => Some(heading),
+            _ => None,
+        }
     }
 
     fn heading_mut(&mut self) -> Option<&mut HeadingState> {
-        self.contexts
-            .iter_mut()
-            .rev()
-            .find_map(|context| match context {
-                BlockContext::Heading(heading) => Some(heading),
-                _ => None,
-            })
+        match self.top_context_mut() {
+            Some(BlockContext::Heading(heading)) => Some(heading),
+            _ => None,
+        }
     }
 
     fn code_block(&self) -> Option<&CodeBlockState> {
@@ -501,6 +495,27 @@ mod tests {
         assert!(state
             .finish_heading("heading".to_string(), String::new())
             .is_ok());
+    }
+
+    #[test]
+    fn test_heading書き込みは上位imageがあるなら下位headingへ副作用を出さない() {
+        let mut state = RenderState::new();
+
+        state.start_heading(1, 0..1);
+        state.push_heading_escaped_text_html("before", "before");
+        state.start_image("image.png", "");
+
+        assert!(!state.in_heading());
+        state.push_heading_escaped_text_html("hidden", "hidden");
+        state.push_heading_rendered_html_fragment("<em>hidden</em>");
+
+        assert!(state.finish_image().is_ok());
+        let heading = state
+            .finish_heading("heading".to_string(), String::new())
+            .expect("imageを閉じた後はheadingを閉じられる");
+
+        assert!(heading.contains("before"));
+        assert!(!heading.contains("hidden"));
     }
 
     #[test]
