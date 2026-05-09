@@ -71,3 +71,65 @@ fn sha256_base64(input: &[u8]) -> String {
 pub(crate) fn inline_js() -> String {
     inline_script::inline_js(MAX_FILE_SIZE)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::syntax_theme_css;
+
+    #[test]
+    fn test_cspハッシュがrender_pageのstyle内容と一致する() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let (script_src, style_src) = csp_hash_sources(&syntax_css);
+
+        let expected_style_hash = {
+            let css_content = combined_css(&syntax_css);
+            let digest = sha2::Sha256::digest(css_content.as_bytes());
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            )
+        };
+        let expected_script_hash = {
+            let digest = sha2::Sha256::digest(inline_js().as_bytes());
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            )
+        };
+
+        assert_eq!(style_src, expected_style_hash, "style-srcハッシュが不一致");
+        assert_eq!(
+            script_src, expected_script_hash,
+            "script-srcハッシュが不一致"
+        );
+    }
+
+    #[test]
+    fn test_csp_hash_sources_複数テーマでstyleハッシュが変化しscriptは固定() {
+        let dark_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let light_css = syntax_theme_css(Some("InspiredGitHub"));
+
+        let (dark_script, dark_style) = csp_hash_sources(&dark_css);
+        let (light_script, light_style) = csp_hash_sources(&light_css);
+
+        assert_eq!(
+            dark_script, light_script,
+            "script-srcハッシュはテーマによらず固定であるべき"
+        );
+        assert_ne!(
+            dark_style, light_style,
+            "style-srcハッシュはテーマごとに変化するべき"
+        );
+    }
+
+    #[test]
+    fn test_combined_css_空のsyntax_cssはベースcssのみを返す() {
+        let combined = combined_css("");
+        assert_eq!(combined, css());
+        assert!(!combined.trim().is_empty());
+    }
+}

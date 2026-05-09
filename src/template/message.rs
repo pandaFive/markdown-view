@@ -221,6 +221,28 @@ mod tests {
     }
 
     #[test]
+    fn test_memo_response_fileフィールドが直列化される() {
+        let memo = MemoResponse::from_raw("memo".to_string(), Some("docs/guide.md".to_string()));
+        let value = serde_json::to_value(memo).unwrap();
+        assert_eq!(value["file"], "docs/guide.md");
+        assert_eq!(value["raw"], "memo");
+        assert!(value.get("html").is_some());
+    }
+
+    #[test]
+    fn test_update_message_fileフィールドが直列化される() {
+        let message = UpdateMessage::new(
+            render_markdown("content"),
+            render_markdown("# toc"),
+            Some("docs/guide.md".to_string()),
+        );
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("content").is_some());
+        assert!(value.get("toc").is_some());
+    }
+
+    #[test]
     fn test_empty_は空文字列をfrom_rawしたものと等価() {
         let file = Some("note.md".to_string());
         let by_empty = MemoResponse::empty(file.clone());

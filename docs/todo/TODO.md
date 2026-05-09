@@ -10,22 +10,14 @@
 
 ## Medium Priority
 
-以下はリスク低減順に実行する。起動不能や silent failure に近い項目を先に扱い、変更範囲が大きい構造変更は後ろへ置く。
-
-- [ ] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
-  - ファイル: `src/template/mod.rs` (740 行), `src/template/page.rs` L45-104
-  - 現状: `template/mod.rs` の 740 行のうち約 720 行が `cfg(test) mod tests` で、page/tree/assets/message にまたがる horizontal integration test を吸収。`render_page` は `<!DOCTYPE html>` から `</html>` までを 62 行の単一 `format!` で組み、`html_escape(memo_file_attr)` などの属性挿入が場当たり的
-  - 対応: テストを各サブモジュール（page/tree/assets/message）の `#[cfg(test)] mod tests` に局所化し、`mod.rs` には公開 API 契約テスト（CSP 整合性など）のみ残す。`render_page` は `render_head` / `render_body` / `attr(name, value)` ヘルパーへ分割
-  - 理由: CLAUDE.md「300 行を超えたファイルは分割を提案」に該当。エスケープ漏れの一発リスクを集約しないために属性挿入をヘルパー化する
-
-- [ ] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
-  - ファイル: `src/renderer/state.rs` L42-336, `src/renderer/render.rs` L33-55
-  - 現状: 14 個の `pub(super)` メソッド（`push_html`/`push_soft_break`/`finish_heading`/`finish_code_block` 等）で State Machine が implicit。`finish_heading` は `debug_assert! + take().?` で release fallback、`finish_code_block` は release でも `unreachable!`、と契約強制が混在
-  - 対応: `enum BlockContext { Heading(HeadingState), CodeBlock(CodeBlockState), Image(ImageState), TableCell(TableCellState), ... }` のスタックを `RenderState` に持たせ、`finish_*` を `Result<_, RenderStateMismatch>` 化。`render::dispatch_event` 側は match で完全列挙
-  - 理由: 状態機械の不変条件をコメントではなく型で表現し、open/close 不整合を型エラーで弾く
+現時点で未完了の Medium Priority はなし。
 
 ## Done Summary
 
+- [x] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
+  - 完了根拠: `RenderState` は `Vec<BlockContext>` と `RenderStateMismatch` で Heading / CodeBlock / Image / Table の active context を扱う構成になった。`finish_*` は stack top だけを閉じ、wrong-top 時は context を保持して mismatch を返す。`render.rs` は mismatch を `warn!` して malformed context の HTML 確定を skip し、heading ID counter の副作用や code block line attrs の debug panic を回避する。通常 Markdown の見出し、コードブロック、画像、テーブル、複合入力の出力互換を既存・追加テストで固定した。残リスクとして、malformed event stream で table 内に `TableRowEnd` だけが来た場合の row-start 厳密追跡は未実装だが、通常 pulldown-cmark 経路では発生しないため次回 state machine 追加整理候補とする
+- [x] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
+  - 完了根拠: `template` のテストを `page` / `tree` / `assets` / `message` へ局所化し、`mod.rs` は公開 API smoke test 中心へ戻した。`render_page` は `render_html_document` / `render_head` / `render_workspace_body` helper へ分割し、属性値 escape を `html_attr` に集約した。`SanitizedHtml` の本文 / TOC / memo preview は二重 escape せず、memo degraded、directory mode、message JSON 直列化、CSP hash、tree HTML escape の契約をテストで固定した
 - [x] ブラウザ JS の責務境界を小モジュールへ分割する
   - 完了根拠: `content.js` の責務を `content-controller.js`、`content-enhancements.js`、`content-navigation.js`、`document-search.js`、`directory-search.js` に分割し、本文更新、検索、ディレクトリ検索、内部リンク解決、描画後副作用を明示境界へ分けた。`content-renderer.js` の sanitize 済み HTML 反映境界は維持し、検索 query と検索結果は DOM API で描画する構成にした。production `window` への内部 API 露出は増やさず、E2E hook は `window.__MV_E2E__ === true` の場合だけ公開する。検索、Markdown link、memo citation jump、update exposure の E2E で回帰を固定した
 - [x] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
