@@ -89,7 +89,7 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          raw: '',
+          raw: 'local draft that must remain',
           html: '<p>broken memo</p>',
           memo_state: 'degraded',
           load_error: 'メモを読み込めませんでした。編集を無効化しました。'

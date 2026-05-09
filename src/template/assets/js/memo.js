@@ -425,7 +425,11 @@ function saveMemoNow(targetFileOverride, rawOverride) {
       return;
     }
     if (targetFileOverride === undefined) {
-      if ((data.raw || '') === raw) {
+      if (isMemoDegraded(data)) {
+        if (applyMemoData(data, { preserveSelection: true }) === false) {
+          return;
+        }
+      } else if ((data.raw || '') === raw) {
         if (updateMemoPreview(data) === false) {
           setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
           return;
