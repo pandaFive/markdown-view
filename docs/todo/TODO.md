@@ -31,10 +31,10 @@
   - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
 
 - [ ] `/api/search` のクエリ長ガードを routes.rs 側に追加する
-  - ファイル: `src/server/routes.rs` L298-318, `src/server/files/search.rs`
-  - 現状: クエリ `q` を長さチェックせずに `search_directory` に渡す。極端に長い `q`（例: 1MB）が tracing にそのまま流れると無視できないコストになる
-  - 対応: 1KB 程度の長さガードを `routes.rs` 側に追加し、超過時は 400 を返す。`search.rs` 内部にも防御を残す（depth in defense）
-  - 昇格理由: 極端に長い未信頼入力が tracing と検索処理に流れるため、resource exhaustion とログ観測性の境界に関わる
+  - ファイル: `src/server/routes.rs` L203-209, `src/server/service.rs` L195-208, `src/server/files/search.rs`
+  - 現状: `api_search_handler` はクエリ `q` を長さチェックせず `service::search` に渡し、`service::search` は `search_directory` へ委譲する。検索実装は `raw_query.trim().to_string()` で照合・レスポンス用 query を作るが、route/service 境界では極端に長い `q`（例: 1MB）を拒否しない
+  - 対応: 1KB 程度の長さガードを `routes.rs` または `service::search` の入口に追加し、超過時は 400 を返す。`search.rs` 内部にも防御を残す（defense in depth）
+  - 昇格理由: 極端に長い未信頼入力が検索処理とレスポンス生成に流れるため、resource exhaustion と API 入力境界に関わる
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 ## Medium Priority
