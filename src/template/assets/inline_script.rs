@@ -8,6 +8,8 @@ const TEMPLATE: &str = concat!(
     "\n",
     include_str!("js/content-enhancements.js"),
     "\n",
+    include_str!("js/content-navigation.js"),
+    "\n",
     include_str!("js/content.js"),
     "\n",
     include_str!("js/memo.js"),
