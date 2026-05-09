@@ -953,3 +953,67 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
     .toContainText('Beta result is visible.');
   await expect(page.locator('#document-search-results')).not.toContainText('サーバー内部エラーが発生しました。');
 });
+
+test('ディレクトリ検索の古い応答は現在queryへ適用されない', async ({ page }) => {
+  let firstRequestStarted = false;
+  let releaseFirstResponse: (() => void) | null = null;
+
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q');
+
+    if (query === 'alpha') {
+      firstRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseFirstResponse = resolve;
+      });
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'alpha',
+          results: [{ file: 'notes.md', line: 1, before: '', current: 'alpha old', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    if (query === 'beta') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'beta',
+          results: [{ file: 'README.md', line: 1, before: '', current: 'beta current', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>alpha text</p><p>beta text</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstRequestStarted).toBe(true);
+
+  await setDocumentSearchQuery(page, 'beta');
+  await expect(page.locator('#document-search-results')).toContainText('beta current');
+
+  releaseFirstResponse?.();
+  await page.waitForTimeout(100);
+  await expect(page.locator('#document-search-results')).toContainText('beta current');
+  await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
+});
