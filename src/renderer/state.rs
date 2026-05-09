@@ -6,22 +6,32 @@ use syntect::parsing::SyntaxSet;
 use super::highlight::render_code_block_html;
 use super::security::{html_escape, sanitize_image_src};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // mismatchログとテストの読みやすさを揃えるため、Expected* の名前で統一する。
 #[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RenderStateMismatch {
     ExpectedHeading,
     ExpectedCodeBlock,
     ExpectedImage,
     ExpectedTable,
+    ExpectedTableRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RenderStateMismatchInfo {
+    pub(super) operation: &'static str,
+    pub(super) mismatch: RenderStateMismatch,
+    pub(super) range: Option<Range<usize>>,
 }
 
 pub(super) struct RenderState {
     html_output: String,
     contexts: Vec<BlockContext>,
     mismatch_count: usize,
+    first_mismatch: Option<RenderStateMismatchInfo>,
 }
 
+#[derive(Debug)]
 enum BlockContext {
     CodeBlock(CodeBlockState),
     Heading(HeadingState),
@@ -29,12 +39,14 @@ enum BlockContext {
     Table(TableState),
 }
 
+#[derive(Debug)]
 struct CodeBlockState {
     language: Option<String>,
     content: String,
     start_range: Range<usize>,
 }
 
+#[derive(Debug)]
 struct HeadingState {
     level: u8,
     range: Range<usize>,
@@ -42,14 +54,17 @@ struct HeadingState {
     html: String,
 }
 
+#[derive(Debug)]
 struct ImageState {
     src: String,
     title: Option<String>,
     alt: String,
 }
 
+#[derive(Debug)]
 struct TableState {
     in_head: bool,
+    in_row: bool,
     alignments: Vec<Alignment>,
     cell_index: usize,
 }
@@ -60,10 +75,22 @@ impl RenderState {
             html_output: String::new(),
             contexts: Vec::new(),
             mismatch_count: 0,
+            first_mismatch: None,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn into_html(self) -> String {
+        self.html_output
+    }
+
+    pub(super) fn into_html_with_recovery_warning(mut self) -> String {
+        if self.has_mismatches() {
+            self.push_html(
+                r#"<div class="render-recovery-warning" role="status">Markdown描画の一部を安全のため省略しました。ログを確認してください。</div>
+"#,
+            );
+        }
         self.html_output
     }
 
@@ -75,7 +102,19 @@ impl RenderState {
         self.html_output.push('\n');
     }
 
-    pub(super) fn record_mismatch(&mut self) {
+    pub(super) fn record_mismatch(
+        &mut self,
+        operation: &'static str,
+        mismatch: RenderStateMismatch,
+        range: Option<Range<usize>>,
+    ) {
+        if self.first_mismatch.is_none() {
+            self.first_mismatch = Some(RenderStateMismatchInfo {
+                operation,
+                mismatch,
+                range,
+            });
+        }
         self.mismatch_count = self.mismatch_count.saturating_add(1);
     }
 
@@ -86,6 +125,10 @@ impl RenderState {
     #[cfg(test)]
     pub(super) fn mismatch_count(&self) -> usize {
         self.mismatch_count
+    }
+
+    pub(super) fn first_mismatch(&self) -> Option<&RenderStateMismatchInfo> {
+        self.first_mismatch.as_ref()
     }
 
     fn top_context(&self) -> Option<&BlockContext> {
@@ -149,6 +192,7 @@ impl RenderState {
         match self.contexts.pop() {
             Some(BlockContext::Heading(heading)) => Ok(heading),
             Some(context) => {
+                // wrong-top close では外側 context を保持し、後続の正しい close で回復できるようにする。
                 self.contexts.push(context);
                 Err(RenderStateMismatch::ExpectedHeading)
             }
@@ -203,10 +247,6 @@ impl RenderState {
 
     pub(super) fn can_finish_heading(&self) -> bool {
         matches!(self.top_context(), Some(BlockContext::Heading(_)))
-    }
-
-    pub(super) fn in_table(&self) -> bool {
-        matches!(self.top_context(), Some(BlockContext::Table(_)))
     }
 
     pub(super) fn push_code_text(&mut self, text: &str) {
@@ -267,6 +307,7 @@ impl RenderState {
         }));
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn finish_heading(
         &mut self,
         id: String,
@@ -323,6 +364,7 @@ impl RenderState {
         })
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn finish_code_block(
         &mut self,
         ss: &SyntaxSet,
@@ -351,6 +393,7 @@ impl RenderState {
         }));
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn finish_image(&mut self) -> Result<String, RenderStateMismatch> {
         let image = self.pop_image()?;
         let safe_src = sanitize_image_src(&image.src);
@@ -369,33 +412,53 @@ impl RenderState {
     pub(super) fn start_table(&mut self, alignments: Vec<Alignment>) {
         self.contexts.push(BlockContext::Table(TableState {
             in_head: false,
+            in_row: false,
             alignments,
             cell_index: 0,
         }));
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn finish_table(&mut self) -> Result<(), RenderStateMismatch> {
+        if self.table().is_some_and(|table| table.in_row) {
+            return Err(RenderStateMismatch::ExpectedTableRow);
+        }
         self.pop_table().map(|_| ())
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn start_table_head(&mut self) -> Result<(), RenderStateMismatch> {
         let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
         table.in_head = true;
         Ok(())
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn finish_table_head(&mut self) -> Result<(), RenderStateMismatch> {
         let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
         table.in_head = false;
         Ok(())
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn reset_table_row(&mut self) -> Result<(), RenderStateMismatch> {
         let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
         table.cell_index = 0;
+        table.in_row = true;
         Ok(())
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
+    pub(super) fn finish_table_row(&mut self) -> Result<(), RenderStateMismatch> {
+        let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
+        if !table.in_row {
+            return Err(RenderStateMismatch::ExpectedTableRow);
+        }
+        table.in_row = false;
+        Ok(())
+    }
+
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn table_cell_start_tag(&mut self) -> Result<String, RenderStateMismatch> {
         let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
         let align_class = table
@@ -411,6 +474,7 @@ impl RenderState {
         }
     }
 
+    #[must_use = "RenderState mismatch must be handled"]
     pub(super) fn table_cell_end_tag(&self) -> Result<&'static str, RenderStateMismatch> {
         let table = self.table().ok_or(RenderStateMismatch::ExpectedTable)?;
         if table.in_head {
@@ -531,6 +595,25 @@ mod tests {
 
         assert!(heading.contains("before"));
         assert!(!heading.contains("hidden"));
+    }
+
+    #[test]
+    fn test_finish_image後に親headingへ画像htmlを追記できる() {
+        let mut state = RenderState::new();
+
+        state.start_heading(1, 0..1);
+        state.start_image("image.png", "title");
+        state.push_image_alt_text("alt");
+
+        let image_html = state.finish_image().expect("imageを閉じられる");
+
+        assert!(state.in_heading());
+        state.push_heading_rendered_html_fragment(&image_html);
+        let heading = state
+            .finish_heading("heading".to_string(), String::new())
+            .expect("親headingを閉じられる");
+
+        assert!(heading.contains("<img src=\"image.png\" alt=\"alt\" title=\"title\" />"));
     }
 
     #[test]
