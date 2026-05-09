@@ -1,67 +1,70 @@
 # Backlog (Low Priority)
 
-低優先度で蓄積している項目。High/Medium が TODO.md から捌けてから着手する候補。
-未完了項目はリスク低減効果を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）の発見コンテキスト。
+低優先度で蓄積している項目。High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善・完了済みの履歴を置く。
+未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
-最終整理: 2026-05-09。次に実行する High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善・完了済みの履歴を置く。セキュリティ境界に関わる項目は、優先度が低くても文脈を残す。
+最終整理: 2026-05-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
+レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
-## P1: リスク低減・検証基盤
-
-- [ ] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
-  - ファイル: `src/server/routes.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-04-host-middleware-structure-observability-design.md`
-  - 現状: PR #123 で `build_routes() -> RouteDefinitions` として route 定義と Host middleware 適用の境界を命名・可視性で明示した。ただし `RouteDefinitions(Router<Arc<AppState>>)` の中身は通常の `Router` なので、`build_routes()` 内に共通 `.layer(...)` を混ぜても型エラーにはならない。これは型による強制というより intent marker であり、構造契約の強制力は限定的
-  - 対応: `apply_security_layers(routes, csp_header)` のような private helper へ Host middleware / security headers / CSP 適用を集約し、route 定義と layer 適用の呼び出し順をさらに読みやすくする。必要なら許可 Host / 不正 Host の route 横断テストを route 一覧 helper に寄せ、route 追加時にテスト対象へ自然に入る構造へ整理する
-  - 由来: PR #123 レビュー follow-up (2026-05-04)
-
-- [ ] Host middleware 化後の低優先 follow-up を整理して追加検証する
-  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-02-host-middleware-guard-design.md`
-  - 現状: PR #120 で Host 検証を router middleware へ集約し、主要 route の不正 Host 拒否、security headers、WS Host/Origin 経路の分離、大容量 PUT body の順序を固定した。一方、許可 Host の全 route smoke、malformed/missing/empty Host の middleware 統合テスト、WS Origin 拒否の error message assert、middleware warn ログへの URI path 追加、test helper 内 `axum::serve(...).unwrap()` の panic 観測性、CHANGELOG 相当の運用ドキュメント化は未対応
-  - 対応: 追加する価値が高い順に、許可 Host 明示ループ、malformed/missing/empty Host の middleware 経路 403、WS Origin 拒否 message assert、warn ログへの `request.uri().path()` 追加を検討する。`axum::serve(...).unwrap()` は test helper の失敗文脈が分かる `expect(...)` へ寄せる。WS Host 拒否 message 変更は PR 本文には明記済みなので、必要になった時点で README か CHANGELOG 相当へ移す
-  - 由来: PR #120 再レビュー follow-up (2026-05-02)
-
-- [ ] Windows メモ原子保存のエラー処理と retry 条件を細分化する
-  - ファイル: `src/server/files/memo_fs.rs`
-  - 現状: Windows の `MoveFileExW` 呼び出しは `spawn_blocking` 経由だが、`JoinError` は `ErrorKind::Other` に潰している。また tmp 作成 retry は `AlreadyExists` のみを対象にしており、Windows の共有違反・削除保留・ウイルス対策ソフトによる一時ロックを retry しない
-  - 対応: `JoinError::is_panic()` / `is_cancelled()` を分けて `tracing::error!` に残す。Windows では `raw_os_error()` で sharing violation / delete pending 相当を判定し、短い retry 対象に含める。Windows CI または `cargo check --target x86_64-pc-windows-gnu` が通る環境で検証する
-  - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
-
-## P2: 保守性・局所回帰検知
-
-- [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
-  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
-  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
-  - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
-  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)
+## P1: リスク低減・契約明文化
 
 - [ ] 未知言語コードブロックの silent fallback に警告ログを追加
   - ファイル: `src/renderer/highlight.rs` L14-50, `tests/renderer_test.rs` L346
   - 現状: `find_syntax_by_token().or_else(find_syntax_by_extension())?` が None を返すと `plain_code_block_html` で `class="language-{lang}"` だけ付与する fallback が走るが、ユーザーに「ハイライトが効いていない」ことを知らせる経路がない。`tests/renderer_test.rs:346` `test_未知言語コードブロックはフォールバック描画される` で仕様固定済み
   - 対応: 初回フォールバック時に `tracing::debug!` 程度のログを 1 回だけ出す（同じ言語名の繰り返しは抑制）。CLI 起動時に「対応シンタックス一覧」コマンドで利用可能言語を確認できるドキュメント追加も検討
+  - 判断: silent fallback の観測性改善だが、描画安全性は既存 fallback で保たれているため BACKLOG P1 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
-  - ファイル: `src/renderer/mod.rs` L91-108, `src/template/assets.rs` L42-61
-  - 現状: `syntax_theme_css` 失敗時に `highlight_disabled_notice_css()`（`body::before` グローバル CSS）を返し、`combined_css` に連結される。CSP ハッシュは fallback ベースで再計算されるため整合性は保たれるが、Markdown 側で `body::before` を期待する CSS が無いという暗黙前提がドキュメントに無い
-  - 対応: `body::before` 衝突を許容しない旨を doc コメントに明記。または fallback CSS のセレクタを `.markdown-view-fallback-notice` 等の局所スコープに変更する
+- [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
+  - ファイル: `src/server/messages.rs` L46-56, `src/server/session.rs` L80-93
+  - 現状: `serde_json::to_string(update)` の失敗は実質不可能だが、`session.rs` 側でエラー処理を持つ。Update メッセージ用の最小サイズ fallback (`{"content":"","toc":""}` 等) を返す `to_json_or_empty` 経路が無い
+  - 対応: `BroadcastMessage::Update` の `to_json` に明示 fallback を追加。観測性として `tracing::error!` を残す
+  - 判断: 実質不可能な失敗経路の契約整理であり、直接の実行時リスクは限定的なため BACKLOG P1 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] assets バンドルの sentinel 衝突回避テストを追加
-  - ファイル: `src/template/assets/css_bundle.rs` L19, `src/template/assets/inline_script.rs` L17-22
-  - 現状: `TEMPLATE.replace("__DARK_THEME_VARS__", ...)` / `replace("__MAX_FILE_SIZE_MB__", ...)` のプレースホルダーは sentinel 衝突に脆弱。`include_str!` した CSS/JS 内に同文字列が無いことを保証するテストが無い
-  - 対応: `#[cfg(test)] mod tests` で「include 対象ソースに sentinel 文字列が含まれない」アサートを追加。`MAX_FILE_SIZE / 1024 / 1024` の整数除算で 11MB → 10MB 表示の丸め事故が起きないかも境界テスト
+- [ ] `read_route_memo` の二重サイズチェックを単一化する
+  - ファイル: `src/server/files/memo.rs` L455-481, `src/server/files/content.rs` L298-311
+  - 現状: `fs.read_with_limit` が `MAX_FILE_SIZE+1` で `take` し超過時に `MemoReadError::TooLarge` を返すのに、`memo.rs:476-481` が読み込み完了後に `bytes.len() as u64 > MAX_FILE_SIZE` を再度チェックしている
+  - 対応: `read_with_limit` の契約を doc コメントで明示し、呼び出し側の重複チェックを削除
+  - 判断: メモ読込の契約明文化として価値は高いが、現状は防御が重複している状態なので BACKLOG P1 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
-  - ファイル: `src/watcher/runtime.rs` L19/L72/L111-127
-  - 現状: `mpsc::channel(WATCHER_MESSAGE_BUFFER=32)` が満杯時、`FileChanged` も `Error` も同じ `try_send` 経路で破棄される。`WatchError::Init` / `ThreadPanic` を破棄するとフォアグラウンドが「監視が止まった理由」を失う
-  - 対応: イベント種別で優先度を分け、`Error` 系は `blocking_send` に切り替えるか、別チャネルに分離する。または `try_send` 失敗時に `tracing::error!` で SLA を上げる
+- [ ] `tokio::select!` の cancel-safe 性をコメントで明記する
+  - ファイル: `src/server/session.rs` L54-132
+  - 現状: `socket.recv()` と `rx.recv()` を `tokio::select!` で競わせているが、両者が cancel safe である根拠コメントが無い。将来の改修で cancel-unsafe な future を入れる事故リスク
+  - 対応: 各 branch の future が cancel safe であることを doc コメントで明記し、新規 branch 追加時のチェックリストを残す
+  - 判断: 将来の WebSocket 改修時の守りとして重要だが、現行 branch は cancel-safe なため BACKLOG P1 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
-  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content.js`, `src/template/assets/js/memo.js`, `README.md`
-  - 現状: Rust 側は `SanitizedHtml` newtype、raw HTML 破棄、URL policy、CSP hash で XSS 境界を作っている。一方ブラウザ側は `contentEl.innerHTML = safeData.content` / `memoPreviewEl.innerHTML = data.html` を使うため、境界の正しさは「サーバー生成 HTML だけが入る」という暗黙契約に依存している
-  - 対応: renderer の信頼境界、HTTP/WS JSON の `content`/`toc`/`html` フィールド、JS 側の `innerHTML` 使用許可条件を短い設計メモにまとめる。E2E hook やテスト用 expose が production 経路で任意 HTML を流し込まないことも確認項目に含める
-  - 由来: Unix 哲学レビュー (2026-04-30)
+## P2: 保守性・局所回帰検知
+
+- [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
+  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/directory-search.js`
+  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
+  - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
+  - 判断: 検索負荷制御は実装済みで、残件は効率化と古い結果の扱いなので BACKLOG P2 に残す
+  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)
+
+- [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
+  - ファイル: `src/server/state.rs` L18-24/L112/L132
+  - 現状: `CanonicalPath::try_from_path` で `canonicalize` した直後に `is_file()`/`is_dir()` で判定するが、両者の間に rename/unlink される race window がある。実害は起動時の `AppMode::new_*` のみで影響は小さい
+  - 対応: `metadata` を一度取得してから `is_file`/`is_dir` を判定し、race window を縮める。`AppModeBuildError` のメッセージも metadata 起点に整理
+  - 判断: path safety に関係するが起動時限定で影響が小さいため BACKLOG P2 に残す
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `data-memo-file` 属性を None 時にスキップする
+  - ファイル: `src/template/page.rs` L43/L47, `src/template/message.rs` L9-11
+  - 現状: `params.memo.file().unwrap_or_default()` で常に `data-memo-file=""`（空文字）を出力する。`UpdateMessage` の `#[serde(skip_serializing_if = "Option::is_none")]` と非対称
+  - 対応: `data-memo-file` も None 時に属性ごとスキップする経路に変更し、bootstrap.js 側を「属性無し ⇒ memo 無し」と扱うよう揃える
+  - 判断: template/message 契約の整合性改善であり、データ安全性への直接影響は限定的なため BACKLOG P2 に残す
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [ ] `log_path::canonicalize_status` の毎回 syscall を削減する
+  - ファイル: `src/server/log_path.rs` L52-65
+  - 現状: ログ出力ごとに `path` と `base` を canonicalize する。warn/error 時のみ呼ばれるが、ログ storm 状況下では I/O が増える
+  - 対応: `base` の canonicalize 結果を起動時に一度だけ算出してキャッシュし、ログ経路では path 側のみ canonicalize する。または `OnceLock` で base を保持
+  - 判断: ログ storm 時の効率化であり、現行の安全性を弱めていないため BACKLOG P2 に残す
+  - 由来: アーキテクチャレビュー (2026-04-30)
 
 ## P3: 長期改善・低緊急
 
@@ -69,73 +72,28 @@
   - ファイル: `src/server/guards.rs`
   - 現状: PR #123 で Host middleware 後段に到達した Host 系 `WsOriginRejection` を `error!` ログとして観測できるようにした。個人向け localhost ツールとしてはログで十分だが、本格運用や継続監視を想定するなら、発生回数をメトリクスやカウンタとして扱う余地がある
   - 対応: 実運用で bypass 兆候を集計する必要が出た場合のみ、軽量なカウンタや structured logging 連携を検討する。現時点では依存追加やメトリクス基盤導入は YAGNI とする
+  - 判断: 既に error ログがあり、メトリクス基盤は実運用要求が出てからでよいため BACKLOG P3 に残す
   - 由来: PR #123 レビュー follow-up (2026-05-04)
-
-- [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
-  - ファイル: `src/server/state.rs` L18-24/L112/L132
-  - 現状: `CanonicalPath::try_from_path` で `canonicalize` した直後に `is_file()`/`is_dir()` で判定するが、両者の間に rename/unlink される race window がある。実害は起動時の `AppMode::new_*` のみで影響は小さい
-  - 対応: `metadata` を一度取得してから `is_file`/`is_dir` を判定し、race window を縮める。`AppModeBuildError` のメッセージも metadata 起点に整理
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `log_path::canonicalize_status` の毎回 syscall を削減する
-  - ファイル: `src/server/log_path.rs` L52-65
-  - 現状: ログ出力ごとに `path` と `base` を canonicalize する。warn/error 時のみ呼ばれるが、ログ storm 状況下では I/O が増える
-  - 対応: `base` の canonicalize 結果を起動時に一度だけ算出してキャッシュし、ログ経路では path 側のみ canonicalize する。または `OnceLock` で base を保持
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `/api/search` のクエリ長ガードを routes.rs 側に追加する
-  - ファイル: `src/server/routes.rs` L298-318, `src/server/files/search.rs`
-  - 現状: クエリ `q` を長さチェックせずに `search_directory` に渡す。極端に長い `q`（例: 1MB）が tracing にそのまま流れると無視できないコストになる
-  - 対応: 1KB 程度の長さガードを `routes.rs` 側に追加し、超過時は 400 を返す。`search.rs` 内部にも防御を残す（depth in defense）
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `read_route_memo` の二重サイズチェックを単一化する
-  - ファイル: `src/server/files/memo.rs` L455-481, `src/server/files/content.rs` L298-311
-  - 現状: `fs.read_with_limit` が `MAX_FILE_SIZE+1` で `take` し超過時に `MemoReadError::TooLarge` を返すのに、`memo.rs:476-481` が読み込み完了後に `bytes.len() as u64 > MAX_FILE_SIZE` を再度チェックしている
-  - 対応: `read_with_limit` の契約を doc コメントで明示し、呼び出し側の重複チェックを削除
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
-  - ファイル: `src/server/messages.rs` L46-56, `src/server/session.rs` L80-93
-  - 現状: `serde_json::to_string(update)` の失敗は実質不可能だが、`session.rs` 側でエラー処理を持つ。Update メッセージ用の最小サイズ fallback (`{"content":"","toc":""}` 等) を返す `to_json_or_empty` 経路が無い
-  - 対応: `BroadcastMessage::Update` の `to_json` に明示 fallback を追加。観測性として `tracing::error!` を残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `data-memo-file` 属性を None 時にスキップする
-  - ファイル: `src/template/page.rs` L43/L47, `src/template/message.rs` L9-11
-  - 現状: `params.memo.file().unwrap_or_default()` で常に `data-memo-file=""`（空文字）を出力する。`UpdateMessage` の `#[serde(skip_serializing_if = "Option::is_none")]` と非対称
-  - 対応: `data-memo-file` も None 時に属性ごとスキップする経路に変更し、bootstrap.js 側を「属性無し ⇒ memo 無し」と扱うよう揃える
-  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [ ] サイドバーの "Documents" 文字列を i18n または日本語化
   - ファイル: `src/server/routes.rs` L33-41 (`sidebar_directory_name`)
   - 現状: `unwrap_or("Documents")` で英語固定。日本語 UI でも同名が出る
   - 対応: 日本語デフォルト（"ドキュメント"）にするか、ディレクトリ名取得失敗時のフォールバック挙動をコメントで明示
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `tokio::select!` の cancel-safe 性をコメントで明記する
-  - ファイル: `src/server/session.rs` L54-132
-  - 現状: `socket.recv()` と `rx.recv()` を `tokio::select!` で競わせているが、両者が cancel safe である根拠コメントが無い。将来の改修で cancel-unsafe な future を入れる事故リスク
-  - 対応: 各 branch の future が cancel safe であることを doc コメントで明記し、新規 branch 追加時のチェックリストを残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
-  - ファイル: `src/watcher/runtime.rs` L149-215/L243-247
-  - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
-  - 対応: panic 経路で `init_tx` がまだ Some なら `WatchError::thread_panic(...)` を init 結果として送る
+  - 判断: UI 文言の局所改善であり、安全性や後続設計への影響は小さいため BACKLOG P3 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [ ] インラインブラウザJS の TS 化
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`
   - 内容: Rust の `include_str!` でコンパイル時に埋め込まれる JS を TS で記述し、事前 tsc でビルドして `.js` 出力を `include_str!` 対象にする
   - 理由: ブラウザ側 JS は現在無型。ただし Rust ビルドパイプラインへの Node 依存追加が必要で、「Rust 単体ビルド」の明快さが崩れる
+  - 判断: 型安全性の長期改善だが、Node 依存追加の設計判断が必要なため BACKLOG P3 に残す
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
 - [ ] `catalog.rs` のパス構築での Vec アロケーション削減
   - ファイル: `src/server/files/catalog.rs`
   - 現状: 相対パス構築で `components().map(...).collect::<Vec<_>>().join("/")` を使っている。上限 1000 件だが呼出あたり Vec アロケーションが発生する
   - 対応: 計測または必要性確認のうえ、イテレータ駆動で直接 String を構築する（`itertools::Itertools::join()` もしくは手書き fold）
-  - 理由: マイクロ最適化。実装前に効果確認推奨
+  - 判断: マイクロ最適化であり、実装前に効果確認が必要なため BACKLOG P3 に残す
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
