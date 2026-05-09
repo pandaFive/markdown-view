@@ -4,6 +4,7 @@
 未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
 最終整理: 2026-05-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
+レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## P1: リスク低減・契約明文化
 
@@ -38,7 +39,7 @@
 ## P2: 保守性・局所回帰検知
 
 - [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
-  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
+  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/directory-search.js`
   - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
   - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
   - 判断: 検索負荷制御は実装済みで、残件は効率化と古い結果の扱いなので BACKLOG P2 に残す

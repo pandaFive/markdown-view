@@ -1,6 +1,6 @@
 # BACKLOG Importance Impact Reprioritization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Run git mutation steps only after the user has explicitly approved committing the reviewed diff.
 
 **Goal:** `docs/todo/TODO.md` と `docs/todo/BACKLOG.md` を、重要度と将来影響度順に再配置し、重要項目を TODO High / Medium へ昇格する。
 
@@ -19,8 +19,10 @@
   - 昇格した項目を未完了一覧から除外する。
   - 残項目を P1 / P2 / P3 内で重要度と将来影響度順に並べ直す。
   - Done セクションは変更しない。
-- Reference: `docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md`
-  - 分類基準と検証コマンドの根拠として読む。変更しない。
+- Create: `docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md`
+  - 分類基準と検証コマンドの根拠を残す。
+- Create: `docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md`
+  - 実行手順と検証手順を残す。
 
 ## Classification Target
 
@@ -85,6 +87,17 @@ sed -n '1,80p' docs/todo/TODO.md
 
 Expected: `High Priority` and `Medium Priority` both say no unfinished items.
 
+- [ ] **Step 1.5: Verify promoted claims against current files**
+
+Run read-only checks before treating review-derived text as current fact:
+
+```bash
+rg -n "WATCHER_MESSAGE_BUFFER|send_watch_event|try_send|catch_unwind|init_tx|search_directory|Query|MoveFileExW|contentEl\\.innerHTML|memoPreviewEl\\.innerHTML" src tests
+rg -n "contentEl\\.innerHTML|memoPreviewEl\\.innerHTML" src/template/assets/js
+```
+
+Expected: each promoted item still maps to current source files or the TODO wording explicitly says implementation must re-check the current code before fixing it.
+
 - [ ] **Step 2: Replace the TODO intro and High / Medium empty sections**
 
 Replace the top of `docs/todo/TODO.md` from `# TODO Issues` through the line before `## Done Summary` with this exact content:
@@ -103,7 +116,7 @@ Replace the top of `docs/todo/TODO.md` from `# TODO Issues` through the line bef
 - [ ] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
   - ファイル: `src/watcher/runtime.rs` L19/L72/L111-127
   - 現状: `mpsc::channel(WATCHER_MESSAGE_BUFFER=32)` が満杯時、`FileChanged` も `Error` も同じ `try_send` 経路で破棄される。`WatchError::Init` / `ThreadPanic` を破棄するとフォアグラウンドが「監視が止まった理由」を失う
-  - 対応: イベント種別で優先度を分け、`Error` 系は `blocking_send` に切り替えるか、別チャネルに分離する。または `try_send` 失敗時に `tracing::error!` で SLA を上げる
+  - 対応: イベント種別で優先度を分け、`Error` 系は破棄せず `blocking_send` / 別チャネル / health state への latch などで foreground から取得可能にする。`try_send` 失敗時の `tracing::error!` は補助的な観測性強化として扱い、ログ追加だけでは完了扱いにしない
   - 昇格理由: watcher error の破棄は監視不能や異常停止の silent failure に直結するため High とする
   - 由来: アーキテクチャレビュー (2026-04-30)
 
@@ -147,7 +160,7 @@ Replace the top of `docs/todo/TODO.md` from `# TODO Issues` through the line bef
   - 由来: PR #120 再レビュー follow-up (2026-05-02)
 
 - [ ] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
-  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content.js`, `src/template/assets/js/memo.js`, `README.md`
+  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content-renderer.js`, `src/template/assets/js/memo.js`, `README.md`
   - 現状: Rust 側は `SanitizedHtml` newtype、raw HTML 破棄、URL policy、CSP hash で XSS 境界を作っている。一方ブラウザ側は `contentEl.innerHTML = safeData.content` / `memoPreviewEl.innerHTML = data.html` を使うため、境界の正しさは「サーバー生成 HTML だけが入る」という暗黙契約に依存している
   - 対応: renderer の信頼境界、HTTP/WS JSON の `content`/`toc`/`html` フィールド、JS 側の `innerHTML` 使用許可条件を短い設計メモにまとめる。E2E hook やテスト用 expose が production 経路で任意 HTML を流し込まないことも確認項目に含める
   - 昇格理由: XSS 境界の契約明文化は複数機能の前提になるが、今回は設計メモ化であり直接の実装修正ではないため Medium とする
@@ -246,7 +259,7 @@ Replace the `docs/todo/BACKLOG.md` content from `# Backlog (Low Priority)` throu
 ## P2: 保守性・局所回帰検知
 
 - [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
-  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
+  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/directory-search.js`
   - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
   - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
   - 判断: 検索負荷制御は実装済みで、残件は効率化と古い結果の扱いなので BACKLOG P2 に残す
@@ -310,7 +323,7 @@ Replace the `docs/todo/BACKLOG.md` content from `# Backlog (Low Priority)` throu
 Run:
 
 ```bash
-rg -n "watcher の `try_send`|panic::catch_unwind|Windows メモ原子保存|/api/search|Host middleware 適用境界|Host middleware 化後|SanitizedHtml|assets バンドル|CSP/syntax_theme_css" docs/todo/TODO.md docs/todo/BACKLOG.md
+rg -n -e 'watcher の `try_send`' -e 'panic::catch_unwind' -e 'Windows メモ原子保存' -e '/api/search' -e 'Host middleware 適用境界' -e 'Host middleware 化後' -e 'SanitizedHtml' -e 'assets バンドル' -e 'CSP/syntax_theme_css' docs/todo/TODO.md docs/todo/BACKLOG.md
 ```
 
 Expected: each moved item title appears in `docs/todo/TODO.md`; no moved item title appears in the incomplete P1/P2/P3 area of `docs/todo/BACKLOG.md`. Matches inside `docs/todo/BACKLOG.md` Done are acceptable only if they are explicitly completed historical items.
@@ -386,11 +399,15 @@ git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md
 
 Expected: diff only changes priority placement and explanatory text in TODO/BACKLOG. It does not modify source code, tests, config, or Done Summary content.
 
-## Task 4: Commit The Reprioritization
+## Task 4: Commit The Reprioritization After User Approval
 
 **Files:**
 - Modify: `docs/todo/TODO.md`
 - Modify: `docs/todo/BACKLOG.md`
+- Create: `docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md`
+- Create: `docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md`
+
+Run this task only after the user explicitly approves committing the reviewed docs-only diff.
 
 - [ ] **Step 1: Confirm worktree status**
 
@@ -400,14 +417,14 @@ Run:
 git status --short --branch
 ```
 
-Expected: only `docs/todo/TODO.md` and `docs/todo/BACKLOG.md` are modified.
+Expected: only the TODO/BACKLOG changes plus the new Superpowers spec/plan files are present, unless the spec/plan files have already been committed in earlier approved commits.
 
 - [ ] **Step 2: Stage the docs**
 
 Run:
 
 ```bash
-git add docs/todo/TODO.md docs/todo/BACKLOG.md
+git add docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md
 ```
 
 Expected: command succeeds with no output.
@@ -421,7 +438,7 @@ git diff --cached --check
 git diff --cached --stat
 ```
 
-Expected: `git diff --cached --check` has no output. `git diff --cached --stat` shows only the two docs files.
+Expected: `git diff --cached --check` has no output. `git diff --cached --stat` shows only the TODO/BACKLOG docs and the Superpowers spec/plan files, unless the spec/plan files were committed earlier.
 
 - [ ] **Step 4: Commit**
 
@@ -431,7 +448,7 @@ Run:
 git commit -m "docs: TODOとBACKLOGを重要度順に再整理"
 ```
 
-Expected: commit succeeds and reports changes to `docs/todo/TODO.md` and `docs/todo/BACKLOG.md`.
+Expected: commit succeeds and reports changes to `docs/todo/TODO.md` and `docs/todo/BACKLOG.md`. If spec/plan files were not committed earlier, the commit also reports those two files.
 
 - [ ] **Step 5: Confirm clean status**
 

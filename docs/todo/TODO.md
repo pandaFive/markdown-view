@@ -3,6 +3,7 @@
 レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
 
 最終整理: 2026-05-09。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
+レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## High Priority
 
@@ -11,7 +12,7 @@
 - [ ] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
   - ファイル: `src/watcher/runtime.rs` L19/L72/L111-127
   - 現状: `mpsc::channel(WATCHER_MESSAGE_BUFFER=32)` が満杯時、`FileChanged` も `Error` も同じ `try_send` 経路で破棄される。`WatchError::Init` / `ThreadPanic` を破棄するとフォアグラウンドが「監視が止まった理由」を失う
-  - 対応: イベント種別で優先度を分け、`Error` 系は `blocking_send` に切り替えるか、別チャネルに分離する。または `try_send` 失敗時に `tracing::error!` で SLA を上げる
+  - 対応: イベント種別で優先度を分け、`Error` 系は破棄せず `blocking_send` / 別チャネル / health state への latch などで foreground から取得可能にする。`try_send` 失敗時の `tracing::error!` は補助的な観測性強化として扱い、ログ追加だけでは完了扱いにしない
   - 昇格理由: watcher error の破棄は監視不能や異常停止の silent failure に直結するため High とする
   - 由来: アーキテクチャレビュー (2026-04-30)
 
@@ -55,7 +56,7 @@
   - 由来: PR #120 再レビュー follow-up (2026-05-02)
 
 - [ ] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
-  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content.js`, `src/template/assets/js/memo.js`, `README.md`
+  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content-renderer.js`, `src/template/assets/js/memo.js`, `README.md`
   - 現状: Rust 側は `SanitizedHtml` newtype、raw HTML 破棄、URL policy、CSP hash で XSS 境界を作っている。一方ブラウザ側は `contentEl.innerHTML = safeData.content` / `memoPreviewEl.innerHTML = data.html` を使うため、境界の正しさは「サーバー生成 HTML だけが入る」という暗黙契約に依存している
   - 対応: renderer の信頼境界、HTTP/WS JSON の `content`/`toc`/`html` フィールド、JS 側の `innerHTML` 使用許可条件を短い設計メモにまとめる。E2E hook やテスト用 expose が production 経路で任意 HTML を流し込まないことも確認項目に含める
   - 昇格理由: XSS 境界の契約明文化は複数機能の前提になるが、今回は設計メモ化であり直接の実装修正ではないため Medium とする

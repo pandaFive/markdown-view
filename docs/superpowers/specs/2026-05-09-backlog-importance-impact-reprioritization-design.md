@@ -33,10 +33,10 @@
 
 以下のいずれかを満たす項目を置く。
 
-- Host / Origin / CSP / HTML sanitize / path validation のようなセキュリティ境界に関わる。
+- 現在の防御層を直接弱める、または境界 bypass に直結する。
 - エラーや異常状態が破棄され、ユーザーまたはログから検知できなくなる。
 - データ保存、復元、メモ、ファイル読込で、失敗時にデータ安全性へ影響する。
-- 既存の防御層を弱める変更を将来誘発しやすい構造負債である。
+- 既存の防御層を弱める変更を近い将来に誘発しやすく、放置すると安全性や復旧判断に直接響く構造負債である。
 
 ### Medium Priority
 
@@ -44,6 +44,7 @@
 
 - 複数機能の前提になる設計メモ、契約明文化、テスト基盤である。
 - route 追加、renderer 変更、watcher 変更など、今後の作業で守り忘れを防ぐ。
+- Host / Origin / CSP / HTML sanitize / path validation のようなセキュリティ境界について、契約明文化、検証網、将来の守り忘れ防止に効く。
 - 将来の改修コストを下げるが、現在の実行時リスクは限定的である。
 
 ### BACKLOG P1
@@ -100,12 +101,13 @@ git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md
 
 - 変更対象: `docs/todo/TODO.md`, `docs/todo/BACKLOG.md`
 - 追加対象: `docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md`
+- 追加対象: `docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md`
 - 実装コードへの影響: なし
 - テストコードへの影響: なし
-- 間接影響: 今後の作業順、PR 作成順、設計書作成順
+- 間接影響: 今後の作業順、PR 作成順、設計書・計画書作成順
 
 ## ロールバック
 
-docs-only 変更なので、設計書コミットと TODO/BACKLOG 整理コミットを revert すれば元に戻せる。
+docs-only 変更なので、設計書、計画書、TODO/BACKLOG 整理コミットを revert すれば元に戻せる。
 
 整理内容の一部だけ戻す必要がある場合は、`docs/todo/TODO.md` と `docs/todo/BACKLOG.md` の該当項目単位で revert または再移動する。プロダクションコードへ影響しないため、ロールバック時の実行時リスクはない。
