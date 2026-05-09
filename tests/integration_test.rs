@@ -338,7 +338,8 @@ async fn test_indexページ取得_壊れたメモがあっても本文表示は
     assert!(body.contains("Body"));
     assert!(body.contains("id=\"memo-editor\""));
     assert!(body.contains("data-state=\"error\""));
-    assert!(body.contains("編集を無効化しました"));
+    assert!(body.contains("内容を保護するため編集を無効化しています"));
+    assert!(body.contains("本文の閲覧は継続できます"));
     assert!(body.contains("disabled"));
 }
 
