@@ -96,21 +96,22 @@ pub(super) async fn load_page(
     let route_request = RouteTargetRequest::page(request.file);
     let target = resolve_route_target(state, route_request).await?;
     let update = load_route_update(&target, route_request).await?;
-    let memo =
-        match load_route_memo(state, &target, RouteTargetRequest::api_memo(request.file)).await {
-            Ok(memo) => memo,
-            Err(error) => {
-                tracing::warn!(
+    let memo = match load_route_memo(state, &target, RouteTargetRequest::api_memo(request.file))
+        .await
+    {
+        Ok(memo) => memo,
+        Err(error) => {
+            tracing::warn!(
                 "[markdown-view] index描画ではメモ読み込み失敗を空メモへフォールバック ({}): {:?}",
                 target.file_label(),
                 error
             );
-                MemoResponse::empty_with_load_error(
+            MemoResponse::empty_with_load_error(
                     target.relative_path().map(ToOwned::to_owned),
-                    "メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。",
+                    "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。",
                 )
-            }
-        };
+        }
+    };
     let sidebar = match target.file_list() {
         Some(files) => SidebarView::directory(
             sidebar_directory_name(state),
@@ -243,6 +244,7 @@ mod tests {
     use crate::server::files::{MockMemoFs, Op, RouteTargetKind};
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
+    use crate::template::MemoState;
 
     fn create_directory_state(base_dir: &std::path::Path) -> AppState {
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
@@ -370,6 +372,7 @@ mod tests {
         assert_eq!(page.title, "note.md");
         assert!(page.update.content().as_str().contains("Note"));
         assert_eq!(page.memo.file(), None);
+        assert_eq!(page.memo.memo_state(), MemoState::Ready);
         assert_eq!(page.sidebar, SidebarView::SingleFile);
     }
 
@@ -384,9 +387,10 @@ mod tests {
 
         assert_eq!(page.memo.raw(), "");
         assert_eq!(page.memo.file(), Some("README.md"));
+        assert_eq!(page.memo.memo_state(), MemoState::Degraded);
         assert_eq!(
             page.memo.load_error(),
-            Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
+            Some("メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。")
         );
     }
 
@@ -420,9 +424,10 @@ mod tests {
         .await
         .expect("index描画ではメモ読み込み失敗をフォールバックする");
         assert_eq!(page.memo.raw(), "");
+        assert_eq!(page.memo.memo_state(), MemoState::Degraded);
         assert_eq!(
             page.memo.load_error(),
-            Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
+            Some("メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。")
         );
 
         let error = load_memo(

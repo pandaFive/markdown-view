@@ -4,7 +4,9 @@ mod page;
 mod tree;
 
 pub use self::assets::{combined_css, csp_hash_sources};
-pub use self::message::{error_message_json, MemoResponse, MemoUpdateMessage, UpdateMessage};
+pub use self::message::{
+    error_message_json, MemoResponse, MemoState, MemoUpdateMessage, UpdateMessage,
+};
 pub use self::page::{render_page, RenderPageParams, SidebarParams};
 pub use self::tree::{build_file_tree, render_file_tree_html, FileTreeNode};
 
@@ -556,7 +558,9 @@ mod tests {
         assert!(html.contains("if (appContext.memo.pendingReload === null) return false;"));
         assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
         assert!(html.contains("if (deps.applyRemoteMemoUpdate(data)) {"));
-        assert!(html.contains("if (isMemoRefreshMessage(data)) {"));
+        assert!(html.contains(
+            "if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {"
+        ));
         assert!(html.contains("if (deps.queueRemoteMemoReload(data)) {"));
         assert!(html.contains("loadMemo(file, appContext.fetch.generation);"));
     }
@@ -667,8 +671,10 @@ mod tests {
     fn test_メモ読み込み失敗時はエラー表示して編集を無効化する() {
         let content = test_content();
         let toc = test_toc();
-        let memo =
-            MemoResponse::empty_with_load_error(Some("README.md".to_string()), "メモ読み込み失敗");
+        let memo = MemoResponse::empty_with_load_error(
+            Some("README.md".to_string()),
+            "/tmp/private/path/README.md: permission denied",
+        );
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
             title: "Test",
@@ -680,12 +686,38 @@ mod tests {
             sidebar: SidebarParams::SingleFile,
         });
 
+        assert!(html.contains("id=\"memo-degraded-banner\""));
+        assert!(html.contains("role=\"status\""));
+        assert!(html.contains("内容を保護するため編集を無効化"));
+        assert!(!html.contains("/tmp/private/path"));
         assert!(html.contains("data-state=\"error\""));
-        assert!(html.contains("メモ読み込み失敗"));
+        assert!(html.contains(">読込失敗</span>"));
         assert!(html.contains("id=\"memo-editor\""));
-        assert!(html.contains("disabled"));
-        assert!(html.contains("data.load_error"));
+        assert!(html.contains("disabled aria-disabled=\"true\""));
+        assert!(html.contains("MEMO_DEGRADED_MESSAGE"));
         assert!(html.contains("setMemoEditorDisabled(true)"));
+    }
+
+    #[test]
+    fn test_通常メモではdegradedバナーを表示しない() {
+        let content = test_content();
+        let toc = test_toc();
+        let memo = MemoResponse::from_raw("通常メモ".to_string(), Some("README.md".to_string()));
+        let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
+        let html = render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: &syntax_css,
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(!html.contains("id=\"memo-degraded-banner\""));
+        assert!(html.contains("data-state=\"saved\""));
+        assert!(html.contains(">保存済み</span>"));
+        assert!(!html.contains("disabled aria-disabled=\"true\""));
     }
 
     #[test]

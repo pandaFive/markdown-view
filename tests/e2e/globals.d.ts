@@ -16,6 +16,7 @@ declare global {
       raw?: string;
       html?: string;
       load_error?: string;
+      memo_state?: 'ready' | 'degraded';
     };
     type UpdateContentOptions = {
       scrollMode?: 'preserve' | 'reset' | 'none';

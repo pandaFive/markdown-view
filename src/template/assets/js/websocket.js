@@ -148,7 +148,7 @@ function createWebSocketController(ctx, deps) {
         setLiveStatus('live');
         return;
       }
-      if (isMemoRefreshMessage(data)) {
+      if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {
         if (deps.queueRemoteMemoReload(data)) {
           hideWsServerErrorBanner();
           hideFileFetchErrorBanner();
