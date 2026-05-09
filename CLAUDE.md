@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-Markdownファイルをブラウザでリアルタイムプレビューする軽量CLIツール（Rust製）。
-ファイル変更を検知してWebSocket経由でブラウザに即座に反映する。
+Markdown ファイルの閲覧、横断検索、引用メモ、ファイルツリー、ライブ更新を扱う localhost 専用 Markdown workspace（Rust製）。
+ファイル変更を検知して WebSocket 経由でブラウザに即座に反映し、メモ sidecar と検索 API を同じ workspace 境界内で扱う。
 
 ## ビルド・テスト・検証コマンド
 
@@ -41,31 +41,29 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
   │
   ├── cli.rs        CLIオプション定義（clap derive）
   ├── server.rs     公開ファサード（モジュール再エクスポート）
-  │   ├── state.rs      サーバー状態とモード判定（AppState, AppMode, CanonicalPath）
-  │   ├── routes.rs     axumルーター、HTTP/WebSocketハンドラ（HTTP adapter）
+  │   ├── state.rs      AppState / AppMode / CanonicalPath
+  │   ├── routes.rs     axumルーター、HTTP/WebSocket adapter
   │   ├── service.rs    ページ/本文/メモ/検索の application service
   │   ├── files/        ファイル探索、検証、読み込み、メモ保存、検索
-  │   │   ├── catalog.rs    Markdown一覧探索
-  │   │   ├── content.rs    Markdown読み込みとUpdateMessage生成
-  │   │   ├── memo.rs       メモ読み書き、sidecar移行、削除契約
-  │   │   ├── memo_fs.rs    メモI/O抽象とatomic保存実装
-  │   │   ├── memo_sidecar.rs sidecar名生成の不変条件
-  │   │   ├── resolve.rs    ルート対象ファイル解決
-  │   │   └── search.rs     ディレクトリ検索
-  │   ├── guards.rs     Host/Origin検証、CSPヘッダー構築
-  │   ├── messages.rs   ブロードキャストメッセージ型、APIエラー型
-  │   ├── broadcast.rs  変更通知ブロードキャスト、監視イベント転送
-  │   └── session.rs    WebSocketセッション送受信ループ管理
+  │   ├── guards.rs     Host/Origin検証、CSP/セキュリティヘッダー
+  │   ├── messages.rs   API / WebSocket メッセージ型
+  │   ├── broadcast.rs  変更通知ブロードキャスト
+  │   ├── session.rs    WebSocket セッション管理
+  │   ├── watch.rs      watcher からの変更イベント処理
+  │   └── log_path.rs   ログ出力用パスの相対化
   ├── renderer/     Markdown描画モジュール
-  │   ├── mod.rs        Markdown→HTML変換（pulldown-cmark + syntectハイライト）
-  │   └── toc.rs        Markdown→目次HTML生成
-  ├── template/     HTMLテンプレートモジュール
-  │   ├── mod.rs        公開API再エクスポート
-  │   ├── page.rs       ページレンダリング
-  │   ├── message.rs    UpdateMessage型、エラーJSON生成
-  │   ├── tree.rs       ファイルツリーHTML生成
-  │   └── assets.rs     CSS/JSバンドル、CSPハッシュ生成
-  └── watcher.rs    ファイル監視（notify + debouncer → tokio bridge）
+  │   ├── render.rs     pulldown-cmark event の描画
+  │   ├── state.rs      レンダリング状態
+  │   ├── line.rs       ソース行属性
+  │   ├── security.rs   URL / HTML sanitize
+  │   ├── highlight.rs  syntect コードハイライト
+  │   └── toc.rs        TOC HTML 生成
+  ├── template/     HTMLページ、UpdateMessage、ファイルツリー、埋め込み assets
+  │   ├── page.rs
+  │   ├── message.rs
+  │   ├── tree.rs
+  │   └── assets/
+  └── watcher/      notify + debouncer → tokio bridge
 ```
 
 ### データフロー
@@ -73,7 +71,9 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 1. **初期表示**: HTTP GET `/` → `service::load_page` → `load_route_update` / `load_route_memo` → `render_page`（フルHTML）
 2. **ライブリロード**: notify検知 → `notify_update` → broadcast channel → WebSocket → クライアントJS
 3. **API**: GET `/api/content` → `service::load_content` → JSON（`UpdateMessage { content, toc }`）
-4. **メモAPI**: GET/PUT `/api/memo` → `service::load_memo` / `service::save_memo` → `MemoResponse`
+4. **検索API**: GET `/api/search` → `service::search` → JSON（検索結果、打ち切り理由、検索統計）
+5. **ファイル一覧API**: GET `/api/files` → `service::list_files` → JSON（ディレクトリ内 Markdown 一覧）
+6. **メモAPI**: GET/PUT `/api/memo` → `service::load_memo` / `service::save_memo` → `MemoResponse`
 
 ### 重要な設計判断
 
@@ -86,8 +86,9 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - **親ディレクトリsync**: rename後の親ディレクトリsyncはbest-effort。失敗しても応答は巻き戻せないため、クラッシュ耐性劣化として `error!` ログに残す
 - **CSS/JS完全埋め込み**: 外部ファイル不要、単一HTMLで完結
 - **notifyはstd::thread**: notifyがsync APIのため、mpscチャネルでtokioにブリッジ
-- **見出しパースが2回実行される**: `slugify`/`generate_unique_id`/`extract_headings`は共有済みだが、`render_markdown`と`generate_toc`で別々にpulldown-cmarkパースが走る（既知のトレードオフ）
+- **見出し情報共有**: `render_document` は本文 HTML と TOC を同じ `HeadingInfo` から生成する。互換 API の `extract_headings` と検索用 Markdown profile は用途別に別走査する。
 - 個人使用前提でも、外部公開 API の互換性破壊は `major change` 扱いにしろ。性能向上のために互換性を壊す場合も、通常変更として紛れ込ませず明示的に扱え
+- **0.x 系の公開 API 縮小**: `CanonicalPathError` の `markdown_view::server` re-export 縮小は破壊変更として扱う。リリース時は versioning と移行方針で明示する
 
 ## セキュリティレイヤー
 

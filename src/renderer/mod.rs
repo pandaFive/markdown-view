@@ -166,6 +166,10 @@ pub struct HeadingInfo {
 ///
 /// 互換用 API。本文 HTML と TOC を同時に必要とする経路では `render_document` を使う。
 pub fn extract_headings(input: &str) -> Vec<HeadingInfo> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+
     render_document(input).headings
 }
 

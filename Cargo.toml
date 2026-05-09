@@ -2,7 +2,7 @@
 name = "markdown-view"
 version = "0.2.0"
 edition = "2021"
-description = "軽量・高速 Markdown プレビューア"
+description = "Markdown workspace for local preview, notes, and search"
 
 [dependencies]
 anyhow = "1"

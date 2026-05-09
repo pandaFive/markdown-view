@@ -1,16 +1,18 @@
 # markdown-view
 
-軽量・高速な Markdown プレビューア（Rust製）。
-ファイルの変更を検知し、WebSocket 経由でブラウザにリアルタイム反映します。
+Markdown workspace for local reading, notes, search, and live preview（Rust製）。
+Markdown ファイルの閲覧、横断検索、引用メモ、ファイルツリー、ライブ更新を localhost 上の単一バイナリで扱います。
 
 ## 特徴
 
 - **ライブリロード** — ファイル保存時にブラウザが自動更新（WebSocket）
-- **ディレクトリモード** — ディレクトリ指定でファイル一覧付きプレビュー
+- **ディレクトリモード** — ディレクトリ指定でファイルツリー付き workspace を表示
+- **横断検索** — workspace 内の Markdown をサーバー側の上限付き検索で横断
+- **引用メモ** — 選択範囲への引用リンクと sidecar メモを保存
 - **目次サイドバー** — 見出しから自動生成、スクロール追従
 - **シンタックスハイライト** — syntect による多言語対応コードハイライト
 - **ダークモード** — OS設定に自動追従 / `--dark` で強制切り替え
-- **セキュア設計** — localhost限定バインド、XSS防止、CSPヘッダー
+- **セキュア設計** — localhost限定バインド、Host/Origin検証、XSS防止、CSPヘッダー
 - **ゼロ設定** — 外部ファイル不要、単一バイナリで完結
 - **複数同時起動** — 使用中ポートを避けて別ディレクトリのプレビューを並行起動可能
 
@@ -168,6 +170,8 @@ src/
 2. **ライブリロード**: ファイル変更検知 → broadcast channel → WebSocket → ブラウザ更新
 3. **API**:
    - GET `/api/content` → JSON（content + toc）、ディレクトリモードでは `?file=` で指定
+   - GET `/api/search` → ディレクトリ内 Markdown の検索結果 JSON（単一ファイルモードでは空結果）
+   - GET/PUT `/api/memo` → 対象 Markdown の sidecar メモ取得・保存
    - GET `/api/files` → ディレクトリ内の `.md` ファイル一覧（単一ファイルモードでは空配列）
 
 ## セキュリティ

@@ -1265,6 +1265,24 @@ async fn test_resolve_route_target_api_contentはfile_listを含まない() {
 }
 
 #[tokio::test]
+async fn test_resolve_route_target_api_memoはfile_listを含まない() {
+    let dir = create_test_dir();
+    let state = create_directory_state(dir.path());
+
+    let explicit_target =
+        resolve_route_target(&state, RouteTargetRequest::api_memo(Some("docs/api.md")))
+            .await
+            .unwrap();
+    let default_target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    assert_eq!(explicit_target.relative_path(), Some("docs/api.md"));
+    assert!(explicit_target.file_list().is_none());
+    assert!(default_target.file_list().is_none());
+}
+
+#[tokio::test]
 async fn test_resolve_route_target_ディレクトリ既定ファイルを返す() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("z-last.md"), "# z").unwrap();

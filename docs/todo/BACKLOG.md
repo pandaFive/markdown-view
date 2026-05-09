@@ -3,7 +3,7 @@
 低優先度で蓄積している項目。High/Medium が TODO.md から捌けてから着手する候補。
 未完了項目はリスク低減効果を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）の発見コンテキスト。
 
-最終整理: 2026-05-05。次に実行する High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善・完了済みの履歴を置く。セキュリティ境界に関わる項目は、優先度が低くても文脈を残す。
+最終整理: 2026-05-09。次に実行する High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善・完了済みの履歴を置く。セキュリティ境界に関わる項目は、優先度が低くても文脈を残す。
 
 ## P1: リスク低減・検証基盤
 
@@ -27,29 +27,11 @@
 
 ## P2: 保守性・局所回帰検知
 
-- [ ] Superpowers spec/plan の長期保存方針を整理する
-  - ファイル: `docs/superpowers/specs/`, `docs/superpowers/plans/`
-  - 現状: PR #123 では設計書と 372 行の実装計画を保存した。設計書の目的・非目的・セキュリティ考慮は ADR 的に参照価値がある一方、plans は commit 手順や実行済み checklist を含み、時間が経つと実行ログとして rot しやすい
-  - 対応: 完了済み plan を保存し続ける基準を決める。保存する場合は「実行前計画」か「実行済み記録」かを冒頭で明示し、不要なら spec へ要点だけ残して plan を削除する。PR #123 の plan は必要に応じて 50 行程度の設計・検証サマリへ圧縮する
-  - 由来: PR #123 レビュー follow-up (2026-05-04)
-
 - [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
   - ファイル: `src/server/files/search.rs`, `src/template/assets/js/content.js`
   - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。一方、連続検索時に古い検索処理をキャンセルする仕組みはなく、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
   - 対応: クライアント検索世代とサーバ側処理の対応、古い検索結果の破棄、`Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
   - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)
-
-- [ ] CLAUDE.md のアーキテクチャ記述を現在の実装構成に揃える
-  - ファイル: `CLAUDE.md`
-  - 現状: CLAUDE.md は `server/files.rs` / `watcher.rs` / `template/mod.rs` を単一ファイル前提で記載しているが、実装は `src/server/files/{catalog,content,memo,memo_fs,memo_sidecar,resolve,search,test_support,tests}.rs`、`src/watcher/{runtime,strategy,error}.rs`、`src/server/{log_path,watch}.rs`、`src/renderer/{state,security,line,highlight,render}.rs`、`src/template/assets/{css,js}/` まで細分化済み。さらに「見出しパースが 2 回」と書かれているが `search` 経由で 3 回目が走る
-  - 対応: モジュール構成図と 2 回パースの記述を実装に追従。「CSS/JS 完全埋め込み」の文言は維持しつつ内部構造（`include_str!` 経由のサブモジュール化）を補足
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] プロダクト定義を Markdown previewer から Markdown workspace へ明文化する
-  - ファイル: `README.md`, `CLAUDE.md`, `Cargo.toml`, `docs/todo/TODO.md`
-  - 現状: `markdown-view` はメモ、引用、横断検索、ファイルツリー、読書補助 UI を含む Markdown 専用 workspace として育っているが、説明文には「軽量・高速 Markdown プレビューア」など previewer 寄りの表現が残る。そのため外部レビューでメモ機能が scope creep と誤読されやすい
-  - 対応: README/Cargo description/開発ガイドの文言を「Markdown workspace」前提へ揃え、メモ・引用・検索を中核機能として位置付ける。純プレビュー化や `--no-memo` は現時点の非目標として明記する
-  - 由来: Unix 哲学レビュー再検討 (2026-04-30)
 
 - [ ] 未知言語コードブロックの silent fallback に警告ログを追加
   - ファイル: `src/renderer/highlight.rs` L14-50, `tests/renderer_test.rs` L346
@@ -125,18 +107,6 @@
   - 対応: `data-memo-file` も None 時に属性ごとスキップする経路に変更し、bootstrap.js 側を「属性無し ⇒ memo 無し」と扱うよう揃える
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] `render_markdown` と `extract_headings` の早期 return 非対称を解消する
-  - ファイル: `src/renderer/mod.rs` L57-63/L150
-  - 現状: `render_markdown` は `input.is_empty()` で空 `SanitizedHtml` を返すが、`extract_headings` には対応する早期 return がない（`generate_toc` 側で空文字に落とすので結果は同じ）
-  - 対応: `extract_headings` 側にも同様の早期 return を入れて API ペアの一貫性を揃える
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `CanonicalPathError` などの内部利用型を `pub(crate)` に絞る
-  - ファイル: `src/server.rs` L13-19
-  - 現状: `CanonicalPath` のみ `pub(crate)` で他は `pub` だが、`CanonicalPathError` も外部から触る経路がない
-  - 対応: 公開不要な型を `pub(crate)` に絞り、lib API surface を最小化
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] サイドバーの "Documents" 文字列を i18n または日本語化
   - ファイル: `src/server/routes.rs` L33-41 (`sidebar_directory_name`)
   - 現状: `unwrap_or("Documents")` で英語固定。日本語 UI でも同名が出る
@@ -147,12 +117,6 @@
   - ファイル: `src/server/session.rs` L54-132
   - 現状: `socket.recv()` と `rx.recv()` を `tokio::select!` で競わせているが、両者が cancel safe である根拠コメントが無い。将来の改修で cancel-unsafe な future を入れる事故リスク
   - 対応: 各 branch の future が cancel safe であることを doc コメントで明記し、新規 branch 追加時のチェックリストを残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `RouteTargetKind::include_file_list` を match 完全列挙に変更する
-  - ファイル: `src/server/files/resolve.rs` L104-106
-  - 現状: `matches!(self.kind, RouteTargetKind::Page)` で Page のみ true。新 variant 追加時に file_list を含めるかが暗黙判断になる
-  - 対応: `match self.kind { Page => true, ApiContent | ApiMemo => false }` に変更し、新 variant 追加時に必ずコンパイルエラーで気付くようにする
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
@@ -174,14 +138,43 @@
   - 理由: マイクロ最適化。実装前に効果確認推奨
   - 由来: PR #59 探索 (2026-04-18)
 
-- [ ] README のアーキテクチャ図を実装構成に揃える
+## Done
+
+- [x] README のアーキテクチャ図を実装構成に揃える
   - ファイル: `README.md`
-  - 現状: `websocket.rs` / `renderer.rs` / `template.rs` / `files.rs` が単一ファイル前提で記載されている。実装は `src/server/session.rs`、`src/renderer/`、`src/template/`、`src/server/files/` に分割済み
-  - 対応: 現在の実装構成と同じ粒度で README のアーキテクチャ図を更新する
-  - 理由: ドキュメント rot。新規コントリビュータが実装構造を誤解する
+  - 内容: `src/server/session.rs`、`src/server/files/`、`src/renderer/`、`src/template/`、`watcher/` を含む現行構成へアーキテクチャ図を更新した。
+  - 完了根拠: README のアーキテクチャ図
   - 由来: PR #59 探索 (2026-04-18)
 
-## Done
+- [x] Superpowers spec/plan の長期保存方針を整理する
+  - ファイル: `docs/superpowers/README.md`
+  - 内容: `specs/` は長期参照する設計判断、`plans/` は実装前計画として扱う方針を明文化した。完了済み plan は参照価値がある場合に残し、実行ログとして rot する場合は要点化する基準を追加した。
+  - 完了根拠: `docs/superpowers/README.md` の保存方針
+
+- [x] CLAUDE.md のアーキテクチャ記述を現在の実装構成に揃える
+  - ファイル: `CLAUDE.md`
+  - 内容: `server/service.rs`、`watcher/`、`renderer/`、`template/assets/` を含む現行構成へ更新し、見出し情報共有の説明を `render_document` 起点に修正した。
+  - 完了根拠: `CLAUDE.md` のアーキテクチャ図と設計判断
+
+- [x] プロダクト定義を Markdown previewer から Markdown workspace へ明文化する
+  - ファイル: `README.md`, `CLAUDE.md`, `Cargo.toml`
+  - 内容: メモ、引用、横断検索、ファイルツリー、ライブ更新を Markdown workspace の中核機能として説明した。純プレビュー化や `--no-memo` は今回も非目標として扱い、既存セキュリティ説明は弱めていない。
+  - 完了根拠: README 冒頭、特徴一覧、Cargo description、CLAUDE.md 概要
+
+- [x] `render_markdown` と `extract_headings` の早期 return 非対称を解消する
+  - ファイル: `src/renderer/mod.rs`, `tests/renderer_test.rs`
+  - 内容: `extract_headings("")` を明示的な早期 return にし、空入力が空配列を返す契約をテストで固定した。
+  - 完了根拠: `test_extract_headingsは空入力で空配列を返す`
+
+- [x] `CanonicalPathError` などの内部利用型を `pub(crate)` に絞る
+  - ファイル: `src/server.rs`
+  - 内容: `CanonicalPathError` の re-export を crate 内へ絞った。`AppModeBuildError` は public constructor の戻り値に含まれるため public のまま残した。
+  - 完了根拠: `cargo test --all-targets --all-features`
+
+- [x] `RouteTargetKind::include_file_list` を match 完全列挙に変更する
+  - ファイル: `src/server/files/resolve.rs`
+  - 内容: `Page` / `ApiContent` / `ApiMemo` を `match` で完全列挙し、新 variant 追加時に file list 要否を見直す構造にした。
+  - 完了根拠: `cargo test --all-targets --all-features`
 
 - [x] `notify_update` receiver=0 エラー観測性改善
   - ファイル: `src/server/broadcast.rs`, `src/server/files/content.rs`

@@ -113,7 +113,10 @@ impl<'a> RouteTargetRequest<'a> {
     }
 
     fn include_file_list(self) -> bool {
-        matches!(self.kind, RouteTargetKind::Page)
+        match self.kind {
+            RouteTargetKind::Page => true,
+            RouteTargetKind::ApiContent | RouteTargetKind::ApiMemo => false,
+        }
     }
 
     fn not_found_message(self) -> &'static str {
