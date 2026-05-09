@@ -12,12 +12,6 @@
 
 以下はリスク低減順に実行する。起動不能や silent failure に近い項目を先に扱い、変更範囲が大きい構造変更は後ろへ置く。
 
-- [ ] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
-  - ファイル: `src/server/messages.rs` L38-40, `src/server/routes.rs` L188-220
-  - 現状: `Refresh` variant は `serde_json::json!({ "refresh": true })` を返すだけで、ディレクトリモードの遅延回復経路（`content.rs:133`）が memo の再取得指示を欠く。一方 `index_handler` のメモ読込失敗は `MemoResponse::empty` に silent fallback し、ユーザーには「メモが消えた」ように見える
-  - 対応: `Refresh` variant に `memo_refresh: bool` を追加するか、仕様コメントを `messages.rs` に明記。`MemoResponse` に degrade flag を追加し、HTML 側でバナー表示できるよう情報を渡す
-  - 理由: 仕様契約を型・コメントに固定し、UI が「メモ機能の一時的な機能低下」を区別できるようにする
-
 - [ ] ブラウザ JS の責務境界を小モジュールへ分割する
   - ファイル: `src/template/assets/js/{bootstrap,content,content-renderer,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
   - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。さらに `content-renderer.js` で `updateContent` の payload 契約、契約違反 warn、`#content` / `#toc` への sanitize 済み HTML 反映、TOC HTML 正規化を明示境界へ切り出した。一方、`content.js` は検索、リンク解決、履歴、スクロール、引用ジャンプ、描画後副作用をまだまとめて扱う巨大ファイルのままで、controller API と依存境界は未整理
@@ -38,6 +32,8 @@
 
 ## Done Summary
 
+- [x] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
+  - 完了根拠: `MemoResponse` に `memo_state` を追加し、通常時は `ready`、読込失敗時は `degraded` として直列化する契約にした。初期ページ描画ではメモ読込失敗を degraded response に変換し、メモパネルに専用バナーを表示して textarea と autosave を止める。ブラウザ側の `applyMemoData` も `memo_state: "degraded"` を主条件にし、読込失敗応答で編集中本文を上書きしない。`BroadcastMessage::Refresh` は `refresh: true` と `memo_refresh: true` を含む JSON へ揃え、refresh payload によるメモ再取得を E2E で固定した
 - [x] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する
   - 完了根拠: ディレクトリモードの監視登録を `WatchPlan` 経由にし、`.git`、`node_modules`、`target`、隠しディレクトリ、symlink directory を notify 登録前に除外する構成にした。起動後に作成された通常サブディレクトリは internal event loop で動的に `NonRecursive` watch へ追加し、既存 Markdown の回復通知も送る。watch 登録の部分成功は init failure とし、起動後の追加 watch 失敗は health failure と `WatchEvent::Error` に分類する。ENOSPC 相当は `WatchErrorKind::ResourceExhausted` として Linux inotify 上限の確認へ進める日本語メッセージを返す。レビュー反映で `.git`、`node_modules`、`target`、隠しディレクトリはプレビュー一覧・検索・直接表示からも共通除外し、README に既定除外と inotify 上限を明記した
 - [x] shutdown チェーンの観測性を統合する
