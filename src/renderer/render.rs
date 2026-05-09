@@ -31,6 +31,11 @@ pub(super) fn render(input: &str) -> RenderOutput {
         state, headings, ..
     } = context;
 
+    debug_assert!(
+        !state.has_mismatches(),
+        "render: Markdown描画状態の不整合が記録された"
+    );
+
     RenderOutput {
         content: SanitizedHtml::from_sanitized_html(state.into_html()),
         headings,
@@ -168,7 +173,12 @@ fn log_ignored_markdown_end_tag(tag: &TagEnd) -> IgnoredMarkdownEventKind {
     IgnoredMarkdownEventKind::EndTag
 }
 
-fn log_render_state_mismatch(operation: &'static str, mismatch: RenderStateMismatch) {
+fn log_render_state_mismatch(
+    state: &mut RenderState,
+    operation: &'static str,
+    mismatch: RenderStateMismatch,
+) {
+    state.record_mismatch();
     tracing::warn!(
         "[markdown-view] Markdown描画状態の不整合を回復: operation={} mismatch={:?}",
         operation,
@@ -273,13 +283,17 @@ fn handle_code_block_end(
     state: &mut RenderState,
 ) {
     if !state.in_code_block() {
-        log_render_state_mismatch("finish_code_block", RenderStateMismatch::ExpectedCodeBlock);
+        log_render_state_mismatch(
+            state,
+            "finish_code_block",
+            RenderStateMismatch::ExpectedCodeBlock,
+        );
         return;
     }
 
     let line_attrs = code_block_line_attrs(&range, line_lookup, state);
     if let Err(mismatch) = state.finish_code_block(syntax_set, line_attrs) {
-        log_render_state_mismatch("finish_code_block", mismatch);
+        log_render_state_mismatch(state, "finish_code_block", mismatch);
     }
 }
 
@@ -290,7 +304,11 @@ fn handle_heading_start(level: u8, range: Range<usize>, state: &mut RenderState)
 fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
     let state = &mut context.state;
     if !state.can_finish_heading() {
-        log_render_state_mismatch("finish_heading", RenderStateMismatch::ExpectedHeading);
+        log_render_state_mismatch(
+            state,
+            "finish_heading",
+            RenderStateMismatch::ExpectedHeading,
+        );
         return;
     }
 
@@ -306,7 +324,7 @@ fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
             }
             state.push_html(&heading_html);
         }
-        Err(mismatch) => log_render_state_mismatch("finish_heading", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "finish_heading", mismatch),
     }
 }
 
@@ -323,7 +341,7 @@ fn handle_image_end(state: &mut RenderState) {
                 state.push_html(&image_html);
             }
         }
-        Err(mismatch) => log_render_state_mismatch("finish_image", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "finish_image", mismatch),
     }
 }
 
@@ -441,28 +459,28 @@ fn handle_table_start(
 fn handle_table_end(state: &mut RenderState) {
     match state.finish_table() {
         Ok(()) => state.push_html("</table>\n"),
-        Err(mismatch) => log_render_state_mismatch("finish_table", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "finish_table", mismatch),
     }
 }
 
 fn handle_table_head_start(state: &mut RenderState) {
     match state.start_table_head() {
         Ok(()) => state.push_html("<thead>\n"),
-        Err(mismatch) => log_render_state_mismatch("start_table_head", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "start_table_head", mismatch),
     }
 }
 
 fn handle_table_head_end(state: &mut RenderState) {
     match state.finish_table_head() {
         Ok(()) => state.push_html("</thead>\n"),
-        Err(mismatch) => log_render_state_mismatch("finish_table_head", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "finish_table_head", mismatch),
     }
 }
 
 fn handle_table_row_start(state: &mut RenderState) {
     match state.reset_table_row() {
         Ok(()) => state.push_html("<tr>\n"),
-        Err(mismatch) => log_render_state_mismatch("reset_table_row", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "reset_table_row", mismatch),
     }
 }
 
@@ -470,21 +488,21 @@ fn handle_table_row_end(state: &mut RenderState) {
     if state.in_table() {
         state.push_html("</tr>\n");
     } else {
-        log_render_state_mismatch("table_row_end", RenderStateMismatch::ExpectedTable);
+        log_render_state_mismatch(state, "table_row_end", RenderStateMismatch::ExpectedTable);
     }
 }
 
 fn handle_table_cell_start(state: &mut RenderState) {
     match state.table_cell_start_tag() {
         Ok(tag) => state.push_html(&tag),
-        Err(mismatch) => log_render_state_mismatch("table_cell_start_tag", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "table_cell_start_tag", mismatch),
     }
 }
 
 fn handle_table_cell_end(state: &mut RenderState) {
     match state.table_cell_end_tag() {
         Ok(tag) => state.push_html(tag),
-        Err(mismatch) => log_render_state_mismatch("table_cell_end_tag", mismatch),
+        Err(mismatch) => log_render_state_mismatch(state, "table_cell_end_tag", mismatch),
     }
 }
 
@@ -603,6 +621,7 @@ mod tests {
 
         handle_table_row_end(&mut state);
 
+        assert_eq!(state.mismatch_count(), 1);
         assert_eq!(state.into_html(), "");
     }
 
@@ -619,6 +638,7 @@ mod tests {
 
         handle_heading_end(&line_lookup, &mut context);
 
+        assert_eq!(context.state.mismatch_count(), 1);
         assert!(context.headings.is_empty());
         let image_html = context.state.finish_image().unwrap();
         context
@@ -646,6 +666,7 @@ mod tests {
 
         handle_code_block_end(0..14, &line_lookup, &syntax_set, &mut state);
 
+        assert_eq!(state.mismatch_count(), 1);
         assert!(state.finish_image().is_ok());
         assert!(state.finish_code_block(&syntax_set, String::new()).is_ok());
     }

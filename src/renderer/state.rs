@@ -19,6 +19,7 @@ pub(super) enum RenderStateMismatch {
 pub(super) struct RenderState {
     html_output: String,
     contexts: Vec<BlockContext>,
+    mismatch_count: usize,
 }
 
 enum BlockContext {
@@ -58,6 +59,7 @@ impl RenderState {
         Self {
             html_output: String::new(),
             contexts: Vec::new(),
+            mismatch_count: 0,
         }
     }
 
@@ -71,6 +73,19 @@ impl RenderState {
 
     pub(super) fn push_soft_break(&mut self) {
         self.html_output.push('\n');
+    }
+
+    pub(super) fn record_mismatch(&mut self) {
+        self.mismatch_count = self.mismatch_count.saturating_add(1);
+    }
+
+    pub(super) fn has_mismatches(&self) -> bool {
+        self.mismatch_count > 0
+    }
+
+    #[cfg(test)]
+    pub(super) fn mismatch_count(&self) -> usize {
+        self.mismatch_count
     }
 
     fn top_context(&self) -> Option<&BlockContext> {
