@@ -202,8 +202,8 @@ test('refresh payloadのmemo_refreshでメモを再取得する', async ({ page 
       contentType: 'application/json',
       body: JSON.stringify({
         memo_state: 'ready',
-        raw: memoGetCount === 1 ? 'initial memo' : 'memo after refresh',
-        html: memoGetCount === 1 ? '<p>initial memo</p>' : '<p>memo after refresh</p>',
+        raw: memoGetCount === 1 ? 'initial memo' : 'memo after combined refresh',
+        html: memoGetCount === 1 ? '<p>initial memo</p>' : '<p>memo after combined refresh</p>',
         file: 'README.md'
       })
     });
@@ -214,9 +214,10 @@ test('refresh payloadのmemo_refreshでメモを再取得する', async ({ page 
   await openMemoTab(page);
   await dispatchWsMessage(page, { memo_refresh: true });
   await expect(page.locator('#memo-editor')).toHaveValue('initial memo');
+  const beforeRefreshPayloadCount = memoGetCount;
 
   await dispatchWsMessage(page, { refresh: true, memo_refresh: true });
 
-  await expect(page.locator('#memo-editor')).toHaveValue('memo after refresh');
-  await expect.poll(() => memoGetCount).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => memoGetCount).toBe(beforeRefreshPayloadCount + 1);
+  await expect(page.locator('#memo-editor')).toHaveValue('memo after combined refresh');
 });
