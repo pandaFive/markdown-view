@@ -189,3 +189,193 @@ pub fn render_file_tree_html(nodes: &[FileTreeNode], current_file: Option<&str>)
     html.push_str("</ul>\n");
     html
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_フラットファイルリストからツリーを構築() {
+        let files = vec![
+            "README.md".to_string(),
+            "docs/api.md".to_string(),
+            "docs/guide/intro.md".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+
+        // ルート直下: ディレクトリ(docs)が先、ファイル(README.md)が後
+        assert_eq!(tree.len(), 2);
+
+        // docs ディレクトリ
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "docs");
+                assert_eq!(children.len(), 2);
+                match &children[0] {
+                    FileTreeNode::Directory {
+                        name,
+                        children: nested,
+                    } => {
+                        assert_eq!(name, "guide");
+                        assert_eq!(nested.len(), 1);
+                        match &nested[0] {
+                            FileTreeNode::File { name, full_path } => {
+                                assert_eq!(name, "intro.md");
+                                assert_eq!(full_path, "docs/guide/intro.md");
+                            }
+                            _ => panic!("docs/guide/intro.md はファイルノードを期待"),
+                        }
+                    }
+                    _ => panic!("docs/guide はディレクトリノードを期待"),
+                }
+                match &children[1] {
+                    FileTreeNode::File { name, full_path } => {
+                        assert_eq!(name, "api.md");
+                        assert_eq!(full_path, "docs/api.md");
+                    }
+                    _ => panic!("docs/api.md はファイルノードを期待"),
+                }
+            }
+            _ => panic!("ルート先頭はdocsディレクトリを期待"),
+        }
+
+        match &tree[1] {
+            FileTreeNode::File { name, full_path } => {
+                assert_eq!(name, "README.md");
+                assert_eq!(full_path, "README.md");
+            }
+            _ => panic!("README.md はファイルノードを期待"),
+        }
+    }
+
+    #[test]
+    fn test_空のファイルリストからツリーを構築() {
+        let files: Vec<String> = vec![];
+        let tree = build_file_tree(&files);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_ルート直下のファイルのみ() {
+        let files = vec!["README.md".to_string(), "CHANGELOG.md".to_string()];
+        let tree = build_file_tree(&files);
+
+        // すべてファイルノード、ディレクトリノードなし
+        assert_eq!(tree.len(), 2);
+        assert!(matches!(
+            &tree[0],
+            FileTreeNode::File { name, full_path } if name == "CHANGELOG.md" && full_path == "CHANGELOG.md"
+        ));
+        assert!(matches!(
+            &tree[1],
+            FileTreeNode::File { name, full_path } if name == "README.md" && full_path == "README.md"
+        ));
+    }
+
+    #[test]
+    fn test_深いネストのファイルツリー() {
+        let files = vec!["a/b/c/d.md".to_string()];
+        let tree = build_file_tree(&files);
+
+        // a/
+        assert_eq!(tree.len(), 1);
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "a");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    FileTreeNode::Directory {
+                        name,
+                        children: b_children,
+                    } => {
+                        assert_eq!(name, "b");
+                        assert_eq!(b_children.len(), 1);
+                        match &b_children[0] {
+                            FileTreeNode::Directory {
+                                name,
+                                children: c_children,
+                            } => {
+                                assert_eq!(name, "c");
+                                assert_eq!(c_children.len(), 1);
+                                assert!(matches!(
+                                    &c_children[0],
+                                    FileTreeNode::File { name, full_path }
+                                        if name == "d.md" && full_path == "a/b/c/d.md"
+                                ));
+                            }
+                            _ => panic!("cディレクトリを期待"),
+                        }
+                    }
+                    _ => panic!("bディレクトリを期待"),
+                }
+            }
+            _ => panic!("aディレクトリを期待"),
+        }
+    }
+
+    #[test]
+    fn test_ツリーhtmlにアクティブファイルのパスが展開される() {
+        let files = vec!["README.md".to_string(), "docs/guide/intro.md".to_string()];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, Some("docs/guide/intro.md"));
+
+        // ルートはulでラップされる
+        assert!(html.starts_with("<ul class=\"file-tree-root\">"));
+        // アクティブファイルの祖先ディレクトリがopen状態
+        assert!(html.contains("<details class=\"file-tree-dir\" open>"));
+        // アクティブファイルにactiveクラスが付与される
+        assert!(html.contains("class=\"file-tree-file active\""));
+        // data-file属性が正しい
+        assert!(html.contains("data-file=\"docs/guide/intro.md\""));
+    }
+
+    #[test]
+    fn test_アクティブファイル判定でcurrent_fileの空セグメントを正規化する() {
+        let files = vec!["README.md".to_string(), "docs/guide/intro.md".to_string()];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, Some("docs//guide//intro.md"));
+
+        // 正規化により同一ファイルとしてactive判定される
+        assert!(html.contains("class=\"file-tree-file active\""));
+        // 祖先ディレクトリもopen状態になる
+        assert!(html.contains("<details class=\"file-tree-dir\" open>"));
+    }
+
+    #[test]
+    fn test_ファイル名のエスケープがツリーhtmlで維持される() {
+        let files = vec!["A&B \"<notes>\".md".to_string()];
+        let tree = build_file_tree(&files);
+        let html = render_file_tree_html(&tree, None);
+
+        // &, <, >, " がエスケープされている
+        assert!(html.contains("A&amp;B &quot;&lt;notes&gt;&quot;.md"));
+        // 生の特殊文字がdata-file属性に含まれない
+        assert!(!html.contains("data-file=\"A&B \"<notes>\".md\""));
+        // data-file属性値のダブルクォートがエスケープされる
+        assert!(html.contains("data-file=\"A&amp;B &quot;&lt;notes&gt;&quot;.md\""));
+    }
+
+    #[test]
+    fn test_空セグメントと重複パスを除去してツリー構築() {
+        let files = vec![
+            "docs//guide.md".to_string(),
+            "docs/guide.md".to_string(),
+            "///".to_string(),
+        ];
+        let tree = build_file_tree(&files);
+
+        assert_eq!(tree.len(), 1);
+        match &tree[0] {
+            FileTreeNode::Directory { name, children } => {
+                assert_eq!(name, "docs");
+                assert_eq!(children.len(), 1);
+                assert!(matches!(
+                    &children[0],
+                    FileTreeNode::File { name, full_path }
+                        if name == "guide.md" && full_path == "docs/guide.md"
+                ));
+            }
+            _ => panic!("docs ディレクトリを期待"),
+        }
+    }
+}

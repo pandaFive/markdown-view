@@ -293,3 +293,324 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
         memo_html = memo.html().as_str(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::{render_markdown, SanitizedHtml};
+    use crate::toc::generate_toc;
+
+    fn test_content() -> SanitizedHtml {
+        render_markdown("content")
+    }
+
+    fn test_toc() -> SanitizedHtml {
+        generate_toc("# toc")
+    }
+
+    fn test_memo() -> MemoResponse {
+        MemoResponse::empty(None)
+    }
+
+    fn render_single_file_page(memo: &MemoResponse) -> String {
+        let content = test_content();
+        let toc = test_toc();
+        render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo,
+            dark_mode: false,
+            syntax_css: "",
+            sidebar: SidebarParams::SingleFile,
+        })
+    }
+
+    fn render_directory_page(files: &[String], memo: &MemoResponse) -> String {
+        let content = test_content();
+        let toc = test_toc();
+        render_page(RenderPageParams {
+            title: "Test",
+            content: &content,
+            toc: &toc,
+            memo,
+            dark_mode: false,
+            syntax_css: "",
+            sidebar: SidebarParams::Directory {
+                directory_name: "workspace",
+                file_list: files,
+                current_file: Some("README.md"),
+            },
+        })
+    }
+
+    #[test]
+    fn test_ディレクトリモードでタブ構造が生成される() {
+        let files = vec!["README.md".to_string(), "docs/guide.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("data-dir-mode=\"true\""));
+        assert!(html.contains("<h2>workspace</h2>"));
+        assert!(html.contains("class=\"sidebar-tabs\""));
+        assert!(html.contains("data-tab=\"files\""));
+        assert!(html.contains("data-tab=\"toc\""));
+        assert!(html.contains("id=\"panel-files\""));
+        assert!(html.contains("id=\"panel-toc\""));
+        assert!(html.contains("id=\"file-filter\""));
+        assert!(html.contains("id=\"file-filter-summary\""));
+        assert!(html.contains("<div class=\"sidebar-panel active\" id=\"panel-files\">"));
+        assert!(html.contains("<div class=\"sidebar-utility\">"));
+        assert!(html.contains("id=\"document-search-input\""));
+        assert!(html.contains("id=\"document-search-summary\""));
+        assert!(html.contains("id=\"document-search-results\""));
+        assert!(html.contains("ディレクトリ検索"));
+        assert!(html.contains("placeholder=\"ディレクトリ全体を検索\""));
+        assert!(!html.contains("sidebar-caption"));
+        assert!(!html.contains("ディレクトリ内のMarkdownを切り替えて閲覧できます。"));
+    }
+
+    #[test]
+    fn test_単一ファイルモードでタブが生成されない() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("class=\"sidebar-tabs\""));
+        assert!(!html.contains("id=\"file-filter\""));
+        assert!(html.contains("id=\"toc-filter\""));
+        assert!(html.contains("id=\"document-search-input\""));
+        assert!(html.contains("id=\"document-search-results\""));
+        assert!(html.contains("本文検索"));
+        assert!(html.contains("placeholder=\"本文を検索\""));
+        assert!(html.contains("id=\"panel-memo\""));
+        assert!(!html.contains("sidebar-caption"));
+        assert!(!html.contains("目次とメモを横断して読書メモを残せます。"));
+    }
+
+    #[test]
+    fn test_単一ファイルモードのメタラベルが描画される() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("id=\"doc-mode\">Single file</span>"));
+        assert!(html.contains("id=\"doc-file-count\">1 file</span>"));
+    }
+
+    #[test]
+    fn test_ディレクトリモードのメタラベルが描画される() {
+        let files = vec!["README.md".to_string(), "docs/guide.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("id=\"doc-mode\">Directory</span>"));
+        assert!(html.contains("id=\"doc-file-count\">2 files</span>"));
+    }
+
+    #[test]
+    fn test_読書ワークスペース用uiが描画される() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("Markdown Workspace"));
+        assert!(html.contains("id=\"document-title\""));
+        assert!(html.contains("id=\"doc-heading-count\""));
+        assert!(html.contains("id=\"doc-char-count\""));
+        assert!(html.contains("id=\"live-status\""));
+        assert!(html.contains("id=\"reading-progress-bar\""));
+        assert!(html.contains("id=\"back-to-top\""));
+    }
+
+    #[test]
+    fn test_sidebar_openがtopbar_btnクラスを共有する() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("id=\"sidebar-open\" class=\"topbar-btn sidebar-open\""));
+    }
+
+    #[test]
+    fn test_selectfile_fetch失敗時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function showFileFetchErrorBanner(message)"));
+        assert!(html.contains("function hideFileFetchErrorBanner()"));
+        assert!(html.contains("file-fetch-error-banner"));
+        assert!(html.contains("className = 'error-banner fetch'"));
+        assert!(html.contains("closeBtn.onclick = hideFileFetchErrorBanner"));
+        assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        assert!(html.contains("function createHttpError(status)"));
+        assert!(html.contains("function getFileFetchErrorMessage(err)"));
+        assert!(html.contains("err.type = 'parse';"));
+        assert!(html.contains("hideFileFetchErrorBanner();"));
+        assert!(html.contains("showFileFetchErrorBanner(getFileFetchErrorMessage(err));"));
+    }
+
+    #[test]
+    fn test_websocket更新時にfetchエラーバナーがクリアされる() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("hideWsServerErrorBanner();"));
+        assert!(html.contains("hideFileFetchErrorBanner();"));
+    }
+
+    #[test]
+    fn test_websocket_data_error時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function showWsServerErrorBanner(message)"));
+        assert!(html.contains("function hideWsServerErrorBanner()"));
+        assert!(html.contains("ws-server-error-banner"));
+        assert!(html.contains("className = 'error-banner server'"));
+        assert!(html.contains("className = 'error-banner disconnect'"));
+        assert!(html.contains("closeBtn.onclick = hideWsServerErrorBanner"));
+        assert!(html.contains("getElementById('ws-disconnect-banner')"));
+        assert!(html.contains("showWsServerErrorBanner(data.error);"));
+    }
+
+    #[test]
+    fn test_websocket_json_parse_error時の視覚フィードバックjsが埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function showWsParseErrorBanner(message)"));
+        assert!(html.contains("function hideWsParseErrorBanner()"));
+        assert!(html.contains("ws-parse-error-banner"));
+        assert!(html.contains(
+            "showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');"
+        ));
+        assert!(html.contains("hideWsParseErrorBanner();"));
+    }
+
+    #[test]
+    fn test_websocket_refresh時もテキスト選択延期機構を通る() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function ensurePendingUpdateTimer()"));
+        assert!(html.contains("if (data.refresh && ctx.config.isDirMode) {"));
+        assert!(html.contains("現在ファイルが未設定のため refresh 通知を無視しました。"));
+        assert!(html.contains("file を含まない refresh 通知を現在ファイルへ適用します。"));
+        assert!(html.contains("if (isTextSelected()) {"));
+        assert!(html
+            .contains("ctx.state.pendingUpdate = { refresh: true, file: ctx.state.currentFile };"));
+        assert!(html.contains("ensurePendingUpdateTimer();"));
+        assert!(html.contains("discardBufferedLiveUpdate('ファイル切替を優先');"));
+        assert!(html.contains("if (ctx.state.pendingUpdate.refresh) {"));
+        assert!(html.contains("deps.selectFile(refreshFile, false);"));
+    }
+
+    #[test]
+    fn test_websocket_memo_update受信処理が埋め込まれる() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function isMemoUpdateMessage(data)"));
+        assert!(html.contains("function isMemoRefreshMessage(data)"));
+        assert!(html.contains("function applyRemoteMemoUpdate(data)"));
+        assert!(html.contains("function queueRemoteMemoReload(data)"));
+        assert!(html.contains("pendingReload: null"));
+        assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
+        assert!(html.contains("if (appContext.memo.pendingReload === null) return false;"));
+        assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
+        assert!(html.contains("if (deps.applyRemoteMemoUpdate(data)) {"));
+        assert!(html.contains(
+            "if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {"
+        ));
+        assert!(html.contains("if (deps.queueRemoteMemoReload(data)) {"));
+        assert!(html.contains("loadMemo(file, appContext.fetch.generation);"));
+    }
+
+    #[test]
+    fn test_websocket_memo_updateは編集中の上書きを回避する() {
+        let files = vec!["README.md".to_string()];
+        let memo = test_memo();
+        let html = render_directory_page(&files, &memo);
+
+        assert!(html.contains("function getMemoRemoteUpdateBlockReason()"));
+        assert!(html.contains("appContext.memo.pendingReload = data.file;"));
+        assert!(html.contains("return flushPendingMemoReloadIfSafe();"));
+    }
+
+    #[test]
+    fn test_copyハンドラが共通化されている() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("function handleCopyClick(button, text, baseLabel)"));
+        assert!(html.contains("handleCopyClick(button, url.toString(), '#');"));
+        assert!(html.contains(
+            "handleCopyClick(button, code.innerText || code.textContent || '', 'Copy');"
+        ));
+    }
+
+    #[test]
+    fn test_live_statusラベルが内部解決される() {
+        let memo = test_memo();
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("liveStatus: {"));
+        assert!(html.contains("function setLiveStatus(state) {"));
+        assert!(!html.contains("function setLiveStatus(state, label) {"));
+    }
+
+    #[test]
+    fn test_メモuiが描画される() {
+        let memo = MemoResponse::from_raw("> 引用メモ".to_string(), Some("README.md".to_string()));
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("id=\"memo-editor\""));
+        assert!(html.contains("id=\"memo-preview\""));
+        assert!(html.contains("id=\"memo-save-status\""));
+        assert!(html.contains("Research Notes"));
+        assert!(
+            !html.contains("本文選択から引用を追加できます。出典リンクと行番号を自動付与します。")
+        );
+        assert!(!html.contains("memo-caption"));
+        assert!(html.contains("id=\"quote-selection-action\""));
+        assert!(html.contains("data-memo-file=\"README.md\""));
+        assert!(
+            html.contains("<blockquote") && html.contains("</blockquote>"),
+            "raw=\"> 引用メモ\" から render_markdown 経由で <blockquote> 要素が描画されること"
+        );
+    }
+
+    #[test]
+    fn test_メモ読み込み失敗時はエラー表示して編集を無効化する() {
+        let memo = MemoResponse::empty_with_load_error(
+            Some("README.md".to_string()),
+            "/tmp/private/path/README.md: permission denied",
+        );
+        let html = render_single_file_page(&memo);
+
+        assert!(html.contains("id=\"memo-degraded-banner\""));
+        assert!(html.contains("role=\"status\""));
+        assert!(html.contains("内容を保護するため編集を無効化"));
+        assert!(!html.contains("/tmp/private/path"));
+        assert!(html.contains("data-state=\"error\""));
+        assert!(html.contains(">読込失敗</span>"));
+        assert!(html.contains("id=\"memo-editor\""));
+        assert!(html.contains("disabled aria-disabled=\"true\""));
+        assert!(html.contains("MEMO_DEGRADED_MESSAGE"));
+        assert!(html.contains("setMemoEditorDisabled(true)"));
+    }
+
+    #[test]
+    fn test_通常メモではdegradedバナーを表示しない() {
+        let memo = MemoResponse::from_raw("通常メモ".to_string(), Some("README.md".to_string()));
+        let html = render_single_file_page(&memo);
+
+        assert!(!html.contains("id=\"memo-degraded-banner\""));
+        assert!(html.contains("data-state=\"saved\""));
+        assert!(html.contains(">保存済み</span>"));
+        assert!(!html.contains("disabled aria-disabled=\"true\""));
+    }
+}
