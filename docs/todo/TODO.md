@@ -9,13 +9,6 @@
 
 放置するとセキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目。
 
-- [ ] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
-  - ファイル: `src/watcher/runtime.rs` L19/L72/L111-127
-  - 現状: `mpsc::channel(WATCHER_MESSAGE_BUFFER=32)` が満杯時、`FileChanged` も `Error` も同じ `try_send` 経路で破棄される。`WatchError::Init` / `ThreadPanic` を破棄するとフォアグラウンドが「監視が止まった理由」を失う
-  - 対応: イベント種別で優先度を分け、`Error` 系は破棄せず `blocking_send` / 別チャネル / health state への latch などで foreground から取得可能にする。`try_send` 失敗時の `tracing::error!` は補助的な観測性強化として扱い、ログ追加だけでは完了扱いにしない
-  - 昇格理由: watcher error の破棄は監視不能や異常停止の silent failure に直結するため High とする
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
   - ファイル: `src/watcher/runtime.rs` L149-215/L243-247
   - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
@@ -78,6 +71,8 @@
 
 ## Done Summary
 
+- [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
+  - 完了根拠: `send_watch_event` が `WatchEvent` variant ごとに送信方針を分け、`FileChanged` は従来どおり満杯時に drop する一方、`Error` は満杯時に process-wide の専用送達 worker へ委譲し、receiver が開いている限り送達する構成になった。notify error、internal channel failure、新規監視登録失敗、thread panic は既存の health failure latch を維持したまま error event として foreground へ流れる。満杯時の `FileChanged` drop、満杯時の `Error` 送達、receiver closed 時の `Error` 非panic、current_thread runtime 上での満杯時送達を unit test で固定した。外部 HTTP API、UI、WebSocket error payload は変更していない。残リスクとして、receiver が開いたまま長時間 drain しない場合は専用 worker queue に ErrorDelivery が滞留し得るが、Error を silent drop しない要件とのトレードオフとして扱う
 - [x] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
   - 完了根拠: `RenderState` は `Vec<BlockContext>` と `RenderStateMismatch` で Heading / CodeBlock / Image / Table の active context を扱う構成になった。`finish_*` は stack top だけを閉じ、wrong-top 時は context を保持して mismatch を返す。`render.rs` は mismatch を `warn!` して malformed context の HTML 確定を skip し、heading ID counter の副作用や code block line attrs の debug panic を回避する。通常 Markdown の見出し、コードブロック、画像、テーブル、複合入力の出力互換を既存・追加テストで固定した。残リスクとして、malformed event stream で table 内に `TableRowEnd` だけが来た場合の row-start 厳密追跡は未実装だが、通常 pulldown-cmark 経路では発生しないため次回 state machine 追加整理候補とする
 - [x] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
