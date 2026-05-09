@@ -29,7 +29,7 @@ function setupFileList() {
 
 function setupFileFilter() {
   var summary = document.getElementById('file-filter-summary');
-  setupFilterableList({
+  appContext.content.setupFilterableList({
     inputId: 'file-filter',
     rootId: 'panel-files',
     getItems: function(root) {
@@ -132,7 +132,7 @@ function setupDirectoryHistoryNavigation() {
       return;
     }
 
-    restoreContentNavigationFromLocation();
+    appContext.content.restoreNavigationFromLocation();
   });
 }
 
@@ -394,9 +394,13 @@ function setupSidebarInteractions() {
     });
   }
 
-  window.addEventListener('scroll', updateReadingProgress, { passive: true });
+  window.addEventListener('scroll', function() {
+    appContext.content.updateReadingProgress();
+  }, { passive: true });
   window.addEventListener('scroll', scheduleTocTrackingUpdate, { passive: true });
-  window.addEventListener('resize', updateReadingProgress);
+  window.addEventListener('resize', function() {
+    appContext.content.updateReadingProgress();
+  });
   window.addEventListener('resize', scheduleTocTrackingUpdate);
 }
 
@@ -438,10 +442,10 @@ function installMarkdownViewTestHooks() {
       return activateSidebarTab(target);
     },
     applyDocumentSearchQuery: function(query) {
-      return applyDocumentSearchQuery(query);
+      return appContext.content.applyDocumentSearchQuery(query);
     },
     augmentHashWithTrailingLineHint: function(link, hash) {
-      return augmentHashWithTrailingLineHint(link, hash);
+      return appContext.content.augmentHashWithTrailingLineHint(link, hash);
     },
     markPendingTocNavigation: function(id) {
       return markPendingTocNavigation(id);
@@ -450,7 +454,7 @@ function installMarkdownViewTestHooks() {
       appContext.test.markPendingTocNavigationObserver = typeof callback === 'function' ? callback : null;
     },
     moveDocumentSearch: function(direction) {
-      return moveDocumentSearch(direction);
+      return appContext.content.moveDocumentSearch(direction);
     },
     scheduleBufferedLiveUpdate: function(data) {
       if (!appContext.websocket) {
@@ -468,7 +472,7 @@ function installMarkdownViewTestHooks() {
       appContext.config.isDirMode = !!value;
     },
     updateContent: function(data, options) {
-      return updateContent(data, options);
+      return appContext.content.updateContent(data, options);
     },
     get isDirMode() {
       return appContext.config.isDirMode;
@@ -483,18 +487,34 @@ function installMarkdownViewTestHooks() {
 }
 
 function startMarkdownViewApp() {
+  appContext.content = createContentController(appContext, {
+    activateSidebarTab: activateSidebarTab,
+    clearMemoSyncPendingStatus: clearMemoSyncPendingStatus,
+    clearPendingTocNavigation: clearPendingTocNavigation,
+    getCurrentActiveTocId: getCurrentActiveTocId,
+    getFileFetchErrorMessage: getFileFetchErrorMessage,
+    hideFileFetchErrorBanner: hideFileFetchErrorBanner,
+    hideQuoteSelectionAction: hideQuoteSelectionAction,
+    hideWsServerErrorBanner: hideWsServerErrorBanner,
+    markPendingTocNavigation: markPendingTocNavigation,
+    restoreActiveTocHeading: restoreActiveTocHeading,
+    selectFile: selectFile,
+    setFileParam: setFileParam,
+    setupTocTracking: setupTocTracking,
+    suppressTocTrackingFor: suppressTocTrackingFor
+  });
   setupSelectionDeferral();
   setupHistoryUrlSync();
   setupDirectoryHistoryNavigation();
-  setupDocumentSearch();
-  setupContentLinkNavigation();
-  setupMemoLinkNavigation();
+  appContext.content.setup();
   setupMemoInteractions();
   setupSidebarInteractions();
   setupThemeToggle();
 
   appContext.websocket = createWebSocketController(appContext, {
-    updateContent: updateContent,
+    updateContent: appContext.content.updateContent,
+    scheduleDirectorySearch: appContext.content.scheduleDirectorySearch,
+    setLiveStatus: appContext.content.setLiveStatus,
     selectFile: selectFile,
     applyRemoteMemoUpdate: applyRemoteMemoUpdate,
     queueRemoteMemoReload: queueRemoteMemoReload
@@ -503,11 +523,11 @@ function startMarkdownViewApp() {
 
   setupTocTracking();
   restoreActiveTocHeading('');
-  updateDocumentStats();
-  updateReadingProgress();
-  syncDocumentChrome(appContext.state.currentFile);
-  enhanceContentInteractions();
-  setupTocFilter();
+  appContext.content.updateDocumentStats();
+  appContext.content.updateReadingProgress();
+  appContext.content.syncDocumentChrome(appContext.state.currentFile);
+  appContext.content.enhanceContentInteractions();
+  appContext.content.setupTocFilter();
   setupTabs();
   if (appContext.config.isDirMode) {
     setupFileList();

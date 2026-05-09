@@ -96,10 +96,10 @@ function selectFile(file, pushHistory, options) {
     hideFileFetchErrorBanner();
     if (gen !== appContext.fetch.generation) return;
     if (!appContext.config.isDirMode && previousFile && previousFile !== file) {
-      clearDocumentSearchQuery();
+      appContext.content.clearDocumentSearchQuery();
     }
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
-    updateContent(data, {
+    appContext.content.updateContent(data, {
       scrollMode: scrollMode,
       requeryDirectorySearch: options.requeryDirectorySearch !== false,
       anchorHash: options.anchorHash || '',
@@ -113,9 +113,9 @@ function selectFile(file, pushHistory, options) {
       setFileParam(appContext.state.currentFile, true, options.historyHash);
       updateFileListActive(appContext.state.currentFile);
     }
-    syncDocumentChrome(appContext.state.currentFile);
+    appContext.content.syncDocumentChrome(appContext.state.currentFile);
     loadMemo(appContext.state.currentFile, gen);
-    setLiveStatus('live');
+    appContext.content.setLiveStatus('live');
   })
   .catch(function(err) {
     console.error('[markdown-view] ファイル取得エラー:', err);
@@ -127,7 +127,7 @@ function selectFile(file, pushHistory, options) {
     ) {
       appContext.search.currentDirectoryIndex = appContext.search.pendingDirectoryNavigation.previousResultIndex;
       appContext.search.pendingDirectoryNavigation = null;
-      renderDirectorySearchUi();
+      appContext.content.renderDirectorySearchUi();
     }
     appContext.state.currentFile = previousFile;
     updateFileListActive(previousFile);
@@ -135,6 +135,6 @@ function selectFile(file, pushHistory, options) {
     // 失敗した遷移の generation で旧ファイルのメモを読み直し、後続遷移があれば loadMemo 側で破棄する。
     loadMemo(previousFile, gen);
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
-    setLiveStatus('error');
+    appContext.content.setLiveStatus('error');
   });
 }

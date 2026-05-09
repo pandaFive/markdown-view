@@ -20,7 +20,7 @@ function setupSelectionDeferral() {
     if (appContext.state.isMouseSelecting) return;
     var sel = window.getSelection();
     if (sel && sel.isCollapsed && appContext.state.pendingUpdate) {
-      applyPendingUpdate();
+      appContext.content.applyPendingUpdate();
     }
   });
 }
@@ -41,7 +41,7 @@ function ensurePendingUpdateTimer() {
     // 最終フォールバックであり、ドラッグ中の選択保護を短時間で破らないため短縮しない。
     appContext.state.pendingUpdateTimer = setTimeout(function() {
       appContext.state.pendingUpdateTimer = null;
-      applyPendingUpdate();
+      appContext.content.applyPendingUpdate();
     }, 30000);
   }
 }

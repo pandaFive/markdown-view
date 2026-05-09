@@ -93,7 +93,8 @@ function createAppContext(doc) {
     test: {
       markPendingTocNavigationObserver: null
     },
-    websocket: null
+    websocket: null,
+    content: null
   };
 }
 

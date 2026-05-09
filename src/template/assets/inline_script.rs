@@ -14,7 +14,7 @@ const TEMPLATE: &str = concat!(
     "\n",
     include_str!("js/directory-search.js"),
     "\n",
-    include_str!("js/content.js"),
+    include_str!("js/content-controller.js"),
     "\n",
     include_str!("js/memo.js"),
     "\n",
