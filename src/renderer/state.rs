@@ -7,6 +7,7 @@ use super::highlight::render_code_block_html;
 use super::security::{html_escape, sanitize_image_src};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// mismatchログとテストの読みやすさを揃えるため、Expected* の名前で統一する。
 #[allow(clippy::enum_variant_names)]
 pub(super) enum RenderStateMismatch {
     ExpectedHeading,
@@ -189,6 +190,10 @@ impl RenderState {
 
     pub(super) fn in_heading(&self) -> bool {
         self.heading().is_some()
+    }
+
+    pub(super) fn in_table(&self) -> bool {
+        matches!(self.top_context(), Some(BlockContext::Table(_)))
     }
 
     pub(super) fn push_code_text(&mut self, text: &str) {
@@ -475,5 +480,54 @@ mod tests {
             state.table_cell_end_tag(),
             Err(RenderStateMismatch::ExpectedTable)
         ));
+    }
+
+    #[test]
+    fn test_finish_headingは上位imageがあるならmismatchを返しstackを保持する() {
+        let mut state = RenderState::new();
+
+        state.start_heading(1, 0..1);
+        state.start_image("image.png", "");
+
+        assert!(matches!(
+            state.finish_heading("heading".to_string(), String::new()),
+            Err(RenderStateMismatch::ExpectedHeading)
+        ));
+        assert!(state.finish_image().is_ok());
+        assert!(state
+            .finish_heading("heading".to_string(), String::new())
+            .is_ok());
+    }
+
+    #[test]
+    fn test_finish_tableは上位imageがあるならmismatchを返しstackを保持する() {
+        let mut state = RenderState::new();
+
+        state.start_table(vec![Alignment::Left]);
+        state.start_image("image.png", "");
+
+        assert!(matches!(
+            state.finish_table(),
+            Err(RenderStateMismatch::ExpectedTable)
+        ));
+        assert!(state.finish_image().is_ok());
+        assert!(state.finish_table().is_ok());
+    }
+
+    #[test]
+    fn test_finish_code_blockは上位imageがあるならmismatchを返しstackを保持する() {
+        let mut state = RenderState::new();
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+
+        state.start_code_block(CodeBlockKind::Indented, 0..10);
+        state.push_code_text("code");
+        state.start_image("image.png", "");
+
+        assert!(matches!(
+            state.finish_code_block(&syntax_set, String::new()),
+            Err(RenderStateMismatch::ExpectedCodeBlock)
+        ));
+        assert!(state.finish_image().is_ok());
+        assert!(state.finish_code_block(&syntax_set, String::new()).is_ok());
     }
 }

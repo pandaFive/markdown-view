@@ -457,7 +457,11 @@ fn handle_table_row_start(state: &mut RenderState) {
 }
 
 fn handle_table_row_end(state: &mut RenderState) {
-    state.push_html("</tr>\n");
+    if state.in_table() {
+        state.push_html("</tr>\n");
+    } else {
+        log_render_state_mismatch("table_row_end", RenderStateMismatch::ExpectedTable);
+    }
 }
 
 fn handle_table_cell_start(state: &mut RenderState) {
@@ -581,5 +585,14 @@ mod tests {
             log_ignored_markdown_end_tag(&TagEnd::HtmlBlock),
             IgnoredMarkdownEventKind::EndTag
         );
+    }
+
+    #[test]
+    fn test_table_row_endはtableなしなら閉じタグを出さない() {
+        let mut state = RenderState::new();
+
+        handle_table_row_end(&mut state);
+
+        assert_eq!(state.into_html(), "");
     }
 }
