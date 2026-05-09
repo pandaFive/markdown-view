@@ -27,6 +27,13 @@ type InitResult = std::result::Result<(), WatchError>;
 type InternalWatchResult =
     std::result::Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>;
 
+struct ErrorDelivery {
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: String,
+    detail: String,
+}
+
 #[derive(Debug)]
 struct WatchRegistrationFailure {
     registered_paths: Vec<PathBuf>,
@@ -337,10 +344,17 @@ impl Drop for Watcher {
     }
 }
 
-/// notifyコールバックからtokioチャネルへイベントを転送する（non-blocking）。
-/// チャネル満杯時・クローズ時はイベントを破棄しwarnログを出力する。
+/// notifyコールバックからtokioチャネルへイベントを転送する。
+/// FileChangedは過負荷時に破棄し、Errorはreceiverが開いている限り送達する。
 fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &str) {
-    match tx.try_send(event) {
+    match event {
+        WatchEvent::FileChanged(path) => send_file_changed_event(tx, path, label),
+        WatchEvent::Error(error) => send_error_event(tx, error, label),
+    }
+}
+
+fn send_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf, label: &str) {
+    match tx.try_send(WatchEvent::FileChanged(path)) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
@@ -352,6 +366,99 @@ fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &st
             tracing::warn!(
                 "[markdown-view] 通知チャネルが閉じているため監視イベントを破棄しました: {}",
                 label
+            );
+        }
+    }
+}
+
+fn send_error_event(tx: &mpsc::Sender<WatchEvent>, error: WatchError, label: &str) {
+    match tx.try_send(WatchEvent::Error(error)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Closed(WatchEvent::Error(error))) => {
+            tracing::warn!(
+                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}, {}",
+                label,
+                error.detail()
+            );
+        }
+        Err(mpsc::error::TrySendError::Full(WatchEvent::Error(error))) => {
+            enqueue_blocking_error_delivery(tx.clone(), error, label);
+        }
+        Err(mpsc::error::TrySendError::Closed(WatchEvent::FileChanged(_)))
+        | Err(mpsc::error::TrySendError::Full(WatchEvent::FileChanged(_))) => {
+            tracing::error!(
+                "[markdown-view] 監視エラー送達で予期しないイベント種別を受け取りました: {}",
+                label
+            );
+        }
+    }
+}
+
+fn enqueue_blocking_error_delivery(tx: mpsc::Sender<WatchEvent>, error: WatchError, label: &str) {
+    let detail = error.detail().to_string();
+    let delivery = ErrorDelivery {
+        tx,
+        error,
+        label: label.to_string(),
+        detail,
+    };
+    match error_delivery_sender() {
+        Some(sender) => {
+            if let Err(send_error) = sender.send(delivery) {
+                let delivery = send_error.0;
+                tracing::error!(
+                    "[markdown-view] 監視エラー送達workerが停止しているため監視エラーを送達できませんでした: {}, {}",
+                    delivery.label,
+                    delivery.detail
+                );
+            }
+        }
+        None => {
+            tracing::error!(
+                "[markdown-view] 監視エラー送達workerを利用できないため監視エラーを送達できませんでした: {}, {}",
+                delivery.label,
+                delivery.detail
+            );
+        }
+    }
+}
+
+fn error_delivery_sender() -> Option<&'static std::sync::mpsc::Sender<ErrorDelivery>> {
+    static ERROR_DELIVERY_SENDER: std::sync::OnceLock<
+        Option<std::sync::mpsc::Sender<ErrorDelivery>>,
+    > = std::sync::OnceLock::new();
+
+    ERROR_DELIVERY_SENDER
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<ErrorDelivery>();
+            match std::thread::Builder::new()
+                .name("markdown-view-watch-error-delivery".to_string())
+                .spawn(move || run_error_delivery_worker(rx))
+            {
+                Ok(_) => Some(tx),
+                Err(error) => {
+                    tracing::error!(
+                        "[markdown-view] 監視エラー送達workerの起動に失敗しました: {}",
+                        error
+                    );
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn run_error_delivery_worker(rx: std::sync::mpsc::Receiver<ErrorDelivery>) {
+    for delivery in rx {
+        if delivery
+            .tx
+            .blocking_send(WatchEvent::Error(delivery.error))
+            .is_err()
+        {
+            tracing::warn!(
+                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}, {}",
+                delivery.label,
+                delivery.detail
             );
         }
     }
@@ -1502,26 +1609,13 @@ mod tests {
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         tx.blocking_send(WatchEvent::FileChanged(first.clone()))
             .expect("channelを満杯にできる");
-        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-        let sender = std::thread::spawn(move || {
-            attempt_tx.send(()).expect("送信開始を通知できる");
-            send_watch_event(
-                &tx,
-                WatchEvent::Error(WatchError::notify("満杯時も送達する")),
-                "error満杯時テスト",
-            );
-            done_tx.send(()).expect("送信完了を通知できる");
-        });
-
-        attempt_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("error送信threadが開始する");
-        if done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
-            sender.join().expect("error送信threadが正常終了する");
-            panic!("Error送信はchannel満杯時に破棄せずreceiverのdrainを待つはず");
-        }
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("満杯時も送達する")),
+            "error満杯時テスト",
+        );
+        drop(tx);
 
         match rx.blocking_recv().expect("先行FileChangedを受信できる") {
             WatchEvent::FileChanged(path) => assert_eq!(path, first),
@@ -1530,15 +1624,60 @@ mod tests {
             }
         }
 
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("drain後にerror送信が完了する");
-        sender.join().expect("error送信threadが正常終了する");
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let received_error = loop {
+            if let Ok(event) = rx.try_recv() {
+                break Some(event);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
 
-        match rx.blocking_recv().expect("Error eventを受信できる") {
+        match received_error.expect("Error eventを受信できる") {
             WatchEvent::Error(error) => {
                 assert_eq!(error.kind(), WatchErrorKind::Notify);
                 assert_eq!(error.detail(), "満杯時も送達する");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_send_watch_event_errorはcurrent_thread_runtimeでも満杯時にruntimeを止めない() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.send(WatchEvent::FileChanged(first.clone()))
+            .await
+            .expect("channelを満杯にできる");
+
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("current_threadでも送達する")),
+            "current_thread満杯時テスト",
+        );
+        drop(tx);
+
+        tokio::task::yield_now().await;
+
+        match rx.recv().await.expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Error eventの受信がtimeoutしない")
+            .expect("Error eventを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "current_threadでも送達する");
             }
             WatchEvent::FileChanged(path) => {
                 panic!("Errorを期待したがFileChanged({path:?})を受信")
