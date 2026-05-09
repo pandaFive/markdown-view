@@ -186,3 +186,37 @@ test('古いメモ読込レスポンスを破棄しても読込中表示を残�
   await expect(page.locator('#memo-save-status')).not.toHaveText('読込中');
   await expect(page.locator('#memo-editor')).not.toHaveValue('stale memo');
 });
+
+test('refresh payloadのmemo_refreshでメモを再取得する', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  let memoGetCount = 0;
+
+  await page.route('**/api/memo*', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    memoGetCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        memo_state: 'ready',
+        raw: memoGetCount === 1 ? 'initial memo' : 'memo after refresh',
+        html: memoGetCount === 1 ? '<p>initial memo</p>' : '<p>memo after refresh</p>',
+        file: 'README.md'
+      })
+    });
+  });
+
+  await page.goto('/');
+  await stabilizeWebSocketHarness(page);
+  await openMemoTab(page);
+  await dispatchWsMessage(page, { memo_refresh: true });
+  await expect(page.locator('#memo-editor')).toHaveValue('initial memo');
+
+  await dispatchWsMessage(page, { refresh: true, memo_refresh: true });
+
+  await expect(page.locator('#memo-editor')).toHaveValue('memo after refresh');
+  await expect.poll(() => memoGetCount).toBeGreaterThanOrEqual(2);
+});
