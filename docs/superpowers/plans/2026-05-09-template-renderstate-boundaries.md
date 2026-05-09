@@ -33,7 +33,16 @@
   - Match `Result` from `RenderState` methods.
   - `warn!` and skip malformed context output in release-compatible mismatch paths.
 - Modify: `tests/renderer_test.rs`
-  - Keep public renderer output regression tests and add the combined state-boundary compatibility case shown in Task 4.
+  - Keep public renderer output regression tests, including the existing combined state-boundary compatibility case.
+
+## Critical Invariants
+
+- `RenderState` の close 系処理は stack top の context だけを閉じる。`rposition` で途中の context を remove してはならない。
+- `finish_image` は `Image` を pop した後、親の `Heading` が残っていればその heading に `<img>` HTML を追加する。
+- `finish_table` が mismatch を返した場合、`render.rs` は `</table>` を出力しない。
+- `SanitizedHtml` の content/toc/memo preview は再 escape しない。
+- 属性値に外部入力が入る場合は `html_attr` を使う。
+- Task 3 は `state.rs` と `render.rs` を同じコミットで更新し、リポジトリをコンパイル可能な状態に戻してからコミットする。
 
 ## Task 1: Template Tests Move To Responsible Modules
 
@@ -159,11 +168,14 @@ mod tests {
 
     #[test]
     fn test_single_file_modeで基本shellを描画する() {
+        let content = test_content();
+        let toc = test_toc();
+        let memo = test_memo();
         let html = render_page(RenderPageParams {
             title: "Title",
-            content: &test_content(),
-            toc: &test_toc(),
-            memo: &test_memo(),
+            content: &content,
+            toc: &toc,
+            memo: &memo,
             dark_mode: false,
             syntax_css: "",
             sidebar: SidebarParams::SingleFile,
@@ -281,8 +293,8 @@ fn test_html_attrは属性値をescapeする() {
 
 #[test]
 fn test_contentとtocは二重escapeしない() {
-    let content = SanitizedHtml::from_sanitized_html("<p><strong>ok</strong></p>".to_string());
-    let toc = SanitizedHtml::from_sanitized_html("<ul><li>toc</li></ul>".to_string());
+    let content = render_markdown("**ok**");
+    let toc = generate_toc("# toc");
     let memo = MemoResponse::empty(None);
 
     let html = render_page(RenderPageParams {
@@ -295,8 +307,8 @@ fn test_contentとtocは二重escapeしない() {
         sidebar: SidebarParams::SingleFile,
     });
 
-    assert!(html.contains("<p><strong>ok</strong></p>"));
-    assert!(html.contains("<ul><li>toc</li></ul>"));
+    assert!(html.contains("<strong>ok</strong>"));
+    assert!(html.contains("href=\"#toc\""));
     assert!(!html.contains("&lt;strong&gt;ok&lt;/strong&gt;"));
 }
 ```
@@ -341,7 +353,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         title: escaped_title,
         css: combined_css(params.syntax_css),
         sidebar_inner,
-        content: params.content.as_str(),
+        content: params.content.as_str().to_string(),
         js: inline_js(),
         mode_label: meta.mode_label,
         file_count_label: meta.file_count_label,
@@ -362,7 +374,7 @@ struct HtmlDocumentParts {
 }
 ```
 
-Then add `render_html_document`, `render_head`, and `render_workspace_body` helpers by moving existing HTML sections without changing literal markup. Keep this exact root shape:
+Then add `render_html_document`, `render_head`, and `render_workspace_body` helpers. `render_head` owns the `<head>...</head>` block, `render_workspace_body` owns the `<body>...</body>` block, and `render_html_document` only joins those sections. Keep this exact root shape:
 
 ```rust
 fn render_html_document(parts: HtmlDocumentParts) -> String {
@@ -426,10 +438,11 @@ git commit -m "refactor: render_pageのHTML組み立て境界を分割"
 
 Expected: commit succeeds.
 
-## Task 3: Introduce `BlockContext` And Mismatch Type
+## Task 3: Introduce `BlockContext` And Compile Through Renderer
 
 **Files:**
 - Modify: `src/renderer/state.rs`
+- Modify: `src/renderer/render.rs`
 
 - [ ] **Step 1: Replace old panic/fallback tests with mismatch tests**
 
@@ -471,6 +484,7 @@ fn test_finish_imageは開始なしならmismatchを返す() {
 fn test_table操作はtable開始なしならmismatchを返す() {
     let mut state = RenderState::new();
 
+    assert!(matches!(state.finish_table(), Err(RenderStateMismatch::ExpectedTable)));
     assert!(matches!(state.start_table_head(), Err(RenderStateMismatch::ExpectedTable)));
     assert!(matches!(state.finish_table_head(), Err(RenderStateMismatch::ExpectedTable)));
     assert!(matches!(state.reset_table_row(), Err(RenderStateMismatch::ExpectedTable)));
@@ -524,11 +538,19 @@ pub(super) fn new() -> Self {
 }
 ```
 
-- [ ] **Step 3: Add context accessors**
+- [ ] **Step 3: Add stack-top and parent context accessors**
 
 Add these private helpers inside `impl RenderState`:
 
 ```rust
+fn top_context(&self) -> Option<&BlockContext> {
+    self.contexts.last()
+}
+
+fn top_context_mut(&mut self) -> Option<&mut BlockContext> {
+    self.contexts.last_mut()
+}
+
 fn heading(&self) -> Option<&HeadingState> {
     self.contexts.iter().rev().find_map(|context| match context {
         BlockContext::Heading(heading) => Some(heading),
@@ -558,10 +580,54 @@ fn image_mut(&mut self) -> Option<&mut ImageState> {
 }
 
 fn table_mut(&mut self) -> Option<&mut TableState> {
-    self.contexts.iter_mut().rev().find_map(|context| match context {
-        BlockContext::Table(table) => Some(table),
+    match self.top_context_mut() {
+        Some(BlockContext::Table(table)) => Some(table),
         _ => None,
-    })
+    }
+}
+
+fn pop_heading(&mut self) -> Result<HeadingState, RenderStateMismatch> {
+    match self.contexts.pop() {
+        Some(BlockContext::Heading(heading)) => Ok(heading),
+        Some(other) => {
+            self.contexts.push(other);
+            Err(RenderStateMismatch::ExpectedHeading)
+        }
+        None => Err(RenderStateMismatch::ExpectedHeading),
+    }
+}
+
+fn pop_code_block(&mut self) -> Result<CodeBlockState, RenderStateMismatch> {
+    match self.contexts.pop() {
+        Some(BlockContext::CodeBlock(code_block)) => Ok(code_block),
+        Some(other) => {
+            self.contexts.push(other);
+            Err(RenderStateMismatch::ExpectedCodeBlock)
+        }
+        None => Err(RenderStateMismatch::ExpectedCodeBlock),
+    }
+}
+
+fn pop_image(&mut self) -> Result<ImageState, RenderStateMismatch> {
+    match self.contexts.pop() {
+        Some(BlockContext::Image(image)) => Ok(image),
+        Some(other) => {
+            self.contexts.push(other);
+            Err(RenderStateMismatch::ExpectedImage)
+        }
+        None => Err(RenderStateMismatch::ExpectedImage),
+    }
+}
+
+fn pop_table(&mut self) -> Result<TableState, RenderStateMismatch> {
+    match self.contexts.pop() {
+        Some(BlockContext::Table(table)) => Ok(table),
+        Some(other) => {
+            self.contexts.push(other);
+            Err(RenderStateMismatch::ExpectedTable)
+        }
+        None => Err(RenderStateMismatch::ExpectedTable),
+    }
 }
 ```
 
@@ -571,9 +637,7 @@ Update `in_code_block`, `in_image`, `in_heading`, `push_*`, `heading_*`, and `co
 
 ```rust
 pub(super) fn in_code_block(&self) -> bool {
-    self.contexts
-        .iter()
-        .any(|context| matches!(context, BlockContext::CodeBlock(_)))
+    matches!(self.top_context(), Some(BlockContext::CodeBlock(_)))
 }
 
 pub(super) fn push_code_text(&mut self, text: &str) {
@@ -598,7 +662,7 @@ pub(super) fn start_heading(&mut self, level: u8, range: Range<usize>) {
 }
 ```
 
-Update finish methods to remove the matching active context:
+Update finish methods to pop only the stack top context:
 
 ```rust
 pub(super) fn finish_heading(
@@ -606,16 +670,7 @@ pub(super) fn finish_heading(
     id: String,
     heading_attrs: String,
 ) -> Result<String, RenderStateMismatch> {
-    let Some(index) = self
-        .contexts
-        .iter()
-        .rposition(|context| matches!(context, BlockContext::Heading(_)))
-    else {
-        return Err(RenderStateMismatch::ExpectedHeading);
-    };
-    let BlockContext::Heading(heading) = self.contexts.remove(index) else {
-        unreachable!("rposition matched heading");
-    };
+    let heading = self.pop_heading()?;
 
     Ok(format!(
         "<h{} id=\"{}\"{}>{}</h{}>\n",
@@ -628,58 +683,104 @@ pub(super) fn finish_heading(
 }
 ```
 
-Use the same pattern for `finish_code_block` and `finish_image`.
+Implement `finish_code_block` as:
+
+```rust
+pub(super) fn finish_code_block(
+    &mut self,
+    ss: &SyntaxSet,
+    line_attrs: String,
+) -> Result<(), RenderStateMismatch> {
+    let code_block = self.pop_code_block()?;
+    let rendered = render_code_block_html(
+        ss,
+        code_block.language.as_deref(),
+        &code_block.content,
+        &line_attrs,
+    );
+    self.push_html(&rendered);
+    Ok(())
+}
+```
+
+Implement `finish_image` as:
+
+```rust
+pub(super) fn finish_image(&mut self) -> Result<String, RenderStateMismatch> {
+    let image = self.pop_image()?;
+    let safe_src = sanitize_image_src(&image.src);
+    let mut image_html = format!(
+        "<img src=\"{}\" alt=\"{}\"",
+        html_escape(&safe_src),
+        html_escape(&image.alt)
+    );
+    if let Some(title) = image.title {
+        image_html.push_str(&format!(" title=\"{}\"", html_escape(&title)));
+    }
+    image_html.push_str(" />");
+    Ok(image_html)
+}
+```
 
 - [ ] **Step 6: Convert table methods to `Result`**
 
 Change table methods:
 
 ```rust
+pub(super) fn finish_table(&mut self) -> Result<(), RenderStateMismatch> {
+    let _table = self.pop_table()?;
+    Ok(())
+}
+
 pub(super) fn start_table_head(&mut self) -> Result<(), RenderStateMismatch> {
     let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
     table.in_head = true;
     Ok(())
 }
 
+pub(super) fn finish_table_head(&mut self) -> Result<(), RenderStateMismatch> {
+    let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
+    table.in_head = false;
+    Ok(())
+}
+
+pub(super) fn reset_table_row(&mut self) -> Result<(), RenderStateMismatch> {
+    let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
+    table.cell_index = 0;
+    Ok(())
+}
+
+pub(super) fn table_cell_start_tag(&mut self) -> Result<String, RenderStateMismatch> {
+    let table = self.table_mut().ok_or(RenderStateMismatch::ExpectedTable)?;
+    let align_class = table
+        .alignments
+        .get(table.cell_index)
+        .and_then(table_align_class_attr)
+        .unwrap_or("");
+    table.cell_index = table.cell_index.saturating_add(1);
+    Ok(if table.in_head {
+        format!("<th{}>", align_class)
+    } else {
+        format!("<td{}>", align_class)
+    })
+}
+
 pub(super) fn table_cell_end_tag(&self) -> Result<&'static str, RenderStateMismatch> {
-    let table = self
-        .contexts
-        .iter()
-        .rev()
-        .find_map(|context| match context {
-            BlockContext::Table(table) => Some(table),
-            _ => None,
-        })
-        .ok_or(RenderStateMismatch::ExpectedTable)?;
+    let table = match self.top_context() {
+        Some(BlockContext::Table(table)) => table,
+        _ => return Err(RenderStateMismatch::ExpectedTable),
+    };
     Ok(if table.in_head { "</th>\n" } else { "</td>\n" })
 }
 ```
 
-- [ ] **Step 7: Run state tests**
-
-Run:
-
-```bash
-cargo test --lib renderer::state --all-features
-```
-
-Expected: PASS for `renderer::state` tests; compile errors may remain in `render.rs` until Task 4.
-
-## Task 4: Update Renderer Dispatch To Handle Mismatches
-
-**Files:**
-- Modify: `src/renderer/render.rs`
-- Modify: `tests/renderer_test.rs`
-
-- [ ] **Step 1: Import mismatch type**
+- [ ] **Step 7: Update `render.rs` for new `Result` signatures**
 
 Change import:
 
 ```rust
 use super::state::{RenderState, RenderStateMismatch};
 ```
-
-- [ ] **Step 2: Add mismatch logger**
 
 Add near ignored event log helpers:
 
@@ -693,9 +794,7 @@ fn log_render_state_mismatch(operation: &'static str, mismatch: RenderStateMisma
 }
 ```
 
-- [ ] **Step 3: Update heading and code block end handling**
-
-Change `handle_code_block_end`:
+Update end handlers so they compile with `Result` signatures. Use these exact handler bodies:
 
 ```rust
 fn handle_code_block_end(
@@ -709,11 +808,7 @@ fn handle_code_block_end(
         log_render_state_mismatch("finish_code_block", mismatch);
     }
 }
-```
 
-Change `handle_heading_end`:
-
-```rust
 fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
     let state = &mut context.state;
     let text = state.heading_plain_text().to_string();
@@ -731,13 +826,7 @@ fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
         Err(mismatch) => log_render_state_mismatch("finish_heading", mismatch),
     }
 }
-```
 
-- [ ] **Step 4: Update image handling**
-
-Change `handle_image_end`:
-
-```rust
 fn handle_image_end(state: &mut RenderState) {
     match state.finish_image() {
         Ok(image_html) => {
@@ -750,17 +839,11 @@ fn handle_image_end(state: &mut RenderState) {
         Err(mismatch) => log_render_state_mismatch("finish_image", mismatch),
     }
 }
-```
 
-- [ ] **Step 5: Update table handling**
-
-Change table handlers:
-
-```rust
 fn handle_table_end(state: &mut RenderState) {
-    state.push_html("</table>\n");
-    if let Err(mismatch) = state.finish_table() {
-        log_render_state_mismatch("finish_table", mismatch);
+    match state.finish_table() {
+        Ok(()) => state.push_html("</table>\n"),
+        Err(mismatch) => log_render_state_mismatch("finish_table", mismatch),
     }
 }
 
@@ -770,6 +853,22 @@ fn handle_table_head_start(state: &mut RenderState) {
         return;
     }
     state.push_html("<thead>\n");
+}
+
+fn handle_table_head_end(state: &mut RenderState) {
+    if let Err(mismatch) = state.finish_table_head() {
+        log_render_state_mismatch("finish_table_head", mismatch);
+        return;
+    }
+    state.push_html("</thead>\n");
+}
+
+fn handle_table_row_start(state: &mut RenderState) {
+    if let Err(mismatch) = state.reset_table_row() {
+        log_render_state_mismatch("reset_table_row", mismatch);
+        return;
+    }
+    state.push_html("<tr>\n");
 }
 
 fn handle_table_cell_start(state: &mut RenderState) {
@@ -787,42 +886,51 @@ fn handle_table_cell_end(state: &mut RenderState) {
 }
 ```
 
-Apply the same pattern to `finish_table_head` and `reset_table_row`.
+- [ ] **Step 8: Run renderer state and compile checks**
 
-- [ ] **Step 6: Add renderer compatibility regression**
+Run:
 
-Add this public regression to `tests/renderer_test.rs`. If the exact same test already exists, leave the existing test unchanged and record that no file edit was needed for this step in the task notes.
-
-```rust
-#[test]
-fn test_renderer_state境界が連続構文で漏れない() {
-    let md = concat!(
-        "# Head ![logo](./logo.png \"caption\") `code`\n",
-        "\n",
-        "![remote](https://example.com/p.png)\n",
-        "\n",
-        "| L | R |\n",
-        "|:--|--:|\n",
-        "| a | b |\n",
-        "\n",
-        "```unknown-lang\n",
-        "<x>\n",
-        "```\n",
-        "\n",
-        "After",
-    );
-    let html = normalize_source_markup(render_markdown(md).as_str());
-
-    assert!(html.contains(r#"<h1 id="head-code">Head <img src="./logo.png" alt="logo" title="caption" /> <code>code</code></h1>"#));
-    assert!(html.contains(r##"<p><img src="#" alt="remote" /></p>"##));
-    assert!(html.contains(r#"<td class="align-left">a</td>"#));
-    assert!(html.contains(r#"<td class="align-right">b</td>"#));
-    assert!(html.contains(r#"<pre class="code-block"><code class="syn-code language-unknown-lang">&lt;x&gt;"#));
-    assert!(html.contains("<p>After</p>"));
-}
+```bash
+cargo test --lib renderer::state --all-features
 ```
 
-- [ ] **Step 7: Run renderer tests**
+Expected: PASS.
+
+Run:
+
+```bash
+cargo test --lib renderer::render --all-features
+```
+
+Expected: PASS.
+
+- [ ] **Step 9: Commit state typing compile-through change**
+
+Run:
+
+```bash
+git add src/renderer/state.rs src/renderer/render.rs
+git commit -m "refactor: RenderStateのcontext不整合をResultで扱う"
+```
+
+Expected: commit succeeds.
+
+## Task 4: Verify Existing Renderer Compatibility Regression
+
+**Files:**
+- Test: `tests/renderer_test.rs`
+
+- [ ] **Step 1: Run the existing combined state-boundary regression**
+
+Run:
+
+```bash
+cargo test --test renderer_test test_renderer_state境界が連続構文で漏れない --all-features
+```
+
+Expected: PASS. This test already exists in the repository and verifies heading/image/table/code contexts do not leak into each other.
+
+- [ ] **Step 2: Run renderer tests**
 
 Run:
 
@@ -832,7 +940,7 @@ cargo test --test renderer_test --all-features
 
 Expected: PASS.
 
-- [ ] **Step 8: Run renderer module tests**
+- [ ] **Step 3: Run renderer module tests**
 
 Run:
 
@@ -842,16 +950,15 @@ cargo test --lib renderer --all-features
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit renderer state typing**
+- [ ] **Step 4: Confirm no test-only diff is required**
 
 Run:
 
 ```bash
-git add src/renderer/state.rs src/renderer/render.rs tests/renderer_test.rs
-git commit -m "refactor: RenderStateのopen close対応を型化"
+git diff -- tests/renderer_test.rs
 ```
 
-Expected: commit succeeds.
+Expected: no diff. If Task 3 changed public renderer behavior and required updating this test, stop and revisit Task 3 before proceeding.
 
 ## Task 5: Full Verification And TODO Update
 
