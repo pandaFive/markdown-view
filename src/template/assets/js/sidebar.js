@@ -29,7 +29,7 @@ function setupFileList() {
 
 function setupFileFilter() {
   var summary = document.getElementById('file-filter-summary');
-  appContext.content.setupFilterableList({
+  setupFilterableList({
     inputId: 'file-filter',
     rootId: 'panel-files',
     getItems: function(root) {
@@ -491,6 +491,7 @@ function startMarkdownViewApp() {
     activateSidebarTab: activateSidebarTab,
     clearMemoSyncPendingStatus: clearMemoSyncPendingStatus,
     clearPendingTocNavigation: clearPendingTocNavigation,
+    createHttpError: createHttpError,
     getCurrentActiveTocId: getCurrentActiveTocId,
     getFileFetchErrorMessage: getFileFetchErrorMessage,
     hideFileFetchErrorBanner: hideFileFetchErrorBanner,
@@ -500,6 +501,7 @@ function startMarkdownViewApp() {
     restoreActiveTocHeading: restoreActiveTocHeading,
     selectFile: selectFile,
     setFileParam: setFileParam,
+    showWsServerErrorBanner: showWsServerErrorBanner,
     setupTocTracking: setupTocTracking,
     suppressTocTrackingFor: suppressTocTrackingFor
   });

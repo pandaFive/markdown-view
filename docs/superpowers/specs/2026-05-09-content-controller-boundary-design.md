@@ -72,7 +72,8 @@
 依存:
 
 - `deps.openFileSearchResult(file, options)` で controller へファイル遷移を依頼する。
-- `deps.applyDocumentSearchHighlights(query)` で現在ファイル内 highlight を再適用する。
+- `deps.renderDocumentSearchResultContext(...)` で検索結果本文を DOM API で描画する。
+- `deps.setCurrentDocumentSearchMatch(...)` / `deps.updateDocumentSearchSummary()` で現在ファイル内 highlight と summary に反映する。
 
 ### `content-navigation.js`
 
@@ -136,7 +137,17 @@
   restoreNavigationFromLocation: Function,
   openDocumentSearch: Function,
   moveDocumentSearch: Function,
-  applyDocumentSearchQuery: Function
+  applyDocumentSearchQuery: Function,
+  clearDocumentSearchQuery: Function,
+  renderDirectorySearchUi: Function,
+  scheduleDirectorySearch: Function,
+  augmentHashWithTrailingLineHint: Function,
+  setLiveStatus: Function,
+  updateDocumentStats: Function,
+  updateReadingProgress: Function,
+  syncDocumentChrome: Function,
+  enhanceContentInteractions: Function,
+  setupTocFilter: Function
 }
 ```
 
@@ -246,4 +257,3 @@ npm run test:e2e
 人間実装見積もり: 1.5-2.5 日。既存 E2E の読み解き、手動ブラウザ確認、レビュー対応を含む。
 
 Codex/AI 支援見積もり: 4-7 時間。モジュール分割自体は機械的に進めやすいが、検索・履歴・メモ citation・WebSocket 更新の回帰確認に時間を使う。
-

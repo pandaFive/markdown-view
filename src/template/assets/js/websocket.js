@@ -78,7 +78,12 @@ function createWebSocketController(ctx, deps) {
       return;
     }
 
-    deps.updateContent(data);
+    var result = deps.updateContent(data);
+    if (result && result.contractViolation) {
+      showWsServerErrorBanner('サーバーから不正な更新データを受信しました。ページを再読み込みしてください。');
+      deps.setLiveStatus('error');
+      return;
+    }
     hideWsServerErrorBanner();
     hideFileFetchErrorBanner();
     deps.setLiveStatus('live');

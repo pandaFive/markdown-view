@@ -14,26 +14,34 @@ function createContentController(ctx, deps) {
   });
 
   var directorySearch;
+  function requireDirectorySearch() {
+    if (!directorySearch) {
+      throw new Error('directory search controller is not initialized');
+    }
+    return directorySearch;
+  }
+
   var documentSearch = createDocumentSearchController(ctx, {
     activateSidebarTab: deps.activateSidebarTab,
     applyPendingDirectorySearchNavigation: function() {
-      return directorySearch.applyPendingDirectorySearchNavigation();
+      return requireDirectorySearch().applyPendingDirectorySearchNavigation();
     },
     openDirectorySearchResult: function(index) {
-      return directorySearch.openDirectorySearchResult(index);
+      return requireDirectorySearch().openDirectorySearchResult(index);
     },
     renderDirectorySearchResults: function() {
-      return directorySearch.renderDirectorySearchResults();
+      return requireDirectorySearch().renderDirectorySearchResults();
     },
     renderDirectorySearchUi: function() {
-      return directorySearch.renderDirectorySearchUi();
+      return requireDirectorySearch().renderDirectorySearchUi();
     },
     scheduleDirectorySearch: function(query) {
-      return directorySearch.scheduleDirectorySearch(query);
+      return requireDirectorySearch().scheduleDirectorySearch(query);
     }
   });
 
   directorySearch = createDirectorySearchController(ctx, {
+    createHttpError: deps.createHttpError,
     createDocumentSearchEmptyState: function(message) {
       return documentSearch.createDocumentSearchEmptyState(message);
     },
@@ -88,7 +96,14 @@ function createContentController(ctx, deps) {
     }
     var data = ctx.state.pendingUpdate;
     ctx.state.pendingUpdate = null;
-    updateContent(data);
+    var result = updateContent(data);
+    if (result.contractViolation) {
+      if (deps.showWsServerErrorBanner) {
+        deps.showWsServerErrorBanner('サーバーから不正な更新データを受信しました。ページを再読み込みしてください。');
+      }
+      enhancements.setLiveStatus('error');
+      return;
+    }
     deps.hideWsServerErrorBanner();
     deps.hideFileFetchErrorBanner();
     enhancements.setLiveStatus('live');
@@ -103,6 +118,11 @@ function createContentController(ctx, deps) {
 
     if (validation.hasContractViolation) {
       logUpdatePayloadContractViolation(validation);
+      return {
+        ok: false,
+        contractViolation: true,
+        missing: validation.missing.slice()
+      };
     }
 
     if (ctx.state.pendingUpdateTimer) {
@@ -158,6 +178,11 @@ function createContentController(ctx, deps) {
     if (!validation.hasContractViolation && ctx.websocket) {
       ctx.websocket.rememberAppliedLiveUpdate(safeData);
     }
+    return {
+      ok: true,
+      contractViolation: false,
+      missing: []
+    };
   }
 
   return {
@@ -177,7 +202,6 @@ function createContentController(ctx, deps) {
     updateReadingProgress: enhancements.updateReadingProgress,
     syncDocumentChrome: enhancements.syncDocumentChrome,
     enhanceContentInteractions: enhancements.enhanceContentInteractions,
-    setupFilterableList: enhancements.setupFilterableList,
     setupTocFilter: enhancements.setupTocFilter
   };
 }

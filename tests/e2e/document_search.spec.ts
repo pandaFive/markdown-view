@@ -52,18 +52,7 @@ async function currentMatchText(page: Page) {
 }
 
 async function setDocumentSearchQuery(page: Page, query: string) {
-  await page.evaluate((value) => {
-    const input = document.getElementById('document-search-input');
-    if (!(input instanceof HTMLInputElement)) {
-      throw new Error('document search input not found');
-    }
-    input.value = value;
-    if (window.markdownViewTestHooks) {
-      window.markdownViewTestHooks.applyDocumentSearchQuery(value);
-      return;
-    }
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  }, query);
+  await page.locator('#document-search-input').fill(query);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -343,6 +332,44 @@ test('検索queryは検索結果リストでHTMLとして解釈されない', as
   await expect(page.locator('mark.document-search-match')).toHaveCount(1);
 });
 
+test('ディレクトリ検索結果はHTMLとして解釈されない', async ({ page }) => {
+  const injected = '<img src=x onerror=alert(1)>';
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: injected,
+        results: [
+          {
+            file: injected,
+            file_match_index: 0,
+            before: 'before ' + injected,
+            current: injected,
+            after: injected + ' after'
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>literal marker</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, injected);
+
+  await expect(page.locator('#document-search-results')).toContainText(injected);
+  await expect(page.locator('#document-search-results img')).toHaveCount(0);
+});
+
 test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
   const paragraphs = Array.from(
     { length: 18 },
@@ -416,6 +443,32 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('README.md');
   await expect(page.locator('#document-search-results .document-search-result').nth(1))
     .toContainText('notes.md');
+});
+
+test('ディレクトリ検索の不正な成功応答は検索エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        results: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
 });
 
 test('ディレクトリモードでは検索打ち切り警告を結果一覧の先頭に表示する', async ({ page }) => {

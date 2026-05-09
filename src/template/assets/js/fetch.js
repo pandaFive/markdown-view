@@ -99,12 +99,15 @@ function selectFile(file, pushHistory, options) {
       appContext.content.clearDocumentSearchQuery();
     }
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
-    appContext.content.updateContent(data, {
+    var updateResult = appContext.content.updateContent(data, {
       scrollMode: scrollMode,
       requeryDirectorySearch: options.requeryDirectorySearch !== false,
       anchorHash: options.anchorHash || '',
       clearHashOnMiss: pushHistory
     });
+    if (updateResult && updateResult.contractViolation) {
+      throw new Error('content response contract violation');
+    }
     if (appContext.config.isDirMode && !pushHistory) {
       setFileParam(appContext.state.currentFile, true, options.historyHash);
     }

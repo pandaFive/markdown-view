@@ -1,3 +1,18 @@
+function setupFilterableList(options) {
+  var input = document.getElementById(options.inputId);
+  var root = document.getElementById(options.rootId);
+  if (!input || !root) return;
+
+  var items = options.getItems(root);
+  var applyFilter = function() {
+    var query = input.value.trim().toLowerCase();
+    options.apply(items, query, input);
+  };
+
+  input.addEventListener('input', applyFilter);
+  applyFilter();
+}
+
 function createContentEnhancements(ctx, deps) {
   function setLiveStatus(state) {
     if (!ctx.elements.liveStatusEl) return;
@@ -122,21 +137,6 @@ function createContentEnhancements(ctx, deps) {
     });
   }
 
-  function setupFilterableList(options) {
-    var input = document.getElementById(options.inputId);
-    var root = document.getElementById(options.rootId);
-    if (!input || !root) return;
-
-    var items = options.getItems(root);
-    var applyFilter = function() {
-      var query = input.value.trim().toLowerCase();
-      options.apply(items, query, input);
-    };
-
-    input.addEventListener('input', applyFilter);
-    applyFilter();
-  }
-
   function setupTocFilter() {
     setupFilterableList({
       inputId: 'toc-filter',
@@ -161,7 +161,6 @@ function createContentEnhancements(ctx, deps) {
     updateReadingProgress: updateReadingProgress,
     syncDocumentChrome: syncDocumentChrome,
     enhanceContentInteractions: enhanceContentInteractions,
-    setupFilterableList: setupFilterableList,
     setupTocFilter: setupTocFilter
   };
 }

@@ -6,28 +6,6 @@ function createDirectorySearchController(ctx, deps) {
     return item;
   }
 
-  function formatDirectorySearchSummary() {
-    var baseText;
-    if (!ctx.search.currentDocumentQuery) {
-      baseText = '0 件';
-    } else if (ctx.search.currentDirectoryLoading) {
-      baseText = '検索中...';
-    } else if (ctx.search.currentDirectoryError) {
-      baseText = 'エラー';
-    } else if (!ctx.search.currentDirectoryResults.length) {
-      baseText = '0 件';
-    } else if (ctx.search.currentDirectoryIndex >= 0) {
-      baseText = (ctx.search.currentDirectoryIndex + 1) + ' / ' + ctx.search.currentDirectoryResults.length + ' 件';
-    } else {
-      baseText = '0 / ' + ctx.search.currentDirectoryResults.length + ' 件';
-    }
-
-    if (ctx.search.currentDirectorySkippedFiles > 0) {
-      return baseText + '（' + ctx.search.currentDirectorySkippedFiles + '件スキップ）';
-    }
-    return baseText;
-  }
-
   function renderDirectorySearchResults() {
     var preservedScrollTop = ctx.elements.documentSearchResultsEl.scrollTop;
     ctx.elements.documentSearchResultsEl.innerHTML = '';
@@ -191,7 +169,7 @@ function createDirectorySearchController(ctx, deps) {
       headers: { 'Accept': 'application/json' }
     })
     .then(function(resp) {
-      if (!resp.ok) throw createHttpError(resp.status);
+      if (!resp.ok) throw deps.createHttpError(resp.status);
       return resp.json().catch(function(err) {
         err.type = 'parse';
         throw err;
@@ -200,10 +178,28 @@ function createDirectorySearchController(ctx, deps) {
     .then(function(data) {
       if (generation !== ctx.search.documentFetchGeneration) return;
       if (query !== ctx.search.currentDocumentQuery) return;
-      if ((data.query || '') !== ctx.search.currentDocumentQuery) return;
+      if (!data || typeof data !== 'object' || Array.isArray(data) ||
+        data.query !== ctx.search.currentDocumentQuery ||
+        !Array.isArray(data.results)
+      ) {
+        ctx.search.currentDirectoryLoading = false;
+        ctx.search.currentDirectoryResults = [];
+        ctx.search.currentDirectoryIndex = -1;
+        ctx.search.currentDirectorySkippedFiles = 0;
+        ctx.search.currentDirectoryTruncated = false;
+        ctx.search.currentDirectoryTruncatedReasons = [];
+        ctx.search.currentDirectoryError = 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
+        console.warn('[markdown-view] ディレクトリ検索応答の契約違反', {
+          expectedQuery: ctx.search.currentDocumentQuery,
+          actualQuery: data && typeof data === 'object' && !Array.isArray(data) ? data.query : null,
+          hasResults: Boolean(data && typeof data === 'object' && Array.isArray(data.results))
+        });
+        renderDirectorySearchUi();
+        return;
+      }
       ctx.search.currentDirectoryLoading = false;
       ctx.search.currentDirectoryError = '';
-      ctx.search.currentDirectoryResults = Array.isArray(data.results) ? data.results : [];
+      ctx.search.currentDirectoryResults = data.results;
       ctx.search.currentDirectorySkippedFiles = Number(data.skipped_files || 0);
       ctx.search.currentDirectoryTruncated = data.truncated === true ||
         (Array.isArray(data.truncated_reasons) && data.truncated_reasons.length > 0);
