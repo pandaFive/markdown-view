@@ -956,7 +956,7 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
 
 test('ディレクトリ検索の古い応答は現在queryへ適用されない', async ({ page }) => {
   let firstRequestStarted = false;
-  let releaseFirstResponse: (() => void) | null = null;
+  let releaseFirstResponse!: () => void;
 
   await page.route('**/api/search**', async (route) => {
     const url = new URL(route.request().url());
@@ -1016,7 +1016,7 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
     const url = new URL(response.url());
     return url.pathname === '/api/search' && url.searchParams.get('q') === 'alpha';
   });
-  releaseFirstResponse?.();
+  releaseFirstResponse();
   await alphaResponse;
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.locator('#document-search-results')).toContainText('beta current');
