@@ -20,7 +20,7 @@ watcher 内で発生した `WatchEvent::Error` が、`FileChanged` の大量発�
 
 - `src/watcher/runtime.rs`
   - `send_watch_event` をイベント種別ごとの送信方針に分ける。
-- `WatchEvent::Error` の満杯時代表送達、送達中追加エラーの集約、helper thread 起動失敗時 fallback、receiver closed 経路のテストを追加する。
+  - `WatchEvent::Error` の満杯時代表送達、送達中追加エラーの集約、helper thread 起動失敗時 fallback、receiver closed 経路のテストを追加する。
   - 既存の満杯時 drop テストを `FileChanged` の契約として明確化する。
 - `src/server/broadcast.rs`
   - production code の変更は予定しない。既存の `WatchEvent::Error` forwarder 処理をそのまま利用する。

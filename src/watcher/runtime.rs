@@ -66,6 +66,18 @@ impl ErrorDeliveryState {
         inner.coalesced_count
     }
 
+    fn coalesce_if_in_flight(&self) -> Option<u64> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !inner.in_flight {
+            return None;
+        }
+        inner.coalesced_count += 1;
+        Some(inner.coalesced_count)
+    }
+
     fn complete_in_flight(&self) -> u64 {
         let mut inner = self
             .inner
@@ -463,6 +475,16 @@ fn send_error_event(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
 ) {
+    if let Some(coalesced) = error_delivery_state.coalesce_if_in_flight() {
+        tracing::warn!(
+            coalesced,
+            error_kind = ?error.kind(),
+            "[markdown-view] 監視エラー送達が保留中のため追加エラーを集約しました: {}",
+            label
+        );
+        return;
+    }
+
     match tx.try_send(WatchEvent::Error(error)) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Closed(WatchEvent::Error(error))) => {
@@ -1908,6 +1930,39 @@ mod tests {
             error_delivery_state.coalesced_count(),
             0,
             "集約件数は送達完了時に消費する"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorは送達中ならチャネルに空きがあっても集約する() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(2);
+        let error_delivery_state = ErrorDeliveryState::new();
+
+        assert!(
+            error_delivery_state.try_mark_in_flight(),
+            "代表Error送達中の状態を作る"
+        );
+
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("追加エラー")),
+            "error空きあり集約テスト",
+            &error_delivery_state,
+        );
+
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            1,
+            "送達中の追加Errorはチャネルに空きがあっても件数集約する"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "送達中の追加Errorはchannelへ積まない"
+        );
+        assert_eq!(
+            error_delivery_state.complete_in_flight(),
+            1,
+            "集約件数を消費できる"
         );
     }
 
