@@ -937,6 +937,11 @@ fn test_render_documentは未閉鎖script後もmarkdown構造を維持する() {
 }
 
 #[test]
+fn test_extract_headingsは空入力で空配列を返す() {
+    assert!(extract_headings("").is_empty());
+}
+
+#[test]
 fn test_extract_headingsはrender_documentのheadingsと一致する() {
     let md = "# A `code`\n\n## ![logo](x.png) B\n\n# A `code`";
 

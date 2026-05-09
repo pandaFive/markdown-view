@@ -15,6 +15,6 @@ pub use self::broadcast::notify_update;
 pub use self::files::{list_markdown_files, resolve_file, ResolveFileError, MAX_FILE_SIZE};
 pub use self::messages::BroadcastMessage;
 pub use self::routes::create_router;
-pub(crate) use self::state::CanonicalPath;
-pub use self::state::{AppMode, AppModeBuildError, AppState, CanonicalPathError};
+pub use self::state::{AppMode, AppModeBuildError, AppState};
+pub(crate) use self::state::{CanonicalPath, CanonicalPathError};
 pub use self::watch::WatchService;
