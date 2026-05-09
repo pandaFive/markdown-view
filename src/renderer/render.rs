@@ -272,6 +272,11 @@ fn handle_code_block_end(
     syntax_set: &SyntaxSet,
     state: &mut RenderState,
 ) {
+    if !state.in_code_block() {
+        log_render_state_mismatch("finish_code_block", RenderStateMismatch::ExpectedCodeBlock);
+        return;
+    }
+
     let line_attrs = code_block_line_attrs(&range, line_lookup, state);
     if let Err(mismatch) = state.finish_code_block(syntax_set, line_attrs) {
         log_render_state_mismatch("finish_code_block", mismatch);
@@ -284,6 +289,11 @@ fn handle_heading_start(level: u8, range: Range<usize>, state: &mut RenderState)
 
 fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
     let state = &mut context.state;
+    if !state.can_finish_heading() {
+        log_render_state_mismatch("finish_heading", RenderStateMismatch::ExpectedHeading);
+        return;
+    }
+
     let text = state.heading_plain_text().to_string();
     let level = state.heading_level();
     let slug = slugify(&text);
@@ -594,5 +604,49 @@ mod tests {
         handle_table_row_end(&mut state);
 
         assert_eq!(state.into_html(), "");
+    }
+
+    #[test]
+    fn test_heading_endは上位imageがあるならid_counterを進めない() {
+        let line_lookup = LineLookup::new("# title");
+        let mut context = RenderContext::new();
+
+        context.state.start_heading(1, 0..7);
+        context
+            .state
+            .push_heading_escaped_text_html("title", "title");
+        context.state.start_image("image.png", "");
+
+        handle_heading_end(&line_lookup, &mut context);
+
+        assert!(context.headings.is_empty());
+        let image_html = context.state.finish_image().unwrap();
+        context
+            .state
+            .push_heading_rendered_html_fragment(&image_html);
+
+        handle_heading_end(&line_lookup, &mut context);
+
+        assert_eq!(context.headings.len(), 1);
+        assert_eq!(context.headings[0].id, "title");
+        let html = context.state.into_html();
+        assert!(html.contains("id=\"title\""));
+        assert!(!html.contains("id=\"title-1\""));
+    }
+
+    #[test]
+    fn test_code_block_endは上位imageがあるならline_attrs評価前に回復する() {
+        let line_lookup = LineLookup::new("```rust\ncode\n```");
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let mut state = RenderState::new();
+
+        state.start_code_block(CodeBlockKind::Indented, 0..14);
+        state.push_code_text("code");
+        state.start_image("image.png", "");
+
+        handle_code_block_end(0..14, &line_lookup, &syntax_set, &mut state);
+
+        assert!(state.finish_image().is_ok());
+        assert!(state.finish_code_block(&syntax_set, String::new()).is_ok());
     }
 }

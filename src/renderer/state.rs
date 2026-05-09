@@ -192,6 +192,10 @@ impl RenderState {
         self.heading().is_some()
     }
 
+    pub(super) fn can_finish_heading(&self) -> bool {
+        matches!(self.top_context(), Some(BlockContext::Heading(_)))
+    }
+
     pub(super) fn in_table(&self) -> bool {
         matches!(self.top_context(), Some(BlockContext::Table(_)))
     }
