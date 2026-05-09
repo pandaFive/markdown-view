@@ -324,6 +324,27 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 });
 
+test('検索queryは検索結果リストでHTMLとして解釈されない', async ({ page }) => {
+  await stabilizeWebSocketHarness(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(false);
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<p>literal &lt;img src=x onerror=alert(1)&gt; appears here</p>',
+    toc: '<ul></ul>'
+  });
+
+  const query = '<img src=x onerror=alert(1)>';
+  await page.evaluate((value) => {
+    window.markdownViewTestHooks.applyDocumentSearchQuery(value);
+  }, query);
+
+  await expect(page.locator('#document-search-results')).toContainText(query);
+  await expect(page.locator('#document-search-results img')).toHaveCount(0);
+  await expect(page.locator('mark.document-search-match')).toHaveCount(1);
+});
+
 test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
   const paragraphs = Array.from(
     { length: 18 },
