@@ -325,8 +325,6 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
 });
 
 test('検索queryは検索結果リストでHTMLとして解釈されない', async ({ page }) => {
-  await stabilizeWebSocketHarness(page);
-  await page.goto('/');
   await page.evaluate(() => {
     window.markdownViewTestHooks.setDirModeForTest(false);
   });
