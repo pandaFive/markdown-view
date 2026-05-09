@@ -26,7 +26,7 @@
 - `ready`: 通常状態。メモ本文と preview を利用でき、編集できる。
 - `degraded`: メモ読み込み失敗状態。本文閲覧は継続できるが、メモ編集は無効化する。
 
-`load_error` は `degraded` 時の利用者向けメッセージとして残す。ただし UI の主分岐は `load_error` の有無ではなく `memo_state === "degraded"` に寄せる。後方互換用の防御として、JS は `load_error` だけを持つ応答も degraded として扱えるようにする。
+`load_error` は API 上の補助情報として残す。ただし UI には表示しない。UI の主分岐は `load_error` の有無ではなく `memo_state === "degraded"` に寄せる。後方互換用の防御として、JS は `load_error` だけを持つ応答も degraded として扱えるようにする。
 
 `/api/memo` GET は現行どおり、読み込み失敗時に HTTP エラーを返す。初期ページ描画の `load_page` だけは、本文閲覧を継続するため `MemoResponse { memo_state: "degraded", raw: "", html: "", load_error: ... }` へ変換する。この非対称は明示仕様とする。
 
@@ -104,7 +104,7 @@ E2E:
 
 ## セキュリティ考慮
 
-取得したエラー詳細や外部入力を UI にそのまま出さない。degraded バナーは固定の利用者向け文言を使う。`load_error` を表示する場合も HTML escape する。
+取得したエラー詳細や外部入力を UI にそのまま出さない。degraded バナーは固定の利用者向け文言を使い、`load_error` は UI 表示に使わない。
 
 メモ preview の `innerHTML` は引き続きサーバー生成済み sanitized HTML のみを許可する境界として扱う。degraded state の導入で、未検証の raw HTML をクライアント側で作らない。
 

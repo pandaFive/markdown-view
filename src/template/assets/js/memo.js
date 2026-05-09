@@ -1,3 +1,5 @@
+var MEMO_DEGRADED_MESSAGE = 'メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。';
+
 function getMemoRequestUrl(file) {
   if (appContext.config.isDirMode && file) {
     return '/api/memo?file=' + encodeURIComponent(file);
@@ -23,9 +25,7 @@ function isMemoDegraded(data) {
 }
 
 function getMemoDegradedMessage(data) {
-  return data && data.load_error
-    ? data.load_error
-    : 'メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。';
+  return MEMO_DEGRADED_MESSAGE;
 }
 
 function setMemoDegradedBanner(message) {
@@ -81,6 +81,11 @@ function isLiveSyncDisconnected() {
 function setMemoEditorDisabled(disabled) {
   if (!appContext.elements.memoEditorEl) return;
   appContext.elements.memoEditorEl.disabled = !!disabled;
+  if (disabled) {
+    appContext.elements.memoEditorEl.setAttribute('aria-disabled', 'true');
+  } else {
+    appContext.elements.memoEditorEl.removeAttribute('aria-disabled');
+  }
 }
 
 function isMemoEditorDisabled() {
@@ -140,13 +145,24 @@ function updateMemoPreview(data) {
   return true;
 }
 
+function clearMemoPreview() {
+  if (!appContext.elements.memoPreviewEl) return;
+  appContext.elements.memoPreviewEl.innerHTML = '';
+}
+
 function applyMemoData(data, options) {
   if (!appContext.elements.memoEditorEl || !appContext.elements.memoPreviewEl || !data) return true;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
+  var shouldPreserveDegradedEditor = !!(options && options.preserveDegradedEditor);
   if (isMemoDegraded(data)) {
-    // degraded 時は raw を上書きしない。読み込み失敗応答でユーザ編集中の内容を破壊しないため。
+    // 保存応答の degraded では draft を守る。読込失敗では別ファイルのメモ混同を避けるため空にする。
     cancelMemoAutosave();
-    updateMemoPreview(data);
+    if (shouldPreserveDegradedEditor) {
+      updateMemoPreview(data);
+    } else {
+      updateMemoEditor('', false);
+      clearMemoPreview();
+    }
     setMemoEditorDisabled(true);
     setMemoDegradedBanner(getMemoDegradedMessage(data));
     setMemoSaveStatus('error', '読込失敗');
@@ -238,6 +254,19 @@ function parseJsonResponse(resp) {
   });
 }
 
+function rememberMemoLoadingStatus() {
+  if (!appContext.elements.memoSaveStatusEl) return;
+  if (appContext.elements.memoSaveStatusEl.dataset.state === 'loading') return;
+  appContext.memo.previousLoadStatus = {
+    state: appContext.elements.memoSaveStatusEl.dataset.state || 'saved',
+    text: appContext.elements.memoSaveStatusEl.textContent || '保存済み'
+  };
+}
+
+function clearMemoLoadingStatusSnapshot() {
+  appContext.memo.previousLoadStatus = null;
+}
+
 function getMemoErrorMessage(err) {
   if (err && err.type === 'http') {
     switch (err.status) {
@@ -270,6 +299,7 @@ function getMemoErrorMessage(err) {
 function loadMemo(file, ownerGeneration) {
   if (!appContext.elements.memoEditorEl) return Promise.resolve();
   var requestGeneration = ++appContext.memo.loadGeneration;
+  rememberMemoLoadingStatus();
   setMemoSaveStatus('loading', '読込中');
   return fetch(getMemoRequestUrl(file), {
     headers: { 'Accept': 'application/json' }
@@ -295,6 +325,7 @@ function loadMemo(file, ownerGeneration) {
     if (applyMemoData(data) !== false) {
       setMemoSaveStatus('saved', '保存済み');
     }
+    clearMemoLoadingStatusSnapshot();
     flushPendingMemoReloadIfSafe();
   })
   .catch(function(err) {
@@ -317,9 +348,12 @@ function loadMemo(file, ownerGeneration) {
     }
     // 取得失敗時は古い本文を別ファイル名で上書き保存する事故を防ぐため、復旧まで編集を止める。
     cancelMemoAutosave();
+    updateMemoEditor('', false);
+    clearMemoPreview();
     setMemoEditorDisabled(true);
-    setMemoDegradedBanner(getMemoErrorMessage(err));
-    setMemoSaveStatus('error', getMemoErrorMessage(err));
+    setMemoDegradedBanner(MEMO_DEGRADED_MESSAGE);
+    setMemoSaveStatus('error', '読込失敗');
+    clearMemoLoadingStatusSnapshot();
     flushPendingMemoReloadIfSafe();
   });
 }
@@ -329,7 +363,13 @@ function clearStaleMemoLoadingStatus(requestGeneration) {
   // その状態で古い読込を破棄すると後続の読込完了が来ないため、表示だけを安全な既定状態へ戻す。
   if (requestGeneration !== appContext.memo.loadGeneration) return;
   if (!appContext.elements.memoSaveStatusEl || appContext.elements.memoSaveStatusEl.dataset.state !== 'loading') return;
-  setMemoSaveStatus('saved', '保存済み');
+  var previous = appContext.memo.previousLoadStatus;
+  if (previous) {
+    setMemoSaveStatus(previous.state, previous.text);
+  } else {
+    setMemoSaveStatus('saved', '保存済み');
+  }
+  clearMemoLoadingStatusSnapshot();
 }
 
 function rememberPendingMemoSave(requestGeneration) {
@@ -425,7 +465,7 @@ function saveMemoNow(targetFileOverride, rawOverride) {
       return;
     }
     if (isMemoDegraded(data)) {
-      if (applyMemoData(data, { preserveSelection: true }) === false) {
+      if (applyMemoData(data, { preserveSelection: true, preserveDegradedEditor: true }) === false) {
         return;
       }
     } else if (targetFileOverride === undefined) {

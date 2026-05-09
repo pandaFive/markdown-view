@@ -558,7 +558,9 @@ mod tests {
         assert!(html.contains("if (appContext.memo.pendingReload === null) return false;"));
         assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
         assert!(html.contains("if (deps.applyRemoteMemoUpdate(data)) {"));
-        assert!(html.contains("if (isMemoRefreshMessage(data)) {"));
+        assert!(html.contains(
+            "if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {"
+        ));
         assert!(html.contains("if (deps.queueRemoteMemoReload(data)) {"));
         assert!(html.contains("loadMemo(file, appContext.fetch.generation);"));
     }
@@ -671,7 +673,7 @@ mod tests {
         let toc = test_toc();
         let memo = MemoResponse::empty_with_load_error(
             Some("README.md".to_string()),
-            "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。",
+            "/tmp/private/path/README.md: permission denied",
         );
         let syntax_css = syntax_theme_css(Some("base16-ocean.dark"));
         let html = render_page(RenderPageParams {
@@ -687,11 +689,12 @@ mod tests {
         assert!(html.contains("id=\"memo-degraded-banner\""));
         assert!(html.contains("role=\"status\""));
         assert!(html.contains("内容を保護するため編集を無効化"));
+        assert!(!html.contains("/tmp/private/path"));
         assert!(html.contains("data-state=\"error\""));
         assert!(html.contains(">読込失敗</span>"));
         assert!(html.contains("id=\"memo-editor\""));
         assert!(html.contains("disabled aria-disabled=\"true\""));
-        assert!(html.contains("data.load_error"));
+        assert!(html.contains("MEMO_DEGRADED_MESSAGE"));
         assert!(html.contains("setMemoEditorDisabled(true)"));
     }
 

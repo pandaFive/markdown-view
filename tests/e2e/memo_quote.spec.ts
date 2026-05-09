@@ -115,6 +115,7 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
 
 test('明示対象の保存応答がdegradedなら編集を無効化してバナーを表示する', async ({ page }) => {
   const draft = 'explicit target draft must remain';
+  const putBodies: Array<{ raw?: string; file?: string | null }> = [];
   let releaseNotesContent!: () => void;
   const notesContentPending = new Promise<void>((resolve) => {
     releaseNotesContent = resolve;
@@ -143,6 +144,7 @@ test('明示対象の保存応答がdegradedなら編集を無効化してバナ
   await page.route('**/api/memo*', async (route) => {
     const request = route.request();
     if (request.method() === 'PUT') {
+      putBodies.push(request.postDataJSON() as { raw?: string; file?: string | null });
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -185,6 +187,7 @@ test('明示対象の保存応答がdegradedなら編集を無効化してバナ
   await expect(page.locator('#memo-degraded-banner')).toContainText('編集を無効化');
   await expect(memoEditor).toHaveValue(draft);
   await expect(memoEditor).toBeDisabled();
+  await expect.poll(() => putBodies).toEqual([{ raw: draft, file: 'README.md' }]);
   releaseNotesContent();
   releaseNotesMemo();
 });
@@ -237,6 +240,7 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
   await openMemoTab(page);
 
   await expect(page.locator('#memo-editor')).toBeEnabled();
+  await expect(page.locator('#memo-editor')).not.toHaveAttribute('aria-disabled', 'true');
   await expect(page.locator('#memo-editor')).toHaveValue('recovered readme memo');
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
   await expect(page.locator('#memo-degraded-banner')).toHaveCount(0);
@@ -284,7 +288,14 @@ test('メモ取得失敗時は古い本文を新ファイルへ保存できな�
   await openMemoTab(page);
 
   await expect(page.locator('#memo-editor')).toBeDisabled();
-  await expect(page.locator('#memo-save-status')).toContainText('失敗');
+  await expect(page.locator('#memo-editor')).toHaveValue('');
+  await expect(page.locator('#memo-preview')).toBeEmpty();
+  await expect(page.locator('#memo-save-status')).toHaveText('読込失敗');
+  await expect(page.locator('#memo-degraded-banner')).toContainText('内容を保護するため編集を無効化');
+  await expect(page.locator('#memo-degraded-banner')).not.toContainText('HTTP');
+  await expect(page.locator('#memo-degraded-banner')).not.toContainText('500');
+  await expect(page.locator('#memo-degraded-banner')).not.toContainText('メモの保存または取得に失敗しました');
+  await expect(page.locator('#memo-degraded-banner')).not.toContainText('memo load failed');
   await page.waitForTimeout(700);
   await expect.poll(() => putCount).toBe(0);
 });

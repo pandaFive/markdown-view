@@ -217,7 +217,7 @@ assert!(html.contains("data-state=\"error\""));
 assert!(html.contains(">読込失敗</span>"));
 assert!(html.contains("id=\"memo-editor\""));
 assert!(html.contains("disabled aria-disabled=\"true\""));
-assert!(html.contains("data.load_error"));
+assert!(html.contains("MEMO_DEGRADED_MESSAGE"));
 assert!(html.contains("setMemoEditorDisabled(true)"));
 ```
 
@@ -277,9 +277,8 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
     } else {
         ""
     };
-    let degraded_message = memo.load_error().unwrap_or(
-        "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。",
-    );
+    let degraded_message =
+        "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。";
     let degraded_banner = if is_degraded {
         format!(
             r##"      <div id="memo-degraded-banner" class="memo-degraded-banner" role="status">{message}</div>
@@ -493,9 +492,7 @@ function isMemoDegraded(data) {
 }
 
 function getMemoDegradedMessage(data) {
-  return data && data.load_error
-    ? data.load_error
-    : 'メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。';
+  return MEMO_DEGRADED_MESSAGE;
 }
 
 function setMemoDegradedBanner(message) {

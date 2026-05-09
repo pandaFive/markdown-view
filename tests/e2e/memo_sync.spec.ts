@@ -220,4 +220,6 @@ test('refresh payloadのmemo_refreshでメモを再取得する', async ({ page 
 
   await expect.poll(() => memoGetCount).toBe(beforeRefreshPayloadCount + 1);
   await expect(page.locator('#memo-editor')).toHaveValue('memo after combined refresh');
+  await page.waitForTimeout(300);
+  expect(memoGetCount).toBe(beforeRefreshPayloadCount + 1);
 });

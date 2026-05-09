@@ -255,9 +255,8 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
     } else {
         ""
     };
-    let degraded_message = memo.load_error().unwrap_or(
-        "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。",
-    );
+    let degraded_message =
+        "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。";
     let degraded_banner = if is_degraded {
         format!(
             r##"      <div id="memo-degraded-banner" class="memo-degraded-banner" role="status">{message}</div>

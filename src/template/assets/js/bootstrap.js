@@ -53,6 +53,7 @@ function createAppContext(doc) {
       saveTimer: null,
       caretStart: memoCaret,
       caretEnd: memoCaret,
+      previousLoadStatus: null,
       pendingReload: null
     },
     search: {
