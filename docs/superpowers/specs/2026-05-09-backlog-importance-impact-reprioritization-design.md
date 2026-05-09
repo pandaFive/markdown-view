@@ -83,7 +83,7 @@ docs 変更のため、TDD ではなく文書検証を行う。
 ```bash
 rg -n "^## |^- \\[ \\]|^- \\[x\\]|由来:" docs/todo/TODO.md docs/todo/BACKLOG.md
 rg -n "Host|Origin|CSP|sanitize|path|silent|watcher|atomic|memo|innerHTML|未信頼" docs/todo/TODO.md docs/todo/BACKLOG.md
-rg -n "TBD|未定|要確認|あとで|完了済みだが未完了" docs/todo/TODO.md docs/todo/BACKLOG.md
+rg -n "TB[D]|未[定]|要[確]認|あ[と]で|完了済みだが未[完]了" docs/todo/TODO.md docs/todo/BACKLOG.md
 git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md
 ```
 

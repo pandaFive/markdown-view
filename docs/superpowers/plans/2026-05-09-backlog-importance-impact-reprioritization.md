@@ -108,6 +108,7 @@ Replace the top of `docs/todo/TODO.md` from `# TODO Issues` through the line bef
 レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
 
 最終整理: 2026-05-09。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
+レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## High Priority
 
@@ -225,6 +226,7 @@ Replace the `docs/todo/BACKLOG.md` content from `# Backlog (Low Priority)` throu
 未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
 最終整理: 2026-05-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
+レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## P1: リスク低減・契約明文化
 
@@ -323,16 +325,18 @@ Replace the `docs/todo/BACKLOG.md` content from `# Backlog (Low Priority)` throu
 Run:
 
 ```bash
-rg -n -e 'watcher の `try_send`' -e 'panic::catch_unwind' -e 'Windows メモ原子保存' -e '/api/search' -e 'Host middleware 適用境界' -e 'Host middleware 化後' -e 'SanitizedHtml' -e 'assets バンドル' -e 'CSP/syntax_theme_css' docs/todo/TODO.md docs/todo/BACKLOG.md
+rg -n '^- \[ \].*(watcher の `try_send`|panic::catch_unwind|Windows メモ原子保存|/api/search|Host middleware 適用境界|Host middleware 化後|SanitizedHtml|assets バンドル|CSP/syntax_theme_css)' docs/todo/TODO.md docs/todo/BACKLOG.md
 ```
 
-Expected: each moved item title appears in `docs/todo/TODO.md`; no moved item title appears in the incomplete P1/P2/P3 area of `docs/todo/BACKLOG.md`. Matches inside `docs/todo/BACKLOG.md` Done are acceptable only if they are explicitly completed historical items.
+Expected: each moved item title appears only as an unfinished item in `docs/todo/TODO.md`; no moved item title appears as an unfinished item in `docs/todo/BACKLOG.md`.
 
 ## Task 3: Validate Documentation Structure
 
 **Files:**
 - Verify: `docs/todo/TODO.md`
 - Verify: `docs/todo/BACKLOG.md`
+- Verify: `docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md`
+- Verify: `docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md`
 
 - [ ] **Step 1: Count unfinished items by file**
 
@@ -345,9 +349,11 @@ rg -c "^- \\[ \\]" docs/todo/TODO.md docs/todo/BACKLOG.md
 Expected:
 
 ```text
-docs/todo/TODO.md: 9 unfinished items
-docs/todo/BACKLOG.md: 12 unfinished items
+docs/todo/TODO.md:9
+docs/todo/BACKLOG.md:12
 ```
+
+Output order may vary; pass if `TODO.md` reports 9 and `BACKLOG.md` reports 12.
 
 - [ ] **Step 2: Check priority headings**
 
@@ -384,20 +390,31 @@ Expected: matches exist in both files, with the highest-impact watcher, memo, qu
 Run:
 
 ```bash
-rg -n "未[定]|要[確]認|あ[と]で|完了済みだが未[完]了" docs/todo/TODO.md docs/todo/BACKLOG.md
+rg -n "未[定]|要[確]認|あ[と]で|完了済みだが未[完]了" docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md
 ```
 
 Expected: no matches.
 
-- [ ] **Step 5: Review the diff**
+- [ ] **Step 5: Check whitespace and reviewed-claim guard**
 
 Run:
 
 ```bash
-git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md
+git diff --check -- docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md
+rg -n 'レビュー由来の `現状`' docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md
 ```
 
-Expected: diff only changes priority placement and explanatory text in TODO/BACKLOG. It does not modify source code, tests, config, or Done Summary content.
+Expected: `git diff --check` has no output. The reviewed-claim guard exists in `TODO.md`, `BACKLOG.md`, and the exact replacement blocks in this plan.
+
+- [ ] **Step 6: Review the diff**
+
+Run:
+
+```bash
+git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-09-backlog-importance-impact-reprioritization-design.md docs/superpowers/plans/2026-05-09-backlog-importance-impact-reprioritization.md
+```
+
+Expected: diff only changes priority placement and explanatory text in TODO/BACKLOG plus the supporting Superpowers spec/plan docs. It does not modify source code, tests, config, or Done Summary content.
 
 ## Task 4: Commit The Reprioritization After User Approval
 
