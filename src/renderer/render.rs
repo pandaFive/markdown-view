@@ -8,7 +8,7 @@ use crate::markdown::{markdown_options, MarkdownProfile};
 
 use super::line::{block_line_attrs, line_block_marker_with, source_line_attrs, LineLookup};
 use super::security::{html_escape, sanitize_link_href};
-use super::state::RenderState;
+use super::state::{RenderState, RenderStateMismatch};
 use super::{generate_unique_id, slugify, syntax_set, HeadingInfo, SanitizedHtml};
 
 pub(super) struct RenderOutput {
@@ -168,6 +168,14 @@ fn log_ignored_markdown_end_tag(tag: &TagEnd) -> IgnoredMarkdownEventKind {
     IgnoredMarkdownEventKind::EndTag
 }
 
+fn log_render_state_mismatch(operation: &'static str, mismatch: RenderStateMismatch) {
+    tracing::warn!(
+        "[markdown-view] Markdown描画状態の不整合を回復: operation={} mismatch={:?}",
+        operation,
+        mismatch
+    );
+}
+
 fn handle_text(
     text: &str,
     range: &Range<usize>,
@@ -265,7 +273,9 @@ fn handle_code_block_end(
     state: &mut RenderState,
 ) {
     let line_attrs = code_block_line_attrs(&range, line_lookup, state);
-    state.finish_code_block(syntax_set, line_attrs);
+    if let Err(mismatch) = state.finish_code_block(syntax_set, line_attrs) {
+        log_render_state_mismatch("finish_code_block", mismatch);
+    }
 }
 
 fn handle_heading_start(level: u8, range: Range<usize>, state: &mut RenderState) {
@@ -279,11 +289,14 @@ fn handle_heading_end(line_lookup: &LineLookup, context: &mut RenderContext) {
     let slug = slugify(&text);
     let id = generate_unique_id(&slug, &mut context.id_counts);
     let heading_attrs = heading_line_attrs(line_lookup, state);
-    if let Some(heading_html) = state.finish_heading(id.clone(), heading_attrs) {
-        if let Some(level) = level {
-            context.headings.push(HeadingInfo { level, text, id });
+    match state.finish_heading(id.clone(), heading_attrs) {
+        Ok(heading_html) => {
+            if let Some(level) = level {
+                context.headings.push(HeadingInfo { level, text, id });
+            }
+            state.push_html(&heading_html);
         }
-        state.push_html(&heading_html);
+        Err(mismatch) => log_render_state_mismatch("finish_heading", mismatch),
     }
 }
 
@@ -292,11 +305,15 @@ fn handle_image_start(dest_url: &str, title: &str, state: &mut RenderState) {
 }
 
 fn handle_image_end(state: &mut RenderState) {
-    let image_html = state.finish_image();
-    if state.in_heading() {
-        state.push_heading_rendered_html_fragment(&image_html);
-    } else {
-        state.push_html(&image_html);
+    match state.finish_image() {
+        Ok(image_html) => {
+            if state.in_heading() {
+                state.push_heading_rendered_html_fragment(&image_html);
+            } else {
+                state.push_html(&image_html);
+            }
+        }
+        Err(mismatch) => log_render_state_mismatch("finish_image", mismatch),
     }
 }
 
@@ -412,23 +429,31 @@ fn handle_table_start(
 }
 
 fn handle_table_end(state: &mut RenderState) {
-    state.push_html("</table>\n");
-    state.finish_table();
+    match state.finish_table() {
+        Ok(()) => state.push_html("</table>\n"),
+        Err(mismatch) => log_render_state_mismatch("finish_table", mismatch),
+    }
 }
 
 fn handle_table_head_start(state: &mut RenderState) {
-    state.start_table_head();
-    state.push_html("<thead>\n");
+    match state.start_table_head() {
+        Ok(()) => state.push_html("<thead>\n"),
+        Err(mismatch) => log_render_state_mismatch("start_table_head", mismatch),
+    }
 }
 
 fn handle_table_head_end(state: &mut RenderState) {
-    state.push_html("</thead>\n");
-    state.finish_table_head();
+    match state.finish_table_head() {
+        Ok(()) => state.push_html("</thead>\n"),
+        Err(mismatch) => log_render_state_mismatch("finish_table_head", mismatch),
+    }
 }
 
 fn handle_table_row_start(state: &mut RenderState) {
-    state.push_html("<tr>\n");
-    state.reset_table_row();
+    match state.reset_table_row() {
+        Ok(()) => state.push_html("<tr>\n"),
+        Err(mismatch) => log_render_state_mismatch("reset_table_row", mismatch),
+    }
 }
 
 fn handle_table_row_end(state: &mut RenderState) {
@@ -436,12 +461,17 @@ fn handle_table_row_end(state: &mut RenderState) {
 }
 
 fn handle_table_cell_start(state: &mut RenderState) {
-    let tag = state.table_cell_start_tag();
-    state.push_html(&tag);
+    match state.table_cell_start_tag() {
+        Ok(tag) => state.push_html(&tag),
+        Err(mismatch) => log_render_state_mismatch("table_cell_start_tag", mismatch),
+    }
 }
 
 fn handle_table_cell_end(state: &mut RenderState) {
-    state.push_html(state.table_cell_end_tag());
+    match state.table_cell_end_tag() {
+        Ok(tag) => state.push_html(tag),
+        Err(mismatch) => log_render_state_mismatch("table_cell_end_tag", mismatch),
+    }
 }
 
 fn push_inline_tag(html: &'static str, state: &mut RenderState) {
