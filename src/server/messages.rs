@@ -54,7 +54,8 @@ impl BroadcastMessage {
             BroadcastMessage::MemoUpdate(update) => serde_json::to_string(update),
             BroadcastMessage::LaggedRecovery(message) => serde_json::to_string(message),
             BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
-                "refresh": true
+                "refresh": true,
+                "memo_refresh": true
             })),
             BroadcastMessage::Error(message) => serde_json::to_string(&error_message_json(message)),
         }
@@ -95,7 +96,14 @@ mod tests {
     fn test_broadcast_message_refreshのjson直列化() {
         let json = BroadcastMessage::Refresh.to_json().unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value, serde_json::json!({ "refresh": true }));
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "refresh": true,
+                "memo_refresh": true
+            })
+        );
     }
 
     #[test]

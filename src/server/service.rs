@@ -243,6 +243,7 @@ mod tests {
     use crate::server::files::{MockMemoFs, Op, RouteTargetKind};
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
+    use crate::template::MemoState;
 
     fn create_directory_state(base_dir: &std::path::Path) -> AppState {
         let (tx, _rx) = broadcast::channel::<BroadcastMessage>(16);
@@ -370,6 +371,7 @@ mod tests {
         assert_eq!(page.title, "note.md");
         assert!(page.update.content().as_str().contains("Note"));
         assert_eq!(page.memo.file(), None);
+        assert_eq!(page.memo.memo_state(), MemoState::Ready);
         assert_eq!(page.sidebar, SidebarView::SingleFile);
     }
 
@@ -384,6 +386,7 @@ mod tests {
 
         assert_eq!(page.memo.raw(), "");
         assert_eq!(page.memo.file(), Some("README.md"));
+        assert_eq!(page.memo.memo_state(), MemoState::Degraded);
         assert_eq!(
             page.memo.load_error(),
             Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
@@ -420,6 +423,7 @@ mod tests {
         .await
         .expect("index描画ではメモ読み込み失敗をフォールバックする");
         assert_eq!(page.memo.raw(), "");
+        assert_eq!(page.memo.memo_state(), MemoState::Degraded);
         assert_eq!(
             page.memo.load_error(),
             Some("メモの読み込みに失敗しました。内容を保護するため編集を無効化しました。")
