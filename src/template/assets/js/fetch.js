@@ -56,6 +56,9 @@ function getFileFetchErrorMessage(err) {
   if (err && err.type === 'parse') {
     return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
   }
+  if (err && err.type === 'contract') {
+    return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
+  }
   return 'ネットワークエラーが発生しました。接続を確認して再度お試しください。';
 }
 
@@ -93,8 +96,8 @@ function selectFile(file, pushHistory, options) {
     });
   })
   .then(function(data) {
-    hideFileFetchErrorBanner();
     if (gen !== appContext.fetch.generation) return;
+    hideFileFetchErrorBanner();
     if (!appContext.config.isDirMode && previousFile && previousFile !== file) {
       appContext.content.clearDocumentSearchQuery();
     }
@@ -106,7 +109,9 @@ function selectFile(file, pushHistory, options) {
       clearHashOnMiss: pushHistory
     });
     if (updateResult && updateResult.contractViolation) {
-      throw new Error('content response contract violation');
+      var err = new Error('content response contract violation');
+      err.type = 'contract';
+      throw err;
     }
     if (appContext.config.isDirMode && !pushHistory) {
       setFileParam(appContext.state.currentFile, true, options.historyHash);

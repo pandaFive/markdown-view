@@ -139,15 +139,12 @@ test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page })
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
-  await page.evaluate(() => {
-    window.markdownViewTestHooks.moveDocumentSearch(1);
-  });
+  await page.locator('#document-search-input').focus();
+  await page.keyboard.press('Enter');
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 
-  await page.evaluate(() => {
-    window.markdownViewTestHooks.moveDocumentSearch(-1);
-  });
+  await page.keyboard.press('Shift+Enter');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(0)).toHaveClass(/active/);
 });
@@ -261,6 +258,94 @@ test('ファイル切り替え失敗時は元文書の検索状態を維持す�
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(3);
 });
 
+test('古いファイル取得成功は新しい取得エラー表示を消さない', async ({ page }) => {
+  let oldRequestStarted = false;
+  let releaseOldResponse!: () => void;
+
+  await page.route('**/api/content**', async (route) => {
+    const url = new URL(route.request().url());
+    const file = url.searchParams.get('file');
+
+    if (file === 'old.md') {
+      oldRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseOldResponse = resolve;
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          file: 'old.md',
+          content: '<h1 id="old">Old</h1><p>old response should stay stale</p>',
+          toc: '<ul><li><a href="#old">Old</a></li></ul>'
+        })
+      });
+      return;
+    }
+
+    if (file === 'missing.md') {
+      await route.fulfill({ status: 404, contentType: 'text/plain', body: 'missing' });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.selectFile('old.md');
+  });
+  await expect.poll(() => oldRequestStarted).toBe(true);
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.selectFile('missing.md');
+  });
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
+
+  const oldResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/content' && url.searchParams.get('file') === 'old.md';
+  });
+  releaseOldResponse();
+  await oldResponse;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
+  await expect(page.locator('#content')).not.toContainText('old response should stay stale');
+});
+
+test('ファイル取得の契約違反はサーバー応答エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/content**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('file') === 'broken.md') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          file: 'broken.md',
+          content: '<h1 id="broken">Broken</h1>'
+        })
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+    window.markdownViewTestHooks.selectFile('broken.md');
+  });
+
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('サーバー応答の解析に失敗しました。');
+  await expect(page.locator('#file-fetch-error-banner')).not.toContainText('ネットワークエラー');
+  await expect(page.locator('#content')).not.toContainText('Broken');
+});
+
 test('live update後も検索結果を再適用する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
@@ -323,9 +408,7 @@ test('検索queryは検索結果リストでHTMLとして解釈されない', as
   });
 
   const query = '<img src=x onerror=alert(1)>';
-  await page.evaluate((value) => {
-    window.markdownViewTestHooks.applyDocumentSearchQuery(value);
-  }, query);
+  await setDocumentSearchQuery(page, query);
 
   await expect(page.locator('#document-search-results')).toContainText(query);
   await expect(page.locator('#document-search-results img')).toHaveCount(0);
@@ -452,6 +535,33 @@ test('ディレクトリ検索の不正な成功応答は検索エラーとし�
       contentType: 'application/json',
       body: JSON.stringify({
         results: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
+});
+
+test('ディレクトリ検索の不正な結果要素は検索エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha',
+        results: [{}]
       })
     });
   });

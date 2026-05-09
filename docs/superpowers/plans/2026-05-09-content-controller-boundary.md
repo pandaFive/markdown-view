@@ -22,7 +22,7 @@
 - Modify `src/template/assets/js/fetch.js`: call `appContext.content.updateContent`, `appContext.content.clearDocumentSearchQuery`, `appContext.content.syncDocumentChrome`, and `appContext.content.renderDirectorySearchUi` instead of content top-level functions.
 - Modify `src/template/assets/js/selection.js`: call `appContext.content.applyPendingUpdate()`.
 - Modify `src/template/assets/js/sidebar.js`: initialize the content controller in `startMarkdownViewApp`, wire E2E hooks through `appContext.content`, and call content APIs for reading progress and restore navigation.
-- Inspect `src/template/assets/js/websocket.js`: keep it unchanged because it already calls the injected `deps.updateContent(data)` path.
+- Modify `src/template/assets/js/websocket.js`: keep the injected `deps.updateContent(data)` path, but route live status, directory-search reschedule, and update payload contract violations through content-controller-facing dependencies.
 - Modify `tests/e2e/update_content_exposure.spec.ts`: assert new internal names are discovered and production `window` remains clean.
 - Modify or add tests in `tests/e2e/document_search.spec.ts` and `tests/e2e/markdown_links.spec.ts` for security/stale-result regressions.
 

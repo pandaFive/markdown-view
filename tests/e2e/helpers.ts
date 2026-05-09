@@ -321,12 +321,12 @@ export async function updateContent(
   data: MvE2E.UpdateContentPayload,
   opts?: MvE2E.UpdateContentOptions
 ) {
-  await page.evaluate(({ payload, options }) => {
+  return page.evaluate(({ payload, options }) => {
     const hooks = window.markdownViewTestHooks;
     if (!hooks) {
       throw new Error('window.markdownViewTestHooks is not exposed for E2E');
     }
-    hooks.updateContent(payload, options);
+    return hooks.updateContent(payload, options);
   }, { payload: data, options: opts });
 }
 
@@ -335,12 +335,13 @@ export async function updateContentAndActivateToc(
   data: MvE2E.UpdateContentPayload,
   opts?: MvE2E.UpdateContentOptions
 ) {
-  await page.evaluate(({ payload, options }) => {
+  return page.evaluate(({ payload, options }) => {
     const hooks = window.markdownViewTestHooks;
     if (!hooks) {
       throw new Error('window.markdownViewTestHooks is not exposed for E2E');
     }
-    hooks.updateContent(payload, options);
+    const result = hooks.updateContent(payload, options);
     hooks.activateSidebarTab('toc');
+    return result;
   }, { payload: data, options: opts });
 }

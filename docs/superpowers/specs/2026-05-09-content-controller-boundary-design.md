@@ -191,8 +191,8 @@ directory-search
 
 ## Error Handling
 
-- update payload の `content` / `toc` 欠落または型不正は、既存どおり `content-renderer.js` で warn する。
-- controller は契約違反時も、現状と同じく可能な範囲で update 処理を継続する。
+- update payload の `content` / `toc` 欠落または型不正は、`content-renderer.js` で warn する。
+- controller は契約違反時に `{ ok: false, contractViolation: true }` を返し、本文/TOC は更新しない。WebSocket 経路では成功状態へ戻さず error 表示にする。
 - ディレクトリ検索の HTTP error、JSON parse error、fetch error は `directory-search.js` に閉じ込め、既存の `getFileFetchErrorMessage` 経由の表示を維持する。
 - 古い generation、query 不一致、ファイル切替後に対応しない検索結果は破棄する。
 - hash miss、リンクパス decode failure、同一ファイル内見出し未発見は `content-navigation.js` で warn し、既存の先頭戻しまたは hash clear 挙動を維持する。
