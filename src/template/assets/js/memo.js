@@ -18,6 +18,42 @@ function setMemoSaveStatus(state, text) {
   appContext.elements.memoSaveStatusEl.textContent = text;
 }
 
+function isMemoDegraded(data) {
+  return !!data && (data.memo_state === 'degraded' || !!data.load_error);
+}
+
+function getMemoDegradedMessage(data) {
+  return data && data.load_error
+    ? data.load_error
+    : 'メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。';
+}
+
+function setMemoDegradedBanner(message) {
+  if (!appContext.elements.memoEditorEl) return;
+  var layout = appContext.elements.memoEditorEl.closest('.memo-layout');
+  if (!layout) return;
+  var existing = document.getElementById('memo-degraded-banner');
+  if (!message) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (!existing) {
+    existing = document.createElement('div');
+    existing.id = 'memo-degraded-banner';
+    existing.className = 'memo-degraded-banner';
+    existing.setAttribute('role', 'status');
+    var toolbar = layout.querySelector('.memo-toolbar');
+    if (toolbar && toolbar.nextSibling) {
+      layout.insertBefore(existing, toolbar.nextSibling);
+    } else if (toolbar) {
+      layout.appendChild(existing);
+    } else {
+      layout.insertBefore(existing, layout.firstChild);
+    }
+  }
+  existing.textContent = message;
+}
+
 function setMemoSavedStatus() {
   if (isLiveSyncDisconnected()) {
     setMemoSaveStatus('error', '保存済み（同期待ち）');
@@ -107,14 +143,16 @@ function updateMemoPreview(data) {
 function applyMemoData(data, options) {
   if (!appContext.elements.memoEditorEl || !appContext.elements.memoPreviewEl || !data) return true;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
-  if (data.load_error) {
-    // load_error 時は raw を上書きしない。読み込み失敗応答でユーザ編集中の内容を破壊しないため。
+  if (isMemoDegraded(data)) {
+    // degraded 時は raw を上書きしない。読み込み失敗応答でユーザ編集中の内容を破壊しないため。
     cancelMemoAutosave();
     updateMemoPreview(data);
     setMemoEditorDisabled(true);
-    setMemoSaveStatus('error', data.load_error);
+    setMemoDegradedBanner(getMemoDegradedMessage(data));
+    setMemoSaveStatus('error', '読込失敗');
     return false;
   }
+  setMemoDegradedBanner('');
   if (typeof data.html !== 'string') {
     updateMemoPreview(data);
     setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
@@ -280,6 +318,7 @@ function loadMemo(file, ownerGeneration) {
     // 取得失敗時は古い本文を別ファイル名で上書き保存する事故を防ぐため、復旧まで編集を止める。
     cancelMemoAutosave();
     setMemoEditorDisabled(true);
+    setMemoDegradedBanner(getMemoErrorMessage(err));
     setMemoSaveStatus('error', getMemoErrorMessage(err));
     flushPendingMemoReloadIfSafe();
   });

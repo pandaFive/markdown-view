@@ -68,7 +68,8 @@ test('メモ読み込み失敗中は引用挿入から保存しない', async ({
   await page.goto('/');
   await expect(page.locator('#content')).toContainText('Initial README content');
   await expect(page.locator('#memo-editor')).toBeDisabled();
-  await expect(page.locator('#memo-save-status')).toContainText('編集を無効化');
+  await expect(page.locator('#memo-save-status')).toContainText('読込失敗');
+  await expect(page.locator('#memo-degraded-banner')).toContainText('内容を保護するため編集を無効化');
 
   await selectParagraphText(page, 'Initial README content');
   const quoteButton = page.locator('#quote-selection-action');
@@ -90,6 +91,7 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
         body: JSON.stringify({
           raw: '',
           html: '<p>broken memo</p>',
+          memo_state: 'degraded',
           load_error: 'メモを読み込めませんでした。編集を無効化しました。'
         })
       });
@@ -105,7 +107,8 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
   const memoEditor = page.locator('#memo-editor');
   await memoEditor.fill('local draft that must remain');
 
-  await expect(page.locator('#memo-save-status')).toContainText('編集を無効化');
+  await expect(page.locator('#memo-save-status')).toContainText('読込失敗');
+  await expect(page.locator('#memo-degraded-banner')).toContainText('編集を無効化');
   await expect(memoEditor).toHaveValue('local draft that must remain');
   await expect(memoEditor).toBeDisabled();
 });
@@ -126,6 +129,7 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
           raw: '',
           html: '',
           file: 'notes.md',
+          memo_state: 'degraded',
           load_error: 'メモを読み込めませんでした。編集を無効化しました。'
         })
       });
@@ -137,7 +141,8 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
       body: JSON.stringify({
         raw: 'recovered readme memo',
         html: '<p>recovered readme memo</p>',
-        file: 'README.md'
+        file: 'README.md',
+        memo_state: 'ready'
       })
     });
   });
@@ -150,6 +155,7 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
   await selectFile(page, 'notes.md');
   await openMemoTab(page);
   await expect(page.locator('#memo-editor')).toBeDisabled();
+  await expect(page.locator('#memo-degraded-banner')).toContainText('編集を無効化');
 
   await selectFile(page, 'README.md');
   await openMemoTab(page);
@@ -157,6 +163,7 @@ test('メモload_error後もファイル切替で編集を再開できる', asyn
   await expect(page.locator('#memo-editor')).toBeEnabled();
   await expect(page.locator('#memo-editor')).toHaveValue('recovered readme memo');
   await expect(page.locator('#memo-save-status')).toHaveText('保存済み');
+  await expect(page.locator('#memo-degraded-banner')).toHaveCount(0);
 });
 
 test('メモ取得失敗時は古い本文を新ファイルへ保存できないようエディタを無効化する', async ({ page }) => {
