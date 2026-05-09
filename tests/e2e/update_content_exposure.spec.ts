@@ -21,7 +21,11 @@ const internalGlobalNames = Array.from(new Set(
 test('内部グローバル名抽出は実ファイルから十分な宣言数を拾う', async () => {
   expect(internalGlobalNames.length).toBeGreaterThan(20);
   expect(internalGlobalNames).toContain('startMarkdownViewApp');
-  expect(internalGlobalNames).toContain('updateContent');
+  expect(internalGlobalNames).toContain('createContentController');
+  expect(internalGlobalNames).toContain('createContentEnhancements');
+  expect(internalGlobalNames).toContain('createContentNavigation');
+  expect(internalGlobalNames).toContain('createDocumentSearchController');
+  expect(internalGlobalNames).toContain('createDirectorySearchController');
   expect(internalGlobalNames).toContain('createWebSocketController');
   expect(internalGlobalNames).toContain('validateUpdatePayload');
   expect(internalGlobalNames).toContain('applyValidatedUpdateHtml');
@@ -68,6 +72,10 @@ test('production実行では内部APIを公開しない', async ({ page }) => {
     return names.filter((name) => typeof win[name] !== 'undefined');
   }, internalGlobalNames);
   expect(exposed).toEqual([]);
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).createContentController)).resolves.toBe('undefined');
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).createDocumentSearchController)).resolves.toBe('undefined');
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).createDirectorySearchController)).resolves.toBe('undefined');
+  await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).appContext)).resolves.toBe('undefined');
   await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).validateUpdatePayload)).resolves.toBe('undefined');
   await expect(page.evaluate(() => typeof (window as unknown as Record<string, unknown>).applyValidatedUpdateHtml)).resolves.toBe('undefined');
   const addedWindowProps = (await ownWindowPropertyNames(page)).filter((name) => !baseline.has(name));

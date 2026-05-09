@@ -52,18 +52,7 @@ async function currentMatchText(page: Page) {
 }
 
 async function setDocumentSearchQuery(page: Page, query: string) {
-  await page.evaluate((value) => {
-    const input = document.getElementById('document-search-input');
-    if (!(input instanceof HTMLInputElement)) {
-      throw new Error('document search input not found');
-    }
-    input.value = value;
-    if (window.markdownViewTestHooks) {
-      window.markdownViewTestHooks.applyDocumentSearchQuery(value);
-      return;
-    }
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  }, query);
+  await page.locator('#document-search-input').fill(query);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -150,15 +139,12 @@ test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page })
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
 
-  await page.evaluate(() => {
-    window.markdownViewTestHooks.moveDocumentSearch(1);
-  });
+  await page.locator('#document-search-input').focus();
+  await page.keyboard.press('Enter');
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
 
-  await page.evaluate(() => {
-    window.markdownViewTestHooks.moveDocumentSearch(-1);
-  });
+  await page.keyboard.press('Shift+Enter');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(0)).toHaveClass(/active/);
 });
@@ -272,6 +258,94 @@ test('ファイル切り替え失敗時は元文書の検索状態を維持す�
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(3);
 });
 
+test('古いファイル取得成功は新しい取得エラー表示を消さない', async ({ page }) => {
+  let oldRequestStarted = false;
+  let releaseOldResponse!: () => void;
+
+  await page.route('**/api/content**', async (route) => {
+    const url = new URL(route.request().url());
+    const file = url.searchParams.get('file');
+
+    if (file === 'old.md') {
+      oldRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseOldResponse = resolve;
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          file: 'old.md',
+          content: '<h1 id="old">Old</h1><p>old response should stay stale</p>',
+          toc: '<ul><li><a href="#old">Old</a></li></ul>'
+        })
+      });
+      return;
+    }
+
+    if (file === 'missing.md') {
+      await route.fulfill({ status: 404, contentType: 'text/plain', body: 'missing' });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.selectFile('old.md');
+  });
+  await expect.poll(() => oldRequestStarted).toBe(true);
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.selectFile('missing.md');
+  });
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
+
+  const oldResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/content' && url.searchParams.get('file') === 'old.md';
+  });
+  releaseOldResponse();
+  await oldResponse;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('指定したファイルが見つかりません。');
+  await expect(page.locator('#content')).not.toContainText('old response should stay stale');
+});
+
+test('ファイル取得の契約違反はサーバー応答エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/content**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('file') === 'broken.md') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          file: 'broken.md',
+          content: '<h1 id="broken">Broken</h1>'
+        })
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+    window.markdownViewTestHooks.selectFile('broken.md');
+  });
+
+  await expect(page.locator('#file-fetch-error-banner')).toContainText('サーバー応答の解析に失敗しました。');
+  await expect(page.locator('#file-fetch-error-banner')).not.toContainText('ネットワークエラー');
+  await expect(page.locator('#content')).not.toContainText('Broken');
+});
+
 test('live update後も検索結果を再適用する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
@@ -322,6 +396,61 @@ test('検索結果一覧に前後文を表示してクリックで該当箇所�
   });
   await expect(page.locator('#document-search-summary')).toHaveText('2 / 2 件');
   await expect(page.locator('#document-search-results .document-search-result').nth(1)).toHaveClass(/active/);
+});
+
+test('検索queryは検索結果リストでHTMLとして解釈されない', async ({ page }) => {
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(false);
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<p>literal &lt;img src=x onerror=alert(1)&gt; appears here</p>',
+    toc: '<ul></ul>'
+  });
+
+  const query = '<img src=x onerror=alert(1)>';
+  await setDocumentSearchQuery(page, query);
+
+  await expect(page.locator('#document-search-results')).toContainText(query);
+  await expect(page.locator('#document-search-results img')).toHaveCount(0);
+  await expect(page.locator('mark.document-search-match')).toHaveCount(1);
+});
+
+test('ディレクトリ検索結果はHTMLとして解釈されない', async ({ page }) => {
+  const injected = '<img src=x onerror=alert(1)>';
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: injected,
+        results: [
+          {
+            file: injected,
+            file_match_index: 0,
+            before: 'before ' + injected,
+            current: injected,
+            after: injected + ' after'
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>literal marker</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, injected);
+
+  await expect(page.locator('#document-search-results')).toContainText(injected);
+  await expect(page.locator('#document-search-results img')).toHaveCount(0);
 });
 
 test('検索結果移動時に一覧のスクロール位置を維持する', async ({ page }) => {
@@ -397,6 +526,59 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('README.md');
   await expect(page.locator('#document-search-results .document-search-result').nth(1))
     .toContainText('notes.md');
+});
+
+test('ディレクトリ検索の不正な成功応答は検索エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        results: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
+});
+
+test('ディレクトリ検索の不正な結果要素は検索エラーとして表示する', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: 'alpha',
+        results: [{}]
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
 });
 
 test('ディレクトリモードでは検索打ち切り警告を結果一覧の先頭に表示する', async ({ page }) => {
@@ -933,4 +1115,73 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
   await expect(page.locator('#document-search-results .document-search-result').first())
     .toContainText('Beta result is visible.');
   await expect(page.locator('#document-search-results')).not.toContainText('サーバー内部エラーが発生しました。');
+});
+
+test('ディレクトリ検索の古い応答は現在queryへ適用されない', async ({ page }) => {
+  let firstRequestStarted = false;
+  let releaseFirstResponse!: () => void;
+
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q');
+
+    if (query === 'alpha') {
+      firstRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseFirstResponse = resolve;
+      });
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'alpha',
+          results: [{ file: 'notes.md', line: 1, before: '', current: 'alpha old', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    if (query === 'beta') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'beta',
+          results: [{ file: 'README.md', line: 1, before: '', current: 'beta current', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>alpha text</p><p>beta text</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstRequestStarted).toBe(true);
+
+  await setDocumentSearchQuery(page, 'beta');
+  await expect(page.locator('#document-search-results')).toContainText('beta current');
+
+  const alphaResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/search' && url.searchParams.get('q') === 'alpha';
+  });
+  releaseFirstResponse();
+  await alphaResponse;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(page.locator('#document-search-results')).toContainText('beta current');
+  await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
 });

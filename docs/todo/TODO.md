@@ -2,7 +2,7 @@
 
 レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
 
-最終整理: 2026-05-05。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
+最終整理: 2026-05-09。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
 
 ## High Priority
 
@@ -11,12 +11,6 @@
 ## Medium Priority
 
 以下はリスク低減順に実行する。起動不能や silent failure に近い項目を先に扱い、変更範囲が大きい構造変更は後ろへ置く。
-
-- [ ] ブラウザ JS の責務境界を小モジュールへ分割する
-  - ファイル: `src/template/assets/js/{bootstrap,content,content-renderer,fetch,memo,selection,sidebar,websocket}.js`, `src/template/assets/inline_script.rs`
-  - 現状: `docs/superpowers/plans/2026-04-30-browser-js-deglobalization.md` の実行で production の `window` 露出は IIFE と `appContext` 集約により解消済み。E2E用内部操作も `window.__MV_E2E__ === true` 時の `markdownViewTestHooks` に限定した。さらに `content-renderer.js` で `updateContent` の payload 契約、契約違反 warn、`#content` / `#toc` への sanitize 済み HTML 反映、TOC HTML 正規化を明示境界へ切り出した。一方、`content.js` は検索、リンク解決、履歴、スクロール、引用ジャンプ、描画後副作用をまだまとめて扱う巨大ファイルのままで、controller API と依存境界は未整理
-  - 対応: 次の分割単位を `document-search` / `directory-search`、`navigation` / `link-resolution`、`createContentController(ctx, deps)` の順で切る。`innerHTML` 使用箇所は引き続き信頼境界を明示し、検索やメモを削る、または純プレビューモードへ戻すことは非目標
-  - 理由: 問題は「機能が多いこと」ではなく、workspace として成長した中核機能群の境界がブラウザ JS 内で十分に表現されていないこと。`content-renderer` により最重要の XSS 信頼境界は狭まったが、巨大ファイルと暗黙の `appContext` 依存が残ると将来の入力経路追加で状態遷移を壊しやすい
 
 - [ ] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
   - ファイル: `src/template/mod.rs` (740 行), `src/template/page.rs` L45-104
@@ -32,6 +26,8 @@
 
 ## Done Summary
 
+- [x] ブラウザ JS の責務境界を小モジュールへ分割する
+  - 完了根拠: `content.js` の責務を `content-controller.js`、`content-enhancements.js`、`content-navigation.js`、`document-search.js`、`directory-search.js` に分割し、本文更新、検索、ディレクトリ検索、内部リンク解決、描画後副作用を明示境界へ分けた。`content-renderer.js` の sanitize 済み HTML 反映境界は維持し、検索 query と検索結果は DOM API で描画する構成にした。production `window` への内部 API 露出は増やさず、E2E hook は `window.__MV_E2E__ === true` の場合だけ公開する。検索、Markdown link、memo citation jump、update exposure の E2E で回帰を固定した
 - [x] `BroadcastMessage::Refresh` の memo_refresh 契約と、メモ読込失敗時の degrade 通知を明示する
   - 完了根拠: `MemoResponse` に `memo_state` を追加し、通常時は `ready`、読込失敗時は `degraded` として直列化する契約にした。初期ページ描画ではメモ読込失敗を degraded response に変換し、メモパネルに専用バナーを表示して textarea と autosave を止める。ブラウザ側の `applyMemoData` も `memo_state: "degraded"` を主条件にし、読込失敗応答で編集中本文を上書きしない。`BroadcastMessage::Refresh` は `refresh: true` と `memo_refresh: true` を含む JSON へ揃え、refresh payload によるメモ再取得を E2E で固定した
 - [x] watcher 再帰監視の除外パターンと ENOSPC ユーザー文言を追加する

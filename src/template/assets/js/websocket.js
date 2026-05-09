@@ -78,10 +78,15 @@ function createWebSocketController(ctx, deps) {
       return;
     }
 
-    deps.updateContent(data);
+    var result = deps.updateContent(data);
+    if (result && result.contractViolation) {
+      showWsServerErrorBanner('サーバーから不正な更新データを受信しました。ページを再読み込みしてください。');
+      deps.setLiveStatus('error');
+      return;
+    }
     hideWsServerErrorBanner();
     hideFileFetchErrorBanner();
-    setLiveStatus('live');
+    deps.setLiveStatus('live');
   }
 
   function scheduleBufferedLiveUpdate(data) {
@@ -108,7 +113,7 @@ function createWebSocketController(ctx, deps) {
       // 接続成功は WebSocket 経路の一時エラーからの復旧点なので、WS バナーだけを解除する。
       hideWsParseErrorBanner();
       hideWsServerErrorBanner();
-      setLiveStatus('live');
+      deps.setLiveStatus('live');
     };
 
     socket.onmessage = function(event) {
@@ -118,7 +123,7 @@ function createWebSocketController(ctx, deps) {
       } catch (e) {
         console.error('[markdown-view] JSONパースエラー:', e);
         showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
-        setLiveStatus('error');
+        deps.setLiveStatus('error');
         suppressNextReconnect = true;
         socket.close();
         return;
@@ -128,7 +133,7 @@ function createWebSocketController(ctx, deps) {
           payloadType: describeInvalidWebSocketPayload(data)
         });
         showWsParseErrorBanner('サーバーから形式が不正なWebSocketメッセージを受信しました。ページを再読み込みしてください。');
-        setLiveStatus('error');
+        deps.setLiveStatus('error');
         suppressNextReconnect = true;
         socket.close();
         return;
@@ -137,7 +142,7 @@ function createWebSocketController(ctx, deps) {
       if (data.error) {
         console.error('[markdown-view] サーバーエラー:', data.error);
         showWsServerErrorBanner(data.error);
-        setLiveStatus('error');
+        deps.setLiveStatus('error');
         return;
       }
       if (isMemoUpdateMessage(data)) {
@@ -145,7 +150,7 @@ function createWebSocketController(ctx, deps) {
           hideWsServerErrorBanner();
           hideFileFetchErrorBanner();
         }
-        setLiveStatus('live');
+        deps.setLiveStatus('live');
         return;
       }
       if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {
@@ -186,7 +191,7 @@ function createWebSocketController(ctx, deps) {
       if (ctx.config.isDirMode && data.file) {
         if (data.file !== ctx.state.currentFile) {
           if (ctx.search.currentDocumentQuery) {
-            scheduleDirectorySearch(ctx.search.currentDocumentQuery);
+            deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
           }
           return;
         }
@@ -200,14 +205,14 @@ function createWebSocketController(ctx, deps) {
         return;
       }
       if (!document.getElementById('ws-parse-error-banner') && !document.getElementById('ws-server-error-banner')) {
-        setLiveStatus('retry');
+        deps.setLiveStatus('retry');
       }
       scheduleReconnect();
     };
 
     socket.onerror = function(event) {
       console.error('[markdown-view] WebSocketエラー:', event);
-      setLiveStatus('error');
+      deps.setLiveStatus('error');
       socket.close();
     };
   }
@@ -215,7 +220,7 @@ function createWebSocketController(ctx, deps) {
   function scheduleReconnect() {
     if (socketReconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
       console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
-      showDisconnectBanner();
+      showDisconnectBanner(deps);
       return;
     }
     var delay = Math.min(WS_RECONNECT_BASE * Math.pow(2, socketReconnectAttempts), WS_RECONNECT_MAX_DELAY);
@@ -231,9 +236,9 @@ function createWebSocketController(ctx, deps) {
   };
 }
 
-function showDisconnectBanner() {
+function showDisconnectBanner(deps) {
   if (document.getElementById('ws-disconnect-banner')) return;
-  setLiveStatus('offline');
+  deps.setLiveStatus('offline');
   var banner = document.createElement('div');
   banner.id = 'ws-disconnect-banner';
   banner.className = 'error-banner disconnect';

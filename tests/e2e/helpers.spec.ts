@@ -351,6 +351,20 @@ test('WebSocket再接続成功時にサーバーエラーバナーを解除す�
   await expect(page.locator('#ws-server-error-banner')).toHaveCount(0);
 });
 
+test('WebSocket更新の契約違反は成功状態に戻さず本文を部分更新しない', async ({ page }) => {
+  await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+
+  await dispatchWsMessage(page, {
+    content: '<h1 data-contract-violation>should not apply</h1>'
+  } as MvE2E.UpdateMessage);
+
+  await expect(page.locator('#ws-server-error-banner')).toContainText('不正な更新データ');
+  await expect(page.locator('#live-status')).toHaveAttribute('data-state', 'error');
+  await expect(page.locator('#content [data-contract-violation]')).toHaveCount(0);
+});
+
 test('WebSocket errorはサーバーエラーバナーを出さず再接続する', async ({ page }) => {
   await page.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
   await page.reload();

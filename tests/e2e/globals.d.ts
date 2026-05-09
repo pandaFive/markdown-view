@@ -25,6 +25,11 @@ declare global {
       clearHashOnMiss?: boolean;
       requeryDirectorySearch?: boolean;
     };
+    type UpdateContentResult = {
+      ok: boolean;
+      contractViolation: boolean;
+      missing: string[];
+    };
     type ClickObservation = {
       defaultPrevented: boolean;
     };
@@ -58,7 +63,7 @@ declare global {
       setCurrentFileForTest(file: string): void;
       setDirModeForTest(value: boolean): void;
       setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
-      updateContent(data: MvE2E.UpdateMessage, opts?: MvE2E.UpdateContentOptions): void;
+      updateContent(data: MvE2E.UpdateMessage, opts?: MvE2E.UpdateContentOptions): MvE2E.UpdateContentResult;
       readonly isDirMode: boolean;
       readonly currentFile: string;
       readonly lastAppliedContent: string | null;
