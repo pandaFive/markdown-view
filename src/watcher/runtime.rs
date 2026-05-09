@@ -57,15 +57,6 @@ impl ErrorDeliveryState {
         true
     }
 
-    fn reset_in_flight(&self) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.in_flight = false;
-        inner.coalesced_count = 0;
-    }
-
     fn coalesce(&self) -> u64 {
         let mut inner = self
             .inner
@@ -500,6 +491,23 @@ fn enqueue_blocking_error_delivery(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
 ) {
+    enqueue_blocking_error_delivery_with_spawner(tx, error, label, error_delivery_state, |job| {
+        std::thread::Builder::new()
+            .name("markdown-view-watch-error-delivery".to_string())
+            .spawn(job)
+            .map(|_| ())
+    });
+}
+
+fn enqueue_blocking_error_delivery_with_spawner<F>(
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: &str,
+    error_delivery_state: &ErrorDeliveryState,
+    spawn_delivery: F,
+) where
+    F: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+{
     if !error_delivery_state.try_mark_in_flight() {
         let coalesced = error_delivery_state.coalesce();
         tracing::warn!(
@@ -513,37 +521,55 @@ fn enqueue_blocking_error_delivery(
 
     let label = label.to_string();
     let delivery_label = label.clone();
+    let fallback_label = label.clone();
     let error_kind = error.kind();
     let state = error_delivery_state.clone();
-    match std::thread::Builder::new()
-        .name("markdown-view-watch-error-delivery".to_string())
-        .spawn(move || {
-            if tx.blocking_send(WatchEvent::Error(error)).is_err() {
-                tracing::warn!(
-                    error_kind = ?error_kind,
-                    "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}",
-                    delivery_label
-                );
-            }
-            let coalesced = state.complete_in_flight();
-            if coalesced > 0 {
-                tracing::warn!(
-                    coalesced,
-                    "[markdown-view] 送達待機中に発生した監視エラーを集約しました: {}",
-                    delivery_label
-                );
-            }
-        }) {
+    let fallback_tx = tx.clone();
+    let fallback_error = error.clone();
+    let fallback_state = state.clone();
+    match spawn_delivery(Box::new(move || {
+        deliver_blocking_error_event(tx, error, &delivery_label, error_kind, &state);
+    })) {
         Ok(_) => {}
         Err(spawn_error) => {
-            error_delivery_state.reset_in_flight();
             tracing::warn!(
                 error_kind = ?error_kind,
-                "[markdown-view] 監視エラー送達スレッドの起動に失敗しました。次回エラーで再試行します: {}, {}",
+                "[markdown-view] 監視エラー送達スレッドの起動に失敗しました。同期送達へフォールバックします: {}, {}",
                 label,
                 spawn_error
             );
+            deliver_blocking_error_event(
+                fallback_tx,
+                fallback_error,
+                &fallback_label,
+                error_kind,
+                &fallback_state,
+            );
         }
+    }
+}
+
+fn deliver_blocking_error_event(
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: &str,
+    error_kind: super::WatchErrorKind,
+    error_delivery_state: &ErrorDeliveryState,
+) {
+    if tx.blocking_send(WatchEvent::Error(error)).is_err() {
+        tracing::warn!(
+            error_kind = ?error_kind,
+            "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}",
+            label
+        );
+    }
+    let coalesced = error_delivery_state.complete_in_flight();
+    if coalesced > 0 {
+        tracing::warn!(
+            coalesced,
+            "[markdown-view] 送達待機中に発生した監視エラーを集約しました: {}",
+            label
+        );
     }
 }
 
@@ -1882,6 +1908,62 @@ mod tests {
             error_delivery_state.coalesced_count(),
             0,
             "集約件数は送達完了時に消費する"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorはhelper_thread起動失敗時もfallback送達する() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
+            .expect("channelを満杯にできる");
+
+        let delivery_state = error_delivery_state.clone();
+        let delivery_tx = tx.clone();
+        let delivery_thread = std::thread::spawn(move || {
+            super::enqueue_blocking_error_delivery_with_spawner(
+                delivery_tx,
+                WatchError::notify("helper spawn failure fallback"),
+                "helper起動失敗fallbackテスト",
+                &delivery_state,
+                |_job| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "thread spawn failed",
+                    ))
+                },
+            );
+        });
+        drop(tx);
+
+        match rx.blocking_recv().expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match recv_event_until(&mut rx, Duration::from_secs(1)).expect("fallback Errorを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "helper spawn failure fallback");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+        delivery_thread
+            .join()
+            .expect("fallback delivery thread should finish");
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "fallback送達後はin-flightを解除する"
+        );
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            0,
+            "fallback送達後は集約件数を消費する"
         );
     }
 
