@@ -1,5 +1,5 @@
 use super::assets::{combined_css, inline_js};
-use super::message::MemoResponse;
+use super::message::{MemoResponse, MemoState};
 use super::tree::{build_file_tree, render_file_tree_html};
 use crate::renderer::{html_escape, SanitizedHtml};
 
@@ -243,13 +243,29 @@ fn render_document_search(is_directory_mode: bool) -> String {
 }
 
 fn render_memo_panel(memo: &MemoResponse) -> String {
-    let (status_state, status_text, textarea_attrs) = match memo.load_error() {
-        Some(error) => (
-            "error",
-            html_escape(error),
-            " disabled aria-disabled=\"true\"",
-        ),
-        None => ("saved", "保存済み".to_string(), ""),
+    let is_degraded = memo.memo_state() == MemoState::Degraded;
+    let status_state = if is_degraded { "error" } else { "saved" };
+    let status_text = if is_degraded {
+        "読込失敗"
+    } else {
+        "保存済み"
+    };
+    let textarea_attrs = if is_degraded {
+        " disabled aria-disabled=\"true\""
+    } else {
+        ""
+    };
+    let degraded_message = memo.load_error().unwrap_or(
+        "メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。",
+    );
+    let degraded_banner = if is_degraded {
+        format!(
+            r##"      <div id="memo-degraded-banner" class="memo-degraded-banner" role="status">{message}</div>
+"##,
+            message = html_escape(degraded_message),
+        )
+    } else {
+        String::new()
     };
     format!(
         r##"    <div class="memo-layout">
@@ -259,7 +275,7 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
         </div>
         <span id="memo-save-status" class="memo-save-status" data-state="{status_state}">{status_text}</span>
       </div>
-      <label class="memo-field">
+{degraded_banner}      <label class="memo-field">
         <span>メモ本文</span>
         <textarea id="memo-editor" placeholder="気づきや引用メモを残す"{textarea_attrs}>{memo_raw}</textarea>
       </label>
@@ -272,6 +288,7 @@ fn render_memo_panel(memo: &MemoResponse) -> String {
     </div>"##,
         status_state = status_state,
         status_text = status_text,
+        degraded_banner = degraded_banner,
         textarea_attrs = textarea_attrs,
         memo_raw = html_escape(memo.raw()),
         memo_html = memo.html().as_str(),
