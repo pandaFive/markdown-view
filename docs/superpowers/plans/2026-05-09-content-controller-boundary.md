@@ -17,12 +17,12 @@
 - Create `src/template/assets/js/document-search.js`: current-document search state rendering, highlight creation, search result list rendering, keyboard/input setup, `openDocumentSearch`.
 - Create `src/template/assets/js/directory-search.js`: `/api/search` orchestration, directory result state, generation/query stale result rejection, directory result rendering and file-open requests.
 - Create `src/template/assets/js/content-controller.js`: `createContentController(ctx, deps)` with `setup`, `updateContent`, `applyPendingUpdate`, `restoreNavigationFromLocation`, `openDocumentSearch`, `moveDocumentSearch`, and `applyDocumentSearchQuery`.
-- Modify `src/template/assets/js/content.js`: remove migrated implementation. By the final task this file should be deleted from the inline bundle or left as an empty compatibility file only if deletion causes unnecessary include churn.
+- Modify `src/template/assets/js/content.js`: remove migrated implementation during Tasks 2-5, then delete the file in Task 6 after removing it from `inline_script.rs`.
 - Modify `src/template/assets/inline_script.rs`: include new JS files in dependency order before `memo.js`, `fetch.js`, `websocket.js`, and `sidebar.js`.
 - Modify `src/template/assets/js/fetch.js`: call `appContext.content.updateContent`, `appContext.content.clearDocumentSearchQuery`, `appContext.content.syncDocumentChrome`, and `appContext.content.renderDirectorySearchUi` instead of content top-level functions.
 - Modify `src/template/assets/js/selection.js`: call `appContext.content.applyPendingUpdate()`.
 - Modify `src/template/assets/js/sidebar.js`: initialize the content controller in `startMarkdownViewApp`, wire E2E hooks through `appContext.content`, and call content APIs for reading progress and restore navigation.
-- Modify `src/template/assets/js/websocket.js`: no direct edit is expected. Keep this file unchanged unless `rg "updateContent\\(" src/template/assets/js/websocket.js` shows a bare call outside the existing injected `deps.updateContent(data)` path.
+- Inspect `src/template/assets/js/websocket.js`: keep it unchanged because it already calls the injected `deps.updateContent(data)` path.
 - Modify `tests/e2e/update_content_exposure.spec.ts`: assert new internal names are discovered and production `window` remains clean.
 - Modify or add tests in `tests/e2e/document_search.spec.ts` and `tests/e2e/markdown_links.spec.ts` for security/stale-result regressions.
 
@@ -462,6 +462,7 @@ function createDocumentSearchController(ctx, deps) {
     applyDocumentSearchQuery: applyDocumentSearchQuery,
     clearDocumentSearchHighlights: clearDocumentSearchHighlights,
     clearDocumentSearchQuery: clearDocumentSearchQuery,
+    createDocumentSearchEmptyState: createDocumentSearchEmptyState,
     moveDocumentSearch: moveDocumentSearch,
     openDocumentSearch: openDocumentSearch,
     renderDocumentSearchResultContext: renderDocumentSearchResultContext,
@@ -513,6 +514,7 @@ var applyDocumentSearchHighlights = documentSearchController.applyDocumentSearch
 var applyDocumentSearchQuery = documentSearchController.applyDocumentSearchQuery;
 var clearDocumentSearchHighlights = documentSearchController.clearDocumentSearchHighlights;
 var clearDocumentSearchQuery = documentSearchController.clearDocumentSearchQuery;
+var createDocumentSearchEmptyState = documentSearchController.createDocumentSearchEmptyState;
 var moveDocumentSearch = documentSearchController.moveDocumentSearch;
 var openDocumentSearch = documentSearchController.openDocumentSearch;
 var renderDocumentSearchResultContext = documentSearchController.renderDocumentSearchResultContext;
@@ -557,46 +559,61 @@ Append this test to `tests/e2e/document_search.spec.ts`:
 
 ```ts
 test('ディレクトリ検索の古い応答は現在queryへ適用されない', async ({ page }) => {
-  await stabilizeWebSocketHarness(page);
+  let firstRequestStarted = false;
   let releaseFirstResponse: (() => void) | null = null;
 
-  await page.route('**/api/search?q=alpha', async (route) => {
-    await new Promise<void>((resolve) => {
-      releaseFirstResponse = resolve;
-    });
-    await route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({
-        query: 'alpha',
-        results: [{ file: 'notes.md', line: 1, before: '', current: 'alpha old', after: '', file_match_index: 0 }],
-        skipped_files: 0,
-        truncated: false,
-        truncated_reasons: []
-      })
-    });
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q');
+
+    if (query === 'alpha') {
+      firstRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseFirstResponse = resolve;
+      });
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'alpha',
+          results: [{ file: 'notes.md', line: 1, before: '', current: 'alpha old', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    if (query === 'beta') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'beta',
+          results: [{ file: 'README.md', line: 1, before: '', current: 'beta current', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
   });
 
-  await page.route('**/api/search?q=beta', async (route) => {
-    await route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({
-        query: 'beta',
-        results: [{ file: 'README.md', line: 1, before: '', current: 'beta current', after: '', file_match_index: 0 }],
-        skipped_files: 0,
-        truncated: false,
-        truncated_reasons: []
-      })
-    });
-  });
-
-  await page.goto('/?file=README.md');
   await page.evaluate(() => {
     window.markdownViewTestHooks.setDirModeForTest(true);
-    window.markdownViewTestHooks.applyDocumentSearchQuery('alpha');
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
   });
-  await page.evaluate(() => {
-    window.markdownViewTestHooks.applyDocumentSearchQuery('beta');
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>alpha text</p><p>beta text</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
   });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstRequestStarted).toBe(true);
+
+  await setDocumentSearchQuery(page, 'beta');
   await expect(page.locator('#document-search-results')).toContainText('beta current');
 
   releaseFirstResponse?.();
@@ -605,6 +622,8 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
   await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
 });
 ```
+
+This test intentionally waits until the first request has started. Without that wait, the 300ms debounce could cancel `alpha` before any stale response exists.
 
 - [ ] **Step 2: Create `createDirectorySearchController`**
 
@@ -660,14 +679,33 @@ Edit `src/template/assets/inline_script.rs`:
 
 - [ ] **Step 4: Temporarily bridge directory search**
 
-In `content.js`, instantiate directory search before document-search bridge dependencies are used. If ordering is awkward, instantiate both controllers with mutable bridge variables:
+In `content.js`, replace the Task 4 document-search bridge with this two-controller bridge:
 
 ```js
 var directorySearchController;
-var documentSearchController;
+var documentSearchController = createDocumentSearchController(appContext, {
+  activateSidebarTab: activateSidebarTab,
+  applyPendingDirectorySearchNavigation: function() {
+    return directorySearchController.applyPendingDirectorySearchNavigation();
+  },
+  openDirectorySearchResult: function(index) {
+    return directorySearchController.openDirectorySearchResult(index);
+  },
+  renderDirectorySearchResults: function() {
+    return directorySearchController.renderDirectorySearchResults();
+  },
+  renderDirectorySearchUi: function() {
+    return directorySearchController.renderDirectorySearchUi();
+  },
+  scheduleDirectorySearch: function(query) {
+    return directorySearchController.scheduleDirectorySearch(query);
+  }
+});
 
 directorySearchController = createDirectorySearchController(appContext, {
-  createDocumentSearchEmptyState: createDocumentSearchEmptyState,
+  createDocumentSearchEmptyState: function(message) {
+    return documentSearchController.createDocumentSearchEmptyState(message);
+  },
   getFileFetchErrorMessage: getFileFetchErrorMessage,
   openFileSearchResult: function(file, options) {
     return selectFile(file, false, options);
@@ -682,9 +720,29 @@ directorySearchController = createDirectorySearchController(appContext, {
     return documentSearchController.updateDocumentSearchSummary();
   }
 });
+
+var applyDocumentSearchHighlights = documentSearchController.applyDocumentSearchHighlights;
+var applyDocumentSearchQuery = documentSearchController.applyDocumentSearchQuery;
+var clearDocumentSearchHighlights = documentSearchController.clearDocumentSearchHighlights;
+var clearDocumentSearchQuery = documentSearchController.clearDocumentSearchQuery;
+var createDocumentSearchEmptyState = documentSearchController.createDocumentSearchEmptyState;
+var moveDocumentSearch = documentSearchController.moveDocumentSearch;
+var openDocumentSearch = documentSearchController.openDocumentSearch;
+var renderDocumentSearchResultContext = documentSearchController.renderDocumentSearchResultContext;
+var renderDocumentSearchResults = documentSearchController.renderDocumentSearchResults;
+var setCurrentDocumentSearchMatch = documentSearchController.setCurrentDocumentSearchMatch;
+var setupDocumentSearch = documentSearchController.setupDocumentSearch;
+var syncDocumentSearchAfterContentUpdate = documentSearchController.syncDocumentSearchAfterContentUpdate;
+var updateDocumentSearchSummary = documentSearchController.updateDocumentSearchSummary;
+
+var applyPendingDirectorySearchNavigation = directorySearchController.applyPendingDirectorySearchNavigation;
+var openDirectorySearchResult = directorySearchController.openDirectorySearchResult;
+var renderDirectorySearchResults = directorySearchController.renderDirectorySearchResults;
+var renderDirectorySearchUi = directorySearchController.renderDirectorySearchUi;
+var scheduleDirectorySearch = directorySearchController.scheduleDirectorySearch;
 ```
 
-Then update the document-search bridge so directory dependencies call `directorySearchController`.
+This ordering is intentional: document-search receives wrappers that read `directorySearchController` later. Those wrappers are only called after both controllers have been assigned.
 
 - [ ] **Step 5: Run directory-search regressions**
 
@@ -711,8 +769,8 @@ git commit -m "refactor: directory searchを分離"
 - Modify: `src/template/assets/js/content.js`
 - Modify: `src/template/assets/js/fetch.js`
 - Modify: `src/template/assets/js/selection.js`
+- Modify: `src/template/assets/js/bootstrap.js`
 - Modify: `src/template/assets/js/sidebar.js`
-- Modify: `src/template/assets/js/websocket.js`
 - Modify: `src/template/assets/inline_script.rs`
 - Test: `tests/e2e/update_content_exposure.spec.ts`
 - Test: `tests/e2e/document_search.spec.ts`
@@ -736,7 +794,24 @@ function createContentController(ctx, deps) {
     restoreActiveTocHeading: deps.restoreActiveTocHeading
   });
   var directorySearch;
-  var documentSearch;
+  var documentSearch = createDocumentSearchController(ctx, {
+    activateSidebarTab: deps.activateSidebarTab,
+    applyPendingDirectorySearchNavigation: function() {
+      return directorySearch.applyPendingDirectorySearchNavigation();
+    },
+    openDirectorySearchResult: function(index) {
+      return directorySearch.openDirectorySearchResult(index);
+    },
+    renderDirectorySearchResults: function() {
+      return directorySearch.renderDirectorySearchResults();
+    },
+    renderDirectorySearchUi: function() {
+      return directorySearch.renderDirectorySearchUi();
+    },
+    scheduleDirectorySearch: function(query) {
+      return directorySearch.scheduleDirectorySearch(query);
+    }
+  });
 
   directorySearch = createDirectorySearchController(ctx, {
     createDocumentSearchEmptyState: function(message) {
@@ -755,15 +830,6 @@ function createContentController(ctx, deps) {
     updateDocumentSearchSummary: function() {
       return documentSearch.updateDocumentSearchSummary();
     }
-  });
-
-  documentSearch = createDocumentSearchController(ctx, {
-    activateSidebarTab: deps.activateSidebarTab,
-    applyPendingDirectorySearchNavigation: directorySearch.applyPendingDirectorySearchNavigation,
-    openDirectorySearchResult: directorySearch.openDirectorySearchResult,
-    renderDirectorySearchResults: directorySearch.renderDirectorySearchResults,
-    renderDirectorySearchUi: directorySearch.renderDirectorySearchUi,
-    scheduleDirectorySearch: directorySearch.scheduleDirectorySearch
   });
 
   function applyPendingUpdate() {
@@ -892,11 +958,13 @@ function createContentController(ctx, deps) {
 }
 ```
 
-Before using `documentSearch.createDocumentSearchEmptyState`, add this property to the `createDocumentSearchController` return object:
+Before using `documentSearch.createDocumentSearchEmptyState`, confirm this property already exists in the `createDocumentSearchController` return object from Task 4:
 
 ```js
 createDocumentSearchEmptyState: createDocumentSearchEmptyState,
 ```
+
+This initialization order is intentional: `documentSearch` receives wrapper functions that read `directorySearch` later. Those wrappers are not called during controller construction, and `directorySearch` is assigned before `setup()` can register events or run searches.
 
 - [ ] **Step 2: Include controller and remove `content.js` from the bundle**
 
@@ -919,6 +987,13 @@ Edit `src/template/assets/inline_script.rs` so content-related files are:
 Remove the `include_str!("js/content.js")` entry. Delete `src/template/assets/js/content.js` if no code remains in it.
 
 - [ ] **Step 3: Wire content controller in `startMarkdownViewApp`**
+
+In `src/template/assets/js/bootstrap.js`, add a nullable controller slot near the end of `createAppContext`:
+
+```js
+    websocket: null,
+    content: null
+```
 
 In `src/template/assets/js/sidebar.js`, at the start of `startMarkdownViewApp()` after `setupHistoryUrlSync()` add:
 
@@ -1022,6 +1097,10 @@ appContext.content.restoreNavigationFromLocation()
 updateReadingProgress
 // event listener callbacks become
 appContext.content.updateReadingProgress
+
+setupFilterableList(...)
+// in setupFileFilter becomes
+appContext.content.setupFilterableList(...)
 ```
 
 When passing websocket deps in `sidebar.js`, replace:
