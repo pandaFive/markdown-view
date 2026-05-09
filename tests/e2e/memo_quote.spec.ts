@@ -113,6 +113,82 @@ test('メモ保存応答がload_errorを含んでも編集中の内容を消さ�
   await expect(memoEditor).toBeDisabled();
 });
 
+test('明示対象の保存応答がdegradedなら編集を無効化してバナーを表示する', async ({ page }) => {
+  const draft = 'explicit target draft must remain';
+  let releaseNotesContent!: () => void;
+  const notesContentPending = new Promise<void>((resolve) => {
+    releaseNotesContent = resolve;
+  });
+  let releaseNotesMemo!: () => void;
+  const notesMemoPending = new Promise<void>((resolve) => {
+    releaseNotesMemo = resolve;
+  });
+  await page.route('**/api/content?*', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('file') === 'notes.md') {
+      await notesContentPending;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          content: '<h1 id="notes">Notes</h1><p>Notes body</p>',
+          toc: '<a href="#notes">Notes</a>',
+          file: 'notes.md'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/memo*', async (route) => {
+    const request = route.request();
+    if (request.method() === 'PUT') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: draft,
+          html: '<p>broken memo</p>',
+          memo_state: 'degraded',
+          load_error: 'メモを読み込めませんでした。編集を無効化しました。'
+        })
+      });
+      return;
+    }
+    const url = new URL(request.url());
+    if (url.searchParams.get('file') === 'notes.md') {
+      await notesMemoPending;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          raw: 'notes memo from server',
+          html: '<p>notes memo from server</p>',
+          file: 'notes.md',
+          memo_state: 'ready'
+        })
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#content')).toContainText('Initial README content');
+  await openMemoTab(page);
+
+  const memoEditor = page.locator('#memo-editor');
+  await memoEditor.fill(draft);
+  await selectFile(page, 'notes.md');
+
+  await expect(page.locator('#memo-save-status')).toContainText('読込失敗');
+  await expect(page.locator('#memo-degraded-banner')).toContainText('編集を無効化');
+  await expect(memoEditor).toHaveValue(draft);
+  await expect(memoEditor).toBeDisabled();
+  releaseNotesContent();
+  releaseNotesMemo();
+});
+
 test('メモload_error後もファイル切替で編集を再開できる', async ({ page }) => {
   await page.route('**/api/memo*', async (route) => {
     const request = route.request();
