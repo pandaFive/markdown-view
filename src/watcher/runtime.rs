@@ -1470,26 +1470,91 @@ mod tests {
     }
 
     #[test]
-    fn test_send_watch_event_チャネル満杯時はメッセージを破棄してブロックしない() {
+    fn test_send_watch_event_filechangedはチャネル満杯時に破棄してブロックしない() {
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        let (_dir2, second) = create_markdown_fixture("second.md", "# second");
         tx.blocking_send(WatchEvent::FileChanged(first.clone()))
-            .unwrap();
+            .expect("channelを満杯にできる");
 
         send_watch_event(
             &tx,
-            WatchEvent::Error(WatchError::notify("満杯時テスト")),
-            "満杯時テスト",
+            WatchEvent::FileChanged(second),
+            "filechanged満杯時テスト",
         );
 
-        match rx.blocking_recv().unwrap() {
+        match rx.blocking_recv().expect("最初のイベントを受信できる") {
             WatchEvent::FileChanged(path) => assert_eq!(path, first),
-            WatchEvent::Error(_) => panic!("最初のメッセージはFileChangedを期待"),
+            WatchEvent::Error(error) => {
+                panic!("最初のメッセージはFileChangedを期待したがError({error})を受信")
+            }
         }
 
         assert!(
             rx.try_recv().is_err(),
-            "満杯時のメッセージは破棄されているはず"
+            "満杯時のFileChangedは破棄されているはず"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorはチャネル満杯時もreceiverが開いていれば送達する() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
+            .expect("channelを満杯にできる");
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let sender = std::thread::spawn(move || {
+            attempt_tx.send(()).expect("送信開始を通知できる");
+            send_watch_event(
+                &tx,
+                WatchEvent::Error(WatchError::notify("満杯時も送達する")),
+                "error満杯時テスト",
+            );
+            done_tx.send(()).expect("送信完了を通知できる");
+        });
+
+        attempt_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("error送信threadが開始する");
+        if done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+            sender.join().expect("error送信threadが正常終了する");
+            panic!("Error送信はchannel満杯時に破棄せずreceiverのdrainを待つはず");
+        }
+
+        match rx.blocking_recv().expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drain後にerror送信が完了する");
+        sender.join().expect("error送信threadが正常終了する");
+
+        match rx.blocking_recv().expect("Error eventを受信できる") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "満杯時も送達する");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+    }
+
+    #[test]
+    fn test_send_watch_event_errorはreceiver_closedでもpanicしない() {
+        let (tx, rx) = mpsc::channel::<WatchEvent>(1);
+        drop(rx);
+
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("receiver closed")),
+            "error receiver closedテスト",
         );
     }
 
