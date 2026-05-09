@@ -4,7 +4,9 @@ mod page;
 mod tree;
 
 pub use self::assets::{combined_css, csp_hash_sources};
-pub use self::message::{error_message_json, MemoResponse, MemoUpdateMessage, UpdateMessage};
+pub use self::message::{
+    error_message_json, MemoResponse, MemoState, MemoUpdateMessage, UpdateMessage,
+};
 pub use self::page::{render_page, RenderPageParams, SidebarParams};
 pub use self::tree::{build_file_tree, render_file_tree_html, FileTreeNode};
 

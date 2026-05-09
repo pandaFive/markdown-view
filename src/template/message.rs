@@ -38,6 +38,16 @@ impl UpdateMessage {
     }
 }
 
+/// メモ機能の利用可能状態。
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoState {
+    /// メモを読み書きできる通常状態。
+    Ready,
+    /// メモ読み込みに失敗し、内容保護のため編集を止めている状態。
+    Degraded,
+}
+
 /// メモ取得・保存応答用JSONメッセージ構造体
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct MemoResponse {
@@ -46,6 +56,7 @@ pub struct MemoResponse {
     /// ディレクトリモード時の対象ファイル相対パス（単一ファイルモードはNone）
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
+    memo_state: MemoState,
     /// メモ読み込み失敗時の利用者向けメッセージ
     #[serde(skip_serializing_if = "Option::is_none")]
     load_error: Option<String>,
@@ -59,6 +70,7 @@ impl MemoResponse {
             raw,
             html,
             file,
+            memo_state: MemoState::Ready,
             load_error: None,
         }
     }
@@ -71,6 +83,7 @@ impl MemoResponse {
     /// 読み込み失敗を明示する空メモ応答を生成する。
     pub fn empty_with_load_error(file: Option<String>, message: impl Into<String>) -> Self {
         let mut response = Self::empty(file);
+        response.memo_state = MemoState::Degraded;
         response.load_error = Some(message.into());
         response
     }
@@ -88,6 +101,11 @@ impl MemoResponse {
     /// ディレクトリモード時の対象ファイル相対パスを返す
     pub fn file(&self) -> Option<&str> {
         self.file.as_deref()
+    }
+
+    /// メモ機能の利用可能状態を返す
+    pub fn memo_state(&self) -> MemoState {
+        self.memo_state
     }
 
     /// メモ読み込み失敗時の利用者向けメッセージを返す
@@ -169,8 +187,37 @@ mod tests {
         assert_eq!(memo.raw(), "");
         assert_eq!(memo.file(), Some("docs/guide.md"));
         assert_eq!(memo.load_error(), Some("メモ読み込み失敗"));
+        assert_eq!(memo.memo_state(), MemoState::Degraded);
         let value = serde_json::to_value(memo).unwrap();
         assert_eq!(value["load_error"], "メモ読み込み失敗");
+        assert_eq!(value["memo_state"], "degraded");
+    }
+
+    #[test]
+    fn test_memo_response_from_rawはready_stateを直列化する() {
+        let memo = MemoResponse::from_raw("memo".to_string(), Some("docs/guide.md".to_string()));
+
+        assert_eq!(memo.memo_state(), MemoState::Ready);
+        let value = serde_json::to_value(memo).unwrap();
+
+        assert_eq!(value["memo_state"], "ready");
+        assert_eq!(value["raw"], "memo");
+        assert!(value.get("load_error").is_none());
+    }
+
+    #[test]
+    fn test_memo_response_empty_with_load_errorはdegraded_stateを直列化する() {
+        let memo = MemoResponse::empty_with_load_error(
+            Some("docs/guide.md".to_string()),
+            "メモ読み込み失敗",
+        );
+
+        assert_eq!(memo.memo_state(), MemoState::Degraded);
+        let value = serde_json::to_value(memo).unwrap();
+
+        assert_eq!(value["memo_state"], "degraded");
+        assert_eq!(value["load_error"], "メモ読み込み失敗");
+        assert_eq!(value["raw"], "");
     }
 
     #[test]
