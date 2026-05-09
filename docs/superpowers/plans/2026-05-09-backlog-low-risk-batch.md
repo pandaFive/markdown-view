@@ -1,6 +1,8 @@
 # BACKLOG Low-Risk Batch Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **履歴資料:** この plan は 2026-05-09 に実行済みの作業計画です。現在のユーザー指示、`AGENTS.md`、明示承認なしに再実行しないでください。チェックボックスとコマンドは当時の計画記録であり、現在の進捗や実行指示ではありません。
+>
+> **Original agentic-worker note:** This plan originally required `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` for task-by-task execution.
 
 **Goal:** `docs/todo/BACKLOG.md` の低リスク項目を、docs 整理と挙動互換の小さなコード契約整理として一括消化する。
 

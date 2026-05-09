@@ -71,7 +71,9 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 1. **初期表示**: HTTP GET `/` → `service::load_page` → `load_route_update` / `load_route_memo` → `render_page`（フルHTML）
 2. **ライブリロード**: notify検知 → `notify_update` → broadcast channel → WebSocket → クライアントJS
 3. **API**: GET `/api/content` → `service::load_content` → JSON（`UpdateMessage { content, toc }`）
-4. **メモAPI**: GET/PUT `/api/memo` → `service::load_memo` / `service::save_memo` → `MemoResponse`
+4. **検索API**: GET `/api/search` → `service::search` → JSON（検索結果、打ち切り理由、検索統計）
+5. **ファイル一覧API**: GET `/api/files` → `service::list_files` → JSON（ディレクトリ内 Markdown 一覧）
+6. **メモAPI**: GET/PUT `/api/memo` → `service::load_memo` / `service::save_memo` → `MemoResponse`
 
 ### 重要な設計判断
 
@@ -86,6 +88,7 @@ main.rs  ── CLI引数パース → バリデーション → サーバー起
 - **notifyはstd::thread**: notifyがsync APIのため、mpscチャネルでtokioにブリッジ
 - **見出し情報共有**: `render_document` は本文 HTML と TOC を同じ `HeadingInfo` から生成する。互換 API の `extract_headings` と検索用 Markdown profile は用途別に別走査する。
 - 個人使用前提でも、外部公開 API の互換性破壊は `major change` 扱いにしろ。性能向上のために互換性を壊す場合も、通常変更として紛れ込ませず明示的に扱え
+- **0.x 系の公開 API 縮小**: `CanonicalPathError` の `markdown_view::server` re-export 縮小は破壊変更として扱う。リリース時は versioning と移行方針で明示する
 
 ## セキュリティレイヤー
 

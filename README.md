@@ -170,6 +170,8 @@ src/
 2. **ライブリロード**: ファイル変更検知 → broadcast channel → WebSocket → ブラウザ更新
 3. **API**:
    - GET `/api/content` → JSON（content + toc）、ディレクトリモードでは `?file=` で指定
+   - GET `/api/search` → ディレクトリ内 Markdown の検索結果 JSON（単一ファイルモードでは空結果）
+   - GET/PUT `/api/memo` → 対象 Markdown の sidecar メモ取得・保存
    - GET `/api/files` → ディレクトリ内の `.md` ファイル一覧（単一ファイルモードでは空配列）
 
 ## セキュリティ
