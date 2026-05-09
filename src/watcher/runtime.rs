@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -27,11 +27,88 @@ type InitResult = std::result::Result<(), WatchError>;
 type InternalWatchResult =
     std::result::Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>;
 
-struct ErrorDelivery {
-    tx: mpsc::Sender<WatchEvent>,
-    error: WatchError,
-    label: String,
-    detail: String,
+#[derive(Debug, Clone)]
+struct ErrorDeliveryState {
+    inner: Arc<Mutex<ErrorDeliveryInner>>,
+}
+
+#[derive(Debug, Default)]
+struct ErrorDeliveryInner {
+    in_flight: bool,
+    coalesced_count: u64,
+}
+
+impl ErrorDeliveryState {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ErrorDeliveryInner::default())),
+        }
+    }
+
+    fn try_mark_in_flight(&self) -> bool {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.in_flight {
+            return false;
+        }
+        inner.in_flight = true;
+        true
+    }
+
+    fn reset_in_flight(&self) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.in_flight = false;
+        inner.coalesced_count = 0;
+    }
+
+    fn coalesce(&self) -> u64 {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.coalesced_count += 1;
+        inner.coalesced_count
+    }
+
+    fn complete_in_flight(&self) -> u64 {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let coalesced = inner.coalesced_count;
+        inner.coalesced_count = 0;
+        inner.in_flight = false;
+        coalesced
+    }
+
+    #[cfg(test)]
+    fn is_in_flight(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .in_flight
+    }
+
+    #[cfg(test)]
+    fn coalesced_count(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .coalesced_count
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WatchEventDelivery<'a> {
+    strategy: &'a WatchStrategy,
+    tx: &'a mpsc::Sender<WatchEvent>,
+    health_state: &'a WatcherHealthState,
+    error_delivery_state: &'a ErrorDeliveryState,
 }
 
 #[derive(Debug)]
@@ -212,6 +289,7 @@ struct WatchRuntime {
     shutdown_flag: Arc<AtomicBool>,
     watcher_thread: std::thread::JoinHandle<()>,
     health_state: WatcherHealthState,
+    error_delivery_state: ErrorDeliveryState,
     error_tx: mpsc::Sender<WatchEvent>,
 }
 
@@ -258,6 +336,7 @@ impl WatchRuntime {
                 "監視スレッドの停止中にパニックを検出",
                 "監視スレッド停止時パニック",
                 &self.health_state,
+                &self.error_delivery_state,
                 &self.error_tx,
             );
             return self.health_state.load();
@@ -279,6 +358,8 @@ impl Watcher {
         let thread_shutdown_flag = shutdown_flag.clone();
         let health_state = WatcherHealthState::new_starting();
         let thread_health_state = health_state.clone();
+        let error_delivery_state = ErrorDeliveryState::new();
+        let thread_error_delivery_state = error_delivery_state.clone();
         let unexpected_exit = strategy.unexpected_exit_message();
         let watcher_thread = spawn_watcher_thread(
             strategy,
@@ -287,12 +368,19 @@ impl Watcher {
             init_tx,
             thread_shutdown_flag,
             thread_health_state,
+            thread_error_delivery_state,
         )?;
 
         await_watcher_init(init_rx, unexpected_exit).await?;
         health_state.store_alive_if_starting();
         Ok((
-            Self::new(shutdown_flag, watcher_thread, health_state, error_tx),
+            Self::new(
+                shutdown_flag,
+                watcher_thread,
+                health_state,
+                error_delivery_state,
+                error_tx,
+            ),
             rx,
         ))
     }
@@ -301,6 +389,7 @@ impl Watcher {
         shutdown_flag: Arc<AtomicBool>,
         watcher_thread: std::thread::JoinHandle<()>,
         health_state: WatcherHealthState,
+        error_delivery_state: ErrorDeliveryState,
         error_tx: mpsc::Sender<WatchEvent>,
     ) -> Self {
         Self {
@@ -308,6 +397,7 @@ impl Watcher {
                 shutdown_flag,
                 watcher_thread,
                 health_state,
+                error_delivery_state,
                 error_tx,
             }),
         }
@@ -345,11 +435,16 @@ impl Drop for Watcher {
 }
 
 /// notifyコールバックからtokioチャネルへイベントを転送する。
-/// FileChangedは過負荷時に破棄し、Errorはreceiverが開いている限り送達する。
-fn send_watch_event(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent, label: &str) {
+/// FileChangedは過負荷時に破棄し、Errorは満杯時にbounded helperへ委譲する。
+fn send_watch_event(
+    tx: &mpsc::Sender<WatchEvent>,
+    event: WatchEvent,
+    label: &str,
+    error_delivery_state: &ErrorDeliveryState,
+) {
     match event {
         WatchEvent::FileChanged(path) => send_file_changed_event(tx, path, label),
-        WatchEvent::Error(error) => send_error_event(tx, error, label),
+        WatchEvent::Error(error) => send_error_event(tx, error, label, error_delivery_state),
     }
 }
 
@@ -371,18 +466,23 @@ fn send_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf, label: 
     }
 }
 
-fn send_error_event(tx: &mpsc::Sender<WatchEvent>, error: WatchError, label: &str) {
+fn send_error_event(
+    tx: &mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: &str,
+    error_delivery_state: &ErrorDeliveryState,
+) {
     match tx.try_send(WatchEvent::Error(error)) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Closed(WatchEvent::Error(error))) => {
             tracing::warn!(
-                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}, {}",
+                error_kind = ?error.kind(),
+                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}",
                 label,
-                error.detail()
             );
         }
         Err(mpsc::error::TrySendError::Full(WatchEvent::Error(error))) => {
-            enqueue_blocking_error_delivery(tx.clone(), error, label);
+            enqueue_blocking_error_delivery(tx.clone(), error, label, error_delivery_state);
         }
         Err(mpsc::error::TrySendError::Closed(WatchEvent::FileChanged(_)))
         | Err(mpsc::error::TrySendError::Full(WatchEvent::FileChanged(_))) => {
@@ -394,71 +494,54 @@ fn send_error_event(tx: &mpsc::Sender<WatchEvent>, error: WatchError, label: &st
     }
 }
 
-fn enqueue_blocking_error_delivery(tx: mpsc::Sender<WatchEvent>, error: WatchError, label: &str) {
-    let detail = error.detail().to_string();
-    let delivery = ErrorDelivery {
-        tx,
-        error,
-        label: label.to_string(),
-        detail,
-    };
-    match error_delivery_sender() {
-        Some(sender) => {
-            if let Err(send_error) = sender.send(delivery) {
-                let delivery = send_error.0;
-                tracing::error!(
-                    "[markdown-view] 監視エラー送達workerが停止しているため監視エラーを送達できませんでした: {}, {}",
-                    delivery.label,
-                    delivery.detail
+fn enqueue_blocking_error_delivery(
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: &str,
+    error_delivery_state: &ErrorDeliveryState,
+) {
+    if !error_delivery_state.try_mark_in_flight() {
+        let coalesced = error_delivery_state.coalesce();
+        tracing::warn!(
+            coalesced,
+            error_kind = ?error.kind(),
+            "[markdown-view] 監視エラー送達が保留中のため追加エラーを集約しました: {}",
+            label
+        );
+        return;
+    }
+
+    let label = label.to_string();
+    let delivery_label = label.clone();
+    let error_kind = error.kind();
+    let state = error_delivery_state.clone();
+    match std::thread::Builder::new()
+        .name("markdown-view-watch-error-delivery".to_string())
+        .spawn(move || {
+            if tx.blocking_send(WatchEvent::Error(error)).is_err() {
+                tracing::warn!(
+                    error_kind = ?error_kind,
+                    "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}",
+                    delivery_label
                 );
             }
-        }
-        None => {
-            tracing::error!(
-                "[markdown-view] 監視エラー送達workerを利用できないため監視エラーを送達できませんでした: {}, {}",
-                delivery.label,
-                delivery.detail
-            );
-        }
-    }
-}
-
-fn error_delivery_sender() -> Option<&'static std::sync::mpsc::Sender<ErrorDelivery>> {
-    static ERROR_DELIVERY_SENDER: std::sync::OnceLock<
-        Option<std::sync::mpsc::Sender<ErrorDelivery>>,
-    > = std::sync::OnceLock::new();
-
-    ERROR_DELIVERY_SENDER
-        .get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<ErrorDelivery>();
-            match std::thread::Builder::new()
-                .name("markdown-view-watch-error-delivery".to_string())
-                .spawn(move || run_error_delivery_worker(rx))
-            {
-                Ok(_) => Some(tx),
-                Err(error) => {
-                    tracing::error!(
-                        "[markdown-view] 監視エラー送達workerの起動に失敗しました: {}",
-                        error
-                    );
-                    None
-                }
+            let coalesced = state.complete_in_flight();
+            if coalesced > 0 {
+                tracing::warn!(
+                    coalesced,
+                    "[markdown-view] 送達待機中に発生した監視エラーを集約しました: {}",
+                    delivery_label
+                );
             }
-        })
-        .as_ref()
-}
-
-fn run_error_delivery_worker(rx: std::sync::mpsc::Receiver<ErrorDelivery>) {
-    for delivery in rx {
-        if delivery
-            .tx
-            .blocking_send(WatchEvent::Error(delivery.error))
-            .is_err()
-        {
+        }) {
+        Ok(_) => {}
+        Err(spawn_error) => {
+            error_delivery_state.reset_in_flight();
             tracing::warn!(
-                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}, {}",
-                delivery.label,
-                delivery.detail
+                error_kind = ?error_kind,
+                "[markdown-view] 監視エラー送達スレッドの起動に失敗しました。次回エラーで再試行します: {}, {}",
+                label,
+                spawn_error
             );
         }
     }
@@ -471,6 +554,7 @@ fn spawn_watcher_thread(
     init_tx: oneshot::Sender<InitResult>,
     thread_shutdown_flag: Arc<AtomicBool>,
     health_state: WatcherHealthState,
+    error_delivery_state: ErrorDeliveryState,
 ) -> Result<std::thread::JoinHandle<()>> {
     let thread_name = strategy.thread_name().to_string();
     let spawn_context = format!("監視スレッド {} の起動に失敗", strategy.thread_name());
@@ -479,6 +563,7 @@ fn spawn_watcher_thread(
         .spawn(move || {
             let rt_tx = tx;
             let panic_tx = rt_tx.clone();
+            let panic_error_delivery_state = error_delivery_state.clone();
             let mut init_tx = Some(init_tx);
             let start_error_prefix = strategy.start_error_prefix();
             let panic_message = strategy.panic_message();
@@ -491,6 +576,7 @@ fn spawn_watcher_thread(
                 let callback_strategy = strategy.clone();
                 let callback_tx = rt_tx.clone();
                 let callback_health_state = health_state.clone();
+                let callback_error_delivery_state = error_delivery_state.clone();
                 let debouncer = new_debouncer(
                     Duration::from_millis(DEBOUNCE_MS),
                     move |res: InternalWatchResult| {
@@ -500,6 +586,7 @@ fn spawn_watcher_thread(
                             &callback_strategy,
                             &callback_tx,
                             &callback_health_state,
+                            &callback_error_delivery_state,
                         );
                     },
                 );
@@ -532,12 +619,16 @@ fn spawn_watcher_thread(
                 }
 
                 send_init_result(&mut init_tx, Ok(()));
+                let delivery = WatchEventDelivery {
+                    strategy: &strategy,
+                    tx: &rt_tx,
+                    health_state: &health_state,
+                    error_delivery_state: &error_delivery_state,
+                };
                 run_watcher_event_loop(
                     &mut debouncer,
                     internal_rx,
-                    &strategy,
-                    &rt_tx,
-                    &health_state,
+                    delivery,
                     &thread_shutdown_flag,
                     &mut registered_paths,
                 );
@@ -549,6 +640,7 @@ fn spawn_watcher_thread(
                     panic_message,
                     error_label,
                     &health_state,
+                    &panic_error_delivery_state,
                     &panic_tx,
                 );
             }
@@ -591,6 +683,7 @@ fn send_internal_watch_result(
     strategy: &WatchStrategy,
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
+    error_delivery_state: &ErrorDeliveryState,
 ) {
     match internal_tx.try_send(result) {
         Ok(()) => {}
@@ -601,6 +694,7 @@ fn send_internal_watch_result(
                 tx,
                 WatchEvent::Error(WatchError::notify("watcher internal channel が満杯です")),
                 strategy.error_label(),
+                error_delivery_state,
             );
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
@@ -612,6 +706,7 @@ fn send_internal_watch_result(
                     "watcher internal channel が閉じています",
                 )),
                 strategy.error_label(),
+                error_delivery_state,
             );
         }
     }
@@ -622,6 +717,7 @@ fn handle_debounced_watch_result(
     strategy: &WatchStrategy,
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
+    error_delivery_state: &ErrorDeliveryState,
 ) {
     match result {
         Ok(events) => {
@@ -630,6 +726,7 @@ fn handle_debounced_watch_result(
                     tx,
                     WatchEvent::FileChanged(changed_path),
                     strategy.change_label(),
+                    error_delivery_state,
                 );
             }
         }
@@ -641,7 +738,12 @@ fn handle_debounced_watch_result(
                 strategy.watch_error_prefix(),
                 watch_error.detail()
             );
-            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
+            send_watch_event(
+                tx,
+                WatchEvent::Error(watch_error),
+                strategy.error_label(),
+                error_delivery_state,
+            );
         }
     }
 }
@@ -652,16 +754,21 @@ fn process_debounced_events_with_watch<F>(
     strategy: &WatchStrategy,
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
+    error_delivery_state: &ErrorDeliveryState,
     registered_paths: &mut WatchDirectoryRegistry,
     watch: F,
 ) where
     F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
 {
-    process_debounced_events_with_watch_and_unwatch(
-        events,
+    let delivery = WatchEventDelivery {
         strategy,
         tx,
         health_state,
+        error_delivery_state,
+    };
+    process_debounced_events_with_watch_and_unwatch(
+        events,
+        delivery,
         registered_paths,
         watch,
         |_path| Ok(()),
@@ -670,9 +777,7 @@ fn process_debounced_events_with_watch<F>(
 
 fn process_debounced_events_with_watch_and_unwatch<F, U>(
     events: Vec<notify_debouncer_mini::DebouncedEvent>,
-    strategy: &WatchStrategy,
-    tx: &mpsc::Sender<WatchEvent>,
-    health_state: &WatcherHealthState,
+    delivery: WatchEventDelivery<'_>,
     registered_paths: &mut WatchDirectoryRegistry,
     mut watch: F,
     mut unwatch: U,
@@ -680,21 +785,22 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
     F: FnMut(&Path, notify::RecursiveMode) -> notify::Result<()>,
     U: FnMut(&Path) -> notify::Result<()>,
 {
-    for changed_path in strategy.collect_changed_paths(&events) {
+    for changed_path in delivery.strategy.collect_changed_paths(&events) {
         send_watch_event(
-            tx,
+            delivery.tx,
             WatchEvent::FileChanged(changed_path),
-            strategy.change_label(),
+            delivery.strategy.change_label(),
+            delivery.error_delivery_state,
         );
     }
 
-    for candidate in strategy.collect_new_directory_candidates(&events) {
+    for candidate in delivery.strategy.collect_new_directory_candidates(&events) {
         if registered_paths.contains(&candidate) {
             for stale_path in registered_paths.remove_subtree(&candidate) {
                 if let Err(error) = unwatch(&stale_path) {
                     tracing::warn!(
                         "[markdown-view] 登録済みディレクトリの監視解除に失敗（再登録は継続）: path={}, {}",
-                        strategy.path_for_log(&stale_path),
+                        delivery.strategy.path_for_log(&stale_path),
                         error
                     );
                 }
@@ -723,14 +829,16 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
             {
                 Ok(registered_now) => (registered_now, None),
                 Err(failure) => {
-                    health_state.store_failed(WatcherFailureKind::Notify);
+                    delivery
+                        .health_state
+                        .store_failed(WatcherFailureKind::Notify);
                     let watch_error = WatchError::from_watch_registration_error(
                         "新規ディレクトリの監視追加に失敗",
                         &failure.source,
                     );
                     tracing::warn!(
                         "[markdown-view] 新規ディレクトリの監視追加に失敗: candidate={}, {}",
-                        strategy.path_for_log(&candidate),
+                        delivery.strategy.path_for_log(&candidate),
                         watch_error.detail()
                     );
                     (failure.registered_paths, Some(watch_error))
@@ -745,15 +853,21 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
         ) {
             if recovered.insert(markdown.clone()) {
                 send_watch_event(
-                    tx,
+                    delivery.tx,
                     WatchEvent::FileChanged(markdown),
-                    strategy.change_label(),
+                    delivery.strategy.change_label(),
+                    delivery.error_delivery_state,
                 );
             }
         }
 
         if let Some(watch_error) = registration_error {
-            send_watch_event(tx, WatchEvent::Error(watch_error), strategy.error_label());
+            send_watch_event(
+                delivery.tx,
+                WatchEvent::Error(watch_error),
+                delivery.strategy.error_label(),
+                delivery.error_delivery_state,
+            );
         }
     }
 }
@@ -763,6 +877,7 @@ fn handle_watcher_panic(
     panic_message: &str,
     error_label: &str,
     health_state: &WatcherHealthState,
+    error_delivery_state: &ErrorDeliveryState,
     tx: &mpsc::Sender<WatchEvent>,
 ) {
     let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
@@ -775,7 +890,12 @@ fn handle_watcher_panic(
     health_state.store_failed(WatcherFailureKind::ThreadPanic);
     let watch_error = WatchError::thread_panic(panic_detail.clone());
     tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
-    send_watch_event(tx, WatchEvent::Error(watch_error), error_label);
+    send_watch_event(
+        tx,
+        WatchEvent::Error(watch_error),
+        error_label,
+        error_delivery_state,
+    );
 }
 
 fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: InitResult) {
@@ -794,9 +914,7 @@ fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: I
 fn run_watcher_event_loop(
     debouncer: &mut notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>,
     internal_rx: std::sync::mpsc::Receiver<InternalWatchResult>,
-    strategy: &WatchStrategy,
-    tx: &mpsc::Sender<WatchEvent>,
-    health_state: &WatcherHealthState,
+    delivery: WatchEventDelivery<'_>,
     shutdown_flag: &AtomicBool,
     registered_paths: &mut WatchDirectoryRegistry,
 ) {
@@ -806,20 +924,30 @@ fn run_watcher_event_loop(
                 let watcher = std::cell::RefCell::new(debouncer.watcher());
                 process_debounced_events_with_watch_and_unwatch(
                     events,
-                    strategy,
-                    tx,
-                    health_state,
+                    delivery,
                     registered_paths,
                     |path, mode| watcher.borrow_mut().watch(path, mode),
                     |path| watcher.borrow_mut().unwatch(path),
                 );
             }
             Ok(Err(error)) => {
-                handle_debounced_watch_result(Err(error), strategy, tx, health_state);
+                handle_debounced_watch_result(
+                    Err(error),
+                    delivery.strategy,
+                    delivery.tx,
+                    delivery.health_state,
+                    delivery.error_delivery_state,
+                );
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                handle_internal_channel_disconnected(strategy, tx, health_state, shutdown_flag);
+                handle_internal_channel_disconnected(
+                    delivery.strategy,
+                    delivery.tx,
+                    delivery.health_state,
+                    delivery.error_delivery_state,
+                    shutdown_flag,
+                );
                 break;
             }
         }
@@ -830,6 +958,7 @@ fn handle_internal_channel_disconnected(
     strategy: &WatchStrategy,
     tx: &mpsc::Sender<WatchEvent>,
     health_state: &WatcherHealthState,
+    error_delivery_state: &ErrorDeliveryState,
     shutdown_flag: &AtomicBool,
 ) {
     tracing::warn!("[markdown-view] watcher internal channel が切断されました");
@@ -843,6 +972,7 @@ fn handle_internal_channel_disconnected(
             "watcher internal channel が切断されました",
         )),
         strategy.error_label(),
+        error_delivery_state,
     );
 }
 
@@ -869,8 +999,8 @@ mod tests {
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         process_debounced_events_with_watch_and_unwatch, register_watch_plan_with,
-        send_watch_event, WatchDirectoryRegistry, Watcher, WatcherFailureKind, WatcherHealth,
-        WatcherHealthState,
+        send_watch_event, ErrorDeliveryState, WatchDirectoryRegistry, WatchEventDelivery, Watcher,
+        WatcherFailureKind, WatcherHealth, WatcherHealthState,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -892,6 +1022,22 @@ mod tests {
                 std::thread::park_timeout(Duration::from_millis(1));
             }
         })
+    }
+
+    fn recv_event_until(
+        rx: &mut mpsc::Receiver<WatchEvent>,
+        timeout: Duration,
+    ) -> Option<WatchEvent> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                return Some(event);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[derive(Default)]
@@ -1055,6 +1201,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1065,6 +1212,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |path, mode| {
                 watched.push((path.to_path_buf(), mode));
@@ -1094,6 +1242,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1103,6 +1252,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |_path, _mode| Err(notify::Error::generic("dynamic watch failed")),
         );
@@ -1141,6 +1291,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1150,6 +1301,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |path, _mode| {
                 if path == nested_canonical {
@@ -1198,6 +1350,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1207,6 +1360,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |_path, _mode| Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch)),
         );
@@ -1244,6 +1398,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1255,6 +1410,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |path, mode| {
                 watched.push((path.to_path_buf(), mode));
@@ -1288,18 +1444,23 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
         registered.insert(existing_dir.canonicalize().unwrap());
         let mut watched = Vec::new();
         let mut unwatched = Vec::new();
+        let delivery = WatchEventDelivery {
+            strategy: &strategy,
+            tx: &tx,
+            health_state: &health_state,
+            error_delivery_state: &error_delivery_state,
+        };
 
         process_debounced_events_with_watch_and_unwatch(
             events,
-            &strategy,
-            &tx,
-            &health_state,
+            delivery,
             &mut registered,
             |path, mode| {
                 watched.push((path.to_path_buf(), mode));
@@ -1354,6 +1515,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut watched = Vec::new();
 
@@ -1362,6 +1524,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |path, mode| {
                 watched.push((path.to_path_buf(), mode));
@@ -1400,6 +1563,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut watched = Vec::new();
 
@@ -1408,6 +1572,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |path, mode| {
                 watched.push((path.to_path_buf(), mode));
@@ -1444,6 +1609,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1454,6 +1620,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |_path, _mode| Ok(()),
         );
@@ -1484,6 +1651,7 @@ mod tests {
             notify_debouncer_mini::DebouncedEventKind::Any,
         )];
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
@@ -1493,6 +1661,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
             &mut registered,
             |_path, _mode| Ok(()),
         );
@@ -1513,13 +1682,20 @@ mod tests {
         drop(internal_tx);
         let health_state = WatcherHealthState::new_alive();
         let shutdown_flag = AtomicBool::new(false);
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
 
         assert!(matches!(
             internal_rx.recv_timeout(Duration::from_millis(1)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
         ));
-        super::handle_internal_channel_disconnected(&strategy, &tx, &health_state, &shutdown_flag);
+        super::handle_internal_channel_disconnected(
+            &strategy,
+            &tx,
+            &health_state,
+            &error_delivery_state,
+            &shutdown_flag,
+        );
 
         assert_eq!(
             health_state.load(),
@@ -1548,6 +1724,7 @@ mod tests {
             .send(Ok(Vec::new()))
             .expect("internal channelを満杯にできる");
         let health_state = WatcherHealthState::new_alive();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
 
         super::send_internal_watch_result(
@@ -1556,6 +1733,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
         );
 
         assert_eq!(
@@ -1579,6 +1757,7 @@ mod tests {
     #[test]
     fn test_send_watch_event_filechangedはチャネル満杯時に破棄してブロックしない() {
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         let (_dir2, second) = create_markdown_fixture("second.md", "# second");
         tx.blocking_send(WatchEvent::FileChanged(first.clone()))
@@ -1588,6 +1767,7 @@ mod tests {
             &tx,
             WatchEvent::FileChanged(second),
             "filechanged満杯時テスト",
+            &error_delivery_state,
         );
 
         match rx.blocking_recv().expect("最初のイベントを受信できる") {
@@ -1606,6 +1786,7 @@ mod tests {
     #[test]
     fn test_send_watch_event_errorはチャネル満杯時もreceiverが開いていれば送達する() {
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         tx.blocking_send(WatchEvent::FileChanged(first.clone()))
             .expect("channelを満杯にできる");
@@ -1614,6 +1795,7 @@ mod tests {
             &tx,
             WatchEvent::Error(WatchError::notify("満杯時も送達する")),
             "error満杯時テスト",
+            &error_delivery_state,
         );
         drop(tx);
 
@@ -1624,16 +1806,7 @@ mod tests {
             }
         }
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let received_error = loop {
-            if let Ok(event) = rx.try_recv() {
-                break Some(event);
-            }
-            if std::time::Instant::now() >= deadline {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        let received_error = recv_event_until(&mut rx, Duration::from_secs(1));
 
         match received_error.expect("Error eventを受信できる") {
             WatchEvent::Error(error) => {
@@ -1646,9 +1819,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_send_watch_event_errorは送達中の追加エラーを集約する() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
+            .expect("channelを満杯にできる");
+
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("代表エラー")),
+            "error集約テスト",
+            &error_delivery_state,
+        );
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("追加エラー1")),
+            "error集約テスト",
+            &error_delivery_state,
+        );
+        send_watch_event(
+            &tx,
+            WatchEvent::Error(WatchError::notify("追加エラー2")),
+            "error集約テスト",
+            &error_delivery_state,
+        );
+
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            2,
+            "送達中の追加Errorは別queueへ積まず件数集約する"
+        );
+
+        match rx.blocking_recv().expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        match recv_event_until(&mut rx, Duration::from_secs(1)).expect("代表Errorを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "代表エラー");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while error_delivery_state.is_in_flight() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "代表Error送達後はin-flightを解除する"
+        );
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            0,
+            "集約件数は送達完了時に消費する"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorは別watcher_stateの送達を詰まらせない() {
+        let (blocked_tx, mut blocked_rx) = mpsc::channel::<WatchEvent>(1);
+        let blocked_state = ErrorDeliveryState::new();
+        let (_blocked_dir, blocked_first) = create_markdown_fixture("blocked.md", "# blocked");
+        blocked_tx
+            .blocking_send(WatchEvent::FileChanged(blocked_first.clone()))
+            .expect("blocked channelを満杯にできる");
+
+        let (independent_tx, mut independent_rx) = mpsc::channel::<WatchEvent>(1);
+        let independent_state = ErrorDeliveryState::new();
+        let (_independent_dir, independent_first) =
+            create_markdown_fixture("independent.md", "# independent");
+        independent_tx
+            .blocking_send(WatchEvent::FileChanged(independent_first.clone()))
+            .expect("independent channelを満杯にできる");
+
+        send_watch_event(
+            &blocked_tx,
+            WatchEvent::Error(WatchError::notify("blocked error")),
+            "blocked watcher",
+            &blocked_state,
+        );
+        send_watch_event(
+            &independent_tx,
+            WatchEvent::Error(WatchError::notify("independent error")),
+            "independent watcher",
+            &independent_state,
+        );
+
+        match independent_rx
+            .blocking_recv()
+            .expect("independent先行FileChangedを受信できる")
+        {
+            WatchEvent::FileChanged(path) => assert_eq!(path, independent_first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match recv_event_until(&mut independent_rx, Duration::from_secs(1))
+            .expect("independent Errorを受信できる")
+        {
+            WatchEvent::Error(error) => assert_eq!(error.detail(), "independent error"),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        match blocked_rx
+            .blocking_recv()
+            .expect("blocked先行FileChangedを受信できる")
+        {
+            WatchEvent::FileChanged(path) => assert_eq!(path, blocked_first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match recv_event_until(&mut blocked_rx, Duration::from_secs(1))
+            .expect("blocked Errorを受信できる")
+        {
+            WatchEvent::Error(error) => assert_eq!(error.detail(), "blocked error"),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_send_watch_event_errorはcurrent_thread_runtimeでも満杯時にruntimeを止めない() {
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         tx.send(WatchEvent::FileChanged(first.clone()))
             .await
@@ -1658,6 +1965,7 @@ mod tests {
             &tx,
             WatchEvent::Error(WatchError::notify("current_threadでも送達する")),
             "current_thread満杯時テスト",
+            &error_delivery_state,
         );
         drop(tx);
 
@@ -1688,12 +1996,14 @@ mod tests {
     #[test]
     fn test_send_watch_event_errorはreceiver_closedでもpanicしない() {
         let (tx, rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
         drop(rx);
 
         send_watch_event(
             &tx,
             WatchEvent::Error(WatchError::notify("receiver closed")),
             "error receiver closedテスト",
+            &error_delivery_state,
         );
     }
 
@@ -1776,7 +2086,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state, tx);
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            health_state,
+            ErrorDeliveryState::new(),
+            tx,
+        );
 
         assert_eq!(watcher.health(), WatcherHealth::Alive);
         assert!(watcher.is_alive());
@@ -1788,12 +2104,14 @@ mod tests {
     fn test_watcher_panic経路はhealth_failedとerror_eventを記録する() {
         let health_state = WatcherHealthState::new_starting();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
 
         handle_watcher_panic(
             Box::new(String::from("panic detail")),
             "panic message",
             "panic label",
             &health_state,
+            &error_delivery_state,
             &tx,
         );
 
@@ -1832,6 +2150,7 @@ mod tests {
         let strategy = WatchStrategy::from_mode(&AppMode::new_single_file(&file_path).unwrap())
             .expect("watch strategyを作成できる");
         let health_state = WatcherHealthState::new_starting();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
 
         handle_debounced_watch_result(
@@ -1839,6 +2158,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
         );
 
         assert_eq!(
@@ -1863,6 +2183,7 @@ mod tests {
         let strategy = WatchStrategy::from_mode(&AppMode::new_single_file(&file_path).unwrap())
             .expect("watch strategyを作成できる");
         let health_state = WatcherHealthState::new_starting();
+        let error_delivery_state = ErrorDeliveryState::new();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(2);
 
         handle_debounced_watch_result(
@@ -1870,6 +2191,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
         );
         handle_debounced_watch_result(
             Ok(vec![notify_debouncer_mini::DebouncedEvent::new(
@@ -1879,6 +2201,7 @@ mod tests {
             &strategy,
             &tx,
             &health_state,
+            &error_delivery_state,
         );
 
         assert!(matches!(
@@ -1901,7 +2224,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state.clone(), tx);
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            health_state.clone(),
+            ErrorDeliveryState::new(),
+            tx,
+        );
 
         health_state.store_failed(WatcherFailureKind::Notify);
 
@@ -1921,7 +2250,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = std::thread::spawn(|| panic!("join panic detail"));
-        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state.clone(), tx);
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            health_state.clone(),
+            ErrorDeliveryState::new(),
+            tx,
+        );
 
         assert_eq!(
             watcher.shutdown(),
@@ -1948,7 +2283,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag, watcher_thread, health_state.clone(), tx);
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            health_state.clone(),
+            ErrorDeliveryState::new(),
+            tx,
+        );
 
         let shutdown_health = watcher.shutdown();
 
@@ -1973,6 +2314,7 @@ mod tests {
             shutdown_flag,
             watcher_thread,
             health_state,
+            error_delivery_state: ErrorDeliveryState::new(),
             error_tx: tx,
         };
 
@@ -1992,7 +2334,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread, health_state, tx);
+        let watcher = Watcher::new(
+            shutdown_flag.clone(),
+            watcher_thread,
+            health_state,
+            ErrorDeliveryState::new(),
+            tx,
+        );
         watcher.shutdown();
         assert!(shutdown_flag.load(Ordering::Acquire));
     }
@@ -2003,7 +2351,13 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let (tx, _rx) = mpsc::channel::<WatchEvent>(1);
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
-        let watcher = Watcher::new(shutdown_flag.clone(), watcher_thread, health_state, tx);
+        let watcher = Watcher::new(
+            shutdown_flag.clone(),
+            watcher_thread,
+            health_state,
+            ErrorDeliveryState::new(),
+            tx,
+        );
 
         drop(watcher);
         assert!(shutdown_flag.load(Ordering::Acquire));
