@@ -33,6 +33,10 @@ struct DocumentMeta {
     file_count_label: String,
 }
 
+fn html_attr(name: &'static str, value: &str) -> String {
+    format!(" {}=\"{}\"", name, html_escape(value))
+}
+
 /// HTMLテンプレートを生成する
 ///
 /// CSS/JSをすべて埋め込み、外部ファイル不要で動作する
@@ -40,18 +44,70 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
     let escaped_title = html_escape(params.title);
     let (dir_mode_attr, sidebar_inner, meta) =
         render_sidebar(&params.sidebar, params.toc, params.memo);
-    let memo_file_attr = params.memo.file().unwrap_or_default();
+    let memo_file_attr = params
+        .memo
+        .file()
+        .map(|file| html_attr("data-memo-file", file))
+        .unwrap_or_else(|| html_attr("data-memo-file", ""));
 
+    render_html_document(HtmlDocumentParts {
+        theme: if params.dark_mode { "dark" } else { "light" },
+        dir_mode_attr,
+        memo_file_attr,
+        title: escaped_title,
+        title_attr: html_attr("data-title", params.title),
+        css: combined_css(params.syntax_css),
+        sidebar_inner,
+        content: params.content.as_str().to_string(),
+        js: inline_js(),
+        mode_label: meta.mode_label,
+        file_count_label: meta.file_count_label,
+    })
+}
+
+struct HtmlDocumentParts {
+    theme: &'static str,
+    dir_mode_attr: String,
+    memo_file_attr: String,
+    title: String,
+    title_attr: String,
+    css: String,
+    sidebar_inner: String,
+    content: String,
+    js: String,
+    mode_label: String,
+    file_count_label: String,
+}
+
+fn render_html_document(parts: HtmlDocumentParts) -> String {
     format!(
         r##"<!DOCTYPE html>
-<html lang="ja" data-theme="{theme}"{dir_mode_attr} data-memo-file="{memo_file}">
-<head>
+<html lang="ja" data-theme="{theme}"{dir_mode_attr}{memo_file_attr}>
+{head}
+{body}
+</html>"##,
+        theme = parts.theme,
+        dir_mode_attr = parts.dir_mode_attr,
+        memo_file_attr = parts.memo_file_attr,
+        head = render_head(&parts.title, &parts.css),
+        body = render_workspace_body(&parts),
+    )
+}
+
+fn render_head(title: &str, css: &str) -> String {
+    format!(
+        r##"<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} - markdown-view</title>
 <style>{css}</style>
-</head>
-<body>
+</head>"##
+    )
+}
+
+fn render_workspace_body(parts: &HtmlDocumentParts) -> String {
+    format!(
+        r##"<body>
 <div class="app-shell">
 <aside id="sidebar" class="sidebar">
 {sidebar_inner}
@@ -80,7 +136,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 <div class="reading-progress" aria-hidden="true">
   <div id="reading-progress-bar" class="reading-progress-bar"></div>
 </div>
-<main id="content" class="content" data-title="{title}">
+<main id="content" class="content"{title_attr}>
 {content}
 </main>
 </div>
@@ -88,18 +144,14 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
 <button id="back-to-top" class="back-to-top" aria-label="ページ上部へ戻る">↑</button>
 <button id="quote-selection-action" class="quote-selection-action" type="button" hidden>引用を追加</button>
 <script>{js}</script>
-</body>
-</html>"##,
-        theme = if params.dark_mode { "dark" } else { "light" },
-        dir_mode_attr = dir_mode_attr,
-        memo_file = html_escape(memo_file_attr),
-        title = escaped_title,
-        css = combined_css(params.syntax_css),
-        sidebar_inner = sidebar_inner,
-        content = params.content.as_str(),
-        js = inline_js(),
-        mode_label = meta.mode_label,
-        file_count_label = meta.file_count_label,
+</body>"##,
+        sidebar_inner = parts.sidebar_inner,
+        title = parts.title,
+        title_attr = parts.title_attr,
+        mode_label = parts.mode_label,
+        file_count_label = parts.file_count_label,
+        content = parts.content,
+        js = parts.js,
     )
 }
 
@@ -119,8 +171,9 @@ fn render_sidebar(
             let tree = build_file_tree(file_list);
             let tree_html = render_file_tree_html(&tree, *current_file);
             let dir_mode_attr = format!(
-                " data-dir-mode=\"true\" data-current-file=\"{}\"",
-                html_escape(current_file.unwrap_or(""))
+                "{}{}",
+                html_attr("data-dir-mode", "true"),
+                html_attr("data-current-file", current_file.unwrap_or(""))
             );
             let sidebar_inner = format!(
                 r##"  <div class="sidebar-brand">
@@ -342,6 +395,56 @@ mod tests {
                 current_file: Some("README.md"),
             },
         })
+    }
+
+    #[test]
+    fn test_html_attrは属性値をescapeする() {
+        assert_eq!(
+            html_attr("data-file", "a\" onclick=\"x & <y>"),
+            " data-file=\"a&quot; onclick=&quot;x &amp; &lt;y&gt;\""
+        );
+    }
+
+    #[test]
+    fn test_contentとtocは二重escapeしない() {
+        let content = render_markdown("**ok**");
+        let toc = generate_toc("# toc");
+        let memo = MemoResponse::empty(None);
+
+        let html = render_page(RenderPageParams {
+            title: "Escape",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: "",
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(html.contains("<strong>"));
+        assert!(html.contains("</strong>"));
+        assert!(html.contains("href=\"#toc\""));
+        assert!(!html.contains("&lt;strong&gt;ok&lt;/strong&gt;"));
+    }
+
+    #[test]
+    fn test_title属性はhtml_attrでescapeする() {
+        let content = test_content();
+        let toc = test_toc();
+        let memo = test_memo();
+
+        let html = render_page(RenderPageParams {
+            title: "a\" onclick=\"x",
+            content: &content,
+            toc: &toc,
+            memo: &memo,
+            dark_mode: false,
+            syntax_css: "",
+            sidebar: SidebarParams::SingleFile,
+        });
+
+        assert!(html.contains(" data-title=\"a&quot; onclick=&quot;x\""));
+        assert!(!html.contains(" data-title=\"a\" onclick=\"x\""));
     }
 
     #[test]
