@@ -1012,8 +1012,13 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
   await setDocumentSearchQuery(page, 'beta');
   await expect(page.locator('#document-search-results')).toContainText('beta current');
 
+  const alphaResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/search' && url.searchParams.get('q') === 'alpha';
+  });
   releaseFirstResponse?.();
-  await page.waitForTimeout(100);
+  await alphaResponse;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.locator('#document-search-results')).toContainText('beta current');
   await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
 });
