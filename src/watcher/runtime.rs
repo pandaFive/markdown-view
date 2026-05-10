@@ -556,19 +556,52 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
         Err(spawn_error) => {
             tracing::warn!(
                 error_kind = ?error_kind,
-                "[markdown-view] 監視エラー送達スレッドの起動に失敗しました。同期送達へフォールバックします: {}, {}",
+                "[markdown-view] 監視エラー送達スレッドの起動に失敗しました。fallback送達を試みます: {}, {}",
                 label,
                 spawn_error
             );
-            deliver_blocking_error_event(
+            deliver_fallback_error_event(
                 fallback_tx,
                 fallback_error,
-                &fallback_label,
+                fallback_label,
                 error_kind,
-                &fallback_state,
+                fallback_state,
             );
         }
     }
+}
+
+fn deliver_fallback_error_event(
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: String,
+    error_kind: super::WatchErrorKind,
+    error_delivery_state: ErrorDeliveryState,
+) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::spawn(async move {
+            deliver_async_error_event(tx, error, label, error_kind, error_delivery_state).await;
+        });
+    } else {
+        deliver_blocking_error_event(tx, error, &label, error_kind, &error_delivery_state);
+    }
+}
+
+async fn deliver_async_error_event(
+    tx: mpsc::Sender<WatchEvent>,
+    error: WatchError,
+    label: String,
+    error_kind: super::WatchErrorKind,
+    error_delivery_state: ErrorDeliveryState,
+) {
+    if tx.send(WatchEvent::Error(error)).await.is_err() {
+        tracing::warn!(
+            error_kind = ?error_kind,
+            "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}",
+            label
+        );
+    }
+    complete_error_delivery(&label, &error_delivery_state);
 }
 
 fn deliver_blocking_error_event(
@@ -585,6 +618,10 @@ fn deliver_blocking_error_event(
             label
         );
     }
+    complete_error_delivery(label, error_delivery_state);
+}
+
+fn complete_error_delivery(label: &str, error_delivery_state: &ErrorDeliveryState) {
     let coalesced = error_delivery_state.complete_in_flight();
     if coalesced > 0 {
         tracing::warn!(
@@ -2015,6 +2052,64 @@ mod tests {
             !error_delivery_state.is_in_flight(),
             "fallback送達後はin-flightを解除する"
         );
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            0,
+            "fallback送達後は集約件数を消費する"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_send_watch_event_errorはruntime内helper_thread起動失敗時もpanicせずfallback送達する(
+    ) {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.send(WatchEvent::FileChanged(first.clone()))
+            .await
+            .expect("channelを満杯にできる");
+
+        super::enqueue_blocking_error_delivery_with_spawner(
+            tx.clone(),
+            WatchError::notify("runtime helper spawn failure fallback"),
+            "runtime helper起動失敗fallbackテスト",
+            &error_delivery_state,
+            |_job| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "thread spawn failed",
+                ))
+            },
+        );
+        drop(tx);
+
+        match rx.recv().await.expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("fallback Errorの受信がtimeoutしない")
+            .expect("fallback Errorを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "runtime helper spawn failure fallback");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while error_delivery_state.is_in_flight() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fallback送達後にin-flightが解除される");
         assert_eq!(
             error_delivery_state.coalesced_count(),
             0,
