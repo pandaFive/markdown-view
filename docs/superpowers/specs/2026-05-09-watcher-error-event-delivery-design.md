@@ -54,7 +54,7 @@ helper thread の起動に失敗した場合は、同じ代表エラーを fallb
 2. 既存どおり `WatcherHealthState::store_failed(...)` を先に呼び、failure を latch する。
 3. `WatchError` を `WatchEvent::Error` に包んで `send_watch_event(...)` を呼ぶ。
 4. 送達中の代表エラーがなければ bounded helper で `blocking_send` し、helper thread 起動失敗時は runtime 内外に応じた fallback で receiver へ送達する。
-5. 送達中の代表エラーがあれば追加 `Error` は件数集約し、代表エラー送達後に集約件数を warn ログへ残す。
+5. 送達中の代表エラーがあれば追加 `Error` は件数集約し、代表エラー送達後に warn ログと合成サマリ `WatchEvent::Error` で集約件数を表面化する。
 6. receiver closed の場合は warn し、送達不能だった事実をログに残す。
 
 health latch を error event 送信前に維持するため、仮に receiver 側が詰まり代表エラーの `blocking_send` が待っていても、`Watcher::health()` では先に `Failed(_)` を観測できる。
@@ -67,17 +67,20 @@ shutdown 中に `WatchEvent::Error` が発生した場合も同じ送信 helper 
 
 thread panic 経路は `handle_watcher_panic` から同じ `send_watch_event(WatchEvent::Error(...))` を通るため、panic detail を含む `ThreadPanic` error event は channel full だけでは破棄されなくなる。
 
+送達状態の `Mutex` が poison した場合は内部 panic 相当として扱う。状態を `Idle` へリセットし、`WatcherHealth` は `Failed(ThreadPanic)` へ latch する。これにより `in_flight` が壊れたまま全 Error が永久に coalesce される経路を避ける。
+
 ## テスト計画
 
 `src/watcher/runtime.rs` の既存 unit tests に以下を追加・更新する。
 
 - `FileChanged` は channel full 時に従来どおり drop され、送信側をブロックしないことを確認する。
 - `Error` は channel full 時でも receiver が開いていれば代表イベントが送達されることを確認する。
-- 送達中の追加 `Error` は全件 queue へ積まず件数集約されることを確認する。
+- 送達中の追加 `Error` は全件 queue へ積まず件数集約し、代表 `Error` 後に合成サマリ `Error` が届くことを確認する。
 - helper thread 起動失敗時でも fallback で代表 `Error` が送達され、送達状態が解除されることを確認する。
 - Tokio runtime 内の helper thread 起動失敗 fallback が `blocking_send` panic を起こさず、async send で代表 `Error` を送達することを確認する。
 - 別 watcher state の送達待機が互いに詰まらないことを確認する。
 - receiver closed 状態で `Error` を送っても panic せず戻ることを確認する。
+- 送達状態の poison 復旧、Drop 中の helper 待機、並列 sender、multi-thread runtime fallback を確認する。
 - 既存の notify error、internal channel full/disconnected、thread panic の health failure テストが引き続き通ることを確認する。
 
 `Error` の channel full テストは、容量 1 の channel を `FileChanged` で埋めた状態で `send_watch_event(WatchEvent::Error(...))` を呼ぶ。メイン側が先に `FileChanged` を drain した後、代表 `Error` を受信できることを確認する。helper thread 起動失敗テストは spawner を注入し、失敗時に runtime 外では同期 fallback、runtime 内では async fallback が代表 `Error` を送ることを固定する。
@@ -92,7 +95,7 @@ cargo test --all-targets --all-features
 ## 受け入れ条件
 
 - `WatchEvent::Error` は `mpsc` channel が満杯でも、receiver が開いている限り代表イベントが破棄されない。
-- 代表 `Error` の送達中に発生した追加 `Error` は件数集約され、unbounded queue を作らない。
+- 代表 `Error` の送達中に発生した追加 `Error` は件数集約され、unbounded queue を作らず、合成サマリ `Error` として receiver へ届く。
 - helper thread 起動失敗時も runtime 内外に応じた fallback で代表 `Error` を送達する。
 - `WatchEvent::FileChanged` は従来どおり過負荷時に drop され、watcher thread を詰まらせない。
 - notify error、internal channel failure、watch registration failure、thread panic の `WatcherHealth` failure latch は維持される。

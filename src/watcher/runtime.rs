@@ -31,67 +31,84 @@ type InternalWatchResult =
 #[derive(Debug, Clone)]
 struct ErrorDeliveryState {
     inner: Arc<Mutex<ErrorDeliveryInner>>,
+    poison_recovered: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
-struct ErrorDeliveryInner {
-    in_flight: bool,
-    coalesced_count: u64,
+enum ErrorDeliveryInner {
+    #[default]
+    Idle,
+    InFlight {
+        coalesced_count: u64,
+    },
 }
 
 impl ErrorDeliveryState {
     fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ErrorDeliveryInner::default())),
+            poison_recovered: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn lock_inner(&self) -> MutexGuard<'_, ErrorDeliveryInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = ErrorDeliveryInner::Idle;
+                self.inner.clear_poison();
+                self.poison_recovered.store(true, Ordering::Release);
+                guard
+            }
+        }
+    }
+
+    fn take_poison_recovered(&self) -> bool {
+        self.poison_recovered.swap(false, Ordering::AcqRel)
     }
 
     fn try_mark_in_flight(&self) -> bool {
         let mut inner = self.lock_inner();
-        if inner.in_flight {
-            return false;
+        match *inner {
+            ErrorDeliveryInner::Idle => {
+                *inner = ErrorDeliveryInner::InFlight { coalesced_count: 0 };
+                true
+            }
+            ErrorDeliveryInner::InFlight { .. } => false,
         }
-        inner.in_flight = true;
-        true
-    }
-
-    fn coalesce(&self) -> u64 {
-        let mut inner = self.lock_inner();
-        inner.coalesced_count += 1;
-        inner.coalesced_count
     }
 
     fn coalesce_if_in_flight(&self) -> Option<u64> {
         let mut inner = self.lock_inner();
-        if !inner.in_flight {
-            return None;
+        match &mut *inner {
+            ErrorDeliveryInner::Idle => None,
+            ErrorDeliveryInner::InFlight { coalesced_count } => {
+                *coalesced_count += 1;
+                Some(*coalesced_count)
+            }
         }
-        inner.coalesced_count += 1;
-        Some(inner.coalesced_count)
     }
 
     fn complete_in_flight(&self) -> u64 {
         let mut inner = self.lock_inner();
-        let coalesced = inner.coalesced_count;
-        inner.coalesced_count = 0;
-        inner.in_flight = false;
-        coalesced
+        match std::mem::take(&mut *inner) {
+            ErrorDeliveryInner::Idle => 0,
+            ErrorDeliveryInner::InFlight { coalesced_count } => coalesced_count,
+        }
     }
 
     #[cfg(test)]
     fn is_in_flight(&self) -> bool {
-        self.lock_inner().in_flight
+        matches!(*self.lock_inner(), ErrorDeliveryInner::InFlight { .. })
     }
 
     #[cfg(test)]
     fn coalesced_count(&self) -> u64 {
-        self.lock_inner().coalesced_count
+        match *self.lock_inner() {
+            ErrorDeliveryInner::Idle => 0,
+            ErrorDeliveryInner::InFlight { coalesced_count } => coalesced_count,
+        }
     }
 }
 
@@ -247,6 +264,11 @@ impl WatcherHealthState {
             WatcherFailureKind::ThreadPanic => Self::FAILED_THREAD_PANIC,
         };
         self.store_if_not_failed(raw);
+    }
+
+    fn store_thread_panic_unconditionally(&self) {
+        self.state
+            .store(Self::FAILED_THREAD_PANIC, Ordering::Release);
     }
 
     fn store_if_not_failed(&self, raw: u8) {
@@ -435,21 +457,23 @@ fn send_watch_event(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
 ) {
-    send_watch_event_with_error_delivery_thread_name(
+    send_watch_event_with_context(
         tx,
         event,
         label,
         error_delivery_state,
         DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+        None,
     );
 }
 
-fn send_watch_event_with_error_delivery_thread_name(
+fn send_watch_event_with_context(
     tx: &mpsc::Sender<WatchEvent>,
     event: WatchEvent,
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
     error_delivery_thread_name: &'static str,
+    health_state: Option<&WatcherHealthState>,
 ) {
     match event {
         WatchEvent::FileChanged(path) => send_file_changed_event(tx, path, label),
@@ -459,6 +483,7 @@ fn send_watch_event_with_error_delivery_thread_name(
             label,
             error_delivery_state,
             error_delivery_thread_name,
+            health_state,
         ),
     }
 }
@@ -487,10 +512,13 @@ fn send_error_event(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
     error_delivery_thread_name: &'static str,
+    health_state: Option<&WatcherHealthState>,
 ) {
     // Production の通常送信元は watcher thread だが、shutdown panic 経路など
     // Tokio runtime 内から呼ばれる場合もあるため fallback は runtime-aware にする。
+    latch_health_for_watch_error(health_state, error.kind());
     if let Some(coalesced) = error_delivery_state.coalesce_if_in_flight() {
+        latch_error_delivery_poison_if_recovered(health_state, error_delivery_state);
         tracing::warn!(
             coalesced,
             error_kind = ?error.kind(),
@@ -499,6 +527,7 @@ fn send_error_event(
         );
         return;
     }
+    latch_error_delivery_poison_if_recovered(health_state, error_delivery_state);
 
     match tx.try_send(WatchEvent::Error(error)) {
         Ok(()) => {}
@@ -516,10 +545,14 @@ fn send_error_event(
                 label,
                 error_delivery_state,
                 error_delivery_thread_name,
+                health_state.cloned(),
             );
         }
         Err(mpsc::error::TrySendError::Closed(WatchEvent::FileChanged(_)))
         | Err(mpsc::error::TrySendError::Full(WatchEvent::FileChanged(_))) => {
+            if let Some(health_state) = health_state {
+                health_state.store_thread_panic_unconditionally();
+            }
             debug_assert!(false, "WatchEvent::Error送信でFileChangedが返ることはない");
             tracing::error!(
                 "[markdown-view] 監視エラー送達で予期しないイベント種別を受け取りました: {}",
@@ -535,6 +568,7 @@ fn enqueue_blocking_error_delivery(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
     thread_name: &'static str,
+    health_state: Option<WatcherHealthState>,
 ) {
     enqueue_blocking_error_delivery_with_spawner(
         tx,
@@ -542,6 +576,7 @@ fn enqueue_blocking_error_delivery(
         label,
         error_delivery_state,
         thread_name,
+        health_state,
         |name, job| {
             std::thread::Builder::new()
                 .name(name.to_string())
@@ -557,12 +592,15 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
     thread_name: &'static str,
+    health_state: Option<WatcherHealthState>,
     spawn_delivery: F,
 ) where
     F: FnOnce(&'static str, Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
 {
     if !error_delivery_state.try_mark_in_flight() {
-        let coalesced = error_delivery_state.coalesce();
+        latch_error_delivery_poison_if_recovered(health_state.as_ref(), error_delivery_state);
+        let coalesced = error_delivery_state.coalesce_if_in_flight().unwrap_or(0);
+        latch_error_delivery_poison_if_recovered(health_state.as_ref(), error_delivery_state);
         tracing::warn!(
             coalesced,
             error_kind = ?error.kind(),
@@ -577,13 +615,23 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
     let fallback_label = label.clone();
     let error_kind = error.kind();
     let state = error_delivery_state.clone();
+    let delivery_health_state = health_state.clone();
     let fallback_tx = tx.clone();
     let fallback_error = error.clone();
     let fallback_state = state.clone();
+    let fallback_health_state = health_state.clone();
     match spawn_delivery(
         thread_name,
         Box::new(move || {
-            deliver_blocking_error_event(tx, error, &delivery_label, error_kind, &state);
+            deliver_blocking_error_event(
+                tx,
+                error,
+                &delivery_label,
+                error_kind,
+                &state,
+                delivery_health_state,
+                thread_name,
+            );
         }),
     ) {
         Ok(_) => {}
@@ -600,6 +648,8 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
                 fallback_label,
                 error_kind,
                 fallback_state,
+                fallback_health_state,
+                thread_name,
             );
         }
     }
@@ -611,13 +661,32 @@ fn deliver_fallback_error_event(
     label: String,
     error_kind: super::WatchErrorKind,
     error_delivery_state: ErrorDeliveryState,
+    health_state: Option<WatcherHealthState>,
+    thread_name: &'static str,
 ) {
     if tokio::runtime::Handle::try_current().is_ok() {
         tokio::spawn(async move {
-            deliver_async_error_event(tx, error, label, error_kind, error_delivery_state).await;
+            deliver_async_error_event(
+                tx,
+                error,
+                label,
+                error_kind,
+                error_delivery_state,
+                health_state,
+                thread_name,
+            )
+            .await;
         });
     } else {
-        deliver_blocking_error_event(tx, error, &label, error_kind, &error_delivery_state);
+        deliver_blocking_error_event(
+            tx,
+            error,
+            &label,
+            error_kind,
+            &error_delivery_state,
+            health_state,
+            thread_name,
+        );
     }
 }
 
@@ -627,6 +696,8 @@ async fn deliver_async_error_event(
     label: String,
     error_kind: super::WatchErrorKind,
     error_delivery_state: ErrorDeliveryState,
+    health_state: Option<WatcherHealthState>,
+    thread_name: &'static str,
 ) {
     if tx.send(WatchEvent::Error(error)).await.is_err() {
         tracing::warn!(
@@ -635,16 +706,30 @@ async fn deliver_async_error_event(
             label
         );
     }
-    complete_error_delivery(&label, &error_delivery_state);
+    complete_error_delivery(
+        &label,
+        &tx,
+        &error_delivery_state,
+        health_state.as_ref(),
+        thread_name,
+    );
 }
 
+/// Tokio runtime 内で呼ぶと `blocking_send` が panic するため、runtime 外の
+/// helper thread または同期 fallback 経路からだけ呼び出す。
 fn deliver_blocking_error_event(
     tx: mpsc::Sender<WatchEvent>,
     error: WatchError,
     label: &str,
     error_kind: super::WatchErrorKind,
     error_delivery_state: &ErrorDeliveryState,
+    health_state: Option<WatcherHealthState>,
+    thread_name: &'static str,
 ) {
+    debug_assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "deliver_blocking_error_event must not run inside a Tokio runtime"
+    );
     if tx.blocking_send(WatchEvent::Error(error)).is_err() {
         tracing::warn!(
             error_kind = ?error_kind,
@@ -652,17 +737,74 @@ fn deliver_blocking_error_event(
             label
         );
     }
-    complete_error_delivery(label, error_delivery_state);
+    complete_error_delivery(
+        label,
+        &tx,
+        error_delivery_state,
+        health_state.as_ref(),
+        thread_name,
+    );
 }
 
-fn complete_error_delivery(label: &str, error_delivery_state: &ErrorDeliveryState) {
+fn complete_error_delivery(
+    label: &str,
+    tx: &mpsc::Sender<WatchEvent>,
+    error_delivery_state: &ErrorDeliveryState,
+    health_state: Option<&WatcherHealthState>,
+    thread_name: &'static str,
+) {
     let coalesced = error_delivery_state.complete_in_flight();
+    latch_error_delivery_poison_if_recovered(health_state, error_delivery_state);
     if coalesced > 0 {
         tracing::warn!(
             coalesced,
             "[markdown-view] 送達待機中に発生した監視エラーを集約しました: {}",
             label
         );
+        send_watch_event_with_context(
+            tx,
+            WatchEvent::Error(WatchError::notify(format!(
+                "送達待機中に発生した監視エラーを{}件集約しました",
+                coalesced
+            ))),
+            label,
+            error_delivery_state,
+            thread_name,
+            health_state,
+        );
+    }
+}
+
+fn latch_health_for_watch_error(
+    health_state: Option<&WatcherHealthState>,
+    error_kind: super::WatchErrorKind,
+) {
+    let Some(health_state) = health_state else {
+        return;
+    };
+    match error_kind {
+        super::WatchErrorKind::ThreadPanic => {
+            health_state.store_failed(WatcherFailureKind::ThreadPanic);
+        }
+        super::WatchErrorKind::Init
+        | super::WatchErrorKind::Notify
+        | super::WatchErrorKind::ResourceExhausted => {
+            health_state.store_failed(WatcherFailureKind::Notify);
+        }
+    }
+}
+
+fn latch_error_delivery_poison_if_recovered(
+    health_state: Option<&WatcherHealthState>,
+    error_delivery_state: &ErrorDeliveryState,
+) {
+    if error_delivery_state.take_poison_recovered() {
+        tracing::error!(
+            "[markdown-view] 監視エラー送達状態のpoisonを検出したため状態をリセットしました"
+        );
+        if let Some(health_state) = health_state {
+            health_state.store_thread_panic_unconditionally();
+        }
     }
 }
 
@@ -810,18 +952,19 @@ fn send_internal_watch_result(
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が満杯です");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_watch_event_with_error_delivery_thread_name(
+            send_watch_event_with_context(
                 tx,
                 WatchEvent::Error(WatchError::notify("watcher internal channel が満杯です")),
                 strategy.error_label(),
                 error_delivery_state,
                 strategy.error_delivery_thread_name(),
+                Some(health_state),
             );
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が閉じています");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_watch_event_with_error_delivery_thread_name(
+            send_watch_event_with_context(
                 tx,
                 WatchEvent::Error(WatchError::notify(
                     "watcher internal channel が閉じています",
@@ -829,6 +972,7 @@ fn send_internal_watch_result(
                 strategy.error_label(),
                 error_delivery_state,
                 strategy.error_delivery_thread_name(),
+                Some(health_state),
             );
         }
     }
@@ -860,12 +1004,13 @@ fn handle_debounced_watch_result(
                 strategy.watch_error_prefix(),
                 watch_error.detail()
             );
-            send_watch_event_with_error_delivery_thread_name(
+            send_watch_event_with_context(
                 tx,
                 WatchEvent::Error(watch_error),
                 strategy.error_label(),
                 error_delivery_state,
                 strategy.error_delivery_thread_name(),
+                Some(health_state),
             );
         }
     }
@@ -986,12 +1131,13 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
         }
 
         if let Some(watch_error) = registration_error {
-            send_watch_event_with_error_delivery_thread_name(
+            send_watch_event_with_context(
                 delivery.tx,
                 WatchEvent::Error(watch_error),
                 delivery.strategy.error_label(),
                 delivery.error_delivery_state,
                 delivery.error_delivery_thread_name,
+                Some(delivery.health_state),
             );
         }
     }
@@ -1015,11 +1161,13 @@ fn handle_watcher_panic(
     health_state.store_failed(WatcherFailureKind::ThreadPanic);
     let watch_error = WatchError::thread_panic(panic_detail.clone());
     tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
-    send_watch_event(
+    send_watch_event_with_context(
         tx,
         WatchEvent::Error(watch_error),
         error_label,
         error_delivery_state,
+        DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+        Some(health_state),
     );
 }
 
@@ -1091,7 +1239,7 @@ fn handle_internal_channel_disconnected(
         return;
     }
     health_state.store_failed(WatcherFailureKind::Notify);
-    send_watch_event_with_error_delivery_thread_name(
+    send_watch_event_with_context(
         tx,
         WatchEvent::Error(WatchError::notify(
             "watcher internal channel が切断されました",
@@ -1099,6 +1247,7 @@ fn handle_internal_channel_disconnected(
         strategy.error_label(),
         error_delivery_state,
         strategy.error_delivery_thread_name(),
+        Some(health_state),
     );
 }
 
@@ -1125,8 +1274,9 @@ mod tests {
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         process_debounced_events_with_watch_and_unwatch, register_watch_plan_with,
-        send_watch_event, ErrorDeliveryState, WatchDirectoryRegistry, WatchEventDelivery, Watcher,
-        WatcherFailureKind, WatcherHealth, WatcherHealthState, DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+        send_watch_event, send_watch_event_with_context, ErrorDeliveryState,
+        WatchDirectoryRegistry, WatchEventDelivery, Watcher, WatcherFailureKind, WatcherHealth,
+        WatcherHealthState, DEFAULT_ERROR_DELIVERY_THREAD_NAME,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -1914,15 +2064,23 @@ mod tests {
     fn test_send_watch_event_errorはチャネル満杯時もreceiverが開いていれば送達する() {
         let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
         let error_delivery_state = ErrorDeliveryState::new();
+        let health_state = WatcherHealthState::new_alive();
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         tx.blocking_send(WatchEvent::FileChanged(first.clone()))
             .expect("channelを満杯にできる");
 
-        send_watch_event(
+        send_watch_event_with_context(
             &tx,
             WatchEvent::Error(WatchError::notify("満杯時も送達する")),
             "error満杯時テスト",
             &error_delivery_state,
+            DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            Some(&health_state),
+        );
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::Notify),
+            "Error送信時点でhealth failureを先行latchする"
         );
         drop(tx);
 
@@ -1997,6 +2155,21 @@ mod tests {
             }
         }
 
+        match recv_event_until(&mut rx, Duration::from_secs(1))
+            .expect("集約サマリErrorを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(
+                    error.detail(),
+                    "送達待機中に発生した監視エラーを2件集約しました"
+                );
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("集約サマリErrorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while error_delivery_state.is_in_flight() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
@@ -2062,6 +2235,7 @@ mod tests {
                 "helper起動失敗fallbackテスト",
                 &delivery_state,
                 DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+                None,
                 |_thread_name, _job| {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -2114,6 +2288,7 @@ mod tests {
             "helper thread名テスト",
             &error_delivery_state,
             TEST_THREAD_NAME,
+            None,
             |thread_name, _job| {
                 assert_eq!(thread_name, TEST_THREAD_NAME);
                 Err(std::io::Error::new(
@@ -2150,6 +2325,7 @@ mod tests {
             "runtime helper起動失敗fallbackテスト",
             &error_delivery_state,
             DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            None,
             |_thread_name, _job| {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -2221,6 +2397,11 @@ mod tests {
             WatchEvent::Error(WatchError::notify("independent error")),
             "independent watcher",
             &independent_state,
+        );
+
+        assert!(
+            blocked_state.is_in_flight(),
+            "blocked watcherの送達待機は独立したstateに閉じる"
         );
 
         match independent_rx
@@ -2313,6 +2494,231 @@ mod tests {
             "error receiver closedテスト",
             &error_delivery_state,
         );
+
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "receiver closedではin-flightを残さない"
+        );
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            0,
+            "receiver closedでは集約件数を残さない"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorはpoison復旧時にhealth_failedへlatchして送達を継続する() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(4);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let health_state = WatcherHealthState::new_alive();
+        let poisoned_state = error_delivery_state.clone();
+
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_state.inner.lock().expect("poison前はlockできる");
+            panic!("ErrorDeliveryStateをpoisonする");
+        });
+
+        send_watch_event_with_context(
+            &tx,
+            WatchEvent::Error(WatchError::notify("poison後も送達する")),
+            "poison復旧テスト",
+            &error_delivery_state,
+            DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            Some(&health_state),
+        );
+
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::ThreadPanic),
+            "poison復旧は内部panic相当としてhealthに残す"
+        );
+        match rx.blocking_recv().expect("poison復旧後のErrorを受信できる") {
+            WatchEvent::Error(error) => assert_eq!(error.detail(), "poison後も送達する"),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "poison復旧後に通常送達した場合はin-flightを残さない"
+        );
+    }
+
+    #[test]
+    fn test_watcher_drop中のhelper送達待機はdeadlockせず解除される() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let health_state = WatcherHealthState::new_alive();
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            health_state.clone(),
+            error_delivery_state.clone(),
+            tx.clone(),
+        );
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
+            .expect("channelを満杯にできる");
+
+        send_watch_event_with_context(
+            &tx,
+            WatchEvent::Error(WatchError::notify("drop中helper error")),
+            "drop中helperテスト",
+            &error_delivery_state,
+            DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            Some(&health_state),
+        );
+        assert!(
+            error_delivery_state.is_in_flight(),
+            "drop前にhelperが送達待機している"
+        );
+
+        drop(watcher);
+
+        match rx.blocking_recv().expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match recv_event_until(&mut rx, Duration::from_secs(1)).expect("helper Errorを受信できる")
+        {
+            WatchEvent::Error(error) => assert_eq!(error.detail(), "drop中helper error"),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while error_delivery_state.is_in_flight() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "drop中に詰まっていたhelperもreceiver drain後に解除される"
+        );
+    }
+
+    #[test]
+    fn test_send_watch_event_errorは並列senderでも代表1件と集約サマリにまとめる() {
+        const SENDER_COUNT: usize = 8;
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
+            .expect("channelを満杯にできる");
+        let barrier = Arc::new(std::sync::Barrier::new(SENDER_COUNT));
+        let mut handles = Vec::new();
+
+        for index in 0..SENDER_COUNT {
+            let thread_tx = tx.clone();
+            let thread_state = error_delivery_state.clone();
+            let thread_barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                thread_barrier.wait();
+                send_watch_event(
+                    &thread_tx,
+                    WatchEvent::Error(WatchError::notify(format!("並列エラー{index}"))),
+                    "並列senderテスト",
+                    &thread_state,
+                );
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("sender threadがpanicしない");
+        }
+        drop(tx);
+
+        match rx.blocking_recv().expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match recv_event_until(&mut rx, Duration::from_secs(1)).expect("代表Errorを受信できる")
+        {
+            WatchEvent::Error(error) => assert!(error.detail().starts_with("並列エラー")),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+        match recv_event_until(&mut rx, Duration::from_secs(1))
+            .expect("並列senderの集約サマリErrorを受信できる")
+        {
+            WatchEvent::Error(error) => assert_eq!(
+                error.detail(),
+                format!(
+                    "送達待機中に発生した監視エラーを{}件集約しました",
+                    SENDER_COUNT - 1
+                )
+            ),
+            WatchEvent::FileChanged(path) => {
+                panic!("集約サマリErrorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+        assert!(
+            !error_delivery_state.is_in_flight(),
+            "並列sender送達後はin-flightを解除する"
+        );
+        assert_eq!(
+            error_delivery_state.coalesced_count(),
+            0,
+            "並列sender送達後は集約件数を消費する"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_watch_event_errorはmulti_thread_runtime内helper起動失敗時もfallback送達する()
+    {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        tx.send(WatchEvent::FileChanged(first.clone()))
+            .await
+            .expect("channelを満杯にできる");
+
+        super::enqueue_blocking_error_delivery_with_spawner(
+            tx.clone(),
+            WatchError::notify("multi_thread runtime fallback"),
+            "multi_thread runtime fallbackテスト",
+            &error_delivery_state,
+            DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            None,
+            |_thread_name, _job| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "thread spawn failed",
+                ))
+            },
+        );
+        drop(tx);
+
+        match rx.recv().await.expect("先行FileChangedを受信できる") {
+            WatchEvent::FileChanged(path) => assert_eq!(path, first),
+            WatchEvent::Error(error) => {
+                panic!("先行メッセージはFileChangedを期待したがError({error})を受信")
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("fallback Errorの受信がtimeoutしない")
+            .expect("fallback Errorを受信できる")
+        {
+            WatchEvent::Error(error) => assert_eq!(error.detail(), "multi_thread runtime fallback"),
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while error_delivery_state.is_in_flight() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fallback送達後にin-flightが解除される");
     }
 
     #[tokio::test]
