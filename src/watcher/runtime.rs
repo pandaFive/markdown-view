@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -22,6 +22,7 @@ const WATCHER_MESSAGE_BUFFER: usize = 32;
 const WATCHER_INTERNAL_EVENT_BUFFER: usize = 64;
 /// shutdown() のグレースフル停止待機秒数
 pub(crate) const WATCH_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+const DEFAULT_ERROR_DELIVERY_THREAD_NAME: &str = "markdown-view-watch-error-delivery";
 
 type InitResult = std::result::Result<(), WatchError>;
 type InternalWatchResult =
@@ -45,11 +46,14 @@ impl ErrorDeliveryState {
         }
     }
 
-    fn try_mark_in_flight(&self) -> bool {
-        let mut inner = self
-            .inner
+    fn lock_inner(&self) -> MutexGuard<'_, ErrorDeliveryInner> {
+        self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn try_mark_in_flight(&self) -> bool {
+        let mut inner = self.lock_inner();
         if inner.in_flight {
             return false;
         }
@@ -58,19 +62,13 @@ impl ErrorDeliveryState {
     }
 
     fn coalesce(&self) -> u64 {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.lock_inner();
         inner.coalesced_count += 1;
         inner.coalesced_count
     }
 
     fn coalesce_if_in_flight(&self) -> Option<u64> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.lock_inner();
         if !inner.in_flight {
             return None;
         }
@@ -79,10 +77,7 @@ impl ErrorDeliveryState {
     }
 
     fn complete_in_flight(&self) -> u64 {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.lock_inner();
         let coalesced = inner.coalesced_count;
         inner.coalesced_count = 0;
         inner.in_flight = false;
@@ -91,18 +86,12 @@ impl ErrorDeliveryState {
 
     #[cfg(test)]
     fn is_in_flight(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .in_flight
+        self.lock_inner().in_flight
     }
 
     #[cfg(test)]
     fn coalesced_count(&self) -> u64 {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .coalesced_count
+        self.lock_inner().coalesced_count
     }
 }
 
@@ -112,6 +101,7 @@ struct WatchEventDelivery<'a> {
     tx: &'a mpsc::Sender<WatchEvent>,
     health_state: &'a WatcherHealthState,
     error_delivery_state: &'a ErrorDeliveryState,
+    error_delivery_thread_name: &'static str,
 }
 
 #[derive(Debug)]
@@ -445,9 +435,31 @@ fn send_watch_event(
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
 ) {
+    send_watch_event_with_error_delivery_thread_name(
+        tx,
+        event,
+        label,
+        error_delivery_state,
+        DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+    );
+}
+
+fn send_watch_event_with_error_delivery_thread_name(
+    tx: &mpsc::Sender<WatchEvent>,
+    event: WatchEvent,
+    label: &str,
+    error_delivery_state: &ErrorDeliveryState,
+    error_delivery_thread_name: &'static str,
+) {
     match event {
         WatchEvent::FileChanged(path) => send_file_changed_event(tx, path, label),
-        WatchEvent::Error(error) => send_error_event(tx, error, label, error_delivery_state),
+        WatchEvent::Error(error) => send_error_event(
+            tx,
+            error,
+            label,
+            error_delivery_state,
+            error_delivery_thread_name,
+        ),
     }
 }
 
@@ -474,7 +486,10 @@ fn send_error_event(
     error: WatchError,
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
+    error_delivery_thread_name: &'static str,
 ) {
+    // Production の通常送信元は watcher thread だが、shutdown panic 経路など
+    // Tokio runtime 内から呼ばれる場合もあるため fallback は runtime-aware にする。
     if let Some(coalesced) = error_delivery_state.coalesce_if_in_flight() {
         tracing::warn!(
             coalesced,
@@ -495,10 +510,17 @@ fn send_error_event(
             );
         }
         Err(mpsc::error::TrySendError::Full(WatchEvent::Error(error))) => {
-            enqueue_blocking_error_delivery(tx.clone(), error, label, error_delivery_state);
+            enqueue_blocking_error_delivery(
+                tx.clone(),
+                error,
+                label,
+                error_delivery_state,
+                error_delivery_thread_name,
+            );
         }
         Err(mpsc::error::TrySendError::Closed(WatchEvent::FileChanged(_)))
         | Err(mpsc::error::TrySendError::Full(WatchEvent::FileChanged(_))) => {
+            debug_assert!(false, "WatchEvent::Error送信でFileChangedが返ることはない");
             tracing::error!(
                 "[markdown-view] 監視エラー送達で予期しないイベント種別を受け取りました: {}",
                 label
@@ -512,13 +534,21 @@ fn enqueue_blocking_error_delivery(
     error: WatchError,
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
+    thread_name: &'static str,
 ) {
-    enqueue_blocking_error_delivery_with_spawner(tx, error, label, error_delivery_state, |job| {
-        std::thread::Builder::new()
-            .name("markdown-view-watch-error-delivery".to_string())
-            .spawn(job)
-            .map(|_| ())
-    });
+    enqueue_blocking_error_delivery_with_spawner(
+        tx,
+        error,
+        label,
+        error_delivery_state,
+        thread_name,
+        |name, job| {
+            std::thread::Builder::new()
+                .name(name.to_string())
+                .spawn(job)
+                .map(|_| ())
+        },
+    );
 }
 
 fn enqueue_blocking_error_delivery_with_spawner<F>(
@@ -526,9 +556,10 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
     error: WatchError,
     label: &str,
     error_delivery_state: &ErrorDeliveryState,
+    thread_name: &'static str,
     spawn_delivery: F,
 ) where
-    F: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+    F: FnOnce(&'static str, Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
 {
     if !error_delivery_state.try_mark_in_flight() {
         let coalesced = error_delivery_state.coalesce();
@@ -549,9 +580,12 @@ fn enqueue_blocking_error_delivery_with_spawner<F>(
     let fallback_tx = tx.clone();
     let fallback_error = error.clone();
     let fallback_state = state.clone();
-    match spawn_delivery(Box::new(move || {
-        deliver_blocking_error_event(tx, error, &delivery_label, error_kind, &state);
-    })) {
+    match spawn_delivery(
+        thread_name,
+        Box::new(move || {
+            deliver_blocking_error_event(tx, error, &delivery_label, error_kind, &state);
+        }),
+    ) {
         Ok(_) => {}
         Err(spawn_error) => {
             tracing::warn!(
@@ -709,6 +743,7 @@ fn spawn_watcher_thread(
                     tx: &rt_tx,
                     health_state: &health_state,
                     error_delivery_state: &error_delivery_state,
+                    error_delivery_thread_name: strategy.error_delivery_thread_name(),
                 };
                 run_watcher_event_loop(
                     &mut debouncer,
@@ -775,23 +810,25 @@ fn send_internal_watch_result(
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が満杯です");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_watch_event(
+            send_watch_event_with_error_delivery_thread_name(
                 tx,
                 WatchEvent::Error(WatchError::notify("watcher internal channel が満杯です")),
                 strategy.error_label(),
                 error_delivery_state,
+                strategy.error_delivery_thread_name(),
             );
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が閉じています");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_watch_event(
+            send_watch_event_with_error_delivery_thread_name(
                 tx,
                 WatchEvent::Error(WatchError::notify(
                     "watcher internal channel が閉じています",
                 )),
                 strategy.error_label(),
                 error_delivery_state,
+                strategy.error_delivery_thread_name(),
             );
         }
     }
@@ -823,11 +860,12 @@ fn handle_debounced_watch_result(
                 strategy.watch_error_prefix(),
                 watch_error.detail()
             );
-            send_watch_event(
+            send_watch_event_with_error_delivery_thread_name(
                 tx,
                 WatchEvent::Error(watch_error),
                 strategy.error_label(),
                 error_delivery_state,
+                strategy.error_delivery_thread_name(),
             );
         }
     }
@@ -850,6 +888,7 @@ fn process_debounced_events_with_watch<F>(
         tx,
         health_state,
         error_delivery_state,
+        error_delivery_thread_name: strategy.error_delivery_thread_name(),
     };
     process_debounced_events_with_watch_and_unwatch(
         events,
@@ -947,11 +986,12 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
         }
 
         if let Some(watch_error) = registration_error {
-            send_watch_event(
+            send_watch_event_with_error_delivery_thread_name(
                 delivery.tx,
                 WatchEvent::Error(watch_error),
                 delivery.strategy.error_label(),
                 delivery.error_delivery_state,
+                delivery.error_delivery_thread_name,
             );
         }
     }
@@ -1051,13 +1091,14 @@ fn handle_internal_channel_disconnected(
         return;
     }
     health_state.store_failed(WatcherFailureKind::Notify);
-    send_watch_event(
+    send_watch_event_with_error_delivery_thread_name(
         tx,
         WatchEvent::Error(WatchError::notify(
             "watcher internal channel が切断されました",
         )),
         strategy.error_label(),
         error_delivery_state,
+        strategy.error_delivery_thread_name(),
     );
 }
 
@@ -1085,7 +1126,7 @@ mod tests {
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         process_debounced_events_with_watch_and_unwatch, register_watch_plan_with,
         send_watch_event, ErrorDeliveryState, WatchDirectoryRegistry, WatchEventDelivery, Watcher,
-        WatcherFailureKind, WatcherHealth, WatcherHealthState,
+        WatcherFailureKind, WatcherHealth, WatcherHealthState, DEFAULT_ERROR_DELIVERY_THREAD_NAME,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -1541,6 +1582,7 @@ mod tests {
             tx: &tx,
             health_state: &health_state,
             error_delivery_state: &error_delivery_state,
+            error_delivery_thread_name: strategy.error_delivery_thread_name(),
         };
 
         process_debounced_events_with_watch_and_unwatch(
@@ -2019,7 +2061,8 @@ mod tests {
                 WatchError::notify("helper spawn failure fallback"),
                 "helper起動失敗fallbackテスト",
                 &delivery_state,
-                |_job| {
+                DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+                |_thread_name, _job| {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
                         "thread spawn failed",
@@ -2059,6 +2102,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_send_watch_event_errorはhelper_thread名をspawnerへ渡す() {
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+        let error_delivery_state = ErrorDeliveryState::new();
+        const TEST_THREAD_NAME: &str = "markdown-view-watch-error-delivery-test";
+
+        super::enqueue_blocking_error_delivery_with_spawner(
+            tx,
+            WatchError::notify("thread name propagation"),
+            "helper thread名テスト",
+            &error_delivery_state,
+            TEST_THREAD_NAME,
+            |thread_name, _job| {
+                assert_eq!(thread_name, TEST_THREAD_NAME);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "thread spawn failed",
+                ))
+            },
+        );
+
+        match rx.blocking_recv().expect("fallback Errorを受信できる") {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "thread name propagation");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_send_watch_event_errorはruntime内helper_thread起動失敗時もpanicせずfallback送達する(
     ) {
@@ -2074,7 +2149,8 @@ mod tests {
             WatchError::notify("runtime helper spawn failure fallback"),
             "runtime helper起動失敗fallbackテスト",
             &error_delivery_state,
-            |_job| {
+            DEFAULT_ERROR_DELIVERY_THREAD_NAME,
+            |_thread_name, _job| {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "thread spawn failed",

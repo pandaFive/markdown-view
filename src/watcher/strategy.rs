@@ -182,6 +182,13 @@ impl WatchStrategy {
         }
     }
 
+    pub(super) fn error_delivery_thread_name(&self) -> &'static str {
+        match self {
+            Self::SingleFile { .. } => "markdown-view-watch-error-delivery-file",
+            Self::Directory { .. } => "markdown-view-watch-error-delivery-dir",
+        }
+    }
+
     pub(super) fn unexpected_exit_message(&self) -> &'static str {
         match self {
             Self::SingleFile { .. } => "ファイル監視スレッドが予期せず終了しました",
@@ -1171,6 +1178,10 @@ mod tests {
 
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-file");
         assert_eq!(
+            strategy.error_delivery_thread_name(),
+            "markdown-view-watch-error-delivery-file"
+        );
+        assert_eq!(
             strategy.unexpected_exit_message(),
             "ファイル監視スレッドが予期せず終了しました"
         );
@@ -1192,6 +1203,10 @@ mod tests {
         };
 
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-dir");
+        assert_eq!(
+            strategy.error_delivery_thread_name(),
+            "markdown-view-watch-error-delivery-dir"
+        );
         assert_eq!(
             strategy.unexpected_exit_message(),
             "ディレクトリ監視スレッドが予期せず終了しました"
