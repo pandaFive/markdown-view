@@ -7,9 +7,9 @@
 
 watcher thread が初期化結果を返す前に panic した場合、`Watcher::spawn(...).await` の戻り値として `WatchErrorKind::ThreadPanic` を返す。
 
-現行実装では `init_tx` がまだ残っている段階で panic しても、panic 詳細は `WatchEvent::Error` の補助通知に流れるだけで、初期化 API の戻り値には反映されない可能性がある。呼び出し側から見ると watcher 起動失敗の原因が init result で観測できず、初期化中 failure と稼働後 failure の境界が曖昧になる。
+現行実装では `init_tx` がまだ残っている段階で panic しても、panic 詳細は内部 `WatchEvent::Error` 補助通知に流れるだけで、初期化 API の戻り値には反映されない可能性がある。呼び出し側から見ると watcher 起動失敗の原因が init result で観測できず、初期化中 failure と稼働後 failure の境界が曖昧になる。
 
-今回の変更では、init 前 panic は起動 API の失敗として返しつつ、既存の health failure と `WatchEvent::Error` 補助通知も維持する。
+今回の変更では、init 前 panic は起動 API の失敗として返しつつ、既存の health failure と内部 error channel への `WatchEvent::Error` 補助通知も維持する。ただし init 前 panic では `Watcher::spawn()` が `Err` を返すため、公開 `WatchEvent` receiver や WebSocket/client への配送は保証しない。
 
 ## 非目的
 
@@ -24,7 +24,7 @@ watcher thread が初期化結果を返す前に panic した場合、`Watcher::
 
 `src/watcher/runtime.rs` の `handle_watcher_panic` を panic detail の単一生成点として維持し、init result の返却責務を追加する。
 
-`handle_watcher_panic` は `&mut Option<oneshot::Sender<InitResult>>` を受け取り、panic detail から `WatchError::thread_panic(...)` を生成する。`init_tx` が `Some` の場合は `send_init_result(init_tx, Err(watch_error.clone()))` で init result に返す。その後、同じ種別と detail を持つ `WatchError` を error channel に送る。`init_tx` が `None` の場合は稼働後 panic として init result には触らず、従来どおり health failed と補助通知だけを行う。
+`handle_watcher_panic` は `&mut Option<oneshot::Sender<InitResult>>` を受け取り、panic detail から `WatchError::thread_panic(...)` を生成する。`init_tx` が `Some` の場合は `send_init_result(init_tx, Err(watch_error.clone()))` で init result に返す。その後、同じ種別と detail を持つ `WatchError` を内部 error channel に送る。`init_tx` が `None` の場合は稼働後 panic として init result には触らず、従来どおり health failed と内部 error channel への補助通知だけを行う。
 
 これにより、panic payload の文字列化、health latch、init result、補助通知の分類が同じ関数内で揃う。
 
@@ -52,7 +52,7 @@ panic detail 抽出と `WatchError::thread_panic` 生成を既存の panic handl
 2. `WatcherHealthState` を `Failed(WatcherFailureKind::ThreadPanic)` に latch する。
 3. `WatchError::thread_panic(detail.clone())` を生成する。
 4. `init_tx` が残っていれば `Err(WatchErrorKind::ThreadPanic)` として init result に返す。
-5. `WatchEvent::Error` 用の error channel に同じ panic detail を送る。
+5. `WatchEvent::Error` 用の内部 error channel に同じ panic detail を送る。
 6. panic message と detail を error log に残す。
 
 init result への返却は `send_init_result` を使い、既存の「二重送信時は warn して破棄」「receiver closed 時は warn」の契約を維持する。
@@ -72,7 +72,7 @@ init result への返却は `send_init_result` を使い、既存の「二重送
 3. `handle_watcher_panic` が `WatchError::thread_panic(detail)` を生成する。
 4. `init_tx` が `Some` なので `send_init_result(..., Err(watch_error.clone()))` を呼ぶ。
 5. `await_watcher_init` が `Err(WatchErrorKind::ThreadPanic)` を受け取り、`Watcher::spawn()` が失敗する。
-6. health は `Failed(ThreadPanic)` になり、`WatchEvent::Error` も補助通知として error channel に残る。
+6. health は `Failed(ThreadPanic)` になり、`WatchEvent::Error` も補助通知として内部 error channel に残る。ただし `Watcher::spawn()` は `Err` で戻るため、公開 receiver や WebSocket/client への配送は保証しない。
 
 ### init 完了後 panic
 
@@ -106,7 +106,7 @@ TDD で進める。
 - init 前 panic では `Watcher::spawn(...).await` が `WatchErrorKind::ThreadPanic` を返す。
 - init 前 panic の detail は init result に保持される。
 - init 前 panic でも `WatcherHealth` は `Failed(WatcherFailureKind::ThreadPanic)` になる。
-- init 前 panic でも `WatchEvent::Error` 補助通知は維持される。
+- init 前 panic でも内部 error channel への `WatchEvent::Error` 補助通知は維持される。ただし公開 receiver や WebSocket/client への配送は保証しない。
 - init 完了後 panic は `Watcher::spawn()` の戻り値には影響せず、既存どおり health failed と error event で扱う。
 - `WatchEvent`、server broadcast、client 表示の契約は変わらない。
 - `./verify.sh` が通る。
@@ -129,7 +129,7 @@ panic detail は未信頼の診断文字列として扱う。ログと `Broadcas
 
 ## ロールバック
 
-実装コミットを revert すれば、init 前 panic は旧挙動である health failed と `WatchEvent::Error` 補助通知のみへ戻る。
+実装コミットを revert すれば、init 前 panic は旧挙動である health failed と内部 error channel への `WatchEvent::Error` 補助通知のみへ戻る。
 
 問題が `handle_watcher_panic` の signature 変更に限定される場合は、init result 送信部分だけを削除し、呼び出し側から `init_tx` を渡さない形へ戻せる。
 

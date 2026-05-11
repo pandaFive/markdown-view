@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Completed historical implementation plan. This document records the steps used for the completed issue 141 work; do not reapply it to the current branch as a fresh task list. If this plan is reused, first regenerate the steps against the current code and inspect `git status` / `git diff` before staging anything.
+
 **Goal:** watcher thread が初期化完了前に panic した場合、`Watcher::spawn(...).await` の init result として `WatchErrorKind::ThreadPanic` を返す。
 
-**Architecture:** `src/watcher/runtime.rs` の `handle_watcher_panic` を panic detail 生成の単一境界として維持し、`init_tx` が残っている場合だけ `send_init_result(..., Err(WatchError::thread_panic(...)))` を呼ぶ。稼働後 panic では `init_tx` が `None` なので、既存どおり health failed と `WatchEvent::Error` 補助通知だけを維持する。
+**Architecture:** `src/watcher/runtime.rs` の `handle_watcher_panic` を panic detail 生成の単一境界として維持し、`init_tx` が残っている場合だけ `send_init_result(..., Err(WatchError::thread_panic(...)))` を呼ぶ。稼働後 panic では `init_tx` が `None` なので、既存どおり health failed と `WatchEvent::Error` 補助通知だけを維持する。init 前 panic の補助通知は内部 error channel への投入であり、`Watcher::spawn()` が `Err` を返すため公開 receiver や WebSocket/client への配送は保証しない。
 
 **Tech Stack:** Rust, Tokio `oneshot` / `mpsc`, `cargo test`, `cargo clippy`, repository `./verify.sh`
 
@@ -26,7 +28,7 @@
 - Modify: `src/watcher/runtime.rs`
 - Test: `src/watcher/runtime.rs`
 
-- [ ] **Step 1: Add failing unit test**
+- [x] **Step 1: Add failing unit test**
 
 `test_watcher_panic経路はinit_tx残存時にthread_panicをinit_resultへ返す` を `test_watcher_panic経路はhealth_failedとerror_eventを記録する` の直前に追加する。
 
@@ -66,7 +68,7 @@
     }
 ```
 
-- [ ] **Step 2: Run targeted test and verify it fails to compile**
+- [x] **Step 2: Run targeted test and verify it fails to compile**
 
 Run:
 
@@ -74,9 +76,11 @@ Run:
 cargo test --lib watcher::runtime::tests::test_watcher_panic経路はinit_tx残存時にthread_panicをinit_resultへ返す
 ```
 
-Expected: FAIL to compile because `handle_watcher_panic` still takes 5 arguments and the test calls it with 6.
+Expected at Task 1 execution time: FAIL to compile because `handle_watcher_panic` still took 5 arguments and the test called it with 6.
 
-- [ ] **Step 3: Commit failing test**
+- [x] **Step 3: Commit failing test**
+
+Before staging, inspect `git status --short --branch` and `git diff -- src/watcher/runtime.rs`. Stage only the Task 1 test diff, and do not include unrelated edits in the same file.
 
 ```bash
 git add src/watcher/runtime.rs
@@ -89,7 +93,7 @@ git commit -m "test: watcher初期化前panicのinit結果を固定"
 - Modify: `src/watcher/runtime.rs`
 - Test: `src/watcher/runtime.rs`
 
-- [ ] **Step 1: Update `spawn_watcher_thread` panic call site**
+- [x] **Step 1: Update `spawn_watcher_thread` panic call site**
 
 Change the `handle_watcher_panic` call in `spawn_watcher_thread` to pass `&mut init_tx`.
 
@@ -106,7 +110,7 @@ Change the `handle_watcher_panic` call in `spawn_watcher_thread` to pass `&mut i
             }
 ```
 
-- [ ] **Step 2: Update `handle_watcher_panic` signature and implementation**
+- [x] **Step 2: Update `handle_watcher_panic` signature and implementation**
 
 Replace the function body with this implementation.
 
@@ -138,7 +142,7 @@ fn handle_watcher_panic(
 }
 ```
 
-- [ ] **Step 3: Update existing panic handler tests for post-init behavior**
+- [x] **Step 3: Update existing panic handler tests for post-init behavior**
 
 In `test_watcher_panic経路はhealth_failedとerror_eventを記録する`, add a local `let mut init_tx = None;` and pass `&mut init_tx`.
 
@@ -170,7 +174,7 @@ In `test_watcher_panic経路はanyhow_payload_detailを保持する`, add the sa
         );
 ```
 
-- [ ] **Step 4: Run targeted panic handler tests**
+- [x] **Step 4: Run targeted panic handler tests**
 
 Run:
 
@@ -180,7 +184,9 @@ cargo test --lib watcher::runtime::tests::test_watcher_panic
 
 Expected: PASS. The new init result test, the existing health/error event test, and the anyhow detail test all pass.
 
-- [ ] **Step 5: Commit implementation**
+- [x] **Step 5: Commit implementation**
+
+Before staging, inspect `git status --short --branch` and `git diff -- src/watcher/runtime.rs`. Stage only the Task 2 implementation diff, and do not include unrelated edits in the same file.
 
 ```bash
 git add src/watcher/runtime.rs
@@ -193,7 +199,7 @@ git commit -m "fix: watcher初期化前panicをinit結果に返す"
 - Modify: `src/watcher/runtime.rs`
 - Test: `src/watcher/runtime.rs`
 
-- [ ] **Step 1: Add init result detail assertion for `anyhow::Error` payload**
+- [x] **Step 1: Add init result detail assertion for `anyhow::Error` payload**
 
 Add this test after `test_watcher_panic経路はanyhow_payload_detailを保持する`.
 
@@ -228,7 +234,7 @@ Add this test after `test_watcher_panic経路はanyhow_payload_detailを保持�
     }
 ```
 
-- [ ] **Step 2: Run targeted test**
+- [x] **Step 2: Run targeted test**
 
 Run:
 
@@ -238,7 +244,7 @@ cargo test --lib watcher::runtime::tests::test_watcher_panic経路はanyhow_payl
 
 Expected: PASS.
 
-- [ ] **Step 3: Run all watcher runtime unit tests**
+- [x] **Step 3: Run all watcher runtime unit tests**
 
 Run:
 
@@ -248,7 +254,9 @@ cargo test --lib watcher::runtime
 
 Expected: PASS. No watcher runtime regression.
 
-- [ ] **Step 4: Commit regression coverage**
+- [x] **Step 4: Commit regression coverage**
+
+Before staging, inspect `git status --short --branch` and `git diff -- src/watcher/runtime.rs`. Stage only the Task 3 regression test diff, and do not include unrelated edits in the same file.
 
 ```bash
 git add src/watcher/runtime.rs
@@ -260,7 +268,7 @@ git commit -m "test: watcher panic detailのinit返却を固定"
 **Files:**
 - Modify: `docs/todo/TODO.md`
 
-- [ ] **Step 1: Search issue 141 tracking entry**
+- [x] **Step 1: Search issue 141 tracking entry**
 
 Run:
 
@@ -270,7 +278,7 @@ rg -n "141|初期化前 panic|init 結果|ThreadPanic" docs/todo/TODO.md docs/to
 
 Expected: Any existing tracking line for issue 141 is shown, or no output if the issue is tracked only in GitHub.
 
-- [ ] **Step 2: Update only an existing issue 141 TODO entry**
+- [x] **Step 2: Update only an existing issue 141 TODO entry**
 
 If `docs/todo/TODO.md` contains an active issue 141 item, change that item to completed or remove it according to the surrounding file's existing convention. Do not invent a new TODO entry if no issue 141 item exists.
 
@@ -286,7 +294,7 @@ Example when the file uses active-only lists:
 <!-- remove the #141 active item after implementation is verified -->
 ```
 
-- [ ] **Step 3: Validate docs diff**
+- [x] **Step 3: Validate docs diff**
 
 Run:
 
@@ -296,12 +304,12 @@ git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md
 
 Expected: Only issue 141 tracking status changes are present. `docs/todo/BACKLOG.md` is unchanged unless the search shows issue 141 is tracked there.
 
-- [ ] **Step 4: Commit tracking update if a file changed**
+- [x] **Step 4: Commit tracking update if a file changed**
 
-If `docs/todo/TODO.md` or `docs/todo/BACKLOG.md` changed:
+If `docs/todo/TODO.md` or `docs/todo/BACKLOG.md` changed, inspect `git status --short --branch` and the targeted docs diff first. Stage only the tracking file that actually changed; do not stage unrelated docs edits.
 
 ```bash
-git add docs/todo/TODO.md docs/todo/BACKLOG.md
+git add <changed-tracking-file>
 git commit -m "docs: issue141の追跡状態を更新"
 ```
 
@@ -312,7 +320,7 @@ If no tracking entry exists, skip this commit and record that in the final repor
 **Files:**
 - No source edits expected.
 
-- [ ] **Step 1: Run format check**
+- [x] **Step 1: Run format check**
 
 Run:
 
@@ -322,7 +330,7 @@ cargo fmt --all -- --check
 
 Expected: PASS.
 
-- [ ] **Step 2: Run clippy**
+- [x] **Step 2: Run clippy**
 
 Run:
 
@@ -332,7 +340,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Expected: PASS.
 
-- [ ] **Step 3: Run full tests**
+- [x] **Step 3: Run full tests**
 
 Run:
 
@@ -342,7 +350,7 @@ cargo test --all-targets --all-features
 
 Expected: PASS.
 
-- [ ] **Step 4: Run repository verification script**
+- [x] **Step 4: Run repository verification script**
 
 Run:
 
@@ -352,7 +360,7 @@ Run:
 
 Expected: PASS. If this repeats the previous checks, still run it because repository policy names it as the required completion gate.
 
-- [ ] **Step 5: Inspect final diff**
+- [x] **Step 5: Inspect final diff**
 
 Run:
 
