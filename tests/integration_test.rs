@@ -1171,9 +1171,10 @@ async fn test_単一ファイルモード_api_searchは長すぎるqueryを400�
         .unwrap();
 
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
-    let json: serde_json::Value = resp.json().await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(&query));
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
-    assert!(!json["error"].as_str().unwrap().contains(&query));
 }
 
 // ==============================
@@ -1288,9 +1289,10 @@ async fn test_ディレクトリモード_api_searchは長すぎるqueryを400�
         .unwrap();
 
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
-    let json: serde_json::Value = resp.json().await.unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(&query));
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
-    assert!(!json["error"].as_str().unwrap().contains(&query));
 }
 
 #[tokio::test]
