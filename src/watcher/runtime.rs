@@ -619,12 +619,14 @@ impl WatchRuntime {
                 return health_state.load();
             }
             Ok(WatcherThreadStopResult::Panicked(panic_payload)) => {
+                let mut init_tx = None;
                 handle_watcher_panic(
                     panic_payload,
                     "監視スレッドの停止中にパニックを検出",
                     "監視スレッド停止時パニック",
                     &health_state,
                     &error_tx,
+                    &mut init_tx,
                 );
             }
             Ok(WatcherThreadStopResult::Stopped) => {
@@ -1036,6 +1038,7 @@ fn spawn_watcher_thread(
                     error_label,
                     &health_state,
                     &panic_error_tx,
+                    &mut init_tx,
                 );
             }
         })
@@ -1234,6 +1237,7 @@ fn handle_watcher_panic(
     error_label: &str,
     health_state: &WatcherHealthState,
     error_tx: &PriorityErrorSender,
+    init_tx: &mut Option<oneshot::Sender<InitResult>>,
 ) {
     let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
         s.to_string()
@@ -1246,6 +1250,9 @@ fn handle_watcher_panic(
     };
     health_state.store_failed(WatcherFailureKind::ThreadPanic);
     let watch_error = WatchError::thread_panic(panic_detail.clone());
+    if init_tx.is_some() {
+        send_init_result(init_tx, Err(watch_error.clone()));
+    }
     tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
     error_tx.send(watch_error, error_label);
 }
@@ -2707,6 +2714,7 @@ mod tests {
     fn test_watcher_panic経路はhealth_failedとerror_eventを記録する() {
         let health_state = WatcherHealthState::new_starting();
         let (error_tx, mut error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let mut init_tx = None;
 
         handle_watcher_panic(
             Box::new(String::from("panic detail")),
@@ -2714,6 +2722,7 @@ mod tests {
             "panic label",
             &health_state,
             &error_tx,
+            &mut init_tx,
         );
 
         assert_eq!(
@@ -2730,6 +2739,7 @@ mod tests {
     fn test_watcher_panic経路はanyhow_payload_detailを保持する() {
         let health_state = WatcherHealthState::new_starting();
         let (error_tx, mut error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let mut init_tx = None;
 
         handle_watcher_panic(
             Box::new(anyhow::anyhow!("anyhow panic detail")),
@@ -2737,6 +2747,7 @@ mod tests {
             "panic label",
             &health_state,
             &error_tx,
+            &mut init_tx,
         );
 
         let error = error_rx.try_recv().expect("panic error eventを期待");
