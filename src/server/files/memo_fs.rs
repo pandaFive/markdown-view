@@ -99,6 +99,14 @@ pub(crate) fn always_ok_before_rename(_: &Path, _: &Path) -> BeforeRenameFuture<
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TMP_ATTEMPTS: u8 = 8;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
+#[cfg(windows)]
+const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 
 /// メモ保存先ファイルシステムの抽象。
 ///
@@ -289,6 +297,41 @@ async fn cleanup_tmp_best_effort(tmp_path: &Path) {
     }
 }
 
+#[cfg(any(test, windows))]
+fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            WINDOWS_ERROR_ACCESS_DENIED
+                | WINDOWS_ERROR_SHARING_VIOLATION
+                | WINDOWS_ERROR_LOCK_VIOLATION
+        )
+    )
+}
+
+#[cfg(any(test, windows))]
+fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
+    if error.is_panic() {
+        tracing::error!(
+            "[markdown-view] メモatomic replace blocking taskがpanicしました: {}",
+            error
+        );
+        io::Error::other(format!("memo atomic replace task panicked: {error}"))
+    } else if error.is_cancelled() {
+        tracing::warn!(
+            "[markdown-view] メモatomic replace blocking taskがcancelledされました: {}",
+            error
+        );
+        io::Error::other(format!("memo atomic replace task cancelled: {error}"))
+    } else {
+        tracing::warn!(
+            "[markdown-view] メモatomic replace blocking taskのjoinに失敗しました: {}",
+            error
+        );
+        io::Error::other(format!("memo atomic replace task failed: {error}"))
+    }
+}
+
 #[cfg(not(windows))]
 async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
     tokio::fs::rename(tmp_path, path).await
@@ -315,10 +358,7 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
         }
     })
     .await
-    .map_err(|error| {
-        tracing::error!("[markdown-view] メモatomic replace task failed: {}", error);
-        io::Error::other(format!("memo atomic replace task failed: {error}"))
-    })?
+    .map_err(map_atomic_replace_join_error)?
 }
 
 #[cfg(windows)]
@@ -392,6 +432,68 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    #[test]
+    fn is_retryable_windows_replace_errorは一時lock系windowsエラーだけtrueにする() {
+        for code in [
+            WINDOWS_ERROR_ACCESS_DENIED,
+            WINDOWS_ERROR_SHARING_VIOLATION,
+            WINDOWS_ERROR_LOCK_VIOLATION,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_retryable_windows_replace_error(&error),
+                "Windows error {code} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn is_retryable_windows_replace_errorは対象外エラーをfalseにする() {
+        for error in [
+            io::Error::from(io::ErrorKind::AlreadyExists),
+            io::Error::from(io::ErrorKind::Other),
+            io::Error::from_raw_os_error(12345),
+        ] {
+            assert!(
+                !is_retryable_windows_replace_error(&error),
+                "unexpected retryable error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn map_atomic_replace_join_errorはpanicを分類する() {
+        let handle = tokio::spawn(async {
+            panic!("atomic replace panic classification test");
+        });
+        let join_error = handle.await.expect_err("task should panic");
+
+        let error = map_atomic_replace_join_error(join_error);
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("panicked"),
+            "panic classification should be visible in io error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_atomic_replace_join_errorはcancelledを分類する() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        handle.abort();
+        let join_error = handle.await.expect_err("task should be cancelled");
+
+        let error = map_atomic_replace_join_error(join_error);
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("cancelled"),
+            "cancel classification should be visible in io error: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn write_atomicはtmpを書いてからrenameする() {
