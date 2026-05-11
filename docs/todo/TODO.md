@@ -9,13 +9,6 @@
 
 放置するとセキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目。
 
-- [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
-  - ファイル: `src/watcher/runtime.rs` の `spawn_watcher_thread` / `handle_watcher_panic` / `await_watcher_init`
-  - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
-  - 対応: panic 経路で `init_tx` がまだ Some なら `WatchError::thread_panic(...)` を init 結果として送る
-  - 昇格理由: watcher 初期化失敗の詳細が失われる silent failure であり、監視開始可否の判断に直接響くため High とする
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] Windows メモ原子保存のエラー処理と retry 条件を細分化する
   - ファイル: `src/server/files/memo_fs.rs`
   - 現状: Windows の `MoveFileExW` 呼び出しは `spawn_blocking` 経由だが、`JoinError` は `ErrorKind::Other` に潰している。また tmp 作成 retry は `AlreadyExists` のみを対象にしており、Windows の共有違反・削除保留・ウイルス対策ソフトによる一時ロックを retry しない
@@ -71,6 +64,8 @@
 
 ## Done Summary
 
+- [x] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
+  - 完了根拠: watcher thread panic handler に `init_tx` を渡し、初期化結果送信前に panic した場合は `WatchError::thread_panic(...)` を `InitResult` の `Err` として返す構成にした。同じ panic detail は既存どおり内部 error channel への `WatchEvent::Error` 補助通知にも流し、health は `Failed(ThreadPanic)` に latch する。init 失敗時は `Watcher::spawn()` が `Err` を返すため、公開 receiver や WebSocket/client への配送は保証しない。`init_tx` が `None` の稼働後 panic と shutdown 中 panic は init result へ触れず、従来どおり health failed と error event で扱う。String payload と `anyhow::Error` payload の detail が init result と error event に保持されることを unit test で固定した。HTTP API、UI、WebSocket payload、shutdown API、watcher event shape は変更していない
 - [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
   - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は bounded ring queue 経由で file backlog から独立して配送される。専用 queue 自体が満杯の場合は OOM を避けるため最古の error を warn log に残して evict し、最新の error を保持する。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。Drop 経路は Tokio worker を同期 join で塞がず、未 shutdown drop は warn で明示する。外部 HTTP API、UI、WebSocket error payload は変更していない。
 - [x] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
