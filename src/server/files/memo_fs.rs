@@ -246,8 +246,6 @@ async fn write_atomic_with_counter(
             return Err(error);
         }
 
-        #[cfg(windows)]
-        cleanup_tmp_best_effort(&tmp_path).await;
         drop(tmp_file);
         sync_parent_dir_best_effort(parent).await;
         return Ok(());
@@ -1184,6 +1182,50 @@ mod tests {
                 io::ErrorKind::PermissionDenied | io::ErrorKind::Other
             ),
             "Windows should reject concurrent tmp write open while memo save owns the handle"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_atomicはwindowsで成功後のtmp_path差し替えファイルを削除しない() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let observed_tmp_path = Arc::new(Mutex::new(None));
+        let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path);
+
+        TokioMemoFs
+            .write_atomic(&path, b"trusted", &move |_, tmp_path| {
+                let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                before_rename_future(async move {
+                    let swapped_path = tmp_path.with_extension("tmp.swapped");
+                    std::fs::rename(&tmp_path, &swapped_path)
+                        .expect("delete-shared tmp path should be swappable before rename");
+                    std::fs::write(&tmp_path, b"attacker")
+                        .expect("attacker replacement tmp should be writable");
+                    *observed_tmp_path_for_check
+                        .lock()
+                        .expect("observed tmp path mutex should not be poisoned") = Some(tmp_path);
+                    Ok(())
+                })
+            })
+            .await
+            .expect("atomic write should succeed with the held tmp handle");
+
+        let tmp_path = observed_tmp_path
+            .lock()
+            .expect("observed tmp path mutex should not be poisoned")
+            .clone()
+            .expect("tmp path should be observed");
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"trusted"
+        );
+        assert_eq!(
+            tokio::fs::read(&tmp_path)
+                .await
+                .expect("attacker tmp should not be deleted after successful replace"),
+            b"attacker"
         );
     }
 
