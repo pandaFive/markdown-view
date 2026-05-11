@@ -105,8 +105,6 @@ const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
 const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
 #[cfg(any(test, windows))]
 const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
-#[cfg(windows)]
-const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 
 /// メモ保存先ファイルシステムの抽象。
 ///
@@ -312,23 +310,14 @@ fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
 #[cfg(any(test, windows))]
 fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
     if error.is_panic() {
-        tracing::error!(
-            "[markdown-view] メモatomic replace blocking taskがpanicしました: {}",
-            error
-        );
-        io::Error::other(format!("memo atomic replace task panicked: {error}"))
+        tracing::error!("[markdown-view] メモatomic replace blocking taskがpanicしました");
+        io::Error::other("memo atomic replace task panicked")
     } else if error.is_cancelled() {
-        tracing::warn!(
-            "[markdown-view] メモatomic replace blocking taskがcancelledされました: {}",
-            error
-        );
-        io::Error::other(format!("memo atomic replace task cancelled: {error}"))
+        tracing::warn!("[markdown-view] メモatomic replace blocking taskがcancelledされました");
+        io::Error::other("memo atomic replace task cancelled")
     } else {
-        tracing::warn!(
-            "[markdown-view] メモatomic replace blocking taskのjoinに失敗しました: {}",
-            error
-        );
-        io::Error::other(format!("memo atomic replace task failed: {error}"))
+        tracing::warn!("[markdown-view] メモatomic replace blocking taskのjoinに失敗しました");
+        io::Error::other("memo atomic replace task failed")
     }
 }
 
