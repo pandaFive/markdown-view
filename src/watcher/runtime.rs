@@ -2679,8 +2679,7 @@ mod tests {
     #[test]
     fn test_watcher_panic経路はinit_tx残存時にthread_panicをinit_resultへ返す() {
         let health_state = WatcherHealthState::new_starting();
-        let (error_tx, mut error_rx) =
-            priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let (error_tx, mut error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
         let (init_tx, mut init_rx) = oneshot::channel::<InitResult>();
         let mut init_tx = Some(init_tx);
 
@@ -2758,8 +2757,7 @@ mod tests {
     #[test]
     fn test_watcher_panic経路はanyhow_payload_detailをinit_resultにも保持する() {
         let health_state = WatcherHealthState::new_starting();
-        let (error_tx, mut error_rx) =
-            priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let (error_tx, mut error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
         let (init_tx, mut init_rx) = oneshot::channel::<InitResult>();
         let mut init_tx = Some(init_tx);
 
