@@ -362,10 +362,22 @@ impl Watcher {
         matches!(self.health(), WatcherHealth::Alive)
     }
 
-    /// 監視スレッドを停止する
-    pub fn shutdown(mut self) -> WatcherHealth {
+    /// 監視スレッドを停止する。
+    ///
+    /// 停止処理は watcher thread の join と内部転送タスクの完了待ちを含むため、
+    /// blocking pool に隔離して async runtime を塞がない。
+    pub async fn shutdown(mut self) -> WatcherHealth {
         if let Some(runtime) = self.runtime.take() {
-            runtime.stop()
+            match tokio::task::spawn_blocking(move || runtime.stop()).await {
+                Ok(health) => health,
+                Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] 監視スレッド停止処理のjoinに失敗: {}",
+                        error
+                    );
+                    WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
+                }
+            }
         } else {
             WatcherHealth::Stopped
         }
@@ -979,9 +991,7 @@ mod tests {
     }
 
     async fn shutdown_watcher_for_test(watcher: Watcher) -> WatcherHealth {
-        tokio::task::spawn_blocking(move || watcher.shutdown())
-            .await
-            .expect("watcher shutdown taskが正常終了する")
+        watcher.shutdown().await
     }
 
     #[derive(Default)]
@@ -2185,7 +2195,7 @@ mod tests {
         let health_state = WatcherHealthState::new_alive();
         let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
         let (watcher, _rx) = watcher_for_test(shutdown_flag.clone(), watcher_thread, health_state);
-        shutdown_watcher_for_test(watcher).await;
+        assert_eq!(watcher.shutdown().await, WatcherHealth::Stopped);
         assert!(shutdown_flag.load(Ordering::Acquire));
     }
 

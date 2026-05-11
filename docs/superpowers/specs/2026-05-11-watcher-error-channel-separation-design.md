@@ -76,6 +76,8 @@ notify callback、debounced event 処理、追加 watch 失敗、internal channe
 
 `WatchRuntime` は watcher thread に加えて内部統合 forwarder の停止ハンドルを保持する。
 
+`Watcher::shutdown().await` は watcher thread の join と内部 forwarder の完了待ちを blocking pool に隔離する。これにより current-thread runtime 上で明示停止しても、内部 forwarder が完了通知を送るための Tokio runtime を塞がない。`Drop` は async にできないため同期 fallback として残し、明示停止は `shutdown().await` を正規経路とする。
+
 停止順:
 
 1. `shutdown_flag` を立てる。
@@ -156,7 +158,7 @@ Error を優先配送しても、存在しない path や base 外 path の情�
 
 - `src/watcher/runtime.rs`: 内部 channel 分離、統合 forwarder、送信 helper、shutdown handling、テスト。
 - `src/watcher/mod.rs`: 公開 `WatchEvent` shape は変更しない。
-- `src/server/watch.rs`: watcher shutdown を `spawn_blocking` に隔離し、内部 forwarder の完了待ちで async runtime を塞がないようにする。
+- `src/server/watch.rs`: `Watcher::shutdown().await` に委譲し、内部 forwarder の完了待ちで async runtime を塞がないようにする。
 - `src/server/broadcast.rs`: 変更しない。
 - `docs/todo/TODO.md`: 実装完了時に対象 TODO / issue の追跡状態を更新する。
 

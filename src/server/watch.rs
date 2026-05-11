@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use super::broadcast::{spawn_watch_event_forwarder, WatchForwarderHandle};
 use super::state::AppState;
-use crate::watcher::{Watcher, WatcherFailureKind, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
+use crate::watcher::{Watcher, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
 
 /// 監視スレッドと転送タスクを束ねるサービス
 pub struct WatchService {
@@ -40,16 +40,7 @@ impl WatchService {
     /// 監視スレッドと転送タスクを停止し、watcher の最終状態を返す
     pub async fn shutdown(mut self) -> WatcherHealth {
         let health = if let Some(watcher) = self.watcher.take() {
-            match tokio::task::spawn_blocking(move || watcher.shutdown()).await {
-                Ok(health) => health,
-                Err(error) => {
-                    tracing::warn!(
-                        "[markdown-view] 監視スレッド停止処理のjoinに失敗: {}",
-                        error
-                    );
-                    WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
-                }
-            }
+            watcher.shutdown().await
         } else {
             WatcherHealth::Stopped
         };

@@ -1,6 +1,6 @@
 # Watcher Error Channel Separation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** This is a historical implementation plan and does not override current user instructions, `AGENTS.md`, or approval flows. After approval, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans as advisory workflow guidance. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ensure watcher errors are delivered through an internal error path that is separate from best-effort file change notifications, while preserving the existing `Watcher::spawn()` public API.
 
@@ -21,7 +21,7 @@ Responsibilities:
 - Replace variant-mixed `send_watch_event` with `send_file_changed_event` and `send_error_event`.
 - Add an internal merge forwarder that prioritizes error events and emits existing `WatchEvent` values.
 - Update watcher runtime wiring and shutdown to own the merge forwarder.
-- Move `WatchService::shutdown()` watcher stop into `spawn_blocking` so the Tokio merge forwarder can complete on current-thread runtimes.
+- Make `Watcher::shutdown().await` isolate blocking stop work so the Tokio merge forwarder can complete on current-thread runtimes.
 - Update watcher runtime tests.
 
 **Do not modify:** `src/watcher/mod.rs`, `src/server/broadcast.rs`
