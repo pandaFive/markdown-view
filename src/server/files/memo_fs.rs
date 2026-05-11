@@ -12,6 +12,8 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,7 +24,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, FILE_SHARE_DELETE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE,
 };
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
@@ -205,8 +208,7 @@ async fn write_atomic_with_counter(
         // tmp 名は推測可能なため、緩い umask の共有環境でも rename 前に他者読み取りさせない。
         options.mode(0o600);
         #[cfg(windows)]
-        // tmp handleをreplace完了まで保持し、retry待機中の外部書き込みをshare modeで拒否する。
-        options.share_mode(FILE_SHARE_DELETE);
+        configure_windows_atomic_tmp_options(&mut options);
         let mut tmp_file = match options.open(&tmp_path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -232,12 +234,20 @@ async fn write_atomic_with_counter(
             return Err(MemoWriteError::Io(error));
         }
 
-        if let Err(error) = checked_atomic_replace(&tmp_path, path, before_rename).await {
+        #[cfg(windows)]
+        let replace_result =
+            checked_atomic_replace(&tmp_file, &tmp_path, path, before_rename).await;
+        #[cfg(not(windows))]
+        let replace_result = checked_atomic_replace(&tmp_path, path, before_rename).await;
+
+        if let Err(error) = replace_result {
             drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(error);
         }
 
+        #[cfg(windows)]
+        cleanup_tmp_best_effort(&tmp_path).await;
         drop(tmp_file);
         sync_parent_dir_best_effort(parent).await;
         return Ok(());
@@ -257,6 +267,13 @@ async fn write_atomic_with_counter(
         error
     );
     Err(MemoWriteError::Io(error))
+}
+
+#[cfg(windows)]
+fn configure_windows_atomic_tmp_options(options: &mut tokio::fs::OpenOptions) {
+    // handle-based renameに必要なDELETE accessを持たせ、retry中は外部書き込みをshare modeで拒否する。
+    options.access_mode(FILE_GENERIC_WRITE | DELETE);
+    options.share_mode(FILE_SHARE_DELETE);
 }
 
 async fn sync_parent_dir_best_effort(parent: &Path) {
@@ -337,24 +354,28 @@ fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
     }
 }
 
+#[cfg(windows)]
+async fn checked_atomic_replace(
+    tmp_file: &tokio::fs::File,
+    tmp_path: &Path,
+    path: &Path,
+    before_rename: &BeforeRenameCheck<'_>,
+) -> Result<(), MemoWriteError> {
+    atomic_replace_checked(tmp_file, tmp_path, path, before_rename).await
+}
+
+#[cfg(not(windows))]
 async fn checked_atomic_replace(
     tmp_path: &Path,
     path: &Path,
     before_rename: &BeforeRenameCheck<'_>,
 ) -> Result<(), MemoWriteError> {
-    #[cfg(windows)]
-    {
-        atomic_replace_checked(tmp_path, path, before_rename).await
-    }
-    #[cfg(not(windows))]
-    {
-        before_rename(path, tmp_path)
-            .await
-            .map_err(MemoWriteError::BeforeRename)?;
-        atomic_replace(tmp_path, path)
-            .await
-            .map_err(MemoWriteError::Io)
-    }
+    before_rename(path, tmp_path)
+        .await
+        .map_err(MemoWriteError::BeforeRename)?;
+    atomic_replace(tmp_path, path)
+        .await
+        .map_err(MemoWriteError::Io)
 }
 
 #[cfg(not(windows))]
@@ -363,14 +384,32 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-async fn move_file_ex_replace_once(tmp_path: Vec<u16>, path: Vec<u16>) -> io::Result<()> {
+async fn move_open_tmp_replace_once(tmp_file: &tokio::fs::File, path: &Path) -> io::Result<()> {
+    let tmp_file = tmp_file.try_clone().await?.into_std().await;
+    let path_wide = path_to_wide(path)?;
+    move_open_std_file_replace_once(tmp_file, path_wide).await
+}
+
+#[cfg(windows)]
+async fn move_open_std_file_replace_once(
+    tmp_file: std::fs::File,
+    path_wide: Vec<u16>,
+) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
-        // SAFETY: 両パスはNUL終端済みで、interior NULを拒否したバッファとしてこの呼び出し中は生存する。
+        let rename_info = build_file_rename_info(&path_wide)?;
+        // SAFETY: handleは生存中のtmp file objectを指し、rename_infoはFILE_RENAME_INFO layoutの
+        // 可変長bufferとしてこの呼び出し中は生存する。
         let result = unsafe {
-            MoveFileExW(
-                tmp_path.as_ptr(),
-                path.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            SetFileInformationByHandle(
+                tmp_file.as_raw_handle().cast(),
+                FileRenameInfo,
+                rename_info.as_ptr().cast(),
+                u32::try_from(rename_info.len()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "rename info buffer is too large",
+                    )
+                })?,
             )
         };
         if result == 0 {
@@ -381,6 +420,36 @@ async fn move_file_ex_replace_once(tmp_path: Vec<u16>, path: Vec<u16>) -> io::Re
     })
     .await
     .map_err(map_atomic_replace_join_error)?
+}
+
+#[cfg(windows)]
+fn build_file_rename_info(path_wide: &[u16]) -> io::Result<Vec<u8>> {
+    let file_name_length = path_wide
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+    let file_name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let buffer_len = file_name_offset
+        .checked_add(file_name_length as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+    let mut buffer = vec![0_u8; buffer_len];
+
+    // SAFETY: bufferはFILE_RENAME_INFO header以上の長さを持ち、FileNameの可変長領域へ
+    // UTF-16 bytesをコピーする。path_wideはinterior NUL拒否済みでNUL終端しない。
+    unsafe {
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = file_name_length;
+        std::ptr::copy_nonoverlapping(
+            path_wide.as_ptr().cast::<u8>(),
+            buffer.as_mut_ptr().add(file_name_offset),
+            file_name_length as usize,
+        );
+    }
+
+    Ok(buffer)
 }
 
 #[cfg(any(test, windows))]
@@ -428,8 +497,7 @@ where
 
 #[cfg(windows)]
 async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
-    let tmp_path_wide = path_to_wide_null(tmp_path)?;
-    let path_wide = path_to_wide_null(path)?;
+    let tmp_file = open_windows_atomic_tmp_for_replace(tmp_path).await?;
     let no_check =
         |_: &Path, _: &Path| before_rename_future(async { Ok::<(), MemoBeforeRenameError>(()) });
 
@@ -437,7 +505,7 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
         tmp_path,
         path,
         &no_check,
-        || move_file_ex_replace_once(tmp_path_wide.clone(), path_wide.clone()),
+        || move_open_tmp_replace_once(&tmp_file, path),
         |delay_ms| tokio::time::sleep(std::time::Duration::from_millis(delay_ms)),
     )
     .await
@@ -449,25 +517,33 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 async fn atomic_replace_checked(
+    tmp_file: &tokio::fs::File,
     tmp_path: &Path,
     path: &Path,
     before_rename: &BeforeRenameCheck<'_>,
 ) -> Result<(), MemoWriteError> {
-    let tmp_path_wide = path_to_wide_null(tmp_path).map_err(MemoWriteError::Io)?;
-    let path_wide = path_to_wide_null(path).map_err(MemoWriteError::Io)?;
+    path_to_wide(path).map_err(MemoWriteError::Io)?;
 
     replace_with_retry_and_revalidation(
         tmp_path,
         path,
         before_rename,
-        || move_file_ex_replace_once(tmp_path_wide.clone(), path_wide.clone()),
+        || move_open_tmp_replace_once(tmp_file, path),
         |delay_ms| tokio::time::sleep(std::time::Duration::from_millis(delay_ms)),
     )
     .await
 }
 
 #[cfg(windows)]
-fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
+async fn open_windows_atomic_tmp_for_replace(tmp_path: &Path) -> io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true);
+    configure_windows_atomic_tmp_options(&mut options);
+    options.open(tmp_path).await
+}
+
+#[cfg(windows)]
+fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
     let mut wide = Vec::new();
     for unit in path.as_os_str().encode_wide() {
         if unit == 0 {
@@ -478,6 +554,12 @@ fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
         }
         wide.push(unit);
     }
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide = path_to_wide(path)?;
     wide.push(0);
     Ok(wide)
 }
@@ -1102,6 +1184,106 @@ mod tests {
                 io::ErrorKind::PermissionDenied | io::ErrorKind::Other
             ),
             "Windows should reject concurrent tmp write open while memo save owns the handle"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_atomic_replace_retryはtmp_path_swap後も保持handleの内容を置換する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let swapped_path = workspace.path().join("memo.md.swapped");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("existing memo should be written");
+
+        let tmp_file = Arc::new({
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            configure_windows_atomic_tmp_options(&mut options);
+            let mut file = options
+                .open(&tmp_path)
+                .await
+                .expect("protected tmp should be created");
+            file.write_all(b"trusted")
+                .await
+                .expect("trusted tmp content should be written");
+            file.flush().await.expect("tmp content should be flushed");
+            file.sync_data()
+                .await
+                .expect("tmp content should be synced");
+            file
+        });
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let validation_count = Arc::new(Mutex::new(0));
+
+        replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &{
+                let validation_count = Arc::clone(&validation_count);
+                let tmp_path = tmp_path.clone();
+                let swapped_path = swapped_path.clone();
+                move |_, _| {
+                    let validation_count = Arc::clone(&validation_count);
+                    let tmp_path = tmp_path.clone();
+                    let swapped_path = swapped_path.clone();
+                    before_rename_future(async move {
+                        let mut count = validation_count
+                            .lock()
+                            .expect("validation count mutex should not be poisoned");
+                        *count += 1;
+                        if *count == 2 {
+                            std::fs::rename(&tmp_path, &swapped_path)
+                                .expect("delete-shared tmp path should be swappable");
+                            std::fs::write(&tmp_path, b"attacker")
+                                .expect("attacker replacement tmp should be writable");
+                        }
+                        Ok(())
+                    })
+                }
+            },
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                let tmp_file = Arc::clone(&tmp_file);
+                let path = path.clone();
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    let tmp_file = Arc::clone(&tmp_file);
+                    let path = path.clone();
+                    async move {
+                        let attempt = {
+                            let mut attempts = replace_attempts
+                                .lock()
+                                .expect("replace attempts mutex should not be poisoned");
+                            *attempts += 1;
+                            *attempts
+                        };
+                        if attempt == 1 {
+                            Err(io::Error::from_raw_os_error(
+                                WINDOWS_ERROR_SHARING_VIOLATION,
+                            ))
+                        } else {
+                            move_open_tmp_replace_once(tmp_file.as_ref(), &path).await
+                        }
+                    }
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect("retry should replace using the held tmp handle");
+
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"trusted"
+        );
+        assert_eq!(
+            tokio::fs::read(&tmp_path)
+                .await
+                .expect("attacker tmp should remain at original tmp path"),
+            b"attacker"
         );
     }
 
