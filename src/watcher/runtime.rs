@@ -752,6 +752,7 @@ async fn await_watcher_init(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -762,8 +763,7 @@ mod tests {
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         process_debounced_events_with_watch_and_unwatch, register_watch_plan_with,
-        send_watch_event, WatchDirectoryRegistry, Watcher, WatcherFailureKind, WatcherHealth,
-        WatcherHealthState,
+        WatchDirectoryRegistry, Watcher, WatcherFailureKind, WatcherHealth, WatcherHealthState,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -1470,26 +1470,120 @@ mod tests {
     }
 
     #[test]
-    fn test_send_watch_event_チャネル満杯時はメッセージを破棄してブロックしない() {
-        let (tx, mut rx) = mpsc::channel::<WatchEvent>(1);
+    fn test_send_file_changed_eventはチャネル満杯時に破棄してブロックしない() {
+        let (file_tx, mut file_rx) = mpsc::channel::<PathBuf>(1);
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
-        tx.blocking_send(WatchEvent::FileChanged(first.clone()))
-            .unwrap();
+        let (_dir2, second) = create_markdown_fixture("second.md", "# second");
+        file_tx
+            .blocking_send(first.clone())
+            .expect("file channelを満杯にできる");
 
-        send_watch_event(
-            &tx,
-            WatchEvent::Error(WatchError::notify("満杯時テスト")),
-            "満杯時テスト",
+        send_file_changed_event(&file_tx, second, "filechanged満杯時テスト");
+
+        assert_eq!(
+            file_rx
+                .blocking_recv()
+                .expect("先行file eventを受信できる"),
+            first
         );
+        assert!(
+            file_rx.try_recv().is_err(),
+            "満杯時のFileChangedは破棄されているはず"
+        );
+    }
 
-        match rx.blocking_recv().unwrap() {
-            WatchEvent::FileChanged(path) => assert_eq!(path, first),
-            WatchEvent::Error(_) => panic!("最初のメッセージはFileChangedを期待"),
+    #[tokio::test]
+    async fn test_error_eventはfile_channel満杯時もmerged_rxに届く() {
+        let (file_tx, file_rx) = mpsc::channel::<PathBuf>(1);
+        let (error_tx, error_rx) = mpsc::channel::<WatchError>(1);
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(4);
+        let (_dir, first) = create_markdown_fixture("first.md", "# first");
+        file_tx
+            .send(first)
+            .await
+            .expect("file channelを満杯にできる");
+
+        let (forwarder, _done_rx) = spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        send_error_event(
+            &error_tx,
+            WatchError::notify("file channelが満杯でも送達する"),
+            "error分離テスト",
+        );
+        drop(file_tx);
+        drop(error_tx);
+
+        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+            .await
+            .expect("merged eventを待てる")
+            .expect("merged eventを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::Notify);
+                assert_eq!(error.detail(), "file channelが満杯でも送達する");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
         }
 
-        assert!(
-            rx.try_recv().is_err(),
-            "満杯時のメッセージは破棄されているはず"
+        forwarder.await.expect("merge forwarderが正常終了する");
+    }
+
+    #[tokio::test]
+    async fn test_merge_forwarderはfileよりerrorを優先する() {
+        let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
+        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(4);
+        let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
+        file_tx
+            .send(changed)
+            .await
+            .expect("file eventを送信できる");
+        error_tx
+            .send(WatchError::notify("優先されるerror"))
+            .await
+            .expect("error eventを送信できる");
+
+        let (forwarder, _done_rx) = spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        drop(file_tx);
+        drop(error_tx);
+
+        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+            .await
+            .expect("最初のmerged eventを待てる")
+            .expect("最初のmerged eventを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.detail(), "優先されるerror");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Error優先を期待したがFileChanged({path:?})を受信")
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+            .await
+            .expect("2つ目のmerged eventを待てる")
+            .expect("2つ目のmerged eventを受信できる")
+        {
+            WatchEvent::FileChanged(_) => {}
+            WatchEvent::Error(error) => {
+                panic!("2つ目はFileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        forwarder.await.expect("merge forwarderが正常終了する");
+    }
+
+    #[test]
+    fn test_send_error_eventはreceiver_closedでもpanicしない() {
+        let (error_tx, error_rx) = mpsc::channel::<WatchError>(1);
+        drop(error_rx);
+
+        send_error_event(
+            &error_tx,
+            WatchError::notify("receiver closed"),
+            "error receiver closedテスト",
         );
     }
 
