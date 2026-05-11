@@ -156,7 +156,7 @@ Error を優先配送しても、存在しない path や base 外 path の情�
 
 - `src/watcher/runtime.rs`: 内部 channel 分離、統合 forwarder、送信 helper、shutdown handling、テスト。
 - `src/watcher/mod.rs`: 公開 `WatchEvent` shape は変更しない。
-- `src/server/watch.rs`: 変更しない。
+- `src/server/watch.rs`: watcher shutdown を `spawn_blocking` に隔離し、内部 forwarder の完了待ちで async runtime を塞がないようにする。
 - `src/server/broadcast.rs`: 変更しない。
 - `docs/todo/TODO.md`: 実装完了時に対象 TODO / issue の追跡状態を更新する。
 

@@ -12,7 +12,7 @@
 
 ## Scope And File Structure
 
-**Modify:** `src/watcher/runtime.rs`
+**Modify:** `src/watcher/runtime.rs`, `src/server/watch.rs`
 
 Responsibilities:
 
@@ -21,9 +21,10 @@ Responsibilities:
 - Replace variant-mixed `send_watch_event` with `send_file_changed_event` and `send_error_event`.
 - Add an internal merge forwarder that prioritizes error events and emits existing `WatchEvent` values.
 - Update watcher runtime wiring and shutdown to own the merge forwarder.
+- Move `WatchService::shutdown()` watcher stop into `spawn_blocking` so the Tokio merge forwarder can complete on current-thread runtimes.
 - Update watcher runtime tests.
 
-**Do not modify:** `src/watcher/mod.rs`, `src/server/watch.rs`, `src/server/broadcast.rs`
+**Do not modify:** `src/watcher/mod.rs`, `src/server/broadcast.rs`
 
 The public `WatchEvent` enum and `Watcher::spawn() -> Result<(Watcher, mpsc::Receiver<WatchEvent>)>` contract stay unchanged.
 
@@ -744,7 +745,7 @@ Expected: format, clippy, and tests all PASS.
 Run:
 
 ```bash
-git add src/watcher/runtime.rs docs/todo/TODO.md
+git add src/server/watch.rs src/watcher/runtime.rs docs/todo/TODO.md docs/superpowers/specs/2026-05-11-watcher-error-channel-separation-design.md docs/superpowers/plans/2026-05-11-watcher-error-channel-separation.md
 git commit -m "docs: watcher異常通知配送issueを完了扱いに更新"
 ```
 

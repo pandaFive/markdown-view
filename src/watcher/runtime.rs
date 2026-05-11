@@ -259,6 +259,7 @@ impl WatchRuntime {
                     timeout_secs = timeout.as_secs(),
                     "[markdown-view] 監視スレッドの停止がタイムアウトしました"
                 );
+                merge_forwarder.abort();
                 return health_state.load();
             }
             std::thread::sleep(poll_interval);
@@ -427,7 +428,7 @@ fn spawn_watch_event_merge_forwarder(
                         }
                         None => {
                             while let Some(path) = file_rx.recv().await {
-                                if merged_tx.send(WatchEvent::FileChanged(path)).await.is_err() {
+                                if !send_merged_file_changed_event(&merged_tx, path) {
                                     let _ = done_tx.send(());
                                     return;
                                 }
@@ -439,7 +440,7 @@ fn spawn_watch_event_merge_forwarder(
                 path = file_rx.recv() => {
                     match path {
                         Some(path) => {
-                            if merged_tx.send(WatchEvent::FileChanged(path)).await.is_err() {
+                            if !send_merged_file_changed_event(&merged_tx, path) {
                                 break;
                             }
                         }
@@ -459,6 +460,26 @@ fn spawn_watch_event_merge_forwarder(
         let _ = done_tx.send(());
     });
     (task, done_rx)
+}
+
+fn send_merged_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf) -> bool {
+    if tx.capacity() <= 1 {
+        tracing::warn!(
+            "[markdown-view] 監視イベント転送チャネルが混雑しているためFileChangedを破棄しました"
+        );
+        return !tx.is_closed();
+    }
+
+    match tx.try_send(WatchEvent::FileChanged(path)) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "[markdown-view] 監視イベント転送チャネルが満杯のためFileChangedを破棄しました"
+            );
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }
 
 /// notifyコールバックからtokioチャネルへFileChangedを転送する（non-blocking）。
@@ -1750,6 +1771,39 @@ mod tests {
             WatchEvent::FileChanged(_) => {}
             WatchEvent::Error(error) => {
                 panic!("2つ目はFileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        forwarder.await.expect("merge forwarderが正常終了する");
+    }
+
+    #[tokio::test]
+    async fn test_merge_forwarderはmerged_backlogでerror_drainを止めない() {
+        let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
+        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+        let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
+        file_tx.send(changed).await.expect("file eventを送信できる");
+        error_tx
+            .send(WatchError::notify("merged backlogでも優先されるerror"))
+            .await
+            .expect("error eventを送信できる");
+
+        let (forwarder, _done_rx) =
+            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        drop(file_tx);
+        drop(error_tx);
+
+        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+            .await
+            .expect("merged eventを待てる")
+            .expect("merged eventを受信できる")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.detail(), "merged backlogでも優先されるerror");
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
             }
         }
 
