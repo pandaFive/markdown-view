@@ -10,6 +10,8 @@ use std::future::Future;
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +22,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    MoveFileExW, FILE_SHARE_DELETE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
@@ -202,6 +204,9 @@ async fn write_atomic_with_counter(
         #[cfg(unix)]
         // tmp 名は推測可能なため、緩い umask の共有環境でも rename 前に他者読み取りさせない。
         options.mode(0o600);
+        #[cfg(windows)]
+        // tmp handleをreplace完了まで保持し、retry待機中の外部書き込みをshare modeで拒否する。
+        options.share_mode(FILE_SHARE_DELETE);
         let mut tmp_file = match options.open(&tmp_path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -212,24 +217,28 @@ async fn write_atomic_with_counter(
         };
 
         if let Err(error) = tmp_file.write_all(content).await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
         if let Err(error) = tmp_file.flush().await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
         if let Err(error) = tmp_file.sync_data().await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
-        drop(tmp_file);
 
         if let Err(error) = checked_atomic_replace(&tmp_path, path, before_rename).await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(error);
         }
 
+        drop(tmp_file);
         sync_parent_dir_best_effort(parent).await;
         return Ok(());
     }
@@ -1054,6 +1063,45 @@ mod tests {
                 .expect("observed mode mutex should not be poisoned")
                 .expect("tmp mode should be observed"),
             0o600
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_atomicはwindowsでreplace完了までtmpの外部書き込みを拒否する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let observed_error = Arc::new(Mutex::new(None));
+        let observed_error_for_check = Arc::clone(&observed_error);
+
+        TokioMemoFs
+            .write_atomic(&path, b"secret", &move |_, tmp_path| {
+                let observed_error_for_check = Arc::clone(&observed_error_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                before_rename_future(async move {
+                    let error = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&tmp_path)
+                        .await
+                        .expect_err("tmp should reject external write open while protected");
+                    *observed_error_for_check
+                        .lock()
+                        .expect("observed error mutex should not be poisoned") = Some(error.kind());
+                    Ok(())
+                })
+            })
+            .await
+            .expect("atomic write should succeed");
+
+        assert!(
+            matches!(
+                observed_error
+                    .lock()
+                    .expect("observed error mutex should not be poisoned")
+                    .expect("write-open error should be observed"),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+            ),
+            "Windows should reject concurrent tmp write open while memo save owns the handle"
         );
     }
 
