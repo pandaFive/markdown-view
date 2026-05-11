@@ -1157,6 +1157,25 @@ async fn test_単一ファイルモードの後方互換_api_searchは空結果(
     assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
 }
 
+#[tokio::test]
+async fn test_単一ファイルモード_api_searchは長すぎるqueryを400で拒否する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+    let client = reqwest::Client::new();
+    let query = "あ".repeat(257);
+
+    let resp = client
+        .get(format!("http://{}/api/search", addr))
+        .query(&[("q", &query)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
+    assert!(!json["error"].as_str().unwrap().contains(&query));
+}
+
 // ==============================
 // ディレクトリモード テスト
 // ==============================
@@ -1244,6 +1263,34 @@ async fn test_ディレクトリモード_検索apiは複数ファイルから�
         .as_str()
         .unwrap()
         .contains("Alpha note appears here."));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchは長すぎるqueryを400で拒否する() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+    let client = reqwest::Client::new();
+    let query = "あ".repeat(257);
+
+    let resp = client
+        .get(format!("http://{}/api/search", addr))
+        .query(&[("q", &query)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
+    assert!(!json["error"].as_str().unwrap().contains(&query));
 }
 
 #[tokio::test]
