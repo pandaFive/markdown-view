@@ -918,7 +918,7 @@ fn send_error_event(tx: &PriorityErrorSender, error: WatchError, label: &str) {
     let mut state = tx.queue.state.lock().expect("priority error queue mutex");
     if state.closed {
         tracing::warn!(
-            detail = error.detail(),
+            error_kind = ?error.kind(),
             "[markdown-view] watcher error channel が閉じているため異常通知を破棄しました: {}",
             label
         );
@@ -2511,15 +2511,28 @@ mod tests {
         ));
     }
 
+    #[traced_test]
     #[test]
-    fn test_send_error_eventはreceiver_closedでもpanicしない() {
+    fn test_send_error_eventはreceiver_closedでもpanicせずdetailをログに出さない() {
         let (error_tx, error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
         drop(error_rx);
+        error_tx
+            .queue
+            .state
+            .lock()
+            .expect("priority error queue mutex")
+            .closed = true;
 
         error_tx.send(
-            WatchError::notify("receiver closed"),
+            WatchError::notify("secret receiver closed detail"),
             "error receiver closedテスト",
         );
+
+        assert!(logs_contain(
+            "watcher error channel が閉じているため異常通知を破棄しました"
+        ));
+        assert!(logs_contain("error_kind=Notify"));
+        assert!(!logs_contain("secret receiver closed detail"));
     }
 
     #[test]
