@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_GENERIC_WRITE, FILE_RENAME_INFO,
-    FILE_SHARE_DELETE,
+    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_GENERIC_WRITE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
@@ -247,6 +247,11 @@ async fn write_atomic_with_counter(
         }
 
         drop(tmp_file);
+        #[cfg(windows)]
+        sync_parent_dir_required(parent)
+            .await
+            .map_err(MemoWriteError::Io)?;
+        #[cfg(not(windows))]
         sync_parent_dir_best_effort(parent).await;
         return Ok(());
     }
@@ -293,6 +298,16 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
             error
         );
     }
+}
+
+#[cfg(windows)]
+async fn sync_parent_dir_required(parent: &Path) -> io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let file = options.open(parent).await?;
+    file.sync_all().await
 }
 
 fn file_name_for_logging(path: &Path) -> String {
@@ -1183,6 +1198,16 @@ mod tests {
             ),
             "Windows should reject concurrent tmp write open while memo save owns the handle"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sync_parent_dir_requiredはwindowsディレクトリをsyncできる() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+
+        sync_parent_dir_required(workspace.path())
+            .await
+            .expect("Windows parent directory sync should succeed for a normal directory");
     }
 
     #[cfg(windows)]
