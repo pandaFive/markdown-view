@@ -61,12 +61,30 @@
     }
 ```
 
+同じ箇所に、async entry が blocking task 起動前に拒否することを固定するテストも追加する。このテストは base directory を canonical 化した後に削除し、長大 query でも directory listing に進まないことを確認する。
+
+```rust
+    #[tokio::test]
+    async fn test_search_directory_async入口は長すぎるqueryを列挙前に拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search_directory(&canonical, &query).await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+```
+
 - [ ] **Step 2: failing test を確認する**
 
 Run:
 
 ```bash
 cargo test --all-targets --all-features test_search_directory_queryが上限を超えるとinvalid_inputを返す
+cargo test --all-targets --all-features test_search_directory_async入口は長すぎるqueryを列挙前に拒否する
 ```
 
 Expected: FAIL with `cannot find value MAX_SEARCH_QUERY_CHARS in this scope`.
@@ -134,11 +152,11 @@ const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
 ```rust
 pub(in crate::server) fn normalize_search_query(raw_query: &str) -> std::io::Result<String> {
-    let query = raw_query.trim().to_string();
+    let query = raw_query.trim();
     if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
         return Err(search_query_too_long_error());
     }
-    Ok(query)
+    Ok(query.to_string())
 }
 
 fn search_query_too_long_error() -> std::io::Error {
@@ -149,7 +167,23 @@ fn search_query_too_long_error() -> std::io::Error {
 }
 ```
 
-`search_directory_with_limits_blocking` の query 作成を置き換える。
+`search_directory` の入口でも検証し、検証済み query だけを blocking task へ渡す。これにより `search_directory` を直接呼ぶ内部経路でも、長大 query が `to_owned()` や `spawn_blocking` まで進まない。
+
+```rust
+pub(in crate::server) async fn search_directory(
+    base_dir: &CanonicalPath,
+    raw_query: &str,
+) -> std::io::Result<SearchResponse> {
+    let query = normalize_search_query(raw_query)?;
+    let base_dir = base_dir.clone();
+
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query))
+        .await
+        .map_err(map_search_join_error)?
+}
+```
+
+`search_directory_with_limits_blocking` の query 作成も同じ検証関数へ置き換え、blocking helper を直接呼ぶテスト・将来の内部呼び出しに対する defense-in-depth を残す。
 
 ```rust
     let query = normalize_search_query(raw_query)?;
@@ -164,9 +198,10 @@ Run:
 
 ```bash
 cargo test --all-targets --all-features search_directory_query
+cargo test --all-targets --all-features test_search_directory_async入口は長すぎるqueryを列挙前に拒否する
 ```
 
-Expected: 追加した3テストが PASS。
+Expected: 追加した4テストが PASS。
 
 - [ ] **Step 6: Task 1 をコミットする**
 
