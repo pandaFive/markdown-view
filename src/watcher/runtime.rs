@@ -1782,15 +1782,21 @@ mod tests {
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
         let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
         let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
-        let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
+        let (_dir, prefilled) = create_markdown_fixture("prefilled.md", "# prefilled");
+        let (_dir2, changed) = create_markdown_fixture("changed.md", "# changed");
+        merged_tx
+            .send(WatchEvent::FileChanged(prefilled.clone()))
+            .await
+            .expect("merged channelを満杯にできる");
         file_tx.send(changed).await.expect("file eventを送信できる");
+
+        let (forwarder, _done_rx) =
+            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        tokio::task::yield_now().await;
         error_tx
             .send(WatchError::notify("merged backlogでも優先されるerror"))
             .await
             .expect("error eventを送信できる");
-
-        let (forwarder, _done_rx) =
-            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         drop(error_tx);
 
@@ -1798,6 +1804,17 @@ mod tests {
             .await
             .expect("merged eventを待てる")
             .expect("merged eventを受信できる")
+        {
+            WatchEvent::FileChanged(path) => assert_eq!(path, prefilled),
+            WatchEvent::Error(error) => {
+                panic!("先行FileChangedを期待したがError({error})を受信")
+            }
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+            .await
+            .expect("error eventを待てる")
+            .expect("error eventを受信できる")
         {
             WatchEvent::Error(error) => {
                 assert_eq!(error.detail(), "merged backlogでも優先されるerror");
@@ -1808,6 +1825,20 @@ mod tests {
         }
 
         forwarder.await.expect("merge forwarderが正常終了する");
+    }
+
+    #[tokio::test]
+    async fn test_send_merged_file_changed_eventはerror用capacityを残す() {
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+        let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
+
+        assert!(super::send_merged_file_changed_event(&merged_tx, changed));
+
+        assert!(
+            merged_rx.try_recv().is_err(),
+            "残容量が1以下ならFileChangedはmerged channelへ積まない"
+        );
+        assert_eq!(merged_tx.capacity(), 1);
     }
 
     #[test]

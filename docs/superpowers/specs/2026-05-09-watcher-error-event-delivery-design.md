@@ -1,5 +1,7 @@
 # watcher error event 送達保証設計
 
+> **Superseded:** この設計は 2026-05-11 の `watcher 異常通知配送分離設計` に置き換えた。現行実装は `WatchEvent::Error` を `FileChanged` とは別の bounded channel に分離し、専用 channel へは `try_send` する。専用 channel 自体が満杯の場合は watcher thread を停止不能にしないため `error!` log に残して破棄する。旧設計内の `blocking_send` や「receiver が開いている限り必ず送達する」という記述は採用しない。
+
 ## 目的
 
 watcher 内で発生した `WatchEvent::Error` が、`FileChanged` の大量発生と同じ `try_send` 経路で破棄されないようにする。

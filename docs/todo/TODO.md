@@ -10,7 +10,7 @@
 放置するとセキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目。
 
 - [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
-  - ファイル: `src/watcher/runtime.rs` L149-215/L243-247
+  - ファイル: `src/watcher/runtime.rs` の `spawn_watcher_thread` / `handle_watcher_panic` / `await_watcher_init`
   - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
   - 対応: panic 経路で `init_tx` がまだ Some なら `WatchError::thread_panic(...)` を init 結果として送る
   - 昇格理由: watcher 初期化失敗の詳細が失われる silent failure であり、監視開始可否の判断に直接響くため High とする
