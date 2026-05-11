@@ -105,6 +105,8 @@ const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
 const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
 #[cfg(any(test, windows))]
 const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
+#[cfg(windows)]
+const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 
 /// メモ保存先ファイルシステムの抽象。
 ///
@@ -327,10 +329,7 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
-    let tmp_path = path_to_wide_null(tmp_path)?;
-    let path = path_to_wide_null(path)?;
-
+async fn move_file_ex_replace_once(tmp_path: Vec<u16>, path: Vec<u16>) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
         // SAFETY: 両パスはNUL終端済みで、interior NULを拒否したバッファとしてこの呼び出し中は生存する。
         let result = unsafe {
@@ -348,6 +347,39 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
     })
     .await
     .map_err(map_atomic_replace_join_error)?
+}
+
+#[cfg(windows)]
+async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
+    let tmp_path_wide = path_to_wide_null(tmp_path)?;
+    let path_wide = path_to_wide_null(path)?;
+    let memo_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "<unknown>".into());
+
+    for attempt in 0..=WINDOWS_REPLACE_RETRY_DELAYS_MS.len() {
+        match move_file_ex_replace_once(tmp_path_wide.clone(), path_wide.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < WINDOWS_REPLACE_RETRY_DELAYS_MS.len()
+                    && is_retryable_windows_replace_error(&error) =>
+            {
+                let delay_ms = WINDOWS_REPLACE_RETRY_DELAYS_MS[attempt];
+                tracing::warn!(
+                    "[markdown-view] メモatomic replaceをretryします (file: {}, attempt: {}, delay_ms: {}, error: {})",
+                    memo_name,
+                    attempt + 1,
+                    delay_ms,
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("windows atomic replace retry loop always returns");
 }
 
 #[cfg(windows)]
