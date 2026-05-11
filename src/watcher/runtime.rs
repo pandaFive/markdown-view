@@ -1478,7 +1478,15 @@ mod tests {
             .blocking_send(first.clone())
             .expect("file channelを満杯にできる");
 
-        send_file_changed_event(&file_tx, second, "filechanged満杯時テスト");
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let sender = std::thread::spawn(move || {
+            super::send_file_changed_event(&file_tx, second, "filechanged満杯時テスト");
+            done_tx.send(()).expect("完了通知を送信できる");
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("FileChanged満杯時の送信はブロックしない");
+        sender.join().expect("filechanged送信threadが正常終了する");
 
         assert_eq!(
             file_rx
@@ -1503,8 +1511,9 @@ mod tests {
             .await
             .expect("file channelを満杯にできる");
 
-        let (forwarder, _done_rx) = spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
-        send_error_event(
+        let (forwarder, _done_rx) =
+            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        super::send_error_event(
             &error_tx,
             WatchError::notify("file channelが満杯でも送達する"),
             "error分離テスト",
@@ -1544,7 +1553,8 @@ mod tests {
             .await
             .expect("error eventを送信できる");
 
-        let (forwarder, _done_rx) = spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        let (forwarder, _done_rx) =
+            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         drop(error_tx);
 
@@ -1580,7 +1590,7 @@ mod tests {
         let (error_tx, error_rx) = mpsc::channel::<WatchError>(1);
         drop(error_rx);
 
-        send_error_event(
+        super::send_error_event(
             &error_tx,
             WatchError::notify("receiver closed"),
             "error receiver closedテスト",
