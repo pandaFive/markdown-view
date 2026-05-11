@@ -13,6 +13,8 @@ use crate::server::CanonicalPath;
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
 const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
+pub(in crate::server) const MAX_SEARCH_QUERY_CHARS: usize = 256;
+const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -151,15 +153,30 @@ struct SearchContext {
     after: String,
 }
 
+pub(in crate::server) fn normalize_search_query(raw_query: &str) -> std::io::Result<String> {
+    let query = raw_query.trim();
+    if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+        return Err(search_query_too_long_error());
+    }
+    Ok(query.to_string())
+}
+
+fn search_query_too_long_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        SEARCH_QUERY_TOO_LONG_MESSAGE,
+    )
+}
+
 /// ディレクトリ内のMarkdownを横断検索する。
 pub(in crate::server) async fn search_directory(
     base_dir: &CanonicalPath,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
+    let query = normalize_search_query(raw_query)?;
     let base_dir = base_dir.clone();
-    let raw_query = raw_query.to_owned();
 
-    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query))
         .await
         .map_err(map_search_join_error)?
 }
@@ -176,7 +193,7 @@ fn search_directory_with_limits_blocking(
     raw_query: &str,
     limits: SearchLimits,
 ) -> std::io::Result<SearchResponse> {
-    let query = raw_query.trim().to_string();
+    let query = normalize_search_query(raw_query)?;
     if query.is_empty() {
         return Ok(SearchResponse::empty(query));
     }
@@ -1084,5 +1101,83 @@ mod tests {
         assert_eq!(response.searched_bytes, "needle".len());
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");
+    }
+
+    #[test]
+    fn test_search_directory_queryが上限を超えるとinvalid_inputを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+        let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            &query,
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_async入口は長すぎるqueryを列挙前に拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search_directory(&canonical, &query).await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_search_directory_queryはtrim後256文字まで許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS);
+        std::fs::write(dir.path().join("README.md"), format!("{query} found")).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            &query,
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.query, query);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[test]
+    fn test_search_directory_queryはtrim後空なら空結果を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "   ",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "");
+        assert_eq!(response.searched_files, 0);
+        assert!(response.results.is_empty());
     }
 }

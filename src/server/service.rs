@@ -2,8 +2,8 @@ use axum::http::StatusCode;
 
 use super::files::{
     list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
-    resolve_route_target, run_blocking_file_task, save_route_memo, search_directory,
-    ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
+    normalize_search_query, resolve_route_target, run_blocking_file_task, save_route_memo,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -192,19 +192,28 @@ pub(super) async fn list_files(state: &AppState) -> Result<Vec<String>, ApiError
     }
 }
 
+fn map_search_error(error: std::io::Error) -> ApiError {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        return json_error(StatusCode::BAD_REQUEST, "検索クエリが長すぎます");
+    }
+
+    tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "ディレクトリ検索に失敗しました",
+    )
+}
+
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
+    let query = normalize_search_query(&query).map_err(map_search_error)?;
     let Some(base_dir) = state.mode().directory_canonical() else {
-        return Ok(SearchResponse::empty(query.trim().to_string()));
+        return Ok(SearchResponse::empty(query));
     };
 
-    search_directory(base_dir, &query).await.map_err(|error| {
-        tracing::warn!("[markdown-view] ディレクトリ検索エラー: {}", error);
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ディレクトリ検索に失敗しました",
-        )
-    })
+    search_directory(base_dir, &query)
+        .await
+        .map_err(map_search_error)
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
@@ -652,5 +661,21 @@ mod tests {
         assert_eq!(response.limits.max_files, 1000);
         assert_eq!(response.limits.max_bytes, 64 * 1024 * 1024);
         assert_eq!(response.searched_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_単一ファイルモードでも長すぎるqueryはbad_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, "# Note\n\nneedle").unwrap();
+        let state = create_single_file_state(&file_path);
+        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search(&state, query)
+            .await
+            .expect_err("長すぎる検索queryは単一ファイルモードでも拒否する");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
     }
 }

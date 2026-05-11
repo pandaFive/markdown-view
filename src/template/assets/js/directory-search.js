@@ -185,6 +185,28 @@ function createDirectorySearchController(ctx, deps) {
     renderDirectorySearchUi();
   }
 
+  function isApiErrorPayload(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) &&
+      typeof value.error === 'string' && value.error;
+  }
+
+  function throwDirectorySearchHttpError(resp) {
+    return resp.text().then(function(body) {
+      var err = deps.createHttpError(resp.status);
+      if (body) {
+        try {
+          var payload = JSON.parse(body);
+          if (isApiErrorPayload(payload)) {
+            err.userMessage = payload.error;
+          }
+        } catch (_parseError) {
+          // JSON でないエラー本文は既存の HTTP status 文言へフォールバックする。
+        }
+      }
+      throw err;
+    });
+  }
+
   function runDirectorySearch(query) {
     var generation = ++ctx.search.documentFetchGeneration;
     var preferredSelection = getPreferredDirectorySearchSelection();
@@ -201,7 +223,7 @@ function createDirectorySearchController(ctx, deps) {
       headers: { 'Accept': 'application/json' }
     })
     .then(function(resp) {
-      if (!resp.ok) throw deps.createHttpError(resp.status);
+      if (!resp.ok) return throwDirectorySearchHttpError(resp);
       return resp.json().catch(function(err) {
         err.type = 'parse';
         throw err;

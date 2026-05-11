@@ -39,6 +39,9 @@ function createHttpError(status) {
 }
 
 function getFileFetchErrorMessage(err) {
+  if (err && typeof err.userMessage === 'string' && err.userMessage) {
+    return err.userMessage;
+  }
   if (err && err.type === 'http') {
     switch (err.status) {
       case 403:
