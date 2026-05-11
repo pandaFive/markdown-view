@@ -352,16 +352,21 @@ fn send_file_changed_event(tx: &mpsc::Sender<PathBuf>, path: PathBuf, label: &st
 }
 
 /// watcher異常通知を専用チャネルへ転送する。
-/// ErrorはFileChangedのbacklogとは分離し、receiverが開いている限り送達を待つ。
+/// ErrorはFileChangedのbacklogとは分離し、専用チャネル過負荷時はログに残して破棄する。
 fn send_error_event(tx: &mpsc::Sender<WatchError>, error: WatchError, label: &str) {
-    let detail = error.detail().to_string();
-    match tx.blocking_send(error) {
+    match tx.try_send(error) {
         Ok(()) => {}
-        Err(_) => {
+        Err(mpsc::error::TrySendError::Full(error)) => {
+            tracing::error!(
+                detail = error.detail(),
+                "[markdown-view] watcher error channel が満杯のため異常通知を破棄しました: {}",
+                label
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
             tracing::warn!(
-                "[markdown-view] 通知チャネルが閉じているため監視エラーを送達できませんでした: {}, {}",
-                label,
-                detail
+                "[markdown-view] watcher error channel が閉じているため異常通知を破棄しました: {}",
+                label
             );
         }
     }
@@ -706,7 +711,7 @@ Add a concise Done Summary entry near the top of `## Done Summary`:
 
 ```markdown
 - [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
-  - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は専用 channel 経由で file backlog から独立して配送される。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。
+  - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は専用 channel 経由で file backlog から独立して配送される。専用 channel 自体が満杯の場合は watcher thread を停止不能にしないため error log に残して破棄する。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。
 ```
 
 - [ ] **Step 3: Run targeted regression tests**
@@ -750,3 +755,4 @@ Expected: commit succeeds.
 - Spec coverage: internal file/error channel split, public API preservation, error priority, shutdown ownership, tests, security considerations, and rollback are covered by Tasks 1-4.
 - Placeholder scan: no `TBD`, `TODO`, `implement later`, or unspecified test instructions remain.
 - Type consistency: public `WatchEvent` remains unchanged; internal split uses `mpsc::Sender<PathBuf>` for file events and `mpsc::Sender<WatchError>` for error events; `Watcher::spawn()` still returns `mpsc::Receiver<WatchEvent>`.
+- Accepted deviation: Error uses a dedicated bounded channel with `try_send`; Full is logged with `error!`, Closed with `warn!`, and the notification is dropped rather than blocking the watcher thread.

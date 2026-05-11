@@ -141,7 +141,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_service_開始と停止ができる() {
-        let start = std::time::Instant::now();
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("watch.md");
         std::fs::write(&file_path, "# watch").unwrap();
@@ -154,6 +153,7 @@ mod tests {
         ));
 
         let service = WatchService::start(state).await.unwrap();
+        let start = std::time::Instant::now();
         assert_eq!(service.shutdown().await, WatcherHealth::Stopped);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(1),

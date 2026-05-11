@@ -495,7 +495,7 @@ fn send_error_event(tx: &mpsc::Sender<WatchError>, error: WatchError, label: &st
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             tracing::warn!(
-                "[markdown-view] 通知チャネルが閉じているため監視イベントを破棄しました: {}",
+                "[markdown-view] watcher error channel が閉じているため異常通知を破棄しました: {}",
                 label
             );
         }
