@@ -554,6 +554,35 @@ test('ディレクトリ検索の不正な成功応答は検索エラーとし�
   await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
 });
 
+test('ディレクトリ検索の400エラーはAPI本文の固定文言を表示する', async ({ page }) => {
+  const query = 'あ'.repeat(257);
+
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: '検索クエリが長すぎます'
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, query);
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results')).toContainText('検索クエリが長すぎます');
+  await expect(page.locator('#document-search-results')).not.toContainText(query);
+});
+
 test('ディレクトリ検索の不正な結果要素は検索エラーとして表示する', async ({ page }) => {
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({

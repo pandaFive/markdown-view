@@ -154,11 +154,11 @@ struct SearchContext {
 }
 
 pub(in crate::server) fn normalize_search_query(raw_query: &str) -> std::io::Result<String> {
-    let query = raw_query.trim().to_string();
+    let query = raw_query.trim();
     if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
         return Err(search_query_too_long_error());
     }
-    Ok(query)
+    Ok(query.to_string())
 }
 
 fn search_query_too_long_error() -> std::io::Error {
@@ -173,10 +173,10 @@ pub(in crate::server) async fn search_directory(
     base_dir: &CanonicalPath,
     raw_query: &str,
 ) -> std::io::Result<SearchResponse> {
+    let query = normalize_search_query(raw_query)?;
     let base_dir = base_dir.clone();
-    let raw_query = raw_query.to_owned();
 
-    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &raw_query))
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query))
         .await
         .map_err(map_search_join_error)?
 }
@@ -1120,6 +1120,19 @@ mod tests {
             },
         )
         .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_async入口は長すぎるqueryを列挙前に拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search_directory(&canonical, &query).await.unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }

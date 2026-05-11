@@ -1296,6 +1296,86 @@ async fn test_ディレクトリモード_api_searchは長すぎるqueryを400�
 }
 
 #[tokio::test]
+async fn test_ディレクトリモード_api_searchは削除済みbaseでも長すぎるqueryを400で拒否する() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+    tokio::fs::remove_dir_all(tmp_dir.path()).await.unwrap();
+    let client = reqwest::Client::new();
+    let query = "あ".repeat(257);
+
+    let resp = client
+        .get(format!("http://{}/api/search", addr))
+        .query(&[("q", &query)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(&query));
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchはraw_query上限超過を400で拒否する() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+    let query = "a".repeat(4097);
+
+    let resp = reqwest::get(format!("http://{}/api/search?q={}", addr, query))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(&query));
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"].as_str(), Some("検索クエリが長すぎます"));
+}
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchは不正percent_encodingを400で拒否する() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        tmp_dir.path().join("README.md"),
+        "# README\n\nAlpha note appears here.",
+    )
+    .await
+    .unwrap();
+
+    let state = build_dir_state(tmp_dir.path());
+    let addr = spawn_test_server(state).await;
+    let invalid_query = "%E0%A4%A";
+
+    let resp = reqwest::get(format!("http://{}/api/search?q={}", addr, invalid_query))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(invalid_query));
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"].as_str(), Some("検索クエリが不正です"));
+}
+
+#[tokio::test]
 async fn test_ディレクトリモード_api_searchは結果数打ち切りをjsonで返す() {
     let dir = tempfile::tempdir().unwrap();
     let markdown = (0..120)

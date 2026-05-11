@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Query, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::get;
@@ -28,6 +28,7 @@ use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams
 // 制御文字など 2 倍を超えて膨らむ極端な JSON 入力は body limit 側で拒否され得る。
 // 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
+const MAX_SEARCH_RAW_QUERY_BYTES: usize = 4096;
 
 /// Host middleware 適用前の route 定義だけを保持する。
 ///
@@ -94,7 +95,7 @@ struct FileQuery {
     file: Option<String>,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, Default)]
 struct SearchQuery {
     q: Option<String>,
 }
@@ -117,6 +118,62 @@ fn sidebar_params(sidebar: &SidebarView) -> SidebarParams<'_> {
             file_list,
             current_file: current_file.as_deref(),
         },
+    }
+}
+
+fn search_query_too_long_error() -> ApiError {
+    json_error(StatusCode::BAD_REQUEST, "検索クエリが長すぎます")
+}
+
+fn invalid_search_query_error() -> ApiError {
+    json_error(StatusCode::BAD_REQUEST, "検索クエリが不正です")
+}
+
+fn search_query_from_uri(uri: &Uri) -> Result<SearchQuery, ApiError> {
+    if let Some(raw_query) = uri.query() {
+        if raw_query.len() > MAX_SEARCH_RAW_QUERY_BYTES {
+            return Err(search_query_too_long_error());
+        }
+        if !is_valid_percent_encoded_utf8_query(raw_query) {
+            return Err(invalid_search_query_error());
+        }
+    }
+
+    Query::<SearchQuery>::try_from_uri(uri)
+        .map(|Query(query)| query)
+        .map_err(|_| invalid_search_query_error())
+}
+
+fn is_valid_percent_encoded_utf8_query(raw_query: &str) -> bool {
+    let bytes = raw_query.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+                return false;
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    std::str::from_utf8(&decoded).is_ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -203,8 +260,9 @@ async fn api_files_handler(
 /// GET /api/search : ディレクトリ全体検索結果をJSON形式で返す
 async fn api_search_handler(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(query): axum::extract::Query<SearchQuery>,
+    uri: Uri,
 ) -> Result<Json<SearchResponse>, ApiError> {
+    let query = search_query_from_uri(&uri)?;
     let response = service::search(&state, query.q.unwrap_or_default()).await?;
     Ok(Json(response))
 }
@@ -227,4 +285,43 @@ async fn ws_handler(
             .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_error_message(error: &ApiError) -> Option<&str> {
+        error.1["error"].as_str()
+    }
+
+    #[test]
+    fn test_search_query_from_uri_raw_query上限超過はdecode前に400で拒否する() {
+        let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
+        let uri: Uri = format!("/api/search?{query}x").parse().unwrap();
+
+        let error = search_query_from_uri(&uri).unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
+    }
+
+    #[test]
+    fn test_search_query_from_uri_percent_encoding不正は400で拒否する() {
+        let uri: Uri = "/api/search?q=%E0%A4%A".parse().unwrap();
+
+        let error = search_query_from_uri(&uri).unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
+    }
+
+    #[test]
+    fn test_search_query_from_uri_valid_queryを復元する() {
+        let uri: Uri = "/api/search?q=alpha%20note".parse().unwrap();
+
+        let query = search_query_from_uri(&uri).unwrap();
+
+        assert_eq!(query.q.as_deref(), Some("alpha note"));
+    }
 }
