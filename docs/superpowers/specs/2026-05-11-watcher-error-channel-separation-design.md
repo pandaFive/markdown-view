@@ -15,7 +15,7 @@ watcher runtime で通常の `WatchEvent::FileChanged` と異常系の `WatchEve
 
 - `Watcher::spawn()` の公開戻り値を 2 receiver に変更しない。
 - WebSocket JSON shape、`BroadcastMessage::Error`、client 側表示を変更しない。
-- `WatcherHealth` の状態数は増やさない。ただし shutdown task panic の原因混線を避けるため `WatcherFailureKind` には `ShutdownTaskPanic` を追加する。
+- `WatcherHealth` は `Failed(WatcherFailureKind)` の形を維持する。shutdown task panic、shutdown timeout、forwarder task panic、forwarder stopped は `WatcherFailureKind` で原因を分ける。
 - watcher の自動再起動機構を追加しない。
 - すべての異常通知を無限に保持する durable queue は作らない。
 - path 解決、HTML sanitize、CSP、Host/Origin 検証などのセキュリティ境界は変更しない。
@@ -111,7 +111,7 @@ notify callback、debounced event 処理、追加 watch 失敗、internal channe
 
 - file channel full: 現行どおり warn log + 破棄。
 - file channel closed: watcher shutdown 中なら終了文脈として扱い、過剰に騒がせない。稼働中に発生した場合は warn log。
-- error channel capacity: `WATCHER_ERROR_QUEUE_CAPACITY = 64` の bounded ring queue とし、FileChanged backlog では破棄しない。異常 storm で 64 件を超えた場合は OOM を避けるため最古の error を evict し、最新の異常通知を保持する。
+- error channel capacity: `WATCHER_ERROR_QUEUE_CAPACITY = 64` の bounded ring queue とし、FileChanged backlog では破棄しない。異常 storm で 64 件に達した状態で新規 error を push する場合は OOM を避けるため最古の error を evict し、最新の異常通知を保持する。
 - error channel closed: panic せず warn log。元の notify/panic failure は health に latch 済みとする。
 - merged channel closed: 外部 receiver が閉じた状態なので内部 forwarder を終了する。
 - internal forwarder panic/join failure: shutdown 時に warn/error log を残す。元の watcher health を不用意に `Stopped` へ上書きしない。

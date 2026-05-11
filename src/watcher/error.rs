@@ -38,6 +38,30 @@ impl WatchError {
         }
     }
 
+    /// shutdown timeoutエラーを生成する
+    pub fn shutdown_timed_out(detail: impl Into<String>) -> Self {
+        Self {
+            kind: WatchErrorKind::ShutdownTimedOut,
+            detail: detail.into(),
+        }
+    }
+
+    /// forwarder task panicエラーを生成する
+    pub fn forwarder_task_panic(detail: impl Into<String>) -> Self {
+        Self {
+            kind: WatchErrorKind::ForwarderTaskPanic,
+            detail: detail.into(),
+        }
+    }
+
+    /// forwarder停止エラーを生成する
+    pub fn forwarder_stopped(detail: impl Into<String>) -> Self {
+        Self {
+            kind: WatchErrorKind::ForwarderStopped,
+            detail: detail.into(),
+        }
+    }
+
     /// 監視リソース枯渇エラーを生成する
     pub fn resource_exhausted(detail: impl Into<String>) -> Self {
         Self {
@@ -89,6 +113,18 @@ impl WatchError {
             WatchErrorKind::ShutdownTaskPanic => {
                 format!("監視停止処理がパニックで失敗しました: {}", self.detail)
             }
+            WatchErrorKind::ShutdownTimedOut => {
+                format!("監視停止処理がタイムアウトしました: {}", self.detail)
+            }
+            WatchErrorKind::ForwarderTaskPanic => {
+                format!(
+                    "監視イベント転送タスクがパニックで停止しました: {}",
+                    self.detail
+                )
+            }
+            WatchErrorKind::ForwarderStopped => {
+                format!("監視イベント転送タスクが停止しました: {}", self.detail)
+            }
             WatchErrorKind::ResourceExhausted => {
                 format!(
                     "監視対象が多すぎるため監視を開始できません。Linuxではfs.inotify.max_user_watchesの上限を確認してください: {}",
@@ -118,6 +154,12 @@ pub enum WatchErrorKind {
     ThreadPanic,
     /// shutdown task 内のpanic
     ShutdownTaskPanic,
+    /// watcher thread 停止timeout
+    ShutdownTimedOut,
+    /// merge forwarder task のpanic
+    ForwarderTaskPanic,
+    /// merge forwarder停止
+    ForwarderStopped,
     /// OSのファイル監視リソース枯渇
     ResourceExhausted,
 }
@@ -157,6 +199,9 @@ mod tests {
         let notify = WatchError::notify("notify詳細");
         let panic = WatchError::thread_panic("panic詳細");
         let shutdown = WatchError::shutdown_task_panic("shutdown詳細");
+        let timeout = WatchError::shutdown_timed_out("timeout詳細");
+        let forwarder_panic = WatchError::forwarder_task_panic("forwarder panic詳細");
+        let forwarder_stopped = WatchError::forwarder_stopped("forwarder stopped詳細");
 
         assert_eq!(
             notify.user_message(),
@@ -169,6 +214,18 @@ mod tests {
         assert_eq!(
             shutdown.user_message(),
             "監視停止処理がパニックで失敗しました: shutdown詳細"
+        );
+        assert_eq!(
+            timeout.user_message(),
+            "監視停止処理がタイムアウトしました: timeout詳細"
+        );
+        assert_eq!(
+            forwarder_panic.user_message(),
+            "監視イベント転送タスクがパニックで停止しました: forwarder panic詳細"
+        );
+        assert_eq!(
+            forwarder_stopped.user_message(),
+            "監視イベント転送タスクが停止しました: forwarder stopped詳細"
         );
     }
 
@@ -193,6 +250,18 @@ mod tests {
         assert_eq!(
             WatchError::shutdown_task_panic("detail").kind(),
             WatchErrorKind::ShutdownTaskPanic
+        );
+        assert_eq!(
+            WatchError::shutdown_timed_out("detail").kind(),
+            WatchErrorKind::ShutdownTimedOut
+        );
+        assert_eq!(
+            WatchError::forwarder_task_panic("detail").kind(),
+            WatchErrorKind::ForwarderTaskPanic
+        );
+        assert_eq!(
+            WatchError::forwarder_stopped("detail").kind(),
+            WatchErrorKind::ForwarderStopped
         );
     }
 
