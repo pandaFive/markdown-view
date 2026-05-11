@@ -1511,13 +1511,14 @@ mod tests {
             .await
             .expect("file channelを満杯にできる");
 
-        let (forwarder, _done_rx) =
-            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         super::send_error_event(
             &error_tx,
             WatchError::notify("file channelが満杯でも送達する"),
             "error分離テスト",
         );
+
+        let (forwarder, _done_rx) =
+            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         drop(error_tx);
 
