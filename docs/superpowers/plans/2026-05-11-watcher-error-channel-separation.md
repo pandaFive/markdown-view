@@ -2,7 +2,7 @@
 
 > **For agentic workers:** This is a historical implementation plan and does not override current user instructions, `AGENTS.md`, or approval flows. After approval, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans as advisory workflow guidance. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ensure watcher errors are delivered through an internal error path that is separate from best-effort file change notifications, while preserving the existing `Watcher::spawn()` public API.
+**Goal:** Ensure watcher errors are delivered through an internal error path that is separate from best-effort file change notifications, while preserving the existing `Watcher::spawn()` and `WatchEvent` public contracts. `Watcher::shutdown()` is intentionally async so shutdown waiting does not block the Tokio runtime.
 
 **Architecture:** Split watcher runtime delivery into file and error input channels, then re-merge them into the existing `mpsc::Receiver<WatchEvent>` returned to server code. File changes keep `try_send` best-effort behavior; errors use a dedicated bounded channel and are prioritized by an internal merge forwarder.
 
@@ -26,7 +26,7 @@ Responsibilities:
 
 **Do not modify:** `src/watcher/mod.rs`, `src/server/broadcast.rs`
 
-The public `WatchEvent` enum and `Watcher::spawn() -> Result<(Watcher, mpsc::Receiver<WatchEvent>)>` contract stay unchanged.
+The public `WatchEvent` enum and `Watcher::spawn() -> Result<(Watcher, mpsc::Receiver<WatchEvent>)>` contract stay unchanged. `Watcher::shutdown(self)` changes from a synchronous return to `Watcher::shutdown(self).await -> WatcherHealth`.
 
 ## Task 0: Prepare Isolated Worktree
 
@@ -753,7 +753,7 @@ Expected: commit succeeds.
 
 ## Self-Review Checklist
 
-- Spec coverage: internal file/error channel split, public API preservation, error priority, shutdown ownership, tests, security considerations, and rollback are covered by Tasks 1-4.
+- Spec coverage: internal file/error channel split, `Watcher::spawn()` / `WatchEvent` contract preservation, async `Watcher::shutdown().await`, error priority, shutdown ownership, tests, security considerations, and rollback are covered by Tasks 1-4.
 - Placeholder scan: no `TBD`, `TODO`, `implement later`, or unspecified test instructions remain.
 - Type consistency: public `WatchEvent` remains unchanged; internal split uses `mpsc::Sender<PathBuf>` for file events and `mpsc::Sender<WatchError>` for error events; `Watcher::spawn()` still returns `mpsc::Receiver<WatchEvent>`.
 - Accepted deviation: Error uses a dedicated bounded channel with `try_send`; Full is logged with `error!`, Closed with `warn!`, and the notification is dropped rather than blocking the watcher thread.

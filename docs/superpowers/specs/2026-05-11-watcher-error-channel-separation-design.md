@@ -9,7 +9,7 @@ watcher runtime で通常の `WatchEvent::FileChanged` と異常系の `WatchEve
 
 通常変更通知は高頻度に発生しうるため、現行どおり best-effort として過負荷時に破棄してよい。一方、notify error、watcher internal channel 異常、追加 watch 失敗、watcher panic などの異常通知は、通常変更通知の backlog と同列に破棄しない。
 
-外部 API は維持し、`Watcher::spawn()` は引き続き `(Watcher, mpsc::Receiver<WatchEvent>)` を返す。server 層の `spawn_watch_event_forwarder` と WebSocket broadcast 契約は変更しない。
+`Watcher::spawn()` は引き続き `(Watcher, mpsc::Receiver<WatchEvent>)` を返し、`WatchEvent` と WebSocket broadcast 契約は維持する。停止 API は内部 forwarder の完了待ちで async runtime を塞がないように、`Watcher::shutdown(self) -> WatcherHealth` から `Watcher::shutdown(self).await -> WatcherHealth` へ変更する。
 
 ## 非目的
 
@@ -42,7 +42,7 @@ watcher 内部 forwarder が `file_rx` と `error_rx` を読み、`WatchEvent::F
 
 ### 案B: 内部 2 channel + 再統合する
 
-watcher 内部では file/error を分け、外部 API は維持する。#140 の「通常変更通知と異常通知を同じ best-effort queue に乗せない」という目的を満たしつつ、server 層の契約変更を避けられるため採用する。
+watcher 内部では file/error を分け、`Watcher::spawn()` と `WatchEvent` の公開契約を維持する。#140 の「通常変更通知と異常通知を同じ best-effort queue に乗せない」という目的を満たしつつ、server 層の受信契約変更を避けられるため採用する。停止 API は `shutdown().await` へ変更する。
 
 ### 案C: 1 channel 維持で Error だけ blocking send にする
 
@@ -139,6 +139,7 @@ TDD で進める。
 - `WatchEvent::Error` は `FileChanged` 用 channel の満杯で破棄されない。
 - file/error が同時に保留される場合、error が優先して外部 `WatchEvent` receiver に届く。
 - `Watcher::spawn()` の公開戻り値は変わらない。
+- `Watcher::shutdown()` は async API になり、呼び出し側は `.await` して最終 `WatcherHealth` を受け取る。
 - `server/watch.rs` と `server/broadcast.rs` の外部契約は変わらない。
 - watcher failure の health latch は既存テストどおり維持される。
 - shutdown 時に watcher thread と内部 forwarder が停止し、timeout 時は診断ログが残る。

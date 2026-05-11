@@ -197,8 +197,9 @@ impl WatcherHealthState {
 
 /// 監視実行中ランタイム
 ///
-/// `shutdown()` および `Drop` は同じ停止処理（タイムアウト付き待機）を行う。
-/// `shutdown()` は `self` を消費するため二重停止を防止する。
+/// 明示停止は `shutdown().await` が正規経路。
+/// `Drop` は明示停止されなかった場合の同期 fallback として同じ停止処理を試みるが、
+/// async runtime を塞がない保証は持たない。
 pub struct Watcher {
     runtime: Option<WatchRuntime>,
 }
@@ -365,7 +366,8 @@ impl Watcher {
     /// 監視スレッドを停止する。
     ///
     /// 停止処理は watcher thread の join と内部転送タスクの完了待ちを含むため、
-    /// blocking pool に隔離して async runtime を塞がない。
+    /// blocking pool に隔離して async runtime を塞がない。呼び出し側は `.await` して
+    /// 最終 `WatcherHealth` を受け取る。
     pub async fn shutdown(mut self) -> WatcherHealth {
         if let Some(runtime) = self.runtime.take() {
             match tokio::task::spawn_blocking(move || runtime.stop()).await {
@@ -387,6 +389,7 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
+            // Drop は async にできないため、明示 shutdown の代替ではなく最後の同期 fallback。
             runtime.stop();
         }
     }
