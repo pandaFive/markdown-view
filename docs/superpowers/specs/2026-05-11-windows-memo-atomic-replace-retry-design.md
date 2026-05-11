@@ -24,7 +24,7 @@ Windows のメモ保存で使う `MoveFileExW` の失敗分類を明確にし、
 
 `src/server/files/memo_fs.rs` の Windows-only 実装に、小さな helper を追加する。
 
-`atomic_replace(tmp_path, path)` は `MoveFileExW` を直接1回呼ぶ関数ではなく、最大3回の短い retry ループを持つ関数にする。各 attempt は同じ tmp path と final path を使い、`MoveFileExW(tmp, final, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` だけを再実行する。
+`atomic_replace(tmp_path, path)` は `MoveFileExW` を直接1回呼ぶ関数ではなく、初回実行に加えて最大3回の短い retry ループを持つ関数にする。各 attempt は同じ tmp path と final path を使い、`MoveFileExW(tmp, final, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` だけを再実行する。
 
 retry 対象は `raw_os_error()` が次の Windows error code の場合に限定する。
 
@@ -32,7 +32,7 @@ retry 対象は `raw_os_error()` が次の Windows error code の場合に限定
 - `ERROR_SHARING_VIOLATION = 32`
 - `ERROR_LOCK_VIOLATION = 33`
 
-`ERROR_ACCESS_DENIED` は権限エラーでも返りうるため、無制限 retry はしない。今回は `10ms, 25ms, 50ms` の最大3回に留め、短時間 lock の吸収だけを狙う。
+`ERROR_ACCESS_DENIED` は権限エラーでも返りうるため、無制限 retry はしない。今回は初回失敗後の retry を `10ms, 25ms, 50ms` の最大3回に留め、短時間 lock の吸収だけを狙う。
 
 ## 代替案
 
@@ -57,7 +57,7 @@ tmp 作成から再実行すれば設計は単純に見えるが、本文書き�
 - `move_file_ex_replace_once(tmp_path, path)`: `spawn_blocking` 内で `MoveFileExW` を1回呼び、失敗時は `io::Error::last_os_error()` を返す。
 - `map_atomic_replace_join_error(error)`: `JoinError::is_panic()` と `is_cancelled()` を分けてログし、外向きには `io::Error::other(...)` を返す。
 - `is_retryable_windows_replace_error(error)`: `raw_os_error()` で retry 対象かを判定する。
-- `atomic_replace`: `move_file_ex_replace_once` を最大3回呼び、retry 対象なら `10ms, 25ms, 50ms` の短い待機を挟む。
+- `atomic_replace`: `move_file_ex_replace_once` を初回と最大3回の retry で呼び、retry 対象なら `10ms, 25ms, 50ms` の短い待機を挟む。
 
 `MoveFileExW` の仕様上、関数失敗時の詳細は `GetLastError` で取得する。Rust 実装では `io::Error::last_os_error()` がその役割を担うため、`raw_os_error()` による分類を採用する。
 
@@ -77,7 +77,7 @@ tmp 作成から再実行すれば設計は単純に見えるが、本文書き�
 1. `MoveFileExW` が `ERROR_SHARING_VIOLATION`、`ERROR_LOCK_VIOLATION`、または `ERROR_ACCESS_DENIED` で失敗する。
 2. `atomic_replace` は warning log を残し、短く待って同じ tmp/final path で再試行する。
 3. retry 中は tmp を再作成せず、本文も再書き込みしない。
-4. 最大3回以内に成功すれば保存成功として扱う。
+4. 初回を含む最大4回以内に成功すれば保存成功として扱う。
 
 ### retry 枯渇または retry 対象外失敗
 
@@ -135,7 +135,7 @@ Windows target がローカルに未導入、または linker 不足で実行で
 
 - Windows の `MoveFileExW` 呼び出しで `JoinError::is_panic()` と `is_cancelled()` がログ上区別される。
 - Windows の `ERROR_ACCESS_DENIED`、`ERROR_SHARING_VIOLATION`、`ERROR_LOCK_VIOLATION` だけが短時間 retry 対象になる。
-- retry は `10ms, 25ms, 50ms` の最大3回に留まる。
+- retry は初回失敗後の `10ms, 25ms, 50ms` の最大3回に留まる。
 - retry 失敗後も既存 sidecar 内容を壊さず、tmp cleanup は既存通り best effort で実行される。
 - HTTP API の status、JSON shape、ユーザー向けエラー文言は変わらない。
 - 非 Windows の rename 挙動は変わらない。
