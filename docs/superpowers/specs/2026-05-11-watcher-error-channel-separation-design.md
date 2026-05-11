@@ -15,7 +15,7 @@ watcher runtime で通常の `WatchEvent::FileChanged` と異常系の `WatchEve
 
 - `Watcher::spawn()` の公開戻り値を 2 receiver に変更しない。
 - WebSocket JSON shape、`BroadcastMessage::Error`、client 側表示を変更しない。
-- `WatcherHealth` / `WatcherFailureKind` の公開型を増やさない。
+- `WatcherHealth` の状態数は増やさない。ただし shutdown task panic の原因混線を避けるため `WatcherFailureKind` には `ShutdownTaskPanic` を追加する。
 - watcher の自動再起動機構を追加しない。
 - すべての異常通知を無限に保持する durable queue は作らない。
 - path 解決、HTML sanitize、CSP、Host/Origin 検証などのセキュリティ境界は変更しない。
@@ -27,12 +27,12 @@ watcher 内部で通常変更通知と異常通知の入力経路を分け、外
 `Watcher::spawn()` は次の内部チャネルを作る。
 
 - `file_tx/file_rx`: `PathBuf` または file event 専用型を流す bounded channel。容量は既存 `WATCHER_MESSAGE_BUFFER` を使い、送信は `try_send`。
-- `error_tx/error_rx`: `WatchError` を流す異常通知専用 bounded channel。容量は `WATCHER_ERROR_MESSAGE_BUFFER` として明示し、送信は `try_send` を使う。通常変更通知とは別容量にし、`FileChanged` の満杯で破棄されない。専用 channel 自体が満杯の場合は watcher thread を停止不能にしないため `error!` log に残して破棄する。
+- `error_tx/error_rx`: `WatchError` を流す異常通知専用 unbounded channel。通常変更通知とは別容量にし、`FileChanged` の満杯や旧 error buffer 相当の件数超過で破棄されない。receiver closed 時だけ warn log に残して破棄する。
 - `merged_tx/merged_rx`: 既存公開 API 用の bounded `mpsc::Sender<WatchEvent>` / `Receiver<WatchEvent>`。
 
 watcher 内部 forwarder が `file_rx` と `error_rx` を読み、`WatchEvent::FileChanged` / `WatchEvent::Error` に戻して `merged_tx` へ転送する。caller には `merged_rx` だけを返すため、`src/server/watch.rs` と `src/server/broadcast.rs` の公開的な扱いは維持する。
 
-内部 forwarder は error 側を優先する。両方の receiver にイベントがある場合、まず `error_rx` を drain し、その後 `file_rx` を処理する。これにより大量の file event が発生しても、error event が同じ入力キューの後ろに埋もれることを避ける。
+内部 forwarder は error 側を優先する。両方の receiver にイベントがある場合、まず `error_rx` を drain し、その後 `file_rx` を処理する。これにより大量の file event が発生しても、error event が同じ入力キューの後ろに埋もれることを避ける。既に `merged_tx` に入った `FileChanged` は preempt しない。
 
 ## 代替案
 
@@ -55,7 +55,7 @@ watcher 内部では file/error を分け、`Watcher::spawn()` と `WatchEvent` 
 既存の `send_watch_event(tx, WatchEvent, label)` を variant 混在の境界として使い続けない。代わりに次の helper に分ける。
 
 - `send_file_changed_event(file_tx, path, label)`: `try_send`。満杯時は warn log を出して破棄する。
-- `send_error_event(error_tx, error, label)`: error 専用 channel へ `try_send` する。file channel の満杯とは独立させる。error channel full 時は `error!`、closed 時は `warn!` に残して破棄し、watcher thread の停止不能化を避ける。
+- `send_error_event(error_tx, error, label)`: error 専用 unbounded channel へ送る。file channel の満杯とは独立させる。closed 時は `warn!` に残して破棄し、watcher thread の停止不能化を避ける。
 
 notify callback、debounced event 処理、追加 watch 失敗、internal channel 異常、panic 経路は、それぞれイベント種別に応じて専用 helper を呼ぶ。
 
@@ -76,7 +76,7 @@ notify callback、debounced event 処理、追加 watch 失敗、internal channe
 
 `WatchRuntime` は watcher thread に加えて内部統合 forwarder の停止ハンドルを保持する。
 
-`Watcher::shutdown().await` は watcher thread の join と内部 forwarder の完了待ちを blocking pool に隔離する。これにより current-thread runtime 上で明示停止しても、内部 forwarder が完了通知を送るための Tokio runtime を塞がない。`Drop` は async にできないため同期 fallback として残し、明示停止は `shutdown().await` を正規経路とする。
+`Watcher::shutdown().await` は watcher thread の join だけを blocking pool に隔離し、内部 forwarder の完了待ちは async に行う。これにより current-thread runtime 上で明示停止しても Tokio runtime を塞がない。`Drop` は async にできないため、停止要求と forwarder abort だけを行い、watcher thread の join は待たない。
 
 停止順:
 
@@ -111,8 +111,8 @@ notify callback、debounced event 処理、追加 watch 失敗、internal channe
 
 - file channel full: 現行どおり warn log + 破棄。
 - file channel closed: watcher shutdown 中なら終了文脈として扱い、過剰に騒がせない。稼働中に発生した場合は warn log。
-- error channel full: `error!` log に detail を残して破棄する。FileChanged backlog とは分離されるが、専用 channel 自体の過負荷で watcher thread をブロックしない方針とする。
-- error channel closed: panic せず warn/error log。元の notify/panic failure は health に latch 済みとする。
+- error channel capacity: unbounded とし、FileChanged backlog や旧 bounded buffer 相当の件数超過では破棄しない。異常 storm 時のメモリ増加は残リスクとして扱う。
+- error channel closed: panic せず warn log。元の notify/panic failure は health に latch 済みとする。
 - merged channel closed: 外部 receiver が閉じた状態なので内部 forwarder を終了する。
 - internal forwarder panic/join failure: shutdown 時に warn/error log を残す。元の watcher health を不用意に `Stopped` へ上書きしない。
 

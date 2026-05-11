@@ -18,7 +18,8 @@ const DEBOUNCE_MS: u64 = 300;
 const WATCHER_THREAD_PARK_MS: u64 = 250;
 /// notify から tokio へ橋渡しするチャネル容量
 const WATCHER_MESSAGE_BUFFER: usize = 32;
-/// watcher error から外部 WatchEvent へ橋渡しする専用チャネル容量
+/// 旧 bounded error buffer の回帰テスト用基準値
+#[cfg(test)]
 const WATCHER_ERROR_MESSAGE_BUFFER: usize = 8;
 /// notify callback から watcher thread へ橋渡しする内部チャネル容量
 const WATCHER_INTERNAL_EVENT_BUFFER: usize = 64;
@@ -106,6 +107,8 @@ pub enum WatcherFailureKind {
     Notify,
     /// watcher thread が panic した
     ThreadPanic,
+    /// shutdown を隔離する blocking task が panic した
+    ShutdownTaskPanic,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +123,7 @@ impl WatcherHealthState {
     const FAILED_THREAD_PANIC: u8 = 3;
     const STOPPING: u8 = 4;
     const STOPPED: u8 = 5;
+    const FAILED_SHUTDOWN_TASK_PANIC: u8 = 6;
 
     fn new_starting() -> Self {
         Self {
@@ -140,6 +144,9 @@ impl WatcherHealthState {
             Self::ALIVE => WatcherHealth::Alive,
             Self::FAILED_NOTIFY => WatcherHealth::Failed(WatcherFailureKind::Notify),
             Self::FAILED_THREAD_PANIC => WatcherHealth::Failed(WatcherFailureKind::ThreadPanic),
+            Self::FAILED_SHUTDOWN_TASK_PANIC => {
+                WatcherHealth::Failed(WatcherFailureKind::ShutdownTaskPanic)
+            }
             Self::STOPPING => WatcherHealth::Stopping,
             Self::STOPPED => WatcherHealth::Stopped,
             invalid => {
@@ -170,6 +177,7 @@ impl WatcherHealthState {
         let raw = match kind {
             WatcherFailureKind::Notify => Self::FAILED_NOTIFY,
             WatcherFailureKind::ThreadPanic => Self::FAILED_THREAD_PANIC,
+            WatcherFailureKind::ShutdownTaskPanic => Self::FAILED_SHUTDOWN_TASK_PANIC,
         };
         self.store_if_not_failed(raw);
     }
@@ -191,15 +199,18 @@ impl WatcherHealthState {
     }
 
     fn is_failed_raw(raw: u8) -> bool {
-        matches!(raw, Self::FAILED_NOTIFY | Self::FAILED_THREAD_PANIC)
+        matches!(
+            raw,
+            Self::FAILED_NOTIFY | Self::FAILED_THREAD_PANIC | Self::FAILED_SHUTDOWN_TASK_PANIC
+        )
     }
 }
 
 /// 監視実行中ランタイム
 ///
 /// 明示停止は `shutdown().await` が正規経路。
-/// `Drop` は明示停止されなかった場合の同期 fallback として同じ停止処理を試みるが、
-/// async runtime を塞がない保証は持たない。
+/// `Drop` は停止要求と内部転送タスクの abort だけを行い、watcher thread の join は待たない。
+#[must_use = "Watcher は明示的に shutdown().await すべき"]
 pub struct Watcher {
     runtime: Option<WatchRuntime>,
 }
@@ -207,16 +218,113 @@ pub struct Watcher {
 struct WatchRuntime {
     shutdown_flag: Arc<AtomicBool>,
     watcher_thread: std::thread::JoinHandle<()>,
-    merge_forwarder: tokio::task::JoinHandle<()>,
-    merge_forwarder_done: std::sync::mpsc::Receiver<()>,
+    merge_forwarder: MergeForwarderHandle,
     health_state: WatcherHealthState,
-    error_tx: mpsc::Sender<WatchError>,
+    error_tx: PriorityErrorSender,
 }
 
 #[derive(Clone)]
 struct WatchEventSenders {
-    file_tx: mpsc::Sender<PathBuf>,
-    error_tx: mpsc::Sender<WatchError>,
+    file_tx: BestEffortFileSender,
+    error_tx: PriorityErrorSender,
+}
+
+#[derive(Clone)]
+struct BestEffortFileSender {
+    tx: mpsc::Sender<PathBuf>,
+}
+
+impl BestEffortFileSender {
+    fn new(tx: mpsc::Sender<PathBuf>) -> Self {
+        Self { tx }
+    }
+
+    fn send(&self, path: PathBuf, label: &str) {
+        send_file_changed_event(&self.tx, path, label);
+    }
+}
+
+#[derive(Clone)]
+struct PriorityErrorSender {
+    tx: mpsc::UnboundedSender<WatchError>,
+}
+
+impl PriorityErrorSender {
+    fn new(tx: mpsc::UnboundedSender<WatchError>) -> Self {
+        Self { tx }
+    }
+
+    fn send(&self, error: WatchError, label: &str) {
+        send_error_event(self, error, label);
+    }
+}
+
+enum WatcherThreadStopResult {
+    Stopped,
+    Panicked(Box<dyn std::any::Any + Send>),
+    TimedOut,
+}
+
+struct MergeForwarderHandle {
+    task: tokio::task::JoinHandle<()>,
+    done_rx: oneshot::Receiver<()>,
+}
+
+struct ForwarderDoneOnDrop(Option<oneshot::Sender<()>>);
+
+impl Drop for ForwarderDoneOnDrop {
+    fn drop(&mut self) {
+        if let Some(done_tx) = self.0.take() {
+            let _ = done_tx.send(());
+        }
+    }
+}
+
+impl MergeForwarderHandle {
+    fn abort_without_wait(self) {
+        self.task.abort();
+    }
+
+    #[cfg(test)]
+    async fn await_completion(self) -> Result<(), tokio::task::JoinError> {
+        self.task.await
+    }
+
+    async fn stop(self, timeout: Duration) {
+        let MergeForwarderHandle { task, done_rx } = self;
+        match tokio::time::timeout(timeout, done_rx).await {
+            Ok(Ok(())) | Ok(Err(_)) => {
+                if let Err(error) = task.await {
+                    if error.is_cancelled() {
+                        tracing::warn!(
+                            "[markdown-view] 監視イベント合流タスクはcancel状態で終了しました"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "[markdown-view] 監視イベント合流タスクの終了待機に失敗: {}",
+                            error
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = timeout.as_secs(),
+                    "[markdown-view] 監視イベント合流タスクの停止がタイムアウトしたためabortします"
+                );
+                task.abort();
+                if let Err(error) = task.await {
+                    if error.is_cancelled() {
+                        return;
+                    }
+                    tracing::warn!(
+                        "[markdown-view] 監視イベント合流タスクのabort後joinに失敗: {}",
+                        error
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl WatchRuntime {
@@ -224,19 +332,19 @@ impl WatchRuntime {
     ///
     /// `WATCH_SHUTDOWN_TIMEOUT_SECS` 以内にスレッドが終了しない場合はリークさせる
     /// （プロセス終了時にOSが回収する）。
-    fn stop(self) -> WatcherHealth {
+    async fn stop(self) -> WatcherHealth {
         self.stop_with_timeout(
             Duration::from_secs(WATCH_SHUTDOWN_TIMEOUT_SECS),
             Duration::from_millis(50),
         )
+        .await
     }
 
-    fn stop_with_timeout(self, timeout: Duration, poll_interval: Duration) -> WatcherHealth {
+    async fn stop_with_timeout(self, timeout: Duration, poll_interval: Duration) -> WatcherHealth {
         let WatchRuntime {
             shutdown_flag,
             watcher_thread,
             merge_forwarder,
-            merge_forwarder_done,
             health_state,
             error_tx,
         } = self;
@@ -252,37 +360,58 @@ impl WatchRuntime {
         watcher_thread.thread().unpark();
 
         let start = std::time::Instant::now();
-        while !watcher_thread.is_finished() {
-            if start.elapsed() > timeout {
-                let elapsed_ms = start.elapsed().as_millis();
+        let join_result = tokio::task::spawn_blocking(move || {
+            join_watcher_thread_with_timeout(watcher_thread, timeout, poll_interval)
+        })
+        .await;
+        let elapsed = start.elapsed();
+
+        match join_result {
+            Ok(WatcherThreadStopResult::TimedOut) => {
                 tracing::warn!(
-                    elapsed_ms,
+                    elapsed_ms = elapsed.as_millis(),
                     timeout_secs = timeout.as_secs(),
                     "[markdown-view] 監視スレッドの停止がタイムアウトしました"
                 );
-                merge_forwarder.abort();
+                merge_forwarder.abort_without_wait();
                 return health_state.load();
             }
-            std::thread::sleep(poll_interval);
+            Ok(WatcherThreadStopResult::Panicked(panic_payload)) => {
+                handle_watcher_panic(
+                    panic_payload,
+                    "監視スレッドの停止中にパニックを検出",
+                    "監視スレッド停止時パニック",
+                    &health_state,
+                    &error_tx,
+                );
+            }
+            Ok(WatcherThreadStopResult::Stopped) => {
+                health_state.store_stopped_if_not_failed();
+            }
+            Err(error) => {
+                health_state.store_failed(WatcherFailureKind::ShutdownTaskPanic);
+                error_tx.send(
+                    WatchError::thread_panic(format!("shutdown task panic: {error}")),
+                    "監視スレッド停止処理パニック",
+                );
+                tracing::warn!(
+                    "[markdown-view] 監視スレッド停止処理のjoinに失敗: {}",
+                    error
+                );
+            }
         }
-        if let Err(panic_payload) = watcher_thread.join() {
-            handle_watcher_panic(
-                panic_payload,
-                "監視スレッドの停止中にパニックを検出",
-                "監視スレッド停止時パニック",
-                &health_state,
-                &error_tx,
-            );
-            let health = health_state.load();
-            drop(error_tx);
-            wait_for_merge_forwarder_done(merge_forwarder, merge_forwarder_done, timeout);
-            return health;
-        }
-        health_state.store_stopped_if_not_failed();
+
         let health = health_state.load();
         drop(error_tx);
-        wait_for_merge_forwarder_done(merge_forwarder, merge_forwarder_done, timeout);
+        merge_forwarder.stop(timeout.saturating_sub(elapsed)).await;
         health
+    }
+
+    fn request_stop_without_wait(self) {
+        self.health_state.store_stopping_if_not_failed();
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.watcher_thread.thread().unpark();
+        self.merge_forwarder.abort_without_wait();
     }
 }
 
@@ -293,13 +422,14 @@ impl Watcher {
         let watch_plan = strategy.watch_plan()?;
         let (merged_tx, merged_rx) = mpsc::channel::<WatchEvent>(WATCHER_MESSAGE_BUFFER);
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(WATCHER_MESSAGE_BUFFER);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(WATCHER_ERROR_MESSAGE_BUFFER);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let file_tx = BestEffortFileSender::new(file_tx);
+        let error_tx = PriorityErrorSender::new(error_tx);
         let senders = WatchEventSenders {
-            file_tx,
+            file_tx: file_tx.clone(),
             error_tx: error_tx.clone(),
         };
-        let (merge_forwarder, merge_forwarder_done) =
-            spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        let merge_forwarder = spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         let (init_tx, init_rx) = oneshot::channel::<InitResult>();
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_shutdown_flag = shutdown_flag.clone();
@@ -322,7 +452,6 @@ impl Watcher {
                 shutdown_flag,
                 watcher_thread,
                 merge_forwarder,
-                merge_forwarder_done,
                 health_state,
                 error_tx,
             ),
@@ -333,17 +462,15 @@ impl Watcher {
     fn new(
         shutdown_flag: Arc<AtomicBool>,
         watcher_thread: std::thread::JoinHandle<()>,
-        merge_forwarder: tokio::task::JoinHandle<()>,
-        merge_forwarder_done: std::sync::mpsc::Receiver<()>,
+        merge_forwarder: MergeForwarderHandle,
         health_state: WatcherHealthState,
-        error_tx: mpsc::Sender<WatchError>,
+        error_tx: PriorityErrorSender,
     ) -> Self {
         Self {
             runtime: Some(WatchRuntime {
                 shutdown_flag,
                 watcher_thread,
                 merge_forwarder,
-                merge_forwarder_done,
                 health_state,
                 error_tx,
             }),
@@ -370,16 +497,7 @@ impl Watcher {
     /// 最終 `WatcherHealth` を受け取る。
     pub async fn shutdown(mut self) -> WatcherHealth {
         if let Some(runtime) = self.runtime.take() {
-            match tokio::task::spawn_blocking(move || runtime.stop()).await {
-                Ok(health) => health,
-                Err(error) => {
-                    tracing::warn!(
-                        "[markdown-view] 監視スレッド停止処理のjoinに失敗: {}",
-                        error
-                    );
-                    WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
-                }
-            }
+            runtime.stop().await
         } else {
             WatcherHealth::Stopped
         }
@@ -389,44 +507,41 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            // Drop は async にできないため、明示 shutdown の代替ではなく最後の同期 fallback。
-            runtime.stop();
+            // Drop は async にできないため、Tokio worker 上で join timeout を待たない。
+            runtime.request_stop_without_wait();
         }
     }
 }
 
-fn wait_for_merge_forwarder_done(
-    merge_forwarder: tokio::task::JoinHandle<()>,
-    merge_forwarder_done: std::sync::mpsc::Receiver<()>,
+fn join_watcher_thread_with_timeout(
+    watcher_thread: std::thread::JoinHandle<()>,
     timeout: Duration,
-) {
-    match merge_forwarder_done.recv_timeout(timeout) {
-        Ok(()) => {}
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            tracing::warn!(
-                timeout_secs = timeout.as_secs(),
-                "[markdown-view] 監視イベント転送タスクの停止がタイムアウトしました"
-            );
-            merge_forwarder.abort();
+    poll_interval: Duration,
+) -> WatcherThreadStopResult {
+    let start = std::time::Instant::now();
+    while !watcher_thread.is_finished() {
+        if start.elapsed() > timeout {
+            return WatcherThreadStopResult::TimedOut;
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            tracing::warn!("[markdown-view] 監視イベント転送タスクの完了通知が切断されました");
-            merge_forwarder.abort();
-        }
+        std::thread::sleep(poll_interval);
+    }
+    match watcher_thread.join() {
+        Ok(()) => WatcherThreadStopResult::Stopped,
+        Err(panic_payload) => WatcherThreadStopResult::Panicked(panic_payload),
     }
 }
 
 fn spawn_watch_event_merge_forwarder(
     mut file_rx: mpsc::Receiver<PathBuf>,
-    mut error_rx: mpsc::Receiver<WatchError>,
+    mut error_rx: mpsc::UnboundedReceiver<WatchError>,
     merged_tx: mpsc::Sender<WatchEvent>,
-) -> (tokio::task::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+) -> MergeForwarderHandle {
+    let (done_tx, done_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
+        let _done = ForwarderDoneOnDrop(Some(done_tx));
         loop {
             while let Ok(error) = error_rx.try_recv() {
                 if merged_tx.send(WatchEvent::Error(error)).await.is_err() {
-                    let _ = done_tx.send(());
                     return;
                 }
             }
@@ -444,7 +559,6 @@ fn spawn_watch_event_merge_forwarder(
                         None => {
                             while let Some(path) = file_rx.recv().await {
                                 if !send_merged_file_changed_event(&merged_tx, path) {
-                                    let _ = done_tx.send(());
                                     return;
                                 }
                             }
@@ -462,7 +576,6 @@ fn spawn_watch_event_merge_forwarder(
                         None => {
                             while let Some(error) = error_rx.recv().await {
                                 if merged_tx.send(WatchEvent::Error(error)).await.is_err() {
-                                    let _ = done_tx.send(());
                                     return;
                                 }
                             }
@@ -472,15 +585,21 @@ fn spawn_watch_event_merge_forwarder(
                 }
             }
         }
-        let _ = done_tx.send(());
     });
-    (task, done_rx)
+    MergeForwarderHandle { task, done_rx }
 }
 
 fn send_merged_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf) -> bool {
+    if tx.is_closed() {
+        tracing::warn!(
+            "[markdown-view] 監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
+        );
+        return false;
+    }
+
     if tx.capacity() <= 1 {
         tracing::warn!(
-            "[markdown-view] 監視イベント転送チャネルが混雑しているためFileChangedを破棄しました"
+            "[markdown-view] 監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました"
         );
         return !tx.is_closed();
     }
@@ -493,7 +612,12 @@ fn send_merged_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf) 
             );
             true
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!(
+                "[markdown-view] 監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
+            );
+            false
+        }
     }
 }
 
@@ -518,19 +642,15 @@ fn send_file_changed_event(tx: &mpsc::Sender<PathBuf>, path: PathBuf, label: &st
 }
 
 /// watcher error を専用チャネルへ転送する（non-blocking）。
-/// チャネル満杯時・クローズ時はイベントを破棄しログを出力する。
-fn send_error_event(tx: &mpsc::Sender<WatchError>, error: WatchError, label: &str) {
-    match tx.try_send(error) {
+///
+/// error は FileChanged backlog から独立させるため unbounded channel に積む。
+/// receiver closed 時だけ warn ログを出力する。
+fn send_error_event(tx: &PriorityErrorSender, error: WatchError, label: &str) {
+    match tx.tx.send(error) {
         Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(error)) => {
-            tracing::error!(
-                detail = error.detail(),
-                "[markdown-view] watcher error channel が満杯のため異常通知を破棄しました: {}",
-                label
-            );
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
+        Err(error) => {
             tracing::warn!(
+                detail = error.0.detail(),
                 "[markdown-view] watcher error channel が閉じているため異常通知を破棄しました: {}",
                 label
             );
@@ -671,8 +791,7 @@ fn send_internal_watch_result(
         Err(std::sync::mpsc::TrySendError::Full(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が満杯です");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_error_event(
-                &senders.error_tx,
+            senders.error_tx.send(
                 WatchError::notify("watcher internal channel が満杯です"),
                 strategy.error_label(),
             );
@@ -680,8 +799,7 @@ fn send_internal_watch_result(
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
             tracing::warn!("[markdown-view] watcher internal channel が閉じています");
             health_state.store_failed(WatcherFailureKind::Notify);
-            send_error_event(
-                &senders.error_tx,
+            senders.error_tx.send(
                 WatchError::notify("watcher internal channel が閉じています"),
                 strategy.error_label(),
             );
@@ -698,7 +816,7 @@ fn handle_debounced_watch_result(
     match result {
         Ok(events) => {
             for changed_path in strategy.collect_changed_paths(&events) {
-                send_file_changed_event(&senders.file_tx, changed_path, strategy.change_label());
+                senders.file_tx.send(changed_path, strategy.change_label());
             }
         }
         Err(e) => {
@@ -709,7 +827,7 @@ fn handle_debounced_watch_result(
                 strategy.watch_error_prefix(),
                 watch_error.detail()
             );
-            send_error_event(&senders.error_tx, watch_error, strategy.error_label());
+            senders.error_tx.send(watch_error, strategy.error_label());
         }
     }
 }
@@ -749,7 +867,7 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
     U: FnMut(&Path) -> notify::Result<()>,
 {
     for changed_path in strategy.collect_changed_paths(&events) {
-        send_file_changed_event(&senders.file_tx, changed_path, strategy.change_label());
+        senders.file_tx.send(changed_path, strategy.change_label());
     }
 
     for candidate in strategy.collect_new_directory_candidates(&events) {
@@ -808,12 +926,12 @@ fn process_debounced_events_with_watch_and_unwatch<F, U>(
             &registered_now,
         ) {
             if recovered.insert(markdown.clone()) {
-                send_file_changed_event(&senders.file_tx, markdown, strategy.change_label());
+                senders.file_tx.send(markdown, strategy.change_label());
             }
         }
 
         if let Some(watch_error) = registration_error {
-            send_error_event(&senders.error_tx, watch_error, strategy.error_label());
+            senders.error_tx.send(watch_error, strategy.error_label());
         }
     }
 }
@@ -823,19 +941,21 @@ fn handle_watcher_panic(
     panic_message: &str,
     error_label: &str,
     health_state: &WatcherHealthState,
-    error_tx: &mpsc::Sender<WatchError>,
+    error_tx: &PriorityErrorSender,
 ) {
     let panic_detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
         s.clone()
+    } else if let Some(error) = panic_payload.downcast_ref::<anyhow::Error>() {
+        error.to_string()
     } else {
         "不明なパニック".to_string()
     };
     health_state.store_failed(WatcherFailureKind::ThreadPanic);
     let watch_error = WatchError::thread_panic(panic_detail.clone());
     tracing::error!("[markdown-view] {}: {}", panic_message, panic_detail);
-    send_error_event(error_tx, watch_error, error_label);
+    error_tx.send(watch_error, error_label);
 }
 
 fn send_init_result(init_tx: &mut Option<oneshot::Sender<InitResult>>, result: InitResult) {
@@ -902,8 +1022,7 @@ fn handle_internal_channel_disconnected(
         return;
     }
     health_state.store_failed(WatcherFailureKind::Notify);
-    send_error_event(
-        &senders.error_tx,
+    senders.error_tx.send(
         WatchError::notify("watcher internal channel が切断されました"),
         strategy.error_label(),
     );
@@ -933,8 +1052,8 @@ mod tests {
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, process_debounced_events_with_watch,
         process_debounced_events_with_watch_and_unwatch, register_watch_plan_with,
-        WatchDirectoryRegistry, WatchEventSenders, Watcher, WatcherFailureKind, WatcherHealth,
-        WatcherHealthState,
+        BestEffortFileSender, PriorityErrorSender, WatchDirectoryRegistry, WatchEventSenders,
+        Watcher, WatcherFailureKind, WatcherHealth, WatcherHealthState,
     };
     use crate::server::AppMode;
     use crate::watcher::strategy::WatchStrategy;
@@ -960,15 +1079,22 @@ mod tests {
 
     fn split_senders_for_test(
         file_buffer: usize,
-        error_buffer: usize,
+        _error_buffer: usize,
     ) -> (
         WatchEventSenders,
         mpsc::Receiver<PathBuf>,
-        mpsc::Receiver<WatchError>,
+        mpsc::UnboundedReceiver<WatchError>,
     ) {
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(file_buffer);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(error_buffer);
-        (WatchEventSenders { file_tx, error_tx }, file_rx, error_rx)
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        (
+            WatchEventSenders {
+                file_tx: BestEffortFileSender::new(file_tx),
+                error_tx: PriorityErrorSender::new(error_tx),
+            },
+            file_rx,
+            error_rx,
+        )
     }
 
     fn watcher_for_test(
@@ -978,17 +1104,16 @@ mod tests {
     ) -> (Watcher, mpsc::Receiver<WatchEvent>) {
         let (merged_tx, merged_rx) = mpsc::channel::<WatchEvent>(4);
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
-        let (merge_forwarder, merge_forwarder_done) =
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let merge_forwarder =
             super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         let watcher = Watcher::new(
             shutdown_flag,
             watcher_thread,
             merge_forwarder,
-            merge_forwarder_done,
             health_state,
-            error_tx,
+            PriorityErrorSender::new(error_tx),
         );
         (watcher, merged_rx)
     }
@@ -1703,7 +1828,8 @@ mod tests {
     #[tokio::test]
     async fn test_error_eventはfile_channel満杯時もmerged_rxに届く() {
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(1);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(1);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_tx = PriorityErrorSender::new(error_tx);
         let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(4);
         let (_dir, first) = create_markdown_fixture("first.md", "# first");
         file_tx
@@ -1713,8 +1839,7 @@ mod tests {
 
         let send_error_tx = error_tx.clone();
         tokio::task::spawn_blocking(move || {
-            super::send_error_event(
-                &send_error_tx,
+            send_error_tx.send(
                 WatchError::notify("file channelが満杯でも送達する"),
                 "error分離テスト",
             );
@@ -1722,8 +1847,7 @@ mod tests {
         .await
         .expect("error event送信taskが正常終了する");
 
-        let (forwarder, _done_rx) =
-            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        let forwarder = super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         drop(error_tx);
 
@@ -1743,23 +1867,24 @@ mod tests {
         assert_eq!(error.kind(), WatchErrorKind::Notify);
         assert_eq!(error.detail(), "file channelが満杯でも送達する");
 
-        forwarder.await.expect("merge forwarderが正常終了する");
+        forwarder
+            .await_completion()
+            .await
+            .expect("merge forwarderが正常終了する");
     }
 
     #[tokio::test]
     async fn test_merge_forwarderはfileよりerrorを優先する() {
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
         let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(4);
         let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
         file_tx.send(changed).await.expect("file eventを送信できる");
         error_tx
             .send(WatchError::notify("優先されるerror"))
-            .await
             .expect("error eventを送信できる");
 
-        let (forwarder, _done_rx) =
-            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        let forwarder = super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         drop(file_tx);
         drop(error_tx);
 
@@ -1787,13 +1912,16 @@ mod tests {
             }
         }
 
-        forwarder.await.expect("merge forwarderが正常終了する");
+        forwarder
+            .await_completion()
+            .await
+            .expect("merge forwarderが正常終了する");
     }
 
     #[tokio::test]
     async fn test_merge_forwarderはmerged_backlogでerror_drainを止めない() {
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
         let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
         let (_dir, prefilled) = create_markdown_fixture("prefilled.md", "# prefilled");
         let (_dir2, changed) = create_markdown_fixture("changed.md", "# changed");
@@ -1803,12 +1931,10 @@ mod tests {
             .expect("merged channelを満杯にできる");
         file_tx.send(changed).await.expect("file eventを送信できる");
 
-        let (forwarder, _done_rx) =
-            super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        let forwarder = super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
         tokio::task::yield_now().await;
         error_tx
             .send(WatchError::notify("merged backlogでも優先されるerror"))
-            .await
             .expect("error eventを送信できる");
         drop(file_tx);
         drop(error_tx);
@@ -1837,7 +1963,65 @@ mod tests {
             }
         }
 
-        forwarder.await.expect("merge forwarderが正常終了する");
+        forwarder
+            .await_completion()
+            .await
+            .expect("merge forwarderが正常終了する");
+    }
+
+    #[tokio::test]
+    async fn test_error_eventはfile_burst中にbuffer件数を超えても破棄されない() {
+        const ERROR_COUNT: usize = super::WATCHER_ERROR_MESSAGE_BUFFER + 4;
+
+        let (file_tx, file_rx) = mpsc::channel::<PathBuf>(super::WATCHER_MESSAGE_BUFFER);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_sender = PriorityErrorSender::new(error_tx.clone());
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+        let (_dir, prefilled) = create_markdown_fixture("prefilled.md", "# prefilled");
+        merged_tx
+            .send(WatchEvent::FileChanged(prefilled))
+            .await
+            .expect("merged channelを満杯にできる");
+
+        for index in 0..super::WATCHER_MESSAGE_BUFFER {
+            file_tx
+                .send(PathBuf::from(format!("burst-{index}.md")))
+                .await
+                .expect("file burstを送信できる");
+        }
+        for index in 0..ERROR_COUNT {
+            error_sender.send(
+                WatchError::notify(format!("error-{index}")),
+                "error burstテスト",
+            );
+        }
+        drop(error_sender);
+
+        let forwarder = super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
+        drop(file_tx);
+        drop(error_tx);
+
+        let mut delivered_errors = Vec::new();
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_secs(1), merged_rx.recv()).await
+        {
+            if let WatchEvent::Error(error) = event {
+                delivered_errors.push(error.detail().to_string());
+                if delivered_errors.len() == ERROR_COUNT {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(
+            delivered_errors.len(),
+            ERROR_COUNT,
+            "file burst中でもerror eventを内部buffer件数で破棄しない"
+        );
+        forwarder
+            .await_completion()
+            .await
+            .expect("merge forwarderが正常終了する");
     }
 
     #[tokio::test]
@@ -1854,48 +2038,51 @@ mod tests {
         assert_eq!(merged_tx.capacity(), 1);
     }
 
+    #[traced_test]
+    #[test]
+    fn test_send_merged_file_changed_eventはclosed時にwarnを残す() {
+        let (merged_tx, merged_rx) = mpsc::channel::<WatchEvent>(1);
+        drop(merged_rx);
+
+        assert!(!super::send_merged_file_changed_event(
+            &merged_tx,
+            PathBuf::from("closed.md")
+        ));
+        assert!(logs_contain(
+            "監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
+        ));
+    }
+
     #[test]
     fn test_send_error_eventはreceiver_closedでもpanicしない() {
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(1);
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_tx = PriorityErrorSender::new(error_tx);
         drop(error_rx);
 
-        super::send_error_event(
-            &error_tx,
+        error_tx.send(
             WatchError::notify("receiver closed"),
             "error receiver closedテスト",
         );
     }
 
     #[test]
-    fn test_send_error_eventはチャネル満杯時に破棄してブロックしない() {
-        let (error_tx, mut error_rx) = mpsc::channel::<WatchError>(1);
-        error_tx
-            .blocking_send(WatchError::notify("先行error"))
-            .expect("error channelを満杯にできる");
+    fn test_send_error_eventはbuffer件数を超えても破棄しない() {
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_tx = PriorityErrorSender::new(error_tx);
 
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        let sender = std::thread::spawn(move || {
-            super::send_error_event(
-                &error_tx,
-                WatchError::notify("破棄されるerror"),
-                "error満杯時テスト",
+        for index in 0..super::WATCHER_ERROR_MESSAGE_BUFFER + 4 {
+            error_tx.send(
+                WatchError::notify(format!("error-{index}")),
+                "error unboundedテスト",
             );
-            done_tx.send(()).expect("完了通知を送信できる");
-        });
-
-        if done_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-            drop(error_rx);
-            sender.join().expect("error送信threadが正常終了する");
-            panic!("Error満杯時の送信はブロックしない");
         }
-        sender.join().expect("error送信threadが正常終了する");
 
-        let error = error_rx.try_recv().expect("先行errorを受信できる");
-        assert_eq!(error.detail(), "先行error");
-        assert!(
-            error_rx.try_recv().is_err(),
-            "満杯時のErrorは追加でキューされないはず"
-        );
+        let mut received = 0;
+        while error_rx.try_recv().is_ok() {
+            received += 1;
+        }
+
+        assert_eq!(received, super::WATCHER_ERROR_MESSAGE_BUFFER + 4);
     }
 
     #[tokio::test]
@@ -1987,7 +2174,8 @@ mod tests {
     #[test]
     fn test_watcher_panic経路はhealth_failedとerror_eventを記録する() {
         let health_state = WatcherHealthState::new_starting();
-        let (error_tx, mut error_rx) = mpsc::channel::<WatchError>(1);
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_tx = PriorityErrorSender::new(error_tx);
 
         handle_watcher_panic(
             Box::new(String::from("panic detail")),
@@ -2005,6 +2193,25 @@ mod tests {
         let error = error_rx.try_recv().expect("panic error eventを期待");
         assert_eq!(error.kind(), WatchErrorKind::ThreadPanic);
         assert_eq!(error.detail(), "panic detail");
+    }
+
+    #[test]
+    fn test_watcher_panic経路はanyhow_payload_detailを保持する() {
+        let health_state = WatcherHealthState::new_starting();
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let error_tx = PriorityErrorSender::new(error_tx);
+
+        handle_watcher_panic(
+            Box::new(anyhow::anyhow!("anyhow panic detail")),
+            "panic message",
+            "panic label",
+            &health_state,
+            &error_tx,
+        );
+
+        let error = error_rx.try_recv().expect("panic error eventを期待");
+        assert_eq!(error.kind(), WatchErrorKind::ThreadPanic);
+        assert_eq!(error.detail(), "anyhow panic detail");
     }
 
     #[test]
@@ -2150,23 +2357,17 @@ mod tests {
     }
 
     #[traced_test]
-    #[test]
-    fn test_watch_runtime_stop_timeoutログに診断情報を含める() {
+    #[tokio::test]
+    async fn test_watch_runtime_stop_timeoutログに診断情報を含める() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let release_flag = Arc::new(AtomicBool::new(false));
         let thread_release_flag = release_flag.clone();
         let health_state = WatcherHealthState::new_alive();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtimeを作成できる");
         let (merged_tx, _merged_rx) = mpsc::channel::<WatchEvent>(4);
         let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
-        let (error_tx, error_rx) = mpsc::channel::<WatchError>(4);
-        let _guard = rt.enter();
-        let (merge_forwarder, merge_forwarder_done) =
+        let (error_tx, error_rx) = mpsc::unbounded_channel::<WatchError>();
+        let merge_forwarder =
             super::spawn_watch_event_merge_forwarder(file_rx, error_rx, merged_tx);
-        drop(_guard);
         drop(file_tx);
         let watcher_thread = std::thread::spawn(move || {
             while !thread_release_flag.load(Ordering::Acquire) {
@@ -2177,13 +2378,13 @@ mod tests {
             shutdown_flag,
             watcher_thread,
             merge_forwarder,
-            merge_forwarder_done,
             health_state,
-            error_tx,
+            error_tx: PriorityErrorSender::new(error_tx),
         };
 
-        let shutdown_health =
-            runtime.stop_with_timeout(Duration::from_secs(0), Duration::from_millis(1));
+        let shutdown_health = runtime
+            .stop_with_timeout(Duration::from_secs(0), Duration::from_millis(1))
+            .await;
         release_flag.store(true, Ordering::Release);
 
         assert_eq!(shutdown_health, WatcherHealth::Stopping);
@@ -2202,6 +2403,30 @@ mod tests {
         assert!(shutdown_flag.load(Ordering::Acquire));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_watcher_shutdown中もtokio_timerが進む() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
+        let thread_shutdown_flag = shutdown_flag.clone();
+        let watcher_thread = std::thread::spawn(move || {
+            while !thread_shutdown_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        let (watcher, _rx) = watcher_for_test(shutdown_flag, watcher_thread, health_state);
+
+        let mut shutdown = Box::pin(watcher.shutdown());
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            health = &mut shutdown => {
+                panic!("shutdownが早すぎてruntime非blocking性を検証できない: {health:?}");
+            }
+        }
+
+        assert_eq!(shutdown.await, WatcherHealth::Stopped);
+    }
+
     #[tokio::test]
     async fn test_watcher_dropはフォールバック停止を行う() {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -2212,6 +2437,31 @@ mod tests {
         tokio::task::spawn_blocking(move || drop(watcher))
             .await
             .expect("watcher drop taskが正常終了する");
+        assert!(shutdown_flag.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_watcher_dropはtokio_workerをブロックしない() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::new(AtomicBool::new(false));
+        let thread_release_flag = release_flag.clone();
+        let health_state = WatcherHealthState::new_alive();
+        let watcher_thread = std::thread::spawn(move || {
+            while !thread_release_flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        });
+        let (watcher, _rx) = watcher_for_test(shutdown_flag.clone(), watcher_thread, health_state);
+
+        let start = std::time::Instant::now();
+        drop(watcher);
+        let elapsed = start.elapsed();
+        release_flag.store(true, Ordering::Release);
+
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "DropはTokio worker上で同期join timeoutを待たない: elapsed={elapsed:?}"
+        );
         assert!(shutdown_flag.load(Ordering::Acquire));
     }
 }

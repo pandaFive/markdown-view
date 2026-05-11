@@ -4,7 +4,7 @@
 
 **Goal:** Ensure watcher errors are delivered through an internal error path that is separate from best-effort file change notifications, while preserving the existing `Watcher::spawn()` and `WatchEvent` public contracts. `Watcher::shutdown()` is intentionally async so shutdown waiting does not block the Tokio runtime.
 
-**Architecture:** Split watcher runtime delivery into file and error input channels, then re-merge them into the existing `mpsc::Receiver<WatchEvent>` returned to server code. File changes keep `try_send` best-effort behavior; errors use a dedicated bounded channel and are prioritized by an internal merge forwarder.
+**Architecture:** Split watcher runtime delivery into file and error input channels, then re-merge them into the existing `mpsc::Receiver<WatchEvent>` returned to server code. File changes keep bounded `try_send` best-effort behavior; errors use a dedicated unbounded channel and are prioritized by an internal merge forwarder.
 
 **Tech Stack:** Rust, Tokio `mpsc`, standard watcher thread, existing watcher runtime unit tests, `cargo test`, `./verify.sh`.
 
@@ -16,7 +16,7 @@
 
 Responsibilities:
 
-- Add `WATCHER_ERROR_MESSAGE_BUFFER`.
+- Add typed internal senders for best-effort file events and priority error events.
 - Add internal delivery types for split channels and forwarder handles.
 - Replace variant-mixed `send_watch_event` with `send_file_changed_event` and `send_error_event`.
 - Add an internal merge forwarder that prioritizes error events and emits existing `WatchEvent` values.
@@ -755,5 +755,5 @@ Expected: commit succeeds.
 
 - Spec coverage: internal file/error channel split, `Watcher::spawn()` / `WatchEvent` contract preservation, async `Watcher::shutdown().await`, error priority, shutdown ownership, tests, security considerations, and rollback are covered by Tasks 1-4.
 - Placeholder scan: no `TBD`, `TODO`, `implement later`, or unspecified test instructions remain.
-- Type consistency: public `WatchEvent` remains unchanged; internal split uses `mpsc::Sender<PathBuf>` for file events and `mpsc::Sender<WatchError>` for error events; `Watcher::spawn()` still returns `mpsc::Receiver<WatchEvent>`.
-- Accepted deviation: Error uses a dedicated bounded channel with `try_send`; Full is logged with `error!`, Closed with `warn!`, and the notification is dropped rather than blocking the watcher thread.
+- Type consistency: public `WatchEvent` remains unchanged; internal split uses a bounded file sender and an unbounded priority error sender; `Watcher::spawn()` still returns `mpsc::Receiver<WatchEvent>`.
+- Accepted deviation: Error uses a dedicated unbounded channel; Closed is logged with `warn!`, and 異常 storm 時のメモリ増加は残リスクとして扱う。
