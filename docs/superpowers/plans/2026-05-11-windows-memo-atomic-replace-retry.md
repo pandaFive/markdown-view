@@ -174,6 +174,7 @@ fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
 `is_retryable_windows_replace_error` の直後に次を追加する。
 
 ```rust
+#[cfg(any(test, windows))]
 fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
     if error.is_panic() {
         tracing::error!(
@@ -349,6 +350,8 @@ rg -n "143|Windows メモ原子保存|Windows メモ atomic|MoveFileExW|atomic r
 ```
 
 Expected: `docs/todo/TODO.md` の High Priority に `Windows メモ原子保存のエラー処理と retry 条件を細分化する` が見つかる。
+
+実行後の現在状態: 対象 item は High Priority から Done Summary へ移動済み。
 
 - [ ] **Step 2: TODO の open item を Done Summary へ移す**
 
