@@ -30,6 +30,14 @@ impl WatchError {
         }
     }
 
+    /// shutdown task panicエラーを生成する
+    pub fn shutdown_task_panic(detail: impl Into<String>) -> Self {
+        Self {
+            kind: WatchErrorKind::ShutdownTaskPanic,
+            detail: detail.into(),
+        }
+    }
+
     /// 監視リソース枯渇エラーを生成する
     pub fn resource_exhausted(detail: impl Into<String>) -> Self {
         Self {
@@ -78,6 +86,9 @@ impl WatchError {
             WatchErrorKind::ThreadPanic => {
                 format!("監視スレッドがパニックで停止しました: {}", self.detail)
             }
+            WatchErrorKind::ShutdownTaskPanic => {
+                format!("監視停止処理がパニックで失敗しました: {}", self.detail)
+            }
             WatchErrorKind::ResourceExhausted => {
                 format!(
                     "監視対象が多すぎるため監視を開始できません。Linuxではfs.inotify.max_user_watchesの上限を確認してください: {}",
@@ -105,6 +116,8 @@ pub enum WatchErrorKind {
     Notify,
     /// 監視スレッド内のpanic
     ThreadPanic,
+    /// shutdown task 内のpanic
+    ShutdownTaskPanic,
     /// OSのファイル監視リソース枯渇
     ResourceExhausted,
 }
@@ -143,6 +156,7 @@ mod tests {
     fn test_watch_error_利用者向けメッセージが種別ごとに生成される() {
         let notify = WatchError::notify("notify詳細");
         let panic = WatchError::thread_panic("panic詳細");
+        let shutdown = WatchError::shutdown_task_panic("shutdown詳細");
 
         assert_eq!(
             notify.user_message(),
@@ -151,6 +165,10 @@ mod tests {
         assert_eq!(
             panic.user_message(),
             "監視スレッドがパニックで停止しました: panic詳細"
+        );
+        assert_eq!(
+            shutdown.user_message(),
+            "監視停止処理がパニックで失敗しました: shutdown詳細"
         );
     }
 
@@ -171,6 +189,10 @@ mod tests {
         assert_eq!(
             WatchError::thread_panic("detail").kind(),
             WatchErrorKind::ThreadPanic
+        );
+        assert_eq!(
+            WatchError::shutdown_task_panic("detail").kind(),
+            WatchErrorKind::ShutdownTaskPanic
         );
     }
 

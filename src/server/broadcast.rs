@@ -90,7 +90,7 @@ pub async fn notify_update(state: &AppState, changed_file: &Path) {
     }
 
     if let Some(message) = build_change_broadcast_message(state, changed_file).await {
-        send_broadcast_message(state.tx(), message);
+        send_broadcast_message(state.tx(), message, "ファイル変更通知");
     }
 }
 
@@ -109,13 +109,15 @@ async fn log_change_error_without_receivers(state: &AppState, changed_file: &Pat
 fn send_broadcast_message(
     tx: &tokio::sync::broadcast::Sender<BroadcastMessage>,
     message: BroadcastMessage,
+    context: &'static str,
 ) {
     if let Err(error) = tx.send(message) {
         let summary = error.0.log_summary();
         tracing::warn!(
             message_kind = summary.message_kind,
             has_file = summary.has_file,
-            "[markdown-view] ファイル変更通知の送信に失敗しました"
+            "[markdown-view] {}の送信に失敗しました",
+            context
         );
     }
 }
@@ -161,9 +163,18 @@ pub(super) fn spawn_watch_event_forwarder(
 /// `notify_update` の受信者なし経路は変更由来の読込前エラーをログに留めるが、
 /// 監視エラー通知は受信者の有無に関わらず送信を試みる。
 fn broadcast_error(state: &AppState, error: &WatchError) {
+    let receiver_count = state.tx().receiver_count();
+    if receiver_count == 0 {
+        tracing::warn!(
+            receiver_count,
+            watch_error_kind = ?error.kind(),
+            "[markdown-view] WebSocket受信者がいないため監視エラーをローカル記録しました"
+        );
+    }
     send_broadcast_message(
         state.tx(),
         BroadcastMessage::Error(format!("ファイル監視エラー: {}", error.user_message())),
+        "監視エラー通知",
     );
 }
 
@@ -232,6 +243,7 @@ mod tests {
         send_broadcast_message(
             &tx,
             BroadcastMessage::Error("secret broadcast error".to_string()),
+            "ファイル変更通知",
         );
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
@@ -251,7 +263,7 @@ mod tests {
             Some("secret/path.md".to_string()),
         ));
 
-        send_broadcast_message(&tx, message);
+        send_broadcast_message(&tx, message, "ファイル変更通知");
 
         assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
         assert!(logs_contain("message_kind"));
@@ -270,9 +282,25 @@ mod tests {
 
         broadcast_error(&state, &WatchError::notify("secret watch failure"));
 
-        assert!(logs_contain("ファイル変更通知の送信に失敗しました"));
+        assert!(logs_contain("監視エラー通知の送信に失敗しました"));
         assert!(logs_contain("message_kind"));
         assert!(logs_contain("error"));
+        assert!(!logs_contain("secret watch failure"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_broadcast_error_受信者ゼロ時はkindだけログに残す() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(base_dir.path());
+
+        broadcast_error(&state, &WatchError::notify("secret watch failure"));
+
+        assert!(logs_contain(
+            "WebSocket受信者がいないため監視エラーをローカル記録しました"
+        ));
+        assert!(logs_contain("receiver_count=0"));
+        assert!(logs_contain("watch_error_kind=Notify"));
         assert!(!logs_contain("secret watch failure"));
     }
 

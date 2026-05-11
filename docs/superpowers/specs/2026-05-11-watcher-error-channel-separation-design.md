@@ -27,7 +27,7 @@ watcher 内部で通常変更通知と異常通知の入力経路を分け、外
 `Watcher::spawn()` は次の内部チャネルを作る。
 
 - `file_tx/file_rx`: `PathBuf` または file event 専用型を流す bounded channel。容量は既存 `WATCHER_MESSAGE_BUFFER` を使い、送信は `try_send`。
-- `error_tx/error_rx`: `WatchError` を流す異常通知専用 unbounded channel。通常変更通知とは別容量にし、`FileChanged` の満杯や旧 error buffer 相当の件数超過で破棄されない。receiver closed 時だけ warn log に残して破棄する。
+- `error_tx/error_rx`: `WatchError` を流す異常通知専用 bounded ring queue。通常変更通知とは別容量にし、`FileChanged` の満杯では破棄されない。異常 storm で専用容量を超えた場合は最新の異常を残すため最古の error を破棄し、warn log に kind と容量だけを残す。receiver closed 時も warn log に残して破棄する。
 - `merged_tx/merged_rx`: 既存公開 API 用の bounded `mpsc::Sender<WatchEvent>` / `Receiver<WatchEvent>`。
 
 watcher 内部 forwarder が `file_rx` と `error_rx` を読み、`WatchEvent::FileChanged` / `WatchEvent::Error` に戻して `merged_tx` へ転送する。caller には `merged_rx` だけを返すため、`src/server/watch.rs` と `src/server/broadcast.rs` の公開的な扱いは維持する。
@@ -55,7 +55,7 @@ watcher 内部では file/error を分け、`Watcher::spawn()` と `WatchEvent` 
 既存の `send_watch_event(tx, WatchEvent, label)` を variant 混在の境界として使い続けない。代わりに次の helper に分ける。
 
 - `send_file_changed_event(file_tx, path, label)`: `try_send`。満杯時は warn log を出して破棄する。
-- `send_error_event(error_tx, error, label)`: error 専用 unbounded channel へ送る。file channel の満杯とは独立させる。closed 時は `warn!` に残して破棄し、watcher thread の停止不能化を避ける。
+- `send_error_event(error_tx, error, label)`: error 専用 bounded ring queue へ送る。file channel の満杯とは独立させる。専用容量を超えた場合は最古を evict して最新を保持する。closed 時は `warn!` に残して破棄し、watcher thread の停止不能化を避ける。
 
 notify callback、debounced event 処理、追加 watch 失敗、internal channel 異常、panic 経路は、それぞれイベント種別に応じて専用 helper を呼ぶ。
 
@@ -111,7 +111,7 @@ notify callback、debounced event 処理、追加 watch 失敗、internal channe
 
 - file channel full: 現行どおり warn log + 破棄。
 - file channel closed: watcher shutdown 中なら終了文脈として扱い、過剰に騒がせない。稼働中に発生した場合は warn log。
-- error channel capacity: unbounded とし、FileChanged backlog や旧 bounded buffer 相当の件数超過では破棄しない。異常 storm 時のメモリ増加は残リスクとして扱う。
+- error channel capacity: `WATCHER_ERROR_QUEUE_CAPACITY = 64` の bounded ring queue とし、FileChanged backlog では破棄しない。異常 storm で 64 件を超えた場合は OOM を避けるため最古の error を evict し、最新の異常通知を保持する。
 - error channel closed: panic せず warn log。元の notify/panic failure は health に latch 済みとする。
 - merged channel closed: 外部 receiver が閉じた状態なので内部 forwarder を終了する。
 - internal forwarder panic/join failure: shutdown 時に warn/error log を残す。元の watcher health を不用意に `Stopped` へ上書きしない。
