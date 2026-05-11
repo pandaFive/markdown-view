@@ -30,10 +30,11 @@ pub(in crate::server) use self::memo_fs::{MemoFs, TokioMemoFs};
 pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
-#[allow(unused_imports)]
 pub(in crate::server) use self::search::{
-    normalize_search_query, search_directory, SearchResponse, MAX_SEARCH_QUERY_CHARS,
+    normalize_search_query, search_directory, SearchResponse,
 };
+#[cfg(test)]
+pub(in crate::server) use self::search::MAX_SEARCH_QUERY_CHARS;
 
 pub(in crate::server) async fn run_blocking_file_task<T, F>(
     task_label: &'static str,
