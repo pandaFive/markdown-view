@@ -72,8 +72,7 @@
 ## Done Summary
 
 - [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
-  - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は専用 channel 経由で file backlog から独立して配送される。専用 channel 自体が満杯の場合は watcher thread を停止不能にしないため error log に残して破棄する。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。
-
+  - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は bounded ring queue 経由で file backlog から独立して配送される。専用 queue 自体が満杯の場合は OOM を避けるため最古の error を warn log に残して evict し、最新の error を保持する。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。Drop 経路は Tokio worker を同期 join で塞がず、未 shutdown drop は warn で明示する。外部 HTTP API、UI、WebSocket error payload は変更していない。
 - [x] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
   - 完了根拠: `RenderState` は `Vec<BlockContext>` と `RenderStateMismatch` で Heading / CodeBlock / Image / Table の active context を扱う構成になった。`finish_*` は stack top だけを閉じ、wrong-top 時は context を保持して mismatch を返す。`render.rs` は mismatch を `warn!` して malformed context の HTML 確定を skip し、heading ID counter の副作用や code block line attrs の debug panic を回避する。通常 Markdown の見出し、コードブロック、画像、テーブル、複合入力の出力互換を既存・追加テストで固定した。残リスクとして、malformed event stream で table 内に `TableRowEnd` だけが来た場合の row-start 厳密追跡は未実装だが、通常 pulldown-cmark 経路では発生しないため次回 state machine 追加整理候補とする
 - [x] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
