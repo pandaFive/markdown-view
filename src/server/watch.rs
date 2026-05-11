@@ -40,7 +40,7 @@ impl WatchService {
     /// 監視スレッドと転送タスクを停止し、watcher の最終状態を返す
     pub async fn shutdown(mut self) -> WatcherHealth {
         let health = if let Some(watcher) = self.watcher.take() {
-            watcher.shutdown()
+            watcher.shutdown().await
         } else {
             WatcherHealth::Stopped
         };
@@ -51,22 +51,29 @@ impl WatchService {
             );
         }
         if let Some(watch_forwarder) = self.watch_forwarder.take() {
-            shutdown_watch_forwarder(watch_forwarder).await;
+            shutdown_watch_forwarder_with_timeout_secs(
+                watch_forwarder,
+                forwarder_shutdown_timeout_secs_for_health(health),
+            )
+            .await;
         }
         health
     }
 }
 
-async fn shutdown_watch_forwarder(watch_forwarder: WatchForwarderHandle) {
-    shutdown_watch_forwarder_with_timeout_secs(
-        watch_forwarder,
-        watch_forwarder_shutdown_timeout_secs(),
-    )
-    .await;
-}
-
 fn watch_forwarder_shutdown_timeout_secs() -> u64 {
     WATCH_SHUTDOWN_TIMEOUT_SECS
+}
+
+fn forwarder_shutdown_timeout_secs_for_health(health: WatcherHealth) -> u64 {
+    if matches!(
+        health,
+        WatcherHealth::Failed(crate::watcher::WatcherFailureKind::ShutdownTimedOut)
+    ) {
+        0
+    } else {
+        watch_forwarder_shutdown_timeout_secs()
+    }
 }
 
 async fn shutdown_watch_forwarder_with_timeout_secs(
@@ -123,12 +130,12 @@ mod tests {
         WatchForwarderDiagnostics, WatchForwarderEventKind, WatchForwarderHandle,
     };
     use super::{
-        shutdown_watch_forwarder_with_timeout_secs, watch_forwarder_shutdown_timeout_secs,
-        WatchService,
+        forwarder_shutdown_timeout_secs_for_health, shutdown_watch_forwarder_with_timeout_secs,
+        watch_forwarder_shutdown_timeout_secs, WatchService,
     };
     use crate::server::AppMode;
     use crate::server::AppState;
-    use crate::watcher::{WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
+    use crate::watcher::{WatcherFailureKind, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
 
     #[tokio::test]
     async fn test_watch_service_開始と停止ができる() {
@@ -144,7 +151,12 @@ mod tests {
         ));
 
         let service = WatchService::start(state).await.unwrap();
+        let start = std::time::Instant::now();
         assert_eq!(service.shutdown().await, WatcherHealth::Stopped);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "watch service shutdown should not wait for watcher timeout"
+        );
     }
 
     #[tokio::test]
@@ -183,6 +195,26 @@ mod tests {
     fn test_shutdown_watch_forwarderはwatcher共通timeout秒数を使う() {
         assert_eq!(
             watch_forwarder_shutdown_timeout_secs(),
+            WATCH_SHUTDOWN_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn test_shutdown_watch_forwarderはwatcher_timeout後だけ即abortにする() {
+        assert_eq!(
+            forwarder_shutdown_timeout_secs_for_health(WatcherHealth::Stopped),
+            WATCH_SHUTDOWN_TIMEOUT_SECS
+        );
+        assert_eq!(
+            forwarder_shutdown_timeout_secs_for_health(WatcherHealth::Failed(
+                WatcherFailureKind::ShutdownTimedOut
+            )),
+            0
+        );
+        assert_eq!(
+            forwarder_shutdown_timeout_secs_for_health(WatcherHealth::Failed(
+                WatcherFailureKind::Notify
+            )),
             WATCH_SHUTDOWN_TIMEOUT_SECS
         );
     }

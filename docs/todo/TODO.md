@@ -10,7 +10,7 @@
 放置するとセキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目。
 
 - [ ] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
-  - ファイル: `src/watcher/runtime.rs` L149-215/L243-247
+  - ファイル: `src/watcher/runtime.rs` の `spawn_watcher_thread` / `handle_watcher_panic` / `await_watcher_init`
   - 現状: debouncer 構築前に panic が起きた場合 `init_tx` が Some のまま `catch_unwind` を抜け、`await_watcher_init` が `Err(_)` 経路に落ちて「予期せず終了しました」とだけ表示される。`panic_detail` は受信前に終了するため使われない
   - 対応: panic 経路で `init_tx` がまだ Some なら `WatchError::thread_panic(...)` を init 結果として送る
   - 昇格理由: watcher 初期化失敗の詳細が失われる silent failure であり、監視開始可否の判断に直接響くため High とする
@@ -72,7 +72,7 @@
 ## Done Summary
 
 - [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
-  - 完了根拠: `send_watch_event` が `WatchEvent` variant ごとに送信方針を分け、`FileChanged` は従来どおり満杯時に drop する一方、`Error` は満杯時に watcher 単位の bounded helper へ代表エラーを委譲し、送達中の追加 `Error` は件数集約して代表 `Error` 後に合成サマリ `Error` として foreground へ流す構成になった。notify error、internal channel failure、新規監視登録失敗、init 完了後の watcher thread panic は health failure latch を error event 送信前に維持する。送達状態は `Idle` / `InFlight` enum にし、代表送達開始と追加集約を単一 lock 操作にまとめ、poison 復旧時は `Failed(ThreadPanic)` へ latch して状態をリセットする。helper thread 起動失敗時の Tokio runtime 内 async fallback は Drop guard で cancel 時も in-flight を解除し、closed channel 時は health failure へ latch する。panic 経路の helper thread 名も watcher 種別ごとの名前を使う。満杯時の `FileChanged` drop、満杯時の `Error` 送達、送達中追加 `Error` のサマリ送達、追加集約なしでサマリを送らないこと、別 watcher state 間の独立性、receiver closed 時の `Error` 非panic、current_thread / multi_thread runtime fallback、async fallback cancel、Drop 中 helper 待機、並列 sender を unit test で固定した。外部 HTTP API、UI、WebSocket error payload は変更していない
+  - 完了根拠: watcher 内部の通常変更通知と異常通知を別 channel に分離し、外部 API は既存の `WatchEvent` receiver に再統合する構成にした。`FileChanged` は満杯時 best-effort で破棄する一方、`Error` は bounded ring queue 経由で file backlog から独立して配送される。専用 queue 自体が満杯の場合は OOM を避けるため最古の error を warn log に残して evict し、最新の error を保持する。内部 forwarder は error を優先して merged receiver へ流し、既存の server broadcast 契約と watcher health latch を維持した。Drop 経路は Tokio worker を同期 join で塞がず、未 shutdown drop は warn で明示する。外部 HTTP API、UI、WebSocket error payload は変更していない。
 - [x] `RenderState` を `enum BlockContext` スタックに置き換えて open/close 対応を型化する
   - 完了根拠: `RenderState` は `Vec<BlockContext>` と `RenderStateMismatch` で Heading / CodeBlock / Image / Table の active context を扱う構成になった。`finish_*` は stack top だけを閉じ、wrong-top 時は context を保持して mismatch を返す。`render.rs` は mismatch を `warn!` して malformed context の HTML 確定を skip し、heading ID counter の副作用や code block line attrs の debug panic を回避する。通常 Markdown の見出し、コードブロック、画像、テーブル、複合入力の出力互換を既存・追加テストで固定した。残リスクとして、malformed event stream で table 内に `TableRowEnd` だけが来た場合の row-start 厳密追跡は未実装だが、通常 pulldown-cmark 経路では発生しないため次回 state machine 追加整理候補とする
 - [x] `template/mod.rs` のテストをサブモジュールへ分割し、`render_page` の 62 行 `format!` を関数分割する
