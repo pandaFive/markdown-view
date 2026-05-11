@@ -145,7 +145,6 @@ impl std::error::Error for WatchError {}
 
 /// ファイル監視エラーの分類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum WatchErrorKind {
     /// 監視開始時の初期化失敗
     Init,

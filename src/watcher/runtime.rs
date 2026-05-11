@@ -635,12 +635,11 @@ impl WatchRuntime {
             }
         }
 
-        let health = health_state.load();
         drop(error_tx);
         merge_forwarder
             .stop(timeout.saturating_sub(elapsed), &diagnostics)
             .await;
-        health
+        health_state.load()
     }
 
     fn request_stop_without_wait(self) {
@@ -2861,6 +2860,55 @@ mod tests {
             .expect("shutdown task panic error eventを期待");
         assert_eq!(error.kind(), WatchErrorKind::ShutdownTaskPanic);
         assert!(error.detail().contains("shutdown task panic"));
+    }
+
+    #[tokio::test]
+    async fn test_watcher_shutdownはmerge_forwarder_panicを戻り値に反映する() {
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let health_state = WatcherHealthState::new_alive();
+        let watcher_thread = spawn_idle_watcher_thread(shutdown_flag.clone());
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let merge_forwarder = super::MergeForwarderHandle {
+            task: tokio::spawn(async move {
+                let _done = super::ForwarderDoneOnDrop(Some(done_tx));
+                panic!("forwarder panic during shutdown");
+            }),
+            done_rx,
+        };
+        let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(4);
+        let diagnostics = WatcherDiagnostics::new(merged_tx, health_state.clone());
+        let (error_tx, _error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let watcher = Watcher::new(
+            shutdown_flag,
+            watcher_thread,
+            merge_forwarder,
+            health_state.clone(),
+            diagnostics,
+            error_tx,
+        );
+
+        let shutdown_health = shutdown_watcher_for_test(watcher).await;
+
+        assert_eq!(
+            shutdown_health,
+            WatcherHealth::Failed(WatcherFailureKind::ForwarderTaskPanic)
+        );
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::ForwarderTaskPanic)
+        );
+        match merged_rx
+            .recv()
+            .await
+            .expect("forwarder panic error eventを期待")
+        {
+            WatchEvent::Error(error) => {
+                assert_eq!(error.kind(), WatchErrorKind::ForwarderTaskPanic);
+            }
+            WatchEvent::FileChanged(path) => {
+                panic!("Errorを期待したがFileChanged({path:?})を受信")
+            }
+        }
     }
 
     #[tokio::test]
