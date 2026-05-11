@@ -16,13 +16,6 @@
   - 昇格理由: メモ保存はデータ安全性に関わり、失敗理由を潰すと復旧判断が弱くなるため High とする
   - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
 
-- [ ] `/api/search` のクエリ長ガードを routes.rs 側に追加する
-  - ファイル: `src/server/routes.rs` L203-209, `src/server/service.rs` L195-208, `src/server/files/search.rs`
-  - 現状: `api_search_handler` はクエリ `q` を長さチェックせず `service::search` に渡し、`service::search` は `search_directory` へ委譲する。検索実装は `raw_query.trim().to_string()` で照合・レスポンス用 query を作るが、route/service 境界では極端に長い `q`（例: 1MB）を拒否しない
-  - 対応: 1KB 程度の長さガードを `routes.rs` または `service::search` の入口に追加し、超過時は 400 を返す。`search.rs` 内部にも防御を残す（defense in depth）
-  - 昇格理由: 極端に長い未信頼入力が検索処理とレスポンス生成に流れるため、resource exhaustion と API 入力境界に関わる
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 ## Medium Priority
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
