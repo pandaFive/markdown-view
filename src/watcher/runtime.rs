@@ -1344,7 +1344,7 @@ mod tests {
     use super::{
         handle_debounced_watch_result, handle_watcher_panic, priority_error_channel,
         process_debounced_events_with_watch, process_debounced_events_with_watch_and_unwatch,
-        register_watch_plan_with, BestEffortFileSender, PriorityErrorReceiver,
+        register_watch_plan_with, BestEffortFileSender, InitResult, PriorityErrorReceiver,
         WatchDirectoryRegistry, WatchEventSenders, Watcher, WatcherDiagnostics, WatcherFailureKind,
         WatcherHealth, WatcherHealthState,
     };
@@ -2667,6 +2667,40 @@ mod tests {
         assert!(watcher.is_alive());
 
         shutdown_watcher_for_test(watcher).await;
+    }
+
+    #[test]
+    fn test_watcher_panic経路はinit_tx残存時にthread_panicをinit_resultへ返す() {
+        let health_state = WatcherHealthState::new_starting();
+        let (error_tx, mut error_rx) =
+            priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let (init_tx, mut init_rx) = oneshot::channel::<InitResult>();
+        let mut init_tx = Some(init_tx);
+
+        handle_watcher_panic(
+            Box::new(String::from("init panic detail")),
+            "panic message",
+            "panic label",
+            &health_state,
+            &error_tx,
+            &mut init_tx,
+        );
+
+        let init_error = init_rx
+            .try_recv()
+            .expect("init resultを受信できる")
+            .expect_err("init前panicはThreadPanicとして返す");
+        assert_eq!(init_error.kind(), WatchErrorKind::ThreadPanic);
+        assert_eq!(init_error.detail(), "init panic detail");
+        assert!(init_tx.is_none());
+        assert_eq!(
+            health_state.load(),
+            WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
+        );
+
+        let event_error = error_rx.try_recv().expect("panic error eventを期待");
+        assert_eq!(event_error.kind(), WatchErrorKind::ThreadPanic);
+        assert_eq!(event_error.detail(), "init panic detail");
     }
 
     #[test]
