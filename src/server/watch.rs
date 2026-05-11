@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use super::broadcast::{spawn_watch_event_forwarder, WatchForwarderHandle};
 use super::state::AppState;
-use crate::watcher::{Watcher, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
+use crate::watcher::{Watcher, WatcherFailureKind, WatcherHealth, WATCH_SHUTDOWN_TIMEOUT_SECS};
 
 /// 監視スレッドと転送タスクを束ねるサービス
 pub struct WatchService {
@@ -40,7 +40,16 @@ impl WatchService {
     /// 監視スレッドと転送タスクを停止し、watcher の最終状態を返す
     pub async fn shutdown(mut self) -> WatcherHealth {
         let health = if let Some(watcher) = self.watcher.take() {
-            watcher.shutdown()
+            match tokio::task::spawn_blocking(move || watcher.shutdown()).await {
+                Ok(health) => health,
+                Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] 監視スレッド停止処理のjoinに失敗: {}",
+                        error
+                    );
+                    WatcherHealth::Failed(WatcherFailureKind::ThreadPanic)
+                }
+            }
         } else {
             WatcherHealth::Stopped
         };
@@ -132,6 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_service_開始と停止ができる() {
+        let start = std::time::Instant::now();
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("watch.md");
         std::fs::write(&file_path, "# watch").unwrap();
@@ -145,6 +155,10 @@ mod tests {
 
         let service = WatchService::start(state).await.unwrap();
         assert_eq!(service.shutdown().await, WatcherHealth::Stopped);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "watch service shutdown should not wait for watcher timeout"
+        );
     }
 
     #[tokio::test]

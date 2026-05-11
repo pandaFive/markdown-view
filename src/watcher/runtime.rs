@@ -481,13 +481,24 @@ fn send_file_changed_event(tx: &mpsc::Sender<PathBuf>, path: PathBuf, label: &st
     }
 }
 
-/// watcher error を専用チャネルへ転送する。送信先が閉じている場合のみ破棄する。
+/// watcher error を専用チャネルへ転送する（non-blocking）。
+/// チャネル満杯時・クローズ時はイベントを破棄しログを出力する。
 fn send_error_event(tx: &mpsc::Sender<WatchError>, error: WatchError, label: &str) {
-    if tx.blocking_send(error).is_err() {
-        tracing::warn!(
-            "[markdown-view] 通知チャネルが閉じているため監視イベントを破棄しました: {}",
-            label
-        );
+    match tx.try_send(error) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(error)) => {
+            tracing::error!(
+                detail = error.detail(),
+                "[markdown-view] watcher error channel が満杯のため異常通知を破棄しました: {}",
+                label
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!(
+                "[markdown-view] 通知チャネルが閉じているため監視イベントを破棄しました: {}",
+                label
+            );
+        }
     }
 }
 
@@ -1754,6 +1765,38 @@ mod tests {
             &error_tx,
             WatchError::notify("receiver closed"),
             "error receiver closedテスト",
+        );
+    }
+
+    #[test]
+    fn test_send_error_eventはチャネル満杯時に破棄してブロックしない() {
+        let (error_tx, mut error_rx) = mpsc::channel::<WatchError>(1);
+        error_tx
+            .blocking_send(WatchError::notify("先行error"))
+            .expect("error channelを満杯にできる");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let sender = std::thread::spawn(move || {
+            super::send_error_event(
+                &error_tx,
+                WatchError::notify("破棄されるerror"),
+                "error満杯時テスト",
+            );
+            done_tx.send(()).expect("完了通知を送信できる");
+        });
+
+        if done_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+            drop(error_rx);
+            sender.join().expect("error送信threadが正常終了する");
+            panic!("Error満杯時の送信はブロックしない");
+        }
+        sender.join().expect("error送信threadが正常終了する");
+
+        let error = error_rx.try_recv().expect("先行errorを受信できる");
+        assert_eq!(error.detail(), "先行error");
+        assert!(
+            error_rx.try_recv().is_err(),
+            "満杯時のErrorは追加でキューされないはず"
         );
     }
 
