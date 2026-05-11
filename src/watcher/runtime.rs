@@ -425,6 +425,16 @@ impl PriorityErrorReceiver {
     }
 }
 
+impl Drop for PriorityErrorReceiver {
+    fn drop(&mut self) {
+        let mut state = self.queue.state.lock().expect("priority error queue mutex");
+        state.closed = true;
+        state.items.clear();
+        drop(state);
+        self.queue.notify.notify_waiters();
+    }
+}
+
 struct PriorityErrorQueue {
     state: Mutex<PriorityErrorQueueState>,
     notify: tokio::sync::Notify,
@@ -2513,26 +2523,44 @@ mod tests {
 
     #[traced_test]
     #[test]
-    fn test_send_error_eventはreceiver_closedでもpanicせずdetailをログに出さない() {
+    fn test_send_error_eventはreceiver_drop後にclosedとして扱い未配送errorを保持しない() {
         let (error_tx, error_rx) = priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+
+        error_tx.send(
+            WatchError::notify("queued before receiver drop"),
+            "error receiver closedテスト",
+        );
+        assert_eq!(
+            error_tx
+                .queue
+                .state
+                .lock()
+                .expect("priority error queue mutex")
+                .items
+                .len(),
+            1
+        );
         drop(error_rx);
-        error_tx
-            .queue
-            .state
-            .lock()
-            .expect("priority error queue mutex")
-            .closed = true;
 
         error_tx.send(
             WatchError::notify("secret receiver closed detail"),
             "error receiver closedテスト",
         );
 
+        let state = error_tx
+            .queue
+            .state
+            .lock()
+            .expect("priority error queue mutex");
+        assert!(state.closed);
+        assert!(state.items.is_empty());
+        drop(state);
         assert!(logs_contain(
             "watcher error channel が閉じているため異常通知を破棄しました"
         ));
         assert!(logs_contain("error_kind=Notify"));
         assert!(!logs_contain("secret receiver closed detail"));
+        assert!(!logs_contain("queued before receiver drop"));
     }
 
     #[test]
