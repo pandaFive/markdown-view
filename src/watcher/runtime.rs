@@ -2756,6 +2756,35 @@ mod tests {
     }
 
     #[test]
+    fn test_watcher_panic経路はanyhow_payload_detailをinit_resultにも保持する() {
+        let health_state = WatcherHealthState::new_starting();
+        let (error_tx, mut error_rx) =
+            priority_error_channel(super::WATCHER_ERROR_MESSAGE_BUFFER);
+        let (init_tx, mut init_rx) = oneshot::channel::<InitResult>();
+        let mut init_tx = Some(init_tx);
+
+        handle_watcher_panic(
+            Box::new(anyhow::anyhow!("anyhow init panic detail")),
+            "panic message",
+            "panic label",
+            &health_state,
+            &error_tx,
+            &mut init_tx,
+        );
+
+        let init_error = init_rx
+            .try_recv()
+            .expect("init resultを受信できる")
+            .expect_err("init前panicはThreadPanicとして返す");
+        assert_eq!(init_error.kind(), WatchErrorKind::ThreadPanic);
+        assert_eq!(init_error.detail(), "anyhow init panic detail");
+
+        let event_error = error_rx.try_recv().expect("panic error eventを期待");
+        assert_eq!(event_error.kind(), WatchErrorKind::ThreadPanic);
+        assert_eq!(event_error.detail(), "anyhow init panic detail");
+    }
+
+    #[test]
     fn test_store_alive_if_startingは先行failedを上書きしない() {
         let health_state = WatcherHealthState::new_starting();
 
