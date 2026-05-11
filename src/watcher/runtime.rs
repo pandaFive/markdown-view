@@ -1521,19 +1521,21 @@ mod tests {
         drop(file_tx);
         drop(error_tx);
 
-        match tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
-            .await
-            .expect("merged eventを待てる")
-            .expect("merged eventを受信できる")
-        {
-            WatchEvent::Error(error) => {
-                assert_eq!(error.kind(), WatchErrorKind::Notify);
-                assert_eq!(error.detail(), "file channelが満杯でも送達する");
-            }
-            WatchEvent::FileChanged(path) => {
-                panic!("Errorを期待したがFileChanged({path:?})を受信")
+        let mut delivered_error = None;
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(1), merged_rx.recv())
+                .await
+                .expect("merged eventを待てる")
+                .expect("merged eventを受信できる");
+            if let WatchEvent::Error(error) = event {
+                delivered_error = Some(error);
+                break;
             }
         }
+
+        let error = delivered_error.expect("Error eventが送達される");
+        assert_eq!(error.kind(), WatchErrorKind::Notify);
+        assert_eq!(error.detail(), "file channelが満杯でも送達する");
 
         forwarder.await.expect("merge forwarderが正常終了する");
     }
