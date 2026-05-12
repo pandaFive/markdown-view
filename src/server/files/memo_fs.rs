@@ -10,6 +10,10 @@ use std::future::Future;
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +24,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_GENERIC_WRITE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
@@ -99,6 +104,14 @@ pub(crate) fn always_ok_before_rename(_: &Path, _: &Path) -> BeforeRenameFuture<
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TMP_ATTEMPTS: u8 = 8;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(test, windows))]
+const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
+#[cfg(any(test, windows))]
+const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 
 /// メモ保存先ファイルシステムの抽象。
 ///
@@ -194,6 +207,8 @@ async fn write_atomic_with_counter(
         #[cfg(unix)]
         // tmp 名は推測可能なため、緩い umask の共有環境でも rename 前に他者読み取りさせない。
         options.mode(0o600);
+        #[cfg(windows)]
+        configure_windows_atomic_tmp_options(&mut options);
         let mut tmp_file = match options.open(&tmp_path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -204,29 +219,39 @@ async fn write_atomic_with_counter(
         };
 
         if let Err(error) = tmp_file.write_all(content).await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
         if let Err(error) = tmp_file.flush().await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
         if let Err(error) = tmp_file.sync_data().await {
+            drop(tmp_file);
             cleanup_tmp_best_effort(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
+
+        #[cfg(windows)]
+        let replace_result =
+            checked_atomic_replace(&tmp_file, &tmp_path, path, before_rename).await;
+        #[cfg(not(windows))]
+        let replace_result = checked_atomic_replace(&tmp_path, path, before_rename).await;
+
+        if let Err(error) = replace_result {
+            drop(tmp_file);
+            cleanup_tmp_best_effort(&tmp_path).await;
+            return Err(error);
+        }
+
         drop(tmp_file);
-
-        if let Err(error) = before_rename(path, &tmp_path).await {
-            cleanup_tmp_best_effort(&tmp_path).await;
-            return Err(MemoWriteError::BeforeRename(error));
-        }
-
-        if let Err(error) = atomic_replace(&tmp_path, path).await {
-            cleanup_tmp_best_effort(&tmp_path).await;
-            return Err(MemoWriteError::Io(error));
-        }
-
+        #[cfg(windows)]
+        sync_parent_dir_required(parent)
+            .await
+            .map_err(MemoWriteError::Io)?;
+        #[cfg(not(windows))]
         sync_parent_dir_best_effort(parent).await;
         return Ok(());
     }
@@ -237,10 +262,7 @@ async fn write_atomic_with_counter(
             "memo temporary file already exists",
         )
     });
-    let memo_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "<unknown>".into());
+    let memo_name = file_name_for_logging(path);
     tracing::error!(
         "[markdown-view] メモ一時ファイル名が{}回連続で衝突したため保存を中止します ({}): {}",
         ATOMIC_TMP_ATTEMPTS,
@@ -248,6 +270,13 @@ async fn write_atomic_with_counter(
         error
     );
     Err(MemoWriteError::Io(error))
+}
+
+#[cfg(windows)]
+fn configure_windows_atomic_tmp_options(options: &mut tokio::fs::OpenOptions) {
+    // handle-based renameに必要なDELETE accessを持たせ、retry中は外部書き込みをshare modeで拒否する。
+    options.access_mode(FILE_GENERIC_WRITE | DELETE);
+    options.share_mode(FILE_SHARE_DELETE);
 }
 
 async fn sync_parent_dir_best_effort(parent: &Path) {
@@ -271,15 +300,28 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
     }
 }
 
+#[cfg(windows)]
+async fn sync_parent_dir_required(parent: &Path) -> io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true);
+    options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let file = options.open(parent).await?;
+    file.sync_all().await
+}
+
+fn file_name_for_logging(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().escape_debug().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 async fn cleanup_tmp_best_effort(tmp_path: &Path) {
     match tokio::fs::remove_file(tmp_path).await {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
-            let tmp_name = tmp_path
-                .file_name()
-                .map(|name| name.to_string_lossy())
-                .unwrap_or_else(|| "<unknown>".into());
+            let tmp_name = file_name_for_logging(tmp_path);
             tracing::warn!(
                 "[markdown-view] メモ一時ファイルcleanup失敗を無視します ({}): {}",
                 tmp_name,
@@ -289,23 +331,98 @@ async fn cleanup_tmp_best_effort(tmp_path: &Path) {
     }
 }
 
+#[cfg(any(test, windows))]
+fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            WINDOWS_ERROR_ACCESS_DENIED
+                | WINDOWS_ERROR_SHARING_VIOLATION
+                | WINDOWS_ERROR_LOCK_VIOLATION
+        )
+    )
+}
+
+#[cfg(any(test, windows))]
+fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
+    let task_id = error.id();
+    if error.is_panic() {
+        tracing::error!(
+            task_id = %task_id,
+            "[markdown-view] メモatomic replace blocking taskがpanicしました"
+        );
+        io::Error::other("memo atomic replace task panicked")
+    } else if error.is_cancelled() {
+        tracing::warn!(
+            task_id = %task_id,
+            "[markdown-view] メモatomic replace blocking taskがcancelledされました"
+        );
+        io::Error::other("memo atomic replace task cancelled")
+    } else {
+        tracing::warn!(
+            task_id = %task_id,
+            "[markdown-view] メモatomic replace blocking taskのjoinに失敗しました"
+        );
+        io::Error::other("memo atomic replace task failed")
+    }
+}
+
+#[cfg(windows)]
+async fn checked_atomic_replace(
+    tmp_file: &tokio::fs::File,
+    tmp_path: &Path,
+    path: &Path,
+    before_rename: &BeforeRenameCheck<'_>,
+) -> Result<(), MemoWriteError> {
+    atomic_replace_checked(tmp_file, tmp_path, path, before_rename).await
+}
+
+#[cfg(not(windows))]
+async fn checked_atomic_replace(
+    tmp_path: &Path,
+    path: &Path,
+    before_rename: &BeforeRenameCheck<'_>,
+) -> Result<(), MemoWriteError> {
+    before_rename(path, tmp_path)
+        .await
+        .map_err(MemoWriteError::BeforeRename)?;
+    atomic_replace(tmp_path, path)
+        .await
+        .map_err(MemoWriteError::Io)
+}
+
 #[cfg(not(windows))]
 async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
     tokio::fs::rename(tmp_path, path).await
 }
 
 #[cfg(windows)]
-async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
-    let tmp_path = path_to_wide_null(tmp_path)?;
-    let path = path_to_wide_null(path)?;
+async fn move_open_tmp_replace_once(tmp_file: &tokio::fs::File, path: &Path) -> io::Result<()> {
+    let tmp_file = tmp_file.try_clone().await?.into_std().await;
+    let path_wide = path_to_wide(path)?;
+    move_open_std_file_replace_once(tmp_file, path_wide).await
+}
 
+#[cfg(windows)]
+async fn move_open_std_file_replace_once(
+    tmp_file: std::fs::File,
+    path_wide: Vec<u16>,
+) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
-        // SAFETY: 両パスはNUL終端済みで、interior NULを拒否したバッファとしてこの呼び出し中は生存する。
+        let rename_info = build_file_rename_info(&path_wide)?;
+        // SAFETY: handleは生存中のtmp file objectを指し、rename_infoはFILE_RENAME_INFO layoutの
+        // 可変長bufferとしてこの呼び出し中は生存する。
         let result = unsafe {
-            MoveFileExW(
-                tmp_path.as_ptr(),
-                path.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            SetFileInformationByHandle(
+                tmp_file.as_raw_handle().cast(),
+                FileRenameInfo,
+                rename_info.as_ptr().cast(),
+                u32::try_from(rename_info.len()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "rename info buffer is too large",
+                    )
+                })?,
             )
         };
         if result == 0 {
@@ -315,14 +432,131 @@ async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
         }
     })
     .await
-    .map_err(|error| {
-        tracing::error!("[markdown-view] メモatomic replace task failed: {}", error);
-        io::Error::other(format!("memo atomic replace task failed: {error}"))
-    })?
+    .map_err(map_atomic_replace_join_error)?
 }
 
 #[cfg(windows)]
-fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
+fn build_file_rename_info(path_wide: &[u16]) -> io::Result<Vec<u8>> {
+    let file_name_length = path_wide
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+    let file_name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let buffer_len = file_name_offset
+        .checked_add(file_name_length as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is too long"))?;
+    let mut buffer = vec![0_u8; buffer_len];
+
+    // SAFETY: bufferはFILE_RENAME_INFO header以上の長さを持ち、FileNameの可変長領域へ
+    // UTF-16 bytesをコピーする。path_wideはinterior NUL拒否済みでNUL終端しない。
+    unsafe {
+        let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = file_name_length;
+        std::ptr::copy_nonoverlapping(
+            path_wide.as_ptr().cast::<u8>(),
+            buffer.as_mut_ptr().add(file_name_offset),
+            file_name_length as usize,
+        );
+    }
+
+    Ok(buffer)
+}
+
+#[cfg(any(test, windows))]
+async fn replace_with_retry_and_revalidation<Replace, ReplaceFuture, Sleep, SleepFuture>(
+    tmp_path: &Path,
+    path: &Path,
+    before_rename: &BeforeRenameCheck<'_>,
+    mut replace_once: Replace,
+    mut sleep: Sleep,
+) -> Result<(), MemoWriteError>
+where
+    Replace: FnMut() -> ReplaceFuture,
+    ReplaceFuture: Future<Output = io::Result<()>>,
+    Sleep: FnMut(u64) -> SleepFuture,
+    SleepFuture: Future<Output = ()>,
+{
+    let memo_name = file_name_for_logging(path);
+
+    let mut attempt = 0;
+    loop {
+        before_rename(path, tmp_path)
+            .await
+            .map_err(MemoWriteError::BeforeRename)?;
+
+        match replace_once().await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_windows_replace_error(&error) => {
+                let Some(&delay_ms) = WINDOWS_REPLACE_RETRY_DELAYS_MS.get(attempt) else {
+                    return Err(MemoWriteError::Io(error));
+                };
+                attempt += 1;
+                tracing::warn!(
+                    "[markdown-view] メモatomic replaceをretryします (file: {}, attempt: {}, delay_ms: {}, error: {})",
+                    memo_name,
+                    attempt,
+                    delay_ms,
+                    error
+                );
+                sleep(delay_ms).await;
+            }
+            Err(error) => return Err(MemoWriteError::Io(error)),
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
+    let tmp_file = open_windows_atomic_tmp_for_replace(tmp_path).await?;
+    let no_check =
+        |_: &Path, _: &Path| before_rename_future(async { Ok::<(), MemoBeforeRenameError>(()) });
+
+    replace_with_retry_and_revalidation(
+        tmp_path,
+        path,
+        &no_check,
+        || move_open_tmp_replace_once(&tmp_file, path),
+        |delay_ms| tokio::time::sleep(std::time::Duration::from_millis(delay_ms)),
+    )
+    .await
+    .map_err(|error| match error {
+        MemoWriteError::Io(error) => error,
+        MemoWriteError::BeforeRename(error) => io::Error::other(error.user_message().to_owned()),
+    })
+}
+
+#[cfg(windows)]
+async fn atomic_replace_checked(
+    tmp_file: &tokio::fs::File,
+    tmp_path: &Path,
+    path: &Path,
+    before_rename: &BeforeRenameCheck<'_>,
+) -> Result<(), MemoWriteError> {
+    path_to_wide(path).map_err(MemoWriteError::Io)?;
+
+    replace_with_retry_and_revalidation(
+        tmp_path,
+        path,
+        before_rename,
+        || move_open_tmp_replace_once(tmp_file, path),
+        |delay_ms| tokio::time::sleep(std::time::Duration::from_millis(delay_ms)),
+    )
+    .await
+}
+
+#[cfg(windows)]
+async fn open_windows_atomic_tmp_for_replace(tmp_path: &Path) -> io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true);
+    configure_windows_atomic_tmp_options(&mut options);
+    options.open(tmp_path).await
+}
+
+#[cfg(windows)]
+fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
     let mut wide = Vec::new();
     for unit in path.as_os_str().encode_wide() {
         if unit == 0 {
@@ -333,6 +567,12 @@ fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
         }
         wide.push(unit);
     }
+    Ok(wide)
+}
+
+#[cfg(windows)]
+fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide = path_to_wide(path)?;
     wide.push(0);
     Ok(wide)
 }
@@ -392,6 +632,348 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    #[test]
+    fn is_retryable_windows_replace_errorは一時lock系windowsエラーだけtrueにする() {
+        for code in [
+            WINDOWS_ERROR_ACCESS_DENIED,
+            WINDOWS_ERROR_SHARING_VIOLATION,
+            WINDOWS_ERROR_LOCK_VIOLATION,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_retryable_windows_replace_error(&error),
+                "Windows error {code} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn is_retryable_windows_replace_errorは対象外エラーをfalseにする() {
+        for error in [
+            io::Error::from(io::ErrorKind::AlreadyExists),
+            io::Error::from(io::ErrorKind::Other),
+            io::Error::from_raw_os_error(12345),
+        ] {
+            assert!(
+                !is_retryable_windows_replace_error(&error),
+                "unexpected retryable error: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn map_atomic_replace_join_errorはpanicを分類する() {
+        let handle = tokio::spawn(async {
+            panic!("atomic replace panic classification test");
+        });
+        let join_error = handle.await.expect_err("task should panic");
+
+        let error = map_atomic_replace_join_error(join_error);
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("panicked"),
+            "panic classification should be visible in io error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_atomic_replace_join_errorはcancelledを分類する() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        handle.abort();
+        let join_error = handle.await.expect_err("task should be cancelled");
+
+        let error = map_atomic_replace_join_error(join_error);
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("cancelled"),
+            "cancel classification should be visible in io error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_atomic_replace_retryはretryごとにbefore_renameを再実行する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let validation_count = Arc::new(Mutex::new(0));
+        let slept_delays = Arc::new(Mutex::new(Vec::new()));
+
+        replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &{
+                let validation_count = Arc::clone(&validation_count);
+                move |_, _| {
+                    let validation_count = Arc::clone(&validation_count);
+                    before_rename_future(async move {
+                        *validation_count
+                            .lock()
+                            .expect("validation count mutex should not be poisoned") += 1;
+                        Ok(())
+                    })
+                }
+            },
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    async move {
+                        let mut attempts = replace_attempts
+                            .lock()
+                            .expect("replace attempts mutex should not be poisoned");
+                        *attempts += 1;
+                        if *attempts == 1 {
+                            Err(io::Error::from_raw_os_error(
+                                WINDOWS_ERROR_SHARING_VIOLATION,
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                }
+            },
+            {
+                let slept_delays = Arc::clone(&slept_delays);
+                move |delay_ms| {
+                    let slept_delays = Arc::clone(&slept_delays);
+                    async move {
+                        slept_delays
+                            .lock()
+                            .expect("slept delays mutex should not be poisoned")
+                            .push(delay_ms);
+                    }
+                }
+            },
+        )
+        .await
+        .expect("retry should eventually succeed");
+
+        assert_eq!(
+            *validation_count
+                .lock()
+                .expect("validation count mutex should not be poisoned"),
+            2
+        );
+        assert_eq!(
+            *replace_attempts
+                .lock()
+                .expect("replace attempts mutex should not be poisoned"),
+            2
+        );
+        assert_eq!(
+            *slept_delays
+                .lock()
+                .expect("slept delays mutex should not be poisoned"),
+            vec![10]
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_atomic_replace_retryは再検証失敗時にreplaceを呼ばない() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let validation_count = Arc::new(Mutex::new(0));
+
+        let error = replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &{
+                let validation_count = Arc::clone(&validation_count);
+                move |_, _| {
+                    let validation_count = Arc::clone(&validation_count);
+                    before_rename_future(async move {
+                        let mut count = validation_count
+                            .lock()
+                            .expect("validation count mutex should not be poisoned");
+                        *count += 1;
+                        if *count == 2 {
+                            Err(MemoBeforeRenameError::new("unsafe retry path"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
+            },
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    async move {
+                        *replace_attempts
+                            .lock()
+                            .expect("replace attempts mutex should not be poisoned") += 1;
+                        Err(io::Error::from_raw_os_error(
+                            WINDOWS_ERROR_SHARING_VIOLATION,
+                        ))
+                    }
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect_err("second validation should fail");
+
+        match error {
+            MemoWriteError::BeforeRename(error) => {
+                assert_eq!(error.user_message(), "unsafe retry path");
+            }
+            MemoWriteError::Io(error) => panic!("unexpected io error: {error}"),
+        }
+        assert_eq!(
+            *validation_count
+                .lock()
+                .expect("validation count mutex should not be poisoned"),
+            2
+        );
+        assert_eq!(
+            *replace_attempts
+                .lock()
+                .expect("replace attempts mutex should not be poisoned"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_atomic_replace_retryは非retryエラーを即時返す() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let slept_delays = Arc::new(Mutex::new(Vec::new()));
+
+        let error = replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &always_ok_before_rename,
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    async move {
+                        *replace_attempts
+                            .lock()
+                            .expect("replace attempts mutex should not be poisoned") += 1;
+                        Err(io::Error::from_raw_os_error(12345))
+                    }
+                }
+            },
+            {
+                let slept_delays = Arc::clone(&slept_delays);
+                move |delay_ms| {
+                    let slept_delays = Arc::clone(&slept_delays);
+                    async move {
+                        slept_delays
+                            .lock()
+                            .expect("slept delays mutex should not be poisoned")
+                            .push(delay_ms);
+                    }
+                }
+            },
+        )
+        .await
+        .expect_err("non-retryable error should fail immediately");
+
+        match error {
+            MemoWriteError::Io(error) => {
+                assert_eq!(error.raw_os_error(), Some(12345));
+            }
+            MemoWriteError::BeforeRename(error) => {
+                panic!("unexpected before_rename error: {}", error.user_message());
+            }
+        }
+        assert_eq!(
+            *replace_attempts
+                .lock()
+                .expect("replace attempts mutex should not be poisoned"),
+            1
+        );
+        assert!(
+            slept_delays
+                .lock()
+                .expect("slept delays mutex should not be poisoned")
+                .is_empty(),
+            "non-retryable error should not sleep"
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_atomic_replace_retryは上限までretryして最後のエラーを返す() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let slept_delays = Arc::new(Mutex::new(Vec::new()));
+
+        let error = replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &always_ok_before_rename,
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    async move {
+                        *replace_attempts
+                            .lock()
+                            .expect("replace attempts mutex should not be poisoned") += 1;
+                        Err(io::Error::from_raw_os_error(WINDOWS_ERROR_LOCK_VIOLATION))
+                    }
+                }
+            },
+            {
+                let slept_delays = Arc::clone(&slept_delays);
+                move |delay_ms| {
+                    let slept_delays = Arc::clone(&slept_delays);
+                    async move {
+                        slept_delays
+                            .lock()
+                            .expect("slept delays mutex should not be poisoned")
+                            .push(delay_ms);
+                    }
+                }
+            },
+        )
+        .await
+        .expect_err("retry exhaustion should return the final error");
+
+        match error {
+            MemoWriteError::Io(error) => {
+                assert_eq!(error.raw_os_error(), Some(WINDOWS_ERROR_LOCK_VIOLATION));
+            }
+            MemoWriteError::BeforeRename(error) => {
+                panic!("unexpected before_rename error: {}", error.user_message());
+            }
+        }
+        assert_eq!(
+            *replace_attempts
+                .lock()
+                .expect("replace attempts mutex should not be poisoned"),
+            WINDOWS_REPLACE_RETRY_DELAYS_MS.len() + 1
+        );
+        assert_eq!(
+            *slept_delays
+                .lock()
+                .expect("slept delays mutex should not be poisoned"),
+            WINDOWS_REPLACE_RETRY_DELAYS_MS
+        );
+    }
+
+    #[test]
+    fn file_name_for_loggingは制御文字をescapeする() {
+        let path = PathBuf::from("memo\nname.md");
+
+        let name = file_name_for_logging(&path);
+
+        assert_eq!(name, "memo\\nname.md");
+    }
 
     #[tokio::test]
     async fn write_atomicはtmpを書いてからrenameする() {
@@ -576,6 +1158,199 @@ mod tests {
                 .expect("observed mode mutex should not be poisoned")
                 .expect("tmp mode should be observed"),
             0o600
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_atomicはwindowsでreplace完了までtmpの外部書き込みを拒否する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let observed_error = Arc::new(Mutex::new(None));
+        let observed_error_for_check = Arc::clone(&observed_error);
+
+        TokioMemoFs
+            .write_atomic(&path, b"secret", &move |_, tmp_path| {
+                let observed_error_for_check = Arc::clone(&observed_error_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                before_rename_future(async move {
+                    let error = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&tmp_path)
+                        .await
+                        .expect_err("tmp should reject external write open while protected");
+                    *observed_error_for_check
+                        .lock()
+                        .expect("observed error mutex should not be poisoned") = Some(error.kind());
+                    Ok(())
+                })
+            })
+            .await
+            .expect("atomic write should succeed");
+
+        assert!(
+            matches!(
+                observed_error
+                    .lock()
+                    .expect("observed error mutex should not be poisoned")
+                    .expect("write-open error should be observed"),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::Other
+            ),
+            "Windows should reject concurrent tmp write open while memo save owns the handle"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sync_parent_dir_requiredはwindowsディレクトリをsyncできる() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+
+        sync_parent_dir_required(workspace.path())
+            .await
+            .expect("Windows parent directory sync should succeed for a normal directory");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_atomicはwindowsで成功後のtmp_path差し替えファイルを削除しない() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let observed_tmp_path = Arc::new(Mutex::new(None));
+        let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path);
+
+        TokioMemoFs
+            .write_atomic(&path, b"trusted", &move |_, tmp_path| {
+                let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path_for_check);
+                let tmp_path = tmp_path.to_path_buf();
+                before_rename_future(async move {
+                    let swapped_path = tmp_path.with_extension("tmp.swapped");
+                    std::fs::rename(&tmp_path, &swapped_path)
+                        .expect("delete-shared tmp path should be swappable before rename");
+                    std::fs::write(&tmp_path, b"attacker")
+                        .expect("attacker replacement tmp should be writable");
+                    *observed_tmp_path_for_check
+                        .lock()
+                        .expect("observed tmp path mutex should not be poisoned") = Some(tmp_path);
+                    Ok(())
+                })
+            })
+            .await
+            .expect("atomic write should succeed with the held tmp handle");
+
+        let tmp_path = observed_tmp_path
+            .lock()
+            .expect("observed tmp path mutex should not be poisoned")
+            .clone()
+            .expect("tmp path should be observed");
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"trusted"
+        );
+        assert_eq!(
+            tokio::fs::read(&tmp_path)
+                .await
+                .expect("attacker tmp should not be deleted after successful replace"),
+            b"attacker"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_atomic_replace_retryはtmp_path_swap後も保持handleの内容を置換する() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let path = workspace.path().join("memo.md");
+        let tmp_path = workspace.path().join("memo.md.tmp");
+        let swapped_path = workspace.path().join("memo.md.swapped");
+        tokio::fs::write(&path, b"old")
+            .await
+            .expect("existing memo should be written");
+
+        let tmp_file = Arc::new({
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            configure_windows_atomic_tmp_options(&mut options);
+            let mut file = options
+                .open(&tmp_path)
+                .await
+                .expect("protected tmp should be created");
+            file.write_all(b"trusted")
+                .await
+                .expect("trusted tmp content should be written");
+            file.flush().await.expect("tmp content should be flushed");
+            file.sync_data()
+                .await
+                .expect("tmp content should be synced");
+            file
+        });
+        let replace_attempts = Arc::new(Mutex::new(0));
+        let validation_count = Arc::new(Mutex::new(0));
+
+        replace_with_retry_and_revalidation(
+            &tmp_path,
+            &path,
+            &{
+                let validation_count = Arc::clone(&validation_count);
+                let tmp_path = tmp_path.clone();
+                let swapped_path = swapped_path.clone();
+                move |_, _| {
+                    let validation_count = Arc::clone(&validation_count);
+                    let tmp_path = tmp_path.clone();
+                    let swapped_path = swapped_path.clone();
+                    before_rename_future(async move {
+                        let mut count = validation_count
+                            .lock()
+                            .expect("validation count mutex should not be poisoned");
+                        *count += 1;
+                        if *count == 2 {
+                            std::fs::rename(&tmp_path, &swapped_path)
+                                .expect("delete-shared tmp path should be swappable");
+                            std::fs::write(&tmp_path, b"attacker")
+                                .expect("attacker replacement tmp should be writable");
+                        }
+                        Ok(())
+                    })
+                }
+            },
+            {
+                let replace_attempts = Arc::clone(&replace_attempts);
+                let tmp_file = Arc::clone(&tmp_file);
+                let path = path.clone();
+                move || {
+                    let replace_attempts = Arc::clone(&replace_attempts);
+                    let tmp_file = Arc::clone(&tmp_file);
+                    let path = path.clone();
+                    async move {
+                        let attempt = {
+                            let mut attempts = replace_attempts
+                                .lock()
+                                .expect("replace attempts mutex should not be poisoned");
+                            *attempts += 1;
+                            *attempts
+                        };
+                        if attempt == 1 {
+                            Err(io::Error::from_raw_os_error(
+                                WINDOWS_ERROR_SHARING_VIOLATION,
+                            ))
+                        } else {
+                            move_open_tmp_replace_once(tmp_file.as_ref(), &path).await
+                        }
+                    }
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect("retry should replace using the held tmp handle");
+
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("memo should be read"),
+            b"trusted"
+        );
+        assert_eq!(
+            tokio::fs::read(&tmp_path)
+                .await
+                .expect("attacker tmp should remain at original tmp path"),
+            b"attacker"
         );
     }
 
