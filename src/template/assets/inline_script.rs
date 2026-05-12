@@ -249,6 +249,7 @@ mod tests {
     }
 
     fn static_identifier_name(node: Node<'_>, source: &str) -> Option<String> {
+        let node = unwrap_parenthesized_expression(node);
         if node.kind() == "identifier" {
             return decode_js_identifier(node_text(node, source));
         }
@@ -695,6 +696,36 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはparenthesized_mutator_receiverを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"(Object).assign(target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Object)["assign"](target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(Object).defineProperty(target, "innerHTML", { value: unsafeHtml });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(Object)["defineProperties"](target, { innerHTML: { value: unsafeHtml } });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Reflect).set(target, "innerHTML", unsafeHtml);"#).len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはdynamic_computed_api_propertyをsink扱いしない() {
         assert_eq!(
             inner_html_sinks(r#"Object[assign](target, { innerHTML: unsafeHtml });"#).len(),
@@ -711,6 +742,14 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"(Object[assign])(target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Object)[assign](target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(receiver).assign(target, { innerHTML: unsafeHtml });"#).len(),
             0
         );
     }
