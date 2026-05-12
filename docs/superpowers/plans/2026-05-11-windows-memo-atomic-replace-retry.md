@@ -138,16 +138,17 @@ Expected: `src/server/files/memo_fs.rs` に failing tests が残っている。�
 **Files:**
 - Modify: `src/server/files/memo_fs.rs`
 
-- [ ] **Step 1: Windows error code と retry delay 定数を追加する**
+- [ ] **Step 1: Windows error code 定数を追加する**
 
 `const ATOMIC_TMP_ATTEMPTS: u8 = 8;` の直後に次を追加する。`ERROR_ACCESS_DENIED` などの windows-sys 定数 import は不要にし、Linux test でも同じ helper を compile できるよう raw code を明示する。
 
 ```rust
+#[cfg(any(test, windows))]
 const WINDOWS_ERROR_ACCESS_DENIED: i32 = 5;
+#[cfg(any(test, windows))]
 const WINDOWS_ERROR_SHARING_VIOLATION: i32 = 32;
+#[cfg(any(test, windows))]
 const WINDOWS_ERROR_LOCK_VIOLATION: i32 = 33;
-#[cfg(windows)]
-const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 ```
 
 - [ ] **Step 2: retry 判定 helper を追加する**
@@ -155,6 +156,7 @@ const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
 `cleanup_tmp_best_effort` の後、`#[cfg(not(windows))] async fn atomic_replace` の前に次を追加する。
 
 ```rust
+#[cfg(any(test, windows))]
 fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -172,25 +174,23 @@ fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
 `is_retryable_windows_replace_error` の直後に次を追加する。
 
 ```rust
+#[cfg(any(test, windows))]
 fn map_atomic_replace_join_error(error: tokio::task::JoinError) -> io::Error {
     if error.is_panic() {
         tracing::error!(
-            "[markdown-view] メモatomic replace blocking taskがpanicしました: {}",
-            error
+            "[markdown-view] メモatomic replace blocking taskがpanicしました"
         );
-        io::Error::other(format!("memo atomic replace task panicked: {error}"))
+        io::Error::other("memo atomic replace task panicked")
     } else if error.is_cancelled() {
         tracing::warn!(
-            "[markdown-view] メモatomic replace blocking taskがcancelledされました: {}",
-            error
+            "[markdown-view] メモatomic replace blocking taskがcancelledされました"
         );
-        io::Error::other(format!("memo atomic replace task cancelled: {error}"))
+        io::Error::other("memo atomic replace task cancelled")
     } else {
         tracing::warn!(
-            "[markdown-view] メモatomic replace blocking taskのjoinに失敗しました: {}",
-            error
+            "[markdown-view] メモatomic replace blocking taskのjoinに失敗しました"
         );
-        io::Error::other(format!("memo atomic replace task failed: {error}"))
+        io::Error::other("memo atomic replace task failed")
     }
 }
 ```
@@ -225,6 +225,13 @@ Expected: tests and helper implementation are committed together.
 - Modify: `src/server/files/memo_fs.rs`
 
 - [ ] **Step 1: `move_file_ex_replace_once` helper を追加する**
+
+`const ATOMIC_TMP_ATTEMPTS: u8 = 8;` 周辺に retry delay 定数を追加する。
+
+```rust
+#[cfg(windows)]
+const WINDOWS_REPLACE_RETRY_DELAYS_MS: [u64; 3] = [10, 25, 50];
+```
 
 既存の `#[cfg(windows)] async fn atomic_replace` の前に次を追加する。
 
@@ -343,6 +350,8 @@ rg -n "143|Windows メモ原子保存|Windows メモ atomic|MoveFileExW|atomic r
 ```
 
 Expected: `docs/todo/TODO.md` の High Priority に `Windows メモ原子保存のエラー処理と retry 条件を細分化する` が見つかる。
+
+実行後の現在状態: 対象 item は High Priority から Done Summary へ移動済み。
 
 - [ ] **Step 2: TODO の open item を Done Summary へ移す**
 

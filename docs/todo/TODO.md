@@ -9,13 +9,6 @@
 
 放置するとセキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目。
 
-- [ ] Windows メモ原子保存のエラー処理と retry 条件を細分化する
-  - ファイル: `src/server/files/memo_fs.rs`
-  - 現状: Windows の `MoveFileExW` 呼び出しは `spawn_blocking` 経由だが、`JoinError` は `ErrorKind::Other` に潰している。また tmp 作成 retry は `AlreadyExists` のみを対象にしており、Windows の共有違反・削除保留・ウイルス対策ソフトによる一時ロックを retry しない
-  - 対応: `JoinError::is_panic()` / `is_cancelled()` を分けて `tracing::error!` に残す。Windows では `raw_os_error()` で sharing violation / delete pending 相当を判定し、短い retry 対象に含める。Windows CI または `cargo check --target x86_64-pc-windows-gnu` が通る環境で検証する
-  - 昇格理由: メモ保存はデータ安全性に関わり、失敗理由を潰すと復旧判断が弱くなるため High とする
-  - 由来: メモ原子保存 PR 3rd レビュー (2026-04-30)
-
 ## Medium Priority
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
@@ -57,6 +50,8 @@
 
 ## Done Summary
 
+- [x] Windows メモ原子保存のエラー処理と retry 条件を細分化する
+  - 完了根拠: `MoveFileExW` の `JoinError` を panic / cancelled / その他 join error に分類してログと `io::Error` message に残す構成にした。Windows の `ERROR_ACCESS_DENIED`、`ERROR_SHARING_VIOLATION`、`ERROR_LOCK_VIOLATION` だけを一時 lock 系として扱い、初回失敗後に `10ms`、`25ms`、`50ms` の最大3回だけ同じ tmp/final path で retry する。retry は `MoveFileExW` 呼び出しだけに限定し、tmp 作成、本文書き込み、rename 前検証、cleanup、親ディレクトリ sync、HTTP API 契約は変更していない。retry 対象判定と JoinError 分類は unit test で固定した。Windows target check は `x86_64-w64-mingw32-gcc` 不足により完走できなかったため、Windows 実機/CI での確認は残リスクとして扱う
 - [x] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
   - 完了根拠: watcher thread panic handler に `init_tx` を渡し、初期化結果送信前に panic した場合は `WatchError::thread_panic(...)` を `InitResult` の `Err` として返す構成にした。同じ panic detail は既存どおり内部 error channel への `WatchEvent::Error` 補助通知にも流し、health は `Failed(ThreadPanic)` に latch する。init 失敗時は `Watcher::spawn()` が `Err` を返すため、公開 receiver や WebSocket/client への配送は保証しない。`init_tx` が `None` の稼働後 panic と shutdown 中 panic は init result へ触れず、従来どおり health failed と error event で扱う。String payload と `anyhow::Error` payload の detail が init result と error event に保持されることを unit test で固定した。HTTP API、UI、WebSocket payload、shutdown API、watcher event shape は変更していない
 - [x] watcher の `try_send` で `WatchEvent::Error` を `FileChanged` と同列に破棄しない
