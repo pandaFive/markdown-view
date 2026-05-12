@@ -137,6 +137,12 @@ mod tests {
     }
 
     fn contains_inner_html_object_key(node: Node<'_>, source: &str) -> bool {
+        if node.kind() == "shorthand_property_identifier"
+            && static_property_name(node, source).as_deref() == Some("innerHTML")
+        {
+            return true;
+        }
+
         if node.kind() == "pair"
             && node
                 .child_by_field_name("key")
@@ -183,7 +189,9 @@ mod tests {
 
     fn static_property_name(node: Node<'_>, source: &str) -> Option<String> {
         match node.kind() {
-            "identifier" | "property_identifier" => decode_js_identifier(node_text(node, source)),
+            "identifier" | "property_identifier" | "shorthand_property_identifier" => {
+                decode_js_identifier(node_text(node, source))
+            }
             "computed_property_name" => node
                 .named_child(0)
                 .and_then(|property| static_property_name(property, source)),
@@ -327,6 +335,18 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"Object.assign(target, { ["inner\x48TML"]: unsafeHtml });"#).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはshorthand_object_propertyを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { innerHTML });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.defineProperties(target, { innerHTML });"#).len(),
             1
         );
     }

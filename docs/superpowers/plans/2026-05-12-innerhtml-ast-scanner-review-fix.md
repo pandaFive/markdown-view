@@ -14,11 +14,14 @@
    - escaped computed object key: `Object.assign(target, { ["inner\\x48TML"]: unsafeHtml });`
    - defineProperties: `Object["defineProperties"](target, { innerHTML: { value: unsafeHtml } });`
    - legacy octal string: `target["inner\\110TML"] = unsafeHtml;`
+   - shorthand object property: `Object.assign(target, { innerHTML });`
+   - shorthand defineProperties key: `Object.defineProperties(target, { innerHTML });`
 2. Tree-sitter JavaScript parser を dev-dependency として追加する。
 3. scanner を実装する。
    - parse tree に error recovery があれば失敗させる。
    - assignment / augmented assignment LHS subtree を走査する。
    - identifier、string/template literal、computed property name の property 名を正規化する。
+   - shorthand property identifier を `innerHTML` object key として扱う。
    - Unicode escape と legacy octal escape を decode する。
    - `Object.assign`、`Reflect.set`、`Object.defineProperty`、`Object.defineProperties` の computed member call を dot member call と同じ名前へ正規化する。
 4. bundled inline JS の `innerHTML` sink allowlist をテストで固定する。

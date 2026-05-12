@@ -18,9 +18,10 @@ scanner は任意 object の `innerHTML` 書き込み候補を保守的に検出
 - Unicode escape 付き identifier property の `target.\u0069nnerHTML`
 - destructuring assignment LHS 内の `({ html: target.innerHTML } = payload)`
 - `Object.assign(target, { innerHTML: value })`、`Object.assign(target, { ["innerHTML"]: value })`、`Object["assign"](...)`
+- `Object.assign(target, { innerHTML })` の shorthand object property
 - `Reflect.set(target, "innerHTML", value)` と `Reflect["set"](target, "innerHTML", value)`
 - `Object.defineProperty(target, "innerHTML", descriptor)` と `Object["defineProperty"](...)`
-- `Object.defineProperties(target, { innerHTML: descriptor })` と `Object["defineProperties"](...)`
+- `Object.defineProperties(target, { innerHTML: descriptor })`、`Object.defineProperties(target, { innerHTML })`、`Object["defineProperties"](...)`
 
 ## Residual Risk
 
