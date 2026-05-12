@@ -164,8 +164,9 @@ mod tests {
 
     fn normalized_member_name(node: Node<'_>, source: &str) -> Option<String> {
         let object = node.child_by_field_name("object")?;
+        let object = static_identifier_name(object, source)?;
         let property = member_property_name(node, source)?;
-        Some(format!("{}.{property}", node_text(object, source)))
+        Some(format!("{object}.{property}"))
     }
 
     fn member_property_name(node: Node<'_>, source: &str) -> Option<String> {
@@ -198,6 +199,13 @@ mod tests {
             "string" | "template_string" => decode_js_static_string(node_text(node, source)),
             _ => None,
         }
+    }
+
+    fn static_identifier_name(node: Node<'_>, source: &str) -> Option<String> {
+        if node.kind() == "identifier" {
+            return decode_js_identifier(node_text(node, source));
+        }
+        None
     }
 
     fn decode_js_identifier(raw: &str) -> Option<String> {
@@ -401,6 +409,25 @@ mod tests {
                 r#"Object["defineProperty"](target, "innerHTML", { value: unsafeHtml });"#
             )
             .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはunicode_escape付きcallee_objectの危険api呼び出しを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"\u004fbject.assign(target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"\u004fbject["defineProperties"](target, { innerHTML: { value: unsafeHtml } });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"\u0052eflect.set(target, "innerHTML", unsafeHtml);"#).len(),
             1
         );
     }
