@@ -115,16 +115,16 @@ mod tests {
         match normalized_member_name(function, source).as_deref() {
             Some("Object.assign") => {
                 let mut cursor = arguments.walk();
-                for argument in arguments.named_children(&mut cursor) {
-                    if contains_inner_html_object_key(argument, source) {
+                for argument in arguments.named_children(&mut cursor).skip(1) {
+                    if contains_top_level_inner_html_object_key(argument, source) {
                         return true;
                     }
                 }
                 false
             }
-            Some("Object.defineProperties") => arguments
-                .named_child(1)
-                .is_some_and(|descriptor| contains_inner_html_object_key(descriptor, source)),
+            Some("Object.defineProperties") => arguments.named_child(1).is_some_and(|descriptor| {
+                contains_top_level_inner_html_object_key(descriptor, source)
+            }),
             Some("Reflect.set" | "Object.defineProperty") => {
                 arguments
                     .named_child(1)
@@ -136,40 +136,38 @@ mod tests {
         }
     }
 
-    fn contains_inner_html_object_key(node: Node<'_>, source: &str) -> bool {
-        if node.kind() == "shorthand_property_identifier"
-            && static_property_name(node, source).as_deref() == Some("innerHTML")
-        {
-            return true;
-        }
-
-        if node.kind() == "pair"
-            && node
-                .child_by_field_name("key")
-                .and_then(|key| static_property_name(key, source))
-                .as_deref()
-                == Some("innerHTML")
-        {
-            return true;
-        }
-
-        if node.kind() == "method_definition"
-            && node
-                .child_by_field_name("name")
-                .and_then(|name| static_property_name(name, source))
-                .as_deref()
-                == Some("innerHTML")
-        {
-            return true;
+    fn contains_top_level_inner_html_object_key(node: Node<'_>, source: &str) -> bool {
+        if node.kind() != "object" {
+            return false;
         }
 
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if contains_inner_html_object_key(child, source) {
+        for property in node.named_children(&mut cursor) {
+            if object_property_key_name(property, source).as_deref() == Some("innerHTML") {
                 return true;
             }
         }
         false
+    }
+
+    fn object_property_key_name(node: Node<'_>, source: &str) -> Option<String> {
+        if node.kind() == "shorthand_property_identifier" {
+            return static_property_name(node, source);
+        }
+
+        if node.kind() == "pair" {
+            return node
+                .child_by_field_name("key")
+                .and_then(|key| static_property_name(key, source));
+        }
+
+        if node.kind() == "method_definition" {
+            return node
+                .child_by_field_name("name")
+                .and_then(|name| static_property_name(name, source));
+        }
+
+        None
     }
 
     fn normalized_member_name(node: Node<'_>, source: &str) -> Option<String> {
@@ -396,6 +394,26 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerは危険apiのnested_object_keyをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { options: { innerHTML: unsafeHtml } });"#)
+                .len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperties(target, { options: { innerHTML: { value: unsafeHtml } } });"#
+            )
+            .len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign({ innerHTML: safeDefault }, source);"#).len(),
+            0
         );
     }
 
