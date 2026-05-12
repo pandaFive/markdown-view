@@ -17,13 +17,13 @@ scanner は任意 object の `innerHTML` 書き込み候補を保守的に検出
 - assignment / augmented assignment LHS の subtree 内にある `target.innerHTML` / `target["innerHTML"]` / `target["inner\x48TML"]` / `target["inner\u0048TML"]` / `target["inner\110TML"]`
 - Unicode escape 付き identifier property の `target.\u0069nnerHTML`
 - destructuring assignment LHS 内の `({ html: target.innerHTML } = payload)`
-- `Object.assign(target, { innerHTML: value })`、`Object.assign(target, { ["innerHTML"]: value })`、`Object["assign"](...)` の source object top-level property
+- `Object.assign(target, { innerHTML: value })`、`Object.assign(target, ({ innerHTML: value }))`、`Object.assign(target, { ["innerHTML"]: value })`、`Object["assign"](...)` の source object top-level property
 - Unicode escape 付き callee object の `\u004fbject.assign(...)`、`\u004fbject["defineProperties"](...)`、`\u0052eflect.set(...)`
 - `Object.assign(target, { innerHTML })` の top-level shorthand object property
 - `Object.assign(target, { innerHTML() { ... } })` と accessor / computed method key の top-level `innerHTML` object property
 - `Reflect.set(target, "innerHTML", value)` と `Reflect["set"](target, "innerHTML", value)`
 - `Object.defineProperty(target, "innerHTML", descriptor)` と `Object["defineProperty"](...)`
-- `Object.defineProperties(target, { innerHTML: descriptor })`、`Object.defineProperties(target, { innerHTML })`、`Object["defineProperties"](...)` の descriptor object top-level property
+- `Object.defineProperties(target, { innerHTML: descriptor })`、`Object.defineProperties(target, ({ innerHTML: descriptor }))`、`Object.defineProperties(target, { innerHTML })`、`Object["defineProperties"](...)` の descriptor object top-level property
 
 ## Residual Risk
 

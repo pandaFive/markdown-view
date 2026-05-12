@@ -142,6 +142,7 @@ mod tests {
     }
 
     fn contains_top_level_inner_html_object_key(node: Node<'_>, source: &str) -> bool {
+        let node = unwrap_parenthesized_expression(node);
         if node.kind() != "object" {
             return false;
         }
@@ -153,6 +154,16 @@ mod tests {
             }
         }
         false
+    }
+
+    fn unwrap_parenthesized_expression(mut node: Node<'_>) -> Node<'_> {
+        while node.kind() == "parenthesized_expression" {
+            let Some(inner) = node.named_child(0) else {
+                break;
+            };
+            node = inner;
+        }
+        node
     }
 
     fn object_property_key_name(node: Node<'_>, source: &str) -> Option<String> {
@@ -375,6 +386,25 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはparenthesized_object_keyを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, ({ innerHTML: unsafeHtml }));"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, (({ innerHTML: unsafeHtml })));"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperties(target, ({ innerHTML: { value: unsafeHtml } }));"#
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはdynamic_computed_object_keyをsink扱いしない() {
         assert_eq!(
             inner_html_sinks(r#"Object.assign(target, { [innerHTML]: unsafeHtml });"#).len(),
@@ -385,6 +415,19 @@ mod tests {
                 r#"Object.defineProperties(target, { [innerHTML]: { value: unsafeHtml } });"#
             )
             .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはparenthesized_object内の非top_levelとdynamic_keyをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, ({ options: { innerHTML: unsafeHtml } }));"#)
+                .len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, ({ [innerHTML]: unsafeHtml }));"#).len(),
             0
         );
     }
