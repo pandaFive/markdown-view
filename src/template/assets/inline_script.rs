@@ -152,6 +152,13 @@ mod tests {
             if object_property_key_name(property, source).as_deref() == Some("innerHTML") {
                 return true;
             }
+            if property.kind() == "spread_element"
+                && property
+                    .named_child(0)
+                    .is_some_and(|spread| contains_top_level_inner_html_object_key(spread, source))
+            {
+                return true;
+            }
         }
         false
     }
@@ -187,6 +194,7 @@ mod tests {
     }
 
     fn normalized_member_name(node: Node<'_>, source: &str) -> Option<String> {
+        let node = unwrap_parenthesized_expression(node);
         let object = node.child_by_field_name("object")?;
         let object = static_identifier_name(object, source)?;
         let property = member_property_name(node, source)?;
@@ -406,6 +414,31 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはstatic_object_spread内のinnerhtml_keyを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { ...{ innerHTML: unsafeHtml } });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { ...({ ["innerHTML"]: unsafeHtml }) });"#)
+                .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { ...{ ...{ innerHTML: unsafeHtml } } });"#)
+                .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperties(target, { ...{ innerHTML: { value: unsafeHtml } } });"#
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはdynamic_computed_object_keyをsink扱いしない() {
         assert_eq!(
             inner_html_sinks(r#"Object.assign(target, { [innerHTML]: unsafeHtml });"#).len(),
@@ -429,6 +462,29 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"Object.assign(target, ({ [innerHTML]: unsafeHtml }));"#).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはdynamic_object_spreadをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { ...source });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { ...makeObject() });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.assign(target, { ...{ options: { innerHTML: unsafeHtml } } });"#
+            )
+            .len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign({ ...{ innerHTML: safeDefault } }, source);"#).len(),
             0
         );
     }
@@ -609,6 +665,36 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはparenthesized_mutating_calleeを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"(Object.assign)(target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"((Object["assign"]))(target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Reflect.set)(target, "innerHTML", unsafeHtml);"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(Object.defineProperty)(target, "innerHTML", { value: unsafeHtml });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(Object.defineProperties)(target, { innerHTML: { value: unsafeHtml } });"#
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはdynamic_computed_api_propertyをsink扱いしない() {
         assert_eq!(
             inner_html_sinks(r#"Object[assign](target, { innerHTML: unsafeHtml });"#).len(),
@@ -621,6 +707,10 @@ mod tests {
         assert_eq!(
             inner_html_sinks(r#"Object.defineProperty(target, innerHTML, { value: unsafeHtml });"#)
                 .len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Object[assign])(target, { innerHTML: unsafeHtml });"#).len(),
             0
         );
     }
