@@ -173,6 +173,29 @@ mod tests {
         node
     }
 
+    fn unwrap_static_callee_expression(mut node: Node<'_>) -> Node<'_> {
+        loop {
+            node = unwrap_parenthesized_expression(node);
+            if node.kind() != "sequence_expression" {
+                return node;
+            }
+
+            let Some(last) = last_named_child(node) else {
+                return node;
+            };
+            node = last;
+        }
+    }
+
+    fn last_named_child(node: Node<'_>) -> Option<Node<'_>> {
+        let mut cursor = node.walk();
+        let mut last = None;
+        for child in node.named_children(&mut cursor) {
+            last = Some(child);
+        }
+        last
+    }
+
     fn object_property_key_name(node: Node<'_>, source: &str) -> Option<String> {
         if node.kind() == "shorthand_property_identifier" {
             return static_identifier_like_property_name(node, source);
@@ -194,7 +217,7 @@ mod tests {
     }
 
     fn normalized_member_name(node: Node<'_>, source: &str) -> Option<String> {
-        let node = unwrap_parenthesized_expression(node);
+        let node = unwrap_static_callee_expression(node);
         let object = node.child_by_field_name("object")?;
         let object = static_identifier_name(object, source)?;
         let property = member_property_name(node, source)?;
@@ -696,6 +719,42 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはsequence_wrapped_mutating_calleeを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"(0, Object.assign)(target, { innerHTML: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"((0, Object["assign"]))(target, { innerHTML: unsafeHtml });"#)
+                .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(0, Reflect.set)(target, "innerHTML", unsafeHtml);"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(0, Object.defineProperty)(target, "innerHTML", { value: unsafeHtml });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(0, Object["defineProperties"])(target, { innerHTML: { value: unsafeHtml } });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(ignored, (Object).assign)(target, { innerHTML: unsafeHtml });"#)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはparenthesized_mutator_receiverを検出する() {
         assert_eq!(
             inner_html_sinks(r#"(Object).assign(target, { innerHTML: unsafeHtml });"#).len(),
@@ -750,6 +809,29 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"(receiver).assign(target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはdynamic_sequence_wrapped_mutating_calleeをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"(0, Object[assign])(target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(0, receiver.assign)(target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"(Object.assign, other)(target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"(Object.assign, Object[assign])(target, { innerHTML: unsafeHtml });"#
+            )
+            .len(),
             0
         );
     }
