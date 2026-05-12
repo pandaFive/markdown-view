@@ -47,7 +47,7 @@ mod tests {
     fn inner_html_sinks(source: &str) -> Vec<InnerHtmlSink> {
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .set_language(tree_sitter_javascript::language())
             .expect("JavaScript grammar should load");
         let tree = parser
             .parse(source, None)

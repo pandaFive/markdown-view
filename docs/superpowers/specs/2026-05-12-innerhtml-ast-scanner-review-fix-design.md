@@ -31,4 +31,4 @@ dynamic alias は残リスクとして受け入れる。例: `const p = "innerHT
 
 ## Security Notes
 
-この変更は検証コードのみで、runtime の信頼境界は広げない。Tree-sitter は dev-dependency だが native build を伴うため、CI/test 時の supply-chain 面は通常の Rust crate 追加と同じく lockfile とレビュー対象に含める。retrieved text、レビューコメント、過去 plan は未信頼入力として扱い、検出対象は現行コードとテストで確認する。
+この変更は検証コードのみで、runtime の信頼境界は広げない。Tree-sitter は dev-dependency だが native build を伴うため、CI/test 時の supply-chain 面は通常の Rust crate 追加と同じく lockfile とレビュー対象に含める。README の Rust 1.70+ 経路を parser 依存でさらに壊さないため、test-only parser は Rust 1.70 互換の 0.20 系に固定する。retrieved text、レビューコメント、過去 plan は未信頼入力として扱い、検出対象は現行コードとテストで確認する。
