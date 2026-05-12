@@ -303,7 +303,7 @@ async fn sync_parent_dir_best_effort(parent: &Path) {
 #[cfg(windows)]
 async fn sync_parent_dir_required(parent: &Path) -> io::Result<()> {
     let mut options = tokio::fs::OpenOptions::new();
-    options.read(true);
+    options.write(true);
     options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     let file = options.open(parent).await?;
