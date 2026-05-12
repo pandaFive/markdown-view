@@ -27,7 +27,7 @@ scanner は任意 object の `innerHTML` 書き込み候補を保守的に検出
 
 ## Residual Risk
 
-dynamic alias は残リスクとして受け入れる。例: `const p = "innerHTML"; target[p] = html` は test-only scanner では検出しない。また値の由来は追跡しない。許可リスト更新時は、検出された sink の値が `SanitizedHtml` 由来、または空文字 clear であることを人間レビューで確認する。
+dynamic alias と dynamic computed key は残リスクとして受け入れる。例: `const p = "innerHTML"; target[p] = html`、`target[innerHTML] = html`、`Object.assign(target, { [innerHTML]: html })` は test-only scanner では検出しない。また値の由来は追跡しない。許可リスト更新時は、検出された sink の値が `SanitizedHtml` 由来、または空文字 clear であることを人間レビューで確認する。
 
 ## Security Notes
 

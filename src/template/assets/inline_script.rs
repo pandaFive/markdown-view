@@ -97,6 +97,11 @@ mod tests {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
+            if node.kind() == "subscript_expression"
+                && node.child_by_field_name("index") == Some(child)
+            {
+                continue;
+            }
             if contains_inner_html_member_access(child, source) {
                 return true;
             }
@@ -128,7 +133,7 @@ mod tests {
             Some("Reflect.set" | "Object.defineProperty") => {
                 arguments
                     .named_child(1)
-                    .and_then(|property| static_property_name(property, source))
+                    .and_then(|property| static_computed_property_name(property, source))
                     .as_deref()
                     == Some("innerHTML")
             }
@@ -152,19 +157,19 @@ mod tests {
 
     fn object_property_key_name(node: Node<'_>, source: &str) -> Option<String> {
         if node.kind() == "shorthand_property_identifier" {
-            return static_property_name(node, source);
+            return static_identifier_like_property_name(node, source);
         }
 
         if node.kind() == "pair" {
             return node
                 .child_by_field_name("key")
-                .and_then(|key| static_property_name(key, source));
+                .and_then(|key| static_object_property_key_name(key, source));
         }
 
         if node.kind() == "method_definition" {
             return node
                 .child_by_field_name("name")
-                .and_then(|name| static_property_name(name, source));
+                .and_then(|name| static_object_property_key_name(name, source));
         }
 
         None
@@ -179,34 +184,48 @@ mod tests {
 
     fn member_property_name(node: Node<'_>, source: &str) -> Option<String> {
         if let Some(property) = node.child_by_field_name("property") {
-            return static_property_name(property, source);
+            return static_identifier_like_property_name(property, source);
         }
 
         if let Some(index) = node.child_by_field_name("index") {
-            return static_property_name(index, source);
+            return static_computed_property_name(index, source);
         }
 
         let mut cursor = node.walk();
         let mut property = None;
         for child in node.children(&mut cursor).filter(|child| child.is_named()) {
-            if let Some(name) = static_property_name(child, source) {
+            if let Some(name) = static_identifier_like_property_name(child, source) {
                 property = Some(name);
             }
         }
         property
     }
 
-    fn static_property_name(node: Node<'_>, source: &str) -> Option<String> {
+    fn static_identifier_like_property_name(node: Node<'_>, source: &str) -> Option<String> {
         match node.kind() {
             "identifier" | "property_identifier" | "shorthand_property_identifier" => {
                 decode_js_identifier(node_text(node, source))
             }
-            "computed_property_name" => node
-                .named_child(0)
-                .and_then(|property| static_property_name(property, source)),
             "string" | "template_string" => decode_js_static_string(node_text(node, source)),
             _ => None,
         }
+    }
+
+    fn static_computed_property_name(node: Node<'_>, source: &str) -> Option<String> {
+        match node.kind() {
+            "computed_property_name" => node
+                .named_child(0)
+                .and_then(|property| static_computed_property_name(property, source)),
+            "string" | "template_string" => decode_js_static_string(node_text(node, source)),
+            _ => None,
+        }
+    }
+
+    fn static_object_property_key_name(node: Node<'_>, source: &str) -> Option<String> {
+        if node.kind() == "computed_property_name" {
+            return static_computed_property_name(node, source);
+        }
+        static_identifier_like_property_name(node, source)
     }
 
     fn static_identifier_name(node: Node<'_>, source: &str) -> Option<String> {
@@ -356,6 +375,21 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはdynamic_computed_object_keyをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { [innerHTML]: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperties(target, { [innerHTML]: { value: unsafeHtml } });"#
+            )
+            .len(),
+            0
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはshorthand_object_propertyを検出する() {
         assert_eq!(
             inner_html_sinks(r#"Object.assign(target, { innerHTML });"#).len(),
@@ -453,6 +487,18 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはdynamic_computed_memberをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"target[innerHTML] = unsafeHtml;"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"target[other.innerHTML] = unsafeHtml;"#).len(),
+            0
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはcomputed_memberの危険api呼び出しを検出する() {
         assert_eq!(
             inner_html_sinks(r#"Object["assign"](target, { innerHTML: unsafeHtml });"#).len(),
@@ -468,6 +514,23 @@ mod tests {
             )
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはdynamic_computed_api_propertyをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"Object[assign](target, { innerHTML: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Reflect.set(target, innerHTML, unsafeHtml);"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.defineProperty(target, innerHTML, { value: unsafeHtml });"#)
+                .len(),
+            0
         );
     }
 
