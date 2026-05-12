@@ -223,6 +223,7 @@ mod tests {
     }
 
     fn static_computed_property_name(node: Node<'_>, source: &str) -> Option<String> {
+        let node = unwrap_parenthesized_expression(node);
         match node.kind() {
             "computed_property_name" => node
                 .named_child(0)
@@ -530,6 +531,37 @@ mod tests {
     }
 
     #[test]
+    fn innerhtml_scannerはparenthesized_computed_propertyを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"target[("innerHTML")] = unsafeHtml;"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"target[(("innerHTML"))] = unsafeHtml;"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Reflect.set(target, ("innerHTML"), unsafeHtml);"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperty(target, ("innerHTML"), { value: unsafeHtml });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { [("innerHTML")]: unsafeHtml });"#).len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { [("inner\x48TML")]: unsafeHtml });"#).len(),
+            1
+        );
+    }
+
+    #[test]
     fn innerhtml_scannerはdynamic_computed_memberをsink扱いしない() {
         assert_eq!(
             inner_html_sinks(r#"target[innerHTML] = unsafeHtml;"#).len(),
@@ -537,6 +569,22 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"target[other.innerHTML] = unsafeHtml;"#).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはparenthesized_dynamic_computed_propertyをsink扱いしない() {
+        assert_eq!(
+            inner_html_sinks(r#"target[(innerHTML)] = unsafeHtml;"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { [(innerHTML)]: unsafeHtml });"#).len(),
+            0
+        );
+        assert_eq!(
+            inner_html_sinks(r#"Reflect.set(target, (innerHTML), unsafeHtml);"#).len(),
             0
         );
     }
