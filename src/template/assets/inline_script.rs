@@ -153,6 +153,16 @@ mod tests {
             return true;
         }
 
+        if node.kind() == "method_definition"
+            && node
+                .child_by_field_name("name")
+                .and_then(|name| static_property_name(name, source))
+                .as_deref()
+                == Some("innerHTML")
+        {
+            return true;
+        }
+
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if contains_inner_html_object_key(child, source) {
@@ -355,6 +365,36 @@ mod tests {
         );
         assert_eq!(
             inner_html_sinks(r#"Object.defineProperties(target, { innerHTML });"#).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn innerhtml_scannerはmethod_style_object_propertyを検出する() {
+        assert_eq!(
+            inner_html_sinks(r#"Object.assign(target, { innerHTML() { return unsafeHtml; } });"#)
+                .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.assign(target, { get innerHTML() { return unsafeHtml; } });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.assign(target, { ["inner\x48TML"]() { return unsafeHtml; } });"#
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            inner_html_sinks(
+                r#"Object.defineProperties(target, { innerHTML() { return unsafeHtml; } });"#
+            )
+            .len(),
             1
         );
     }

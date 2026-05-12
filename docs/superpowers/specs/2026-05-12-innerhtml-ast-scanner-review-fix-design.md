@@ -20,6 +20,7 @@ scanner は任意 object の `innerHTML` 書き込み候補を保守的に検出
 - `Object.assign(target, { innerHTML: value })`、`Object.assign(target, { ["innerHTML"]: value })`、`Object["assign"](...)`
 - Unicode escape 付き callee object の `\u004fbject.assign(...)`、`\u004fbject["defineProperties"](...)`、`\u0052eflect.set(...)`
 - `Object.assign(target, { innerHTML })` の shorthand object property
+- `Object.assign(target, { innerHTML() { ... } })` と accessor / computed method key の `innerHTML` object property
 - `Reflect.set(target, "innerHTML", value)` と `Reflect["set"](target, "innerHTML", value)`
 - `Object.defineProperty(target, "innerHTML", descriptor)` と `Object["defineProperty"](...)`
 - `Object.defineProperties(target, { innerHTML: descriptor })`、`Object.defineProperties(target, { innerHTML })`、`Object["defineProperties"](...)`
