@@ -36,10 +36,60 @@ const MAX_SEARCH_RAW_QUERY_BYTES: usize = 4096;
 /// `create_router` 側へ集約する契約を型で表現する。
 struct RouteDefinitions(Router<Arc<AppState>>);
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SecuritySmokeRoute {
+    method: &'static str,
+    path: &'static str,
+}
+
+#[cfg(test)]
+fn security_smoke_routes() -> &'static [SecuritySmokeRoute] {
+    &[
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/",
+        },
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/api/content",
+        },
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/api/search?q=test",
+        },
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/api/memo",
+        },
+        SecuritySmokeRoute {
+            method: "PUT",
+            path: "/api/memo",
+        },
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/api/files",
+        },
+        SecuritySmokeRoute {
+            method: "GET",
+            path: "/ws",
+        },
+    ]
+}
+
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
-    let RouteDefinitions(routes) = build_routes();
+    let routes = build_routes();
+
+    apply_security_layers(routes, csp_header).with_state(state)
+}
+
+fn apply_security_layers(
+    route_definitions: RouteDefinitions,
+    csp_header: HeaderValue,
+) -> Router<Arc<AppState>> {
+    let RouteDefinitions(routes) = route_definitions;
 
     routes
         // `Router::layer` は呼び出し時点で存在する route にだけ適用される。
@@ -65,7 +115,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::http::header::CONTENT_SECURITY_POLICY,
             csp_header,
         ))
-        .with_state(state)
 }
 
 /// Host middleware 適用前の route 定義だけを集約する。
@@ -87,6 +136,67 @@ fn build_routes() -> RouteDefinitions {
             )
             .route("/api/files", get(api_files_handler)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_error_message(error: &ApiError) -> Option<&str> {
+        error.1["error"].as_str()
+    }
+
+    #[test]
+    fn test_security_smoke_routesは主要routeを列挙する() {
+        let routes = security_smoke_routes();
+        let actual: Vec<(&str, &str)> = routes
+            .iter()
+            .map(|route| (route.method, route.path))
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                ("GET", "/"),
+                ("GET", "/api/content"),
+                ("GET", "/api/search?q=test"),
+                ("GET", "/api/memo"),
+                ("PUT", "/api/memo"),
+                ("GET", "/api/files"),
+                ("GET", "/ws"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_search_query_from_uri_raw_query上限超過はdecode前に400で拒否する() {
+        let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
+        let uri: Uri = format!("/api/search?{query}x").parse().unwrap();
+
+        let error = search_query_from_uri(&uri).unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
+    }
+
+    #[test]
+    fn test_search_query_from_uri_percent_encoding不正は400で拒否する() {
+        let uri: Uri = "/api/search?q=%E0%A4%A".parse().unwrap();
+
+        let error = search_query_from_uri(&uri).unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
+    }
+
+    #[test]
+    fn test_search_query_from_uri_valid_queryを復元する() {
+        let uri: Uri = "/api/search?q=alpha%20note".parse().unwrap();
+
+        let query = search_query_from_uri(&uri).unwrap();
+
+        assert_eq!(query.q.as_deref(), Some("alpha note"));
+    }
 }
 
 /// クエリパラメータ
@@ -285,43 +395,4 @@ async fn ws_handler(
             .into_response();
     }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn api_error_message(error: &ApiError) -> Option<&str> {
-        error.1["error"].as_str()
-    }
-
-    #[test]
-    fn test_search_query_from_uri_raw_query上限超過はdecode前に400で拒否する() {
-        let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
-        let uri: Uri = format!("/api/search?{query}x").parse().unwrap();
-
-        let error = search_query_from_uri(&uri).unwrap_err();
-
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
-    }
-
-    #[test]
-    fn test_search_query_from_uri_percent_encoding不正は400で拒否する() {
-        let uri: Uri = "/api/search?q=%E0%A4%A".parse().unwrap();
-
-        let error = search_query_from_uri(&uri).unwrap_err();
-
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
-    }
-
-    #[test]
-    fn test_search_query_from_uri_valid_queryを復元する() {
-        let uri: Uri = "/api/search?q=alpha%20note".parse().unwrap();
-
-        let query = search_query_from_uri(&uri).unwrap();
-
-        assert_eq!(query.q.as_deref(), Some("alpha note"));
-    }
 }
