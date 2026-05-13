@@ -150,11 +150,6 @@ impl WatcherHealthState {
     }
 }
 
-/// 監視実行中ランタイム
-///
-/// 明示停止は `shutdown().await` が正規経路。
-/// `Drop` は停止要求と内部転送タスクの abort だけを行い、watcher thread の join は待たない。
-
 #[cfg(test)]
 mod tests {
     use super::*;

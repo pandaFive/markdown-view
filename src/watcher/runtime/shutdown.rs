@@ -203,10 +203,6 @@ pub(super) fn spawn_watch_event_merge_forwarder(
     MergeForwarderHandle { task, done_rx }
 }
 
-/// FileChanged を外部公開用 merged channel へbest-effort転送する。
-///
-/// 残容量1件は Error 用に予約し、FileChanged burst が watcher error の合流を
-
 #[cfg(test)]
 mod tests {
     use super::super::test_support::*;
