@@ -28,6 +28,7 @@ use crate::server::AppMode;
 pub use self::health::{WatcherFailureKind, WatcherHealth};
 pub(crate) use self::shutdown::WATCH_SHUTDOWN_TIMEOUT_SECS;
 
+#[must_use = "Watcher は明示的に shutdown().await すべき"]
 pub struct Watcher {
     runtime: Option<WatchRuntime>,
 }
