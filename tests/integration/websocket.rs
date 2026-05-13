@@ -7,10 +7,12 @@ use markdown_view::server::{BroadcastMessage, WatchService};
 use markdown_view::template::UpdateMessage;
 use markdown_view::toc::generate_toc;
 
+#[cfg(unix)]
+use super::support::make_file_unreadable;
 use super::support::{
-    assert_close_frame_message, atomic_save_markdown_file, connect_ws, make_file_unreadable,
-    next_ws_message, setup_dir_server, setup_single_file_server,
-    setup_single_file_server_from_path, setup_single_file_server_with_bytes,
+    assert_close_frame_message, atomic_save_markdown_file, connect_ws, next_ws_message,
+    setup_dir_server, setup_single_file_server, setup_single_file_server_from_path,
+    setup_single_file_server_with_bytes,
 };
 
 #[tokio::test]

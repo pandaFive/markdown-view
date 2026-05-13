@@ -1,9 +1,11 @@
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
+#[cfg(unix)]
+use super::support::make_file_unreadable;
 use super::support::{
-    assert_json_error_for_paths, make_file_unreadable, setup_single_file_server,
-    setup_single_file_server_from_path, setup_single_file_server_with_bytes,
+    assert_json_error_for_paths, setup_single_file_server, setup_single_file_server_from_path,
+    setup_single_file_server_with_bytes,
 };
 
 #[tokio::test]
