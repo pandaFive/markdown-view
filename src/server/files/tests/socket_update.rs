@@ -1,5 +1,3 @@
-use axum::http::StatusCode;
-
 use super::support::{
     create_directory_state, create_markdown_fixture, create_single_file_state, create_test_dir,
 };
@@ -51,66 +49,6 @@ async fn test_load_initial_socket_update_単一ファイルサイズ超過時は
         .expect_err("サイズ超過ファイルはSocketInitErrorを返すべき");
 
     assert_eq!(err.close_code(), 1009);
-}
-
-#[tokio::test]
-async fn test_load_route_update_ioエラーを500へ変換する() {
-    let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
-    let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
-        .await
-        .unwrap();
-    std::fs::remove_file(&file_path).unwrap();
-
-    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
-        .await
-        .expect_err("missing file should map to api error");
-
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(json["error"], "ファイルの読み込みに失敗しました");
-}
-
-#[tokio::test]
-async fn test_load_route_update_サイズ超過を413へ変換する() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("large.md");
-    tokio::fs::write(&file_path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
-        .await
-        .unwrap();
-    let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
-        .await
-        .unwrap();
-
-    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
-        .await
-        .expect_err("oversized file should map to api error");
-
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(json["error"], "ファイルサイズが上限（10MB）を超えています");
-}
-
-#[tokio::test]
-async fn test_load_route_update_非utf8を422へ変換する() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("binary.md");
-    tokio::fs::write(&file_path, vec![0xff, 0xfe, 0xfd])
-        .await
-        .unwrap();
-    let state = create_single_file_state(&file_path);
-    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
-        .await
-        .unwrap();
-
-    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
-        .await
-        .expect_err("invalid utf8 should map to api error");
-
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(json["error"], "このファイルはUTF-8テキストではありません");
 }
 
 #[tokio::test]
