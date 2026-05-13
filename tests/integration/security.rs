@@ -2,33 +2,112 @@ use super::support::{
     connect_ws, connect_ws_with_host, setup_dir_server, setup_single_file_server,
 };
 
+enum HostSmokeRequest {
+    Get(&'static str),
+    MemoPut,
+    WebSocketUpgrade,
+}
+
+struct HostSmokeCase {
+    name: &'static str,
+    request: HostSmokeRequest,
+}
+
+const HOST_SMOKE_CASES: &[HostSmokeCase] = &[
+    HostSmokeCase {
+        name: "index",
+        request: HostSmokeRequest::Get("/"),
+    },
+    HostSmokeCase {
+        name: "content",
+        request: HostSmokeRequest::Get("/api/content"),
+    },
+    HostSmokeCase {
+        name: "memo_get",
+        request: HostSmokeRequest::Get("/api/memo"),
+    },
+    HostSmokeCase {
+        name: "files",
+        request: HostSmokeRequest::Get("/api/files"),
+    },
+    HostSmokeCase {
+        name: "search",
+        request: HostSmokeRequest::Get("/api/search?q=test"),
+    },
+    HostSmokeCase {
+        name: "memo_put",
+        request: HostSmokeRequest::MemoPut,
+    },
+    HostSmokeCase {
+        name: "websocket",
+        request: HostSmokeRequest::WebSocketUpgrade,
+    },
+];
+
 #[tokio::test]
-async fn test_host_middlewareは全http_routeの不正hostを拒否する() {
+async fn test_host_middlewareは主要routeの不正hostを拒否しsecurity_headerを維持する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Check").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
-    for path in [
-        "/",
-        "/api/content",
-        "/api/memo",
-        "/api/files",
-        "/api/search?q=test",
-    ] {
-        let resp = client
-            .get(format!("http://{}{}", addr, path))
-            .header("Host", &attack_host)
-            .send()
+    for case in HOST_SMOKE_CASES {
+        let resp = send_host_smoke_request(&client, addr, &attack_host, case)
             .await
-            .unwrap();
+            .unwrap_or_else(|err| panic!("{} should receive a response: {err}", case.name));
 
         assert_forbidden_with_security_headers(&resp);
         let json: serde_json::Value = resp.json().await.unwrap();
-        assert!(json["error"].as_str().is_some());
+        assert_eq!(
+            json["error"], "許可されていないHostヘッダーです",
+            "{} should return host rejection error",
+            case.name
+        );
     }
 }
+
+async fn send_host_smoke_request(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    attack_host: &str,
+    case: &HostSmokeCase,
+) -> reqwest::Result<reqwest::Response> {
+    match &case.request {
+        HostSmokeRequest::Get(path) => {
+            client
+                .get(format!("http://{}{}", addr, path))
+                .header("Host", attack_host)
+                .send()
+                .await
+        }
+        HostSmokeRequest::MemoPut => {
+            client
+                .put(format!("http://{}/api/memo", addr))
+                .header("Host", attack_host)
+                .json(&serde_json::json!({
+                    "raw": "blocked memo"
+                }))
+                .send()
+                .await
+        }
+        HostSmokeRequest::WebSocketUpgrade => {
+            let allowed_origin = format!("http://{}", addr);
+
+            client
+                .get(format!("http://{}/ws", addr))
+                .header("Host", attack_host)
+                .header("Origin", allowed_origin)
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .send()
+                .await
+        }
+    }
+}
+
 #[tokio::test]
-async fn test_host_middlewareはbody付きmemo_putもbody_limit前に不正hostを拒否する() {
+async fn test_host_middlewareは巨大body付きmemo_putもbody_limit前に不正hostを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
@@ -51,6 +130,7 @@ async fn test_host_middlewareはbody付きmemo_putもbody_limit前に不正host�
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "許可されていないHostヘッダーです");
 }
+
 fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
     assert_eq!(
@@ -71,43 +151,7 @@ fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
         .and_then(|value| value.to_str().ok())
         .is_some());
 }
-#[tokio::test]
-async fn test_apiメモ_getは不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo GET").await;
-    let client = reqwest::Client::new();
-    let attack_host = format!("evil.example:{}", addr.port());
 
-    let resp = client
-        .get(format!("http://{}/api/memo", addr))
-        .header("Host", &attack_host)
-        .send()
-        .await
-        .unwrap();
-
-    assert_forbidden_with_security_headers(&resp);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(json["error"].as_str().is_some());
-}
-#[tokio::test]
-async fn test_apiメモ_putは不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
-    let client = reqwest::Client::new();
-    let attack_host = format!("evil.example:{}", addr.port());
-
-    let resp = client
-        .put(format!("http://{}/api/memo", addr))
-        .header("Host", &attack_host)
-        .json(&serde_json::json!({
-            "raw": "blocked memo"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_forbidden_with_security_headers(&resp);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(json["error"].as_str().is_some());
-}
 #[tokio::test]
 async fn test_websocketは異なるoriginを拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
@@ -125,29 +169,7 @@ async fn test_websocketはoriginポート不一致を拒否する() {
     let result = connect_ws(&url, &wrong_port_origin).await;
     assert!(result.is_err());
 }
-#[tokio::test]
-async fn test_websocketはhost_middlewareで不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Host Test").await;
-    let client = reqwest::Client::new();
 
-    let attack_host = format!("evil.example:{}", addr.port());
-    let allowed_origin = format!("http://{}", addr);
-    let resp = client
-        .get(format!("http://{}/ws", addr))
-        .header("Host", attack_host)
-        .header("Origin", allowed_origin)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .send()
-        .await
-        .unwrap();
-
-    assert_forbidden_with_security_headers(&resp);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "許可されていないHostヘッダーです");
-}
 #[tokio::test]
 async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
