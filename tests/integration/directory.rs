@@ -1,18 +1,10 @@
-#![allow(unused_imports)]
-
 use std::sync::Arc;
-use std::time::Duration;
-#[cfg(unix)]
-use std::{fs, os::unix::fs::symlink};
 
 use tokio::sync::broadcast;
 
-use markdown_view::renderer::render_markdown;
-use markdown_view::server::{AppMode, AppState, BroadcastMessage, WatchService};
-use markdown_view::template::UpdateMessage;
-use markdown_view::toc::generate_toc;
+use markdown_view::server::{AppMode, AppState};
 
-use super::support::*;
+use super::support::setup_dir_server;
 
 #[tokio::test]
 async fn test_ディレクトリモード_indexページ取得() {

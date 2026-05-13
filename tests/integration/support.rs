@@ -14,7 +14,7 @@ use markdown_view::server::{AppMode, AppState};
 pub(super) type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 pub(super) type WsReadHalf = SplitStream<WsStream>;
-pub(super) fn build_single_file_state(file_path: &Path) -> Arc<AppState> {
+fn build_single_file_state(file_path: &Path) -> Arc<AppState> {
     let (tx, _rx) = broadcast::channel(16);
     Arc::new(AppState::new_with_tokio_memo_fs(
         AppMode::new_single_file(file_path).unwrap(),
