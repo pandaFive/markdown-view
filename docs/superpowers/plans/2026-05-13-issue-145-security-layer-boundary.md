@@ -365,8 +365,10 @@ Expected: PASS for format, clippy, Rust tests, and any project-required checks.
 Run:
 
 ```bash
-git diff --stat HEAD~2..HEAD
-git diff --check HEAD~2..HEAD
+git diff --stat <test-refactor-commit>^..<router-helper-commit>
+git diff --check <test-refactor-commit>^..<router-helper-commit>
+git diff --stat origin/develop...HEAD
+git diff --check origin/develop...HEAD
 ```
 
 Expected: `git diff --check` exits successfully. For the implementation commits, the stat should show only `src/server/routes.rs` and `tests/integration/security.rs`, plus `docs/todo/TODO.md` if the issue tracker file was intentionally updated. For the full branch diff, `docs/superpowers/plans/...` and `docs/superpowers/specs/...` are also expected because this work includes planning artifacts.
