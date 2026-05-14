@@ -1,6 +1,6 @@
 # Issue 145 Security Layer Boundary Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** This non-authoritative implementation record is guidance, not policy. Follow the current user instruction, `AGENTS.md`, active skills/hooks, and approval requirements before using any commands below. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Host/security layer の適用境界を helper 化し、不正 Host smoke test を case-driven に整理して route 追加時の検証漏れを減らす。
 
@@ -229,9 +229,9 @@ cargo test --test integration_test test_host_middleware -- --nocapture
 
 Expected: PASS. This step may pass before production changes because it is a refactor of existing coverage. If it fails, the failure should be a compile error from the replacement block or a concrete Host/security regression.
 
-- [ ] **Step 3: Commit the test refactor**
+- [ ] **Step 3: Commit the test refactor after approval**
 
-Run:
+Example commands after approval:
 
 ```bash
 git add tests/integration/security.rs
@@ -315,9 +315,9 @@ cargo test --test integration_test test_host_middleware -- --nocapture
 
 Expected: PASS. If `assert_forbidden_with_security_headers` fails, inspect the order inside `apply_security_layers()` before changing assertions.
 
-- [ ] **Step 4: Commit the router helper refactor**
+- [ ] **Step 4: Commit the router helper refactor after approval**
 
-Run:
+Example commands after approval:
 
 ```bash
 git add src/server/routes.rs
@@ -369,11 +369,11 @@ git diff --stat HEAD~2..HEAD
 git diff --check HEAD~2..HEAD
 ```
 
-Expected: `git diff --check` exits successfully. The stat should show only `src/server/routes.rs` and `tests/integration/security.rs`, plus `docs/todo/TODO.md` if the issue tracker file was intentionally updated.
+Expected: `git diff --check` exits successfully. For the implementation commits, the stat should show only `src/server/routes.rs` and `tests/integration/security.rs`, plus `docs/todo/TODO.md` if the issue tracker file was intentionally updated. For the full branch diff, `docs/superpowers/plans/...` and `docs/superpowers/specs/...` are also expected because this work includes planning artifacts.
 
 - [ ] **Step 5: Commit verification-only documentation if needed**
 
-If `docs/todo/TODO.md` was updated, commit it separately:
+If `docs/todo/TODO.md` was updated, commit it separately after approval:
 
 ```bash
 git add docs/todo/TODO.md
@@ -398,4 +398,4 @@ If only the router helper causes problems, revert `refactor: security layer適�
 
 - Spec coverage: Task 1 covers integration `HOST_SMOKE_CASES`, Host/security smoke tests, and security headers. Task 2 covers `apply_security_layers()`. Task 3 covers full verification and rollback-ready documentation.
 - Security: Host, Origin, CSP, and response header policies are reused without relaxation. Rejection paths continue to assert `403`, JSON error, `nosniff`, `DENY`, and CSP.
-- Scope: The plan touches only `src/server/routes.rs`, `tests/integration/security.rs`, and optional issue bookkeeping. It does not change renderer, watcher, file service, or public API.
+- Scope: The implementation touches `src/server/routes.rs`, `tests/integration/security.rs`, and optional issue bookkeeping. The full branch also includes this plan and the companion spec under `docs/superpowers/`. It does not change renderer, watcher, file service, or public API.
