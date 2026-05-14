@@ -59,6 +59,8 @@ impl std::error::Error for CanonicalPathError {}
 pub enum AppModeBuildError {
     /// canonicalize済みパスの生成に失敗
     CanonicalPath(CanonicalPathError),
+    /// canonicalize済みパスのmetadata取得に失敗
+    Metadata(PathBuf, std::io::Error),
     /// 単一ファイルモードでファイル以外が指定された
     NotFile(PathBuf),
     /// ディレクトリモードでディレクトリ以外が指定された
@@ -71,6 +73,14 @@ impl std::fmt::Display for AppModeBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppModeBuildError::CanonicalPath(e) => write!(f, "{}", e),
+            AppModeBuildError::Metadata(path, error) => {
+                write!(
+                    f,
+                    "パスのメタデータ取得に失敗しました: {}: {}",
+                    path.display(),
+                    error
+                )
+            }
             AppModeBuildError::NotFile(path) => {
                 write!(
                     f,
@@ -92,7 +102,17 @@ impl std::fmt::Display for AppModeBuildError {
     }
 }
 
-impl std::error::Error for AppModeBuildError {}
+impl std::error::Error for AppModeBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppModeBuildError::CanonicalPath(error) => Some(error),
+            AppModeBuildError::Metadata(_, error) => Some(error),
+            AppModeBuildError::NotFile(_)
+            | AppModeBuildError::NotDirectory(_)
+            | AppModeBuildError::NotMarkdown(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 enum AppModeKind {
@@ -353,6 +373,19 @@ mod tests {
         let (_dir, file_path) = create_markdown_fixture("note.md", "# note");
         let result = AppMode::new_directory(&file_path);
         assert!(matches!(result, Err(AppModeBuildError::NotDirectory(_))));
+    }
+
+    #[test]
+    fn test_app_mode_build_error_metadataはpathとsourceを保持する() {
+        let path = PathBuf::from("/tmp/missing-after-canonicalize.md");
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "消えた");
+        let build_error = AppModeBuildError::Metadata(path.clone(), error);
+
+        assert_eq!(
+            build_error.to_string(),
+            "パスのメタデータ取得に失敗しました: /tmp/missing-after-canonicalize.md: 消えた"
+        );
+        assert!(std::error::Error::source(&build_error).is_some());
     }
 
     #[test]
