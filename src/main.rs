@@ -68,9 +68,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("パスが見つかりません: {}", args.path.display()))?;
 
     // ファイルかディレクトリかを判定してモードを決定
-    let mode = if path.is_file() {
+    let metadata = std::fs::metadata(&path).context("パスのメタデータ取得に失敗")?;
+    let file_type = metadata.file_type();
+    let mode = if file_type.is_file() {
         // 単一ファイルモード: 起動時にサイズチェック
-        let metadata = std::fs::metadata(&path).context("ファイルのメタデータ取得に失敗")?;
         if metadata.len() > MAX_FILE_SIZE {
             bail!(
                 "ファイルサイズが上限（{}MB）を超えています: {}",
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
             );
         }
         AppMode::new_single_file(&path).context("単一ファイルモードの初期化に失敗")?
-    } else if path.is_dir() {
+    } else if file_type.is_dir() {
         AppMode::new_directory(&path).context("ディレクトリモードの初期化に失敗")?
     } else {
         bail!(
