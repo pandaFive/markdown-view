@@ -109,7 +109,7 @@ async fn send_host_smoke_request(
     attack_host: &str,
     case: &HostSmokeCase,
 ) -> reqwest::Result<reqwest::Response> {
-    match case.request {
+    match &case.request {
         HostSmokeRequest::Get(path) => {
             client
                 .get(format!("http://{}{}", addr, path))
@@ -396,6 +396,6 @@ If only the router helper causes problems, revert `refactor: security layerÈÅ©Áî
 
 ## Self-Review
 
-- Spec coverage: Task 1 covers Host/security smoke tests and security headers. Task 2 covers `apply_security_layers()` and route smoke list helper. Task 3 covers full verification and rollback-ready documentation.
+- Spec coverage: Task 1 covers integration `HOST_SMOKE_CASES`, Host/security smoke tests, and security headers. Task 2 covers `apply_security_layers()`. Task 3 covers full verification and rollback-ready documentation.
 - Security: Host, Origin, CSP, and response header policies are reused without relaxation. Rejection paths continue to assert `403`, JSON error, `nosniff`, `DENY`, and CSP.
 - Scope: The plan touches only `src/server/routes.rs`, `tests/integration/security.rs`, and optional issue bookkeeping. It does not change renderer, watcher, file service, or public API.
