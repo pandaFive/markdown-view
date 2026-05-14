@@ -114,6 +114,31 @@ impl std::error::Error for AppModeBuildError {
     }
 }
 
+fn metadata_for_mode(canonical: &CanonicalPath) -> Result<std::fs::Metadata, AppModeBuildError> {
+    std::fs::metadata(canonical.as_path())
+        .map_err(|error| AppModeBuildError::Metadata(canonical.as_path().to_path_buf(), error))
+}
+
+fn ensure_canonical_file(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
+    let metadata = metadata_for_mode(canonical)?;
+    if !metadata.file_type().is_file() {
+        return Err(AppModeBuildError::NotFile(
+            canonical.as_path().to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
+    let metadata = metadata_for_mode(canonical)?;
+    if !metadata.file_type().is_dir() {
+        return Err(AppModeBuildError::NotDirectory(
+            canonical.as_path().to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum AppModeKind {
     SingleFile(CanonicalPath),
@@ -129,11 +154,7 @@ impl AppMode {
     pub fn new_single_file(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
         let canonical =
             CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
-        if !canonical.as_path().is_file() {
-            return Err(AppModeBuildError::NotFile(
-                canonical.as_path().to_path_buf(),
-            ));
-        }
+        ensure_canonical_file(&canonical)?;
         match canonical.as_path().extension() {
             Some(ext) if ext.eq_ignore_ascii_case("md") => {}
             _ => {
@@ -149,11 +170,7 @@ impl AppMode {
     pub fn new_directory(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
         let canonical =
             CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
-        if !canonical.as_path().is_dir() {
-            return Err(AppModeBuildError::NotDirectory(
-                canonical.as_path().to_path_buf(),
-            ));
-        }
+        ensure_canonical_directory(&canonical)?;
         Ok(Self(AppModeKind::Directory(canonical)))
     }
 
@@ -376,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_mode_build_error_metadataはpathとsourceを保持する() {
+    fn test_app_mode_build_error_メタデータはpathとsourceを保持する() {
         let path = PathBuf::from("/tmp/missing-after-canonicalize.md");
         let error = std::io::Error::new(std::io::ErrorKind::NotFound, "消えた");
         let build_error = AppModeBuildError::Metadata(path.clone(), error);
