@@ -277,4 +277,20 @@ mod tests {
         assert!(message.contains("パスのメタデータ取得に失敗"));
         assert!(message.contains(&canonical.display().to_string()));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_build_app_mode_for_canonical_path_特殊ファイルは拒否() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let socket_path = dir.path().join("preview.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("Unix socket作成");
+        let canonical = socket_path.canonicalize().expect("canonical path");
+
+        let error = build_app_mode_for_canonical_path(&canonical).expect_err("特殊ファイル拒否");
+        let message = error.to_string();
+
+        assert!(message.contains("指定されたパスはファイルでもディレクトリでもありません"));
+        assert!(message.contains(&canonical.display().to_string()));
+    }
 }

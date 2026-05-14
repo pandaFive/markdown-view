@@ -69,8 +69,17 @@ run_playwright_e2e() {
   npm run test:e2e
 }
 
+check_appmode_toctou_regression() {
+  local pattern='canonical\.as_path\(\)\.is_(file|dir)|path\.is_(file|dir)\(\)'
+  if rg -n "$pattern" src/server/state.rs src/main.rs; then
+    echo "エラー: AppModeの種別判定にis_file()/is_dir()が再導入されています。" >&2
+    return 1
+  fi
+}
+
 run_step "フォーマットチェック" cargo fmt --all -- --check
 run_step "Lint (clippy)" cargo clippy --all-targets --all-features -- -D warnings
+run_step "AppMode TOCTOU回帰チェック" check_appmode_toctou_regression
 run_step "テスト実行" cargo test --all-targets --all-features
 run_step "リリースビルドテスト実行" cargo test --all-targets --all-features --release
 run_step "E2E型チェック (tsc)" typecheck_e2e
