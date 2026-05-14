@@ -11,7 +11,7 @@ Issue 147 は、`AppMode::new_single_file` / `new_directory` が `canonicalize` 
 - `AppMode::new_single_file` / `new_directory` で、`canonicalize` 後の `is_file()` / `is_dir()` 呼び出しをやめる。
 - `main.rs` の起動時モード分岐も、取得済み `metadata.file_type()` に基づく判定へ寄せる。
 - 単一ファイルの `.md` 拡張子チェックと `MAX_FILE_SIZE` チェックを維持する。
-- 既存の public API、CLI の正常系挙動、server/watch/rendering の契約を変えない。
+- 既存の public API、public error variant、CLI の正常系挙動、server/watch/rendering の契約を変えない。
 
 ## 非ゴール
 
@@ -27,16 +27,16 @@ Issue 147 は、`AppMode::new_single_file` / `new_directory` が `canonicalize` 
 想定 helper:
 
 ```text
-metadata_for_mode(&CanonicalPath) -> Result<std::fs::Metadata, AppModeBuildError>
-ensure_canonical_file(&CanonicalPath) -> Result<std::fs::Metadata, AppModeBuildError>
+metadata_for_mode(&CanonicalPath) -> std::io::Result<std::fs::Metadata>
+ensure_canonical_file(&CanonicalPath) -> Result<(), AppModeBuildError>
 ensure_canonical_directory(&CanonicalPath) -> Result<(), AppModeBuildError>
 ```
 
-`ensure_canonical_file()` は `metadata_for_mode()` が返した `Metadata` の `file_type().is_file()` を確認し、違えば既存の `AppModeBuildError::NotFile` を返す。`new_single_file()` はこの metadata を取得した後、既存どおり canonical path の拡張子で `.md` を判定する。
+`ensure_canonical_file()` は `metadata_for_mode()` が返した `Metadata` の `file_type().is_file()` を確認し、違えば既存の `AppModeBuildError::NotFile` を返す。`new_single_file()` はこの helper を通してから、既存どおり canonical path の拡張子で `.md` を判定する。
 
 `ensure_canonical_directory()` は同じく `file_type().is_dir()` を確認し、違えば既存の `AppModeBuildError::NotDirectory` を返す。`new_directory()` はこの helper を通してから `AppModeKind::Directory` を作る。
 
-metadata 取得失敗は、`canonicalize` 成功後に対象が消える race や権限エラーを含むため、`AppModeBuildError::Metadata(PathBuf, std::io::Error)` を追加して明示的に伝播する。`Display` では対象パスを含め、起動時エラーとして原因を追えるようにする。
+metadata 取得失敗は、public error variant を増やさず、単一ファイル側では既存の `AppModeBuildError::NotFile`、ディレクトリ側では既存の `AppModeBuildError::NotDirectory` に安全側で集約する。CLI 起動時の metadata 取得失敗は context 付き error とし、対象パスを含めて原因を追えるようにする。
 
 `main.rs` は `args.path.canonicalize()` 後の `if path.is_file() ... else if path.is_dir()` をやめる。代わりに `std::fs::metadata(&path)` を一度取得し、その `file_type()` で単一ファイルかディレクトリかを分岐する。単一ファイル時の `MAX_FILE_SIZE` チェックは同じ metadata の `len()` を使う。
 
@@ -54,7 +54,7 @@ symlink、path traversal、Host/Origin/CSP、HTML sanitization、file size guard
 - `main.rs` の起動時モード分岐も `path.is_file()` / `path.is_dir()` を使わない。
 - 種別判定は取得済み `metadata.file_type()` に基づく。
 - 単一ファイルの `.md` 拡張子チェックと `MAX_FILE_SIZE` チェックが維持される。
-- metadata 取得失敗時は `AppModeBuildError::Metadata` または起動時 context 付き error として伝播する。
+- metadata 取得失敗時は既存の `AppModeBuildError` variant または起動時 context 付き error として伝播する。
 - 既存の public API とユーザー可視の正常系挙動が変わらない。
 - `./verify.sh` が通る。
 
@@ -85,7 +85,7 @@ docs-only の本設計書作成では、Markdown の placeholder、矛盾、scop
 
 ## 影響範囲
 
-- `src/server/state.rs`: `AppModeBuildError::Metadata` と private helper の追加、`new_single_file` / `new_directory` の種別判定変更。
+- `src/server/state.rs`: private helper の追加、`new_single_file` / `new_directory` の種別判定変更。
 - `src/main.rs`: 起動時の file/directory 分岐と単一ファイルサイズチェックを `metadata.file_type()` ベースへ変更。
 - `src/server/state.rs` の unit tests: regression coverage の追加または調整。
 
@@ -105,5 +105,5 @@ dependent file として、`src/server.rs` の re-export、watcher、server/file
 ## 残留リスク
 
 - `metadata()` と実際の file open の間には race が残る。
-- metadata 取得失敗の error variant 追加により、既存テストが厳密な variant match をしている場合は調整が必要になる。
+- metadata 取得失敗を既存 variant に集約するため、詳細な io error source は `AppModeBuildError` からは参照できない。
 - 起動時 error message の context がわずかに変わる可能性があるため、CLI error snapshot 相当の検証がある場合は確認する。

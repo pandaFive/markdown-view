@@ -59,8 +59,6 @@ impl std::error::Error for CanonicalPathError {}
 pub enum AppModeBuildError {
     /// canonicalize済みパスの生成に失敗
     CanonicalPath(CanonicalPathError),
-    /// canonicalize済みパスのmetadata取得に失敗
-    Metadata(PathBuf, std::io::Error),
     /// 単一ファイルモードでファイル以外が指定された
     NotFile(PathBuf),
     /// ディレクトリモードでディレクトリ以外が指定された
@@ -73,14 +71,6 @@ impl std::fmt::Display for AppModeBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppModeBuildError::CanonicalPath(e) => write!(f, "{}", e),
-            AppModeBuildError::Metadata(path, error) => {
-                write!(
-                    f,
-                    "パスのメタデータ取得に失敗しました: {}: {}",
-                    path.display(),
-                    error
-                )
-            }
             AppModeBuildError::NotFile(path) => {
                 write!(
                     f,
@@ -106,7 +96,6 @@ impl std::error::Error for AppModeBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AppModeBuildError::CanonicalPath(error) => Some(error),
-            AppModeBuildError::Metadata(_, error) => Some(error),
             AppModeBuildError::NotFile(_)
             | AppModeBuildError::NotDirectory(_)
             | AppModeBuildError::NotMarkdown(_) => None,
@@ -114,13 +103,13 @@ impl std::error::Error for AppModeBuildError {
     }
 }
 
-fn metadata_for_mode(canonical: &CanonicalPath) -> Result<std::fs::Metadata, AppModeBuildError> {
+fn metadata_for_mode(canonical: &CanonicalPath) -> std::io::Result<std::fs::Metadata> {
     std::fs::metadata(canonical.as_path())
-        .map_err(|error| AppModeBuildError::Metadata(canonical.as_path().to_path_buf(), error))
 }
 
 fn ensure_canonical_file(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
-    let metadata = metadata_for_mode(canonical)?;
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotFile(canonical.as_path().to_path_buf()))?;
     if !metadata.file_type().is_file() {
         return Err(AppModeBuildError::NotFile(
             canonical.as_path().to_path_buf(),
@@ -130,7 +119,8 @@ fn ensure_canonical_file(canonical: &CanonicalPath) -> Result<(), AppModeBuildEr
 }
 
 fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
-    let metadata = metadata_for_mode(canonical)?;
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotDirectory(canonical.as_path().to_path_buf()))?;
     if !metadata.file_type().is_dir() {
         return Err(AppModeBuildError::NotDirectory(
             canonical.as_path().to_path_buf(),
@@ -393,16 +383,33 @@ mod tests {
     }
 
     #[test]
-    fn test_app_mode_build_error_メタデータはpathとsourceを保持する() {
-        let path = PathBuf::from("/tmp/missing-after-canonicalize.md");
-        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "消えた");
-        let build_error = AppModeBuildError::Metadata(path.clone(), error);
+    fn test_ensure_canonical_file_metadata失敗はnotfileへ集約する() {
+        let (_dir, file_path) = create_markdown_fixture("vanish.md", "# vanish");
+        let canonical = file_path.canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_file(&file_path).unwrap();
 
-        assert_eq!(
-            build_error.to_string(),
-            "パスのメタデータ取得に失敗しました: /tmp/missing-after-canonicalize.md: 消えた"
-        );
-        assert!(std::error::Error::source(&build_error).is_some());
+        let result = ensure_canonical_file(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotFile(path)) if path == canonical
+        ));
+    }
+
+    #[test]
+    fn test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_dir(dir.path()).unwrap();
+
+        let result = ensure_canonical_directory(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotDirectory(path)) if path == canonical
+        ));
     }
 
     #[test]

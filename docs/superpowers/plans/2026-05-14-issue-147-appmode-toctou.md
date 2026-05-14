@@ -13,39 +13,55 @@
 ## File Structure
 
 - Modify: `src/server/state.rs`
-  - `AppModeBuildError::Metadata(PathBuf, std::io::Error)` を追加する。
-  - `std::error::Error::source()` を実装し、`CanonicalPath` と `Metadata` の原因 error を返す。
+  - `AppModeBuildError` の public variant set は維持する。
   - `metadata_for_mode()`, `ensure_canonical_file()`, `ensure_canonical_directory()` を private helper として追加する。
   - `AppMode::new_single_file()` と `AppMode::new_directory()` を helper 経由に変更する。
-  - unit tests に metadata error variant の表示と source を固定する regression test を追加する。
+  - unit tests に metadata 取得失敗を既存 variant へ集約する regression test を追加する。
 - Modify: `src/main.rs`
   - `path.is_file()` / `path.is_dir()` による起動時分岐をやめる。
   - `std::fs::metadata(&path)` の戻り値から `file_type()` と `len()` を使う。
 - No production API changes:
   - `AppMode::new_single_file()`, `AppMode::new_directory()`, `single_file()`, `directory()`, `base_dir()` の呼び出し形は維持する。
 
-## Task 1: AppMode metadata error contract
+## Task 1: AppMode metadata failure keeps existing public variants
 
 **Files:**
 - Modify: `src/server/state.rs`
 - Test: `src/server/state.rs`
 
-- [ ] **Step 1: Write the failing metadata error unit test**
+- [ ] **Step 1: Write failing metadata failure unit tests**
 
-Add this test inside the existing `#[cfg(test)] mod tests` in `src/server/state.rs`, near the other `AppModeBuildError` / `AppMode` tests.
+Add these tests inside the existing `#[cfg(test)] mod tests` in `src/server/state.rs`, near the other `AppModeBuildError` / `AppMode` tests.
 
 ```rust
     #[test]
-    fn test_app_mode_build_error_metadataはpathとsourceを保持する() {
-        let path = PathBuf::from("/tmp/missing-after-canonicalize.md");
-        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "消えた");
-        let build_error = AppModeBuildError::Metadata(path.clone(), error);
+    fn test_ensure_canonical_file_metadata失敗はnotfileへ集約する() {
+        let (_dir, file_path) = create_markdown_fixture("vanish.md", "# vanish");
+        let canonical = file_path.canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_file(&file_path).unwrap();
 
-        assert_eq!(
-            build_error.to_string(),
-            "パスのメタデータ取得に失敗しました: /tmp/missing-after-canonicalize.md: 消えた"
-        );
-        assert!(std::error::Error::source(&build_error).is_some());
+        let result = ensure_canonical_file(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotFile(path)) if path == canonical
+        ));
+    }
+
+    #[test]
+    fn test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_dir(dir.path()).unwrap();
+
+        let result = ensure_canonical_directory(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotDirectory(path)) if path == canonical
+        ));
     }
 ```
 
@@ -54,21 +70,20 @@ Add this test inside the existing `#[cfg(test)] mod tests` in `src/server/state.
 Run:
 
 ```bash
-cargo test --lib server::state::tests::test_app_mode_build_error_metadataはpathとsourceを保持する
+cargo test --lib server::state::tests::test_ensure_canonical_file_metadata失敗はnotfileへ集約する
+cargo test --lib server::state::tests::test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する
 ```
 
-Expected: compile failure because `AppModeBuildError::Metadata` does not exist.
+Expected: failure because metadata failure is not yet mapped to the existing `NotFile` / `NotDirectory` variants.
 
-- [ ] **Step 3: Add `Metadata` to `AppModeBuildError` and implement `source()`**
+- [ ] **Step 3: Keep `AppModeBuildError` public variants unchanged**
 
-In `src/server/state.rs`, update `AppModeBuildError`:
+In `src/server/state.rs`, keep `AppModeBuildError` limited to the existing public variants:
 
 ```rust
 pub enum AppModeBuildError {
     /// canonicalize済みパスの生成に失敗
     CanonicalPath(CanonicalPathError),
-    /// canonicalize済みパスのmetadata取得に失敗
-    Metadata(PathBuf, std::io::Error),
     /// 単一ファイルモードでファイル以外が指定された
     NotFile(PathBuf),
     /// ディレクトリモードでディレクトリ以外が指定された
@@ -78,28 +93,13 @@ pub enum AppModeBuildError {
 }
 ```
 
-Update the `Display` match:
-
-```rust
-            AppModeBuildError::CanonicalPath(e) => write!(f, "{}", e),
-            AppModeBuildError::Metadata(path, error) => {
-                write!(
-                    f,
-                    "パスのメタデータ取得に失敗しました: {}: {}",
-                    path.display(),
-                    error
-                )
-            }
-```
-
-Replace the existing empty error impl:
+Use `source()` only for `CanonicalPath`:
 
 ```rust
 impl std::error::Error for AppModeBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AppModeBuildError::CanonicalPath(error) => Some(error),
-            AppModeBuildError::Metadata(_, error) => Some(error),
             AppModeBuildError::NotFile(_)
             | AppModeBuildError::NotDirectory(_)
             | AppModeBuildError::NotMarkdown(_) => None,
@@ -113,7 +113,8 @@ impl std::error::Error for AppModeBuildError {
 Run:
 
 ```bash
-cargo test --lib server::state::tests::test_app_mode_build_error_metadataはpathとsourceを保持する
+cargo test --lib server::state::tests::test_ensure_canonical_file_metadata失敗はnotfileへ集約する
+cargo test --lib server::state::tests::test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する
 ```
 
 Expected: PASS.
@@ -140,26 +141,24 @@ Expected: both commands PASS before implementation. These tests preserve the vis
 Add these functions after `impl std::error::Error for AppModeBuildError` and before `enum AppModeKind` in `src/server/state.rs`:
 
 ```rust
-fn metadata_for_mode(canonical: &CanonicalPath) -> Result<std::fs::Metadata, AppModeBuildError> {
-    std::fs::metadata(canonical.as_path()).map_err(|error| {
-        AppModeBuildError::Metadata(canonical.as_path().to_path_buf(), error)
-    })
+fn metadata_for_mode(canonical: &CanonicalPath) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(canonical.as_path())
 }
 
-fn ensure_canonical_file(
-    canonical: &CanonicalPath,
-) -> Result<std::fs::Metadata, AppModeBuildError> {
-    let metadata = metadata_for_mode(canonical)?;
+fn ensure_canonical_file(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotFile(canonical.as_path().to_path_buf()))?;
     if !metadata.file_type().is_file() {
         return Err(AppModeBuildError::NotFile(
             canonical.as_path().to_path_buf(),
         ));
     }
-    Ok(metadata)
+    Ok(())
 }
 
 fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
-    let metadata = metadata_for_mode(canonical)?;
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotDirectory(canonical.as_path().to_path_buf()))?;
     if !metadata.file_type().is_dir() {
         return Err(AppModeBuildError::NotDirectory(
             canonical.as_path().to_path_buf(),
@@ -184,7 +183,7 @@ Replace the current `is_file()` block in `new_single_file()`:
 with:
 
 ```rust
-        let _metadata = ensure_canonical_file(&canonical)?;
+        ensure_canonical_file(&canonical)?;
 ```
 
 Keep the existing `.md` extension check unchanged.
@@ -242,16 +241,26 @@ Expected: commit succeeds with only `src/server/state.rs` staged.
 
 **Files:**
 - Modify: `src/main.rs`
+- Test: `src/main.rs`
 
-- [ ] **Step 1: Replace startup mode branch**
+- [ ] **Step 1: Extract startup mode helper and cover it with unit tests**
 
-In `src/main.rs`, replace this block:
+Add `build_app_mode_for_canonical_path(&Path) -> Result<AppMode>` and cover these cases:
+
+- `.md` file becomes single-file mode.
+- directory becomes directory mode.
+- oversized Markdown is rejected before `AppMode` construction.
+- metadata failure includes the canonical path in the startup context error.
+
+The helper should centralize startup metadata retrieval:
 
 ```rust
-    // ファイルかディレクトリかを判定してモードを決定
-    let mode = if path.is_file() {
-        // 単一ファイルモード: 起動時にサイズチェック
-        let metadata = std::fs::metadata(&path).context("ファイルのメタデータ取得に失敗")?;
+fn build_app_mode_for_canonical_path(path: &Path) -> Result<AppMode> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("パスのメタデータ取得に失敗: {}", path.display()))?;
+    let file_type = metadata.file_type();
+
+    if file_type.is_file() {
         if metadata.len() > MAX_FILE_SIZE {
             bail!(
                 "ファイルサイズが上限（{}MB）を超えています: {}",
@@ -259,41 +268,23 @@ In `src/main.rs`, replace this block:
                 path.display()
             );
         }
-        AppMode::new_single_file(&path).context("単一ファイルモードの初期化に失敗")?
-    } else if path.is_dir() {
-        AppMode::new_directory(&path).context("ディレクトリモードの初期化に失敗")?
+        AppMode::new_single_file(path).context("単一ファイルモードの初期化に失敗")
+    } else if file_type.is_dir() {
+        AppMode::new_directory(path).context("ディレクトリモードの初期化に失敗")
     } else {
         bail!(
             "指定されたパスはファイルでもディレクトリでもありません: {}",
             path.display()
         );
-    };
+    }
+}
 ```
 
-with:
+Then replace the startup branch with:
 
 ```rust
     // ファイルかディレクトリかを判定してモードを決定
-    let metadata = std::fs::metadata(&path).context("パスのメタデータ取得に失敗")?;
-    let file_type = metadata.file_type();
-    let mode = if file_type.is_file() {
-        // 単一ファイルモード: 起動時にサイズチェック
-        if metadata.len() > MAX_FILE_SIZE {
-            bail!(
-                "ファイルサイズが上限（{}MB）を超えています: {}",
-                MAX_FILE_SIZE / 1024 / 1024,
-                path.display()
-            );
-        }
-        AppMode::new_single_file(&path).context("単一ファイルモードの初期化に失敗")?
-    } else if file_type.is_dir() {
-        AppMode::new_directory(&path).context("ディレクトリモードの初期化に失敗")?
-    } else {
-        bail!(
-            "指定されたパスはファイルでもディレクトリでもありません: {}",
-            path.display()
-        );
-    };
+    let mode = build_app_mode_for_canonical_path(&path)?;
 ```
 
 - [ ] **Step 2: Format and run targeted compile/test**
@@ -302,6 +293,7 @@ Run:
 
 ```bash
 cargo fmt --all
+cargo test --bin markdown-view build_app_mode_for_canonical_path
 cargo test --all-targets --all-features app_mode
 ```
 
