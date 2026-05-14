@@ -36,47 +36,6 @@ const MAX_SEARCH_RAW_QUERY_BYTES: usize = 4096;
 /// `create_router` 側へ集約する契約を型で表現する。
 struct RouteDefinitions(Router<Arc<AppState>>);
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SecuritySmokeRoute {
-    method: &'static str,
-    path: &'static str,
-}
-
-#[cfg(test)]
-fn security_smoke_routes() -> &'static [SecuritySmokeRoute] {
-    &[
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/content",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/search?q=test",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/memo",
-        },
-        SecuritySmokeRoute {
-            method: "PUT",
-            path: "/api/memo",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/files",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/ws",
-        },
-    ]
-}
-
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
     let csp_header = build_csp_header(state.syntax_css());
@@ -144,28 +103,6 @@ mod tests {
 
     fn api_error_message(error: &ApiError) -> Option<&str> {
         error.1["error"].as_str()
-    }
-
-    #[test]
-    fn test_security_smoke_routesは主要routeを列挙する() {
-        let routes = security_smoke_routes();
-        let actual: Vec<(&str, &str)> = routes
-            .iter()
-            .map(|route| (route.method, route.path))
-            .collect();
-
-        assert_eq!(
-            actual,
-            vec![
-                ("GET", "/"),
-                ("GET", "/api/content"),
-                ("GET", "/api/search?q=test"),
-                ("GET", "/api/memo"),
-                ("PUT", "/api/memo"),
-                ("GET", "/api/files"),
-                ("GET", "/ws"),
-            ]
-        );
     }
 
     #[test]

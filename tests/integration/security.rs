@@ -14,6 +14,7 @@ struct HostSmokeCase {
 }
 
 const HOST_SMOKE_CASES: &[HostSmokeCase] = &[
+    // 新規 route を追加した場合は、Host/security smoke 対象としてここへ追加する。
     HostSmokeCase {
         name: "index",
         request: HostSmokeRequest::Get("/"),

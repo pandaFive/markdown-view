@@ -10,7 +10,7 @@ Issue 145 は、Host validation、security headers、CSP layer が `create_route
 
 - Host middleware、`X-Content-Type-Options`、`X-Frame-Options`、CSP の適用を `apply_security_layers(routes, csp_header)` に集約する。
 - `create_router()` を「route 定義を作る」「security layer を適用する」「state を注入する」の流れに整理する。
-- Host/security smoke test に使える route 一覧 helper を整備し、新規 route 追加時の検証対象更新を容易にする。
+- Host/security smoke test に使う integration case table を整備し、新規 route 追加時の検証対象更新を容易にする。
 - Host/Origin/CSP の既存ポリシー、拒否時レスポンス、監査ログを維持する。
 
 ## 非ゴール
@@ -18,7 +18,7 @@ Issue 145 は、Host validation、security headers、CSP layer が `create_route
 - Host、Origin、CSP、security header の許可条件変更。
 - axum router の公開 API 変更。
 - WebSocket Origin 検証の責務移動。Host は middleware、Origin は `ws_handler` 内の既存検証に残す。
-- `SecuredRouter` のような強い型 wrapper 導入。今回の規模では route 一覧 helper と security layer helper で十分とする。
+- `SecuredRouter` のような強い型 wrapper 導入。今回の規模では integration smoke case table と security layer helper で十分とする。
 - UI、renderer、file service、watcher の挙動変更。
 
 ## アーキテクチャ
@@ -35,25 +35,25 @@ apply_security_layers(routes, csp_header).with_state(state)
 
 これにより、security layer の順序と理由を helper に閉じ込め、`create_router()` に新規 route を直接足しにくい形へ寄せる。`RouteDefinitions` は引き続き private のままにし、裸の `Router` と route 定義中の router を区別する。
 
-## Route 一覧 helper
+## Integration smoke case table
 
-Host/security smoke test 用に、検証対象 route を列挙する helper を追加する。helper は production request handling には使わず、テストから route coverage を保つための一覧として扱う。
+Host/security smoke test 用に、`tests/integration/security.rs` の case table で検証対象 route を列挙する。この case table は production request handling には使わず、実際に不正 Host request を送る integration test の唯一の smoke list として扱う。
 
 想定する検証対象は次の通り。
 
 - `GET /`
 - `GET /api/content`
-- `GET /api/search`
+- `GET /api/search?q=test`
 - `GET /api/memo`
 - `PUT /api/memo`
 - `GET /api/files`
 - `GET /ws`
 
-helper の公開範囲は最小にする。integration test から参照しにくい場合は、production module に公開 helper を増やすより、`tests/integration/security.rs` 側で小さな case table を持たせる。ただし route 定義とテスト対象の二重管理が増えすぎる場合は、`pub(crate)` helper として server module 内に閉じる。
+production module に test-only 公開 helper は増やさない。新規 route 追加時は `build_routes()` とあわせて integration case table を更新する。
 
 ## テスト方針
 
-既存の `tests/integration/security.rs` を中心に更新する。現在の個別 Host 拒否テストを、route 一覧に基づく case-driven test へ寄せる。
+既存の `tests/integration/security.rs` を中心に更新する。現在の個別 Host 拒否テストを、integration case table に基づく case-driven test へ寄せる。
 
 GET 系 route は単純な request で検証する。`PUT /api/memo` は最小 JSON body を付け、不正 Host が body limit や handler 処理より前に拒否されることを確認する。`GET /ws` は HTTP upgrade request として投げ、不正 Host が Host middleware で `403` になることを確認する。
 
@@ -70,7 +70,7 @@ WebSocket は Host middleware と Origin 検証の二段構えを維持する。
 ## 受け入れ条件
 
 - `create_router()` から security layer の詳細が `apply_security_layers()` に移っている。
-- 新規 route 追加時に Host/security smoke 対象を更新しやすい route 一覧または case table がある。
+- 新規 route 追加時に Host/security smoke 対象を更新しやすい integration case table がある。
 - 不正 Host は主要 HTTP route と `/ws` で `403` になる。
 - Host 拒否レスポンスに security headers が付く。
 - Host/Origin/CSP のポリシーを緩めていない。
@@ -95,10 +95,10 @@ docs-only の本設計書作成では、Markdown の placeholder、矛盾、scop
 
 主な変更対象は次の通り。
 
-- `src/server/routes.rs`: `apply_security_layers()` と route smoke helper の追加、`create_router()` の整理。
+- `src/server/routes.rs`: `apply_security_layers()` の追加、`create_router()` の整理。
 - `tests/integration/security.rs`: Host/security smoke test の case-driven 化。
 
-必要に応じて、test helper の visibility 調整に限って周辺 module を触る。
+test helper の visibility 調整は行わない。
 
 ## Rollback path
 
@@ -109,7 +109,7 @@ docs-only の本設計書作成では、Markdown の placeholder、矛盾、scop
 - Human effort: 45〜75分
 - Codex/AI-assisted effort: 20〜35分
 
-route 一覧 helper の visibility を integration test からどう扱うかで上下する。public API を増やさずに済む場合は短く収まる。
+integration case table の粒度と検証対象 route の整理で上下する。public API は増やさない。
 
 ## 残留リスク
 

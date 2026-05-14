@@ -15,9 +15,9 @@
 - Modify: `src/server/routes.rs`
   - `apply_security_layers(RouteDefinitions, HeaderValue) -> Router<Arc<AppState>>` を追加する。
   - `create_router()` を `build_routes()`、`apply_security_layers()`、`.with_state(state)` の流れへ整理する。
-  - `#[cfg(test)]` の route smoke 一覧 helper と unit test を追加し、route coverage の意図を routes module 内に残す。
 - Modify: `tests/integration/security.rs`
   - 既存の個別 Host 拒否テストを case-driven helper に寄せる。
+  - `HOST_SMOKE_CASES` を唯一の Host/security smoke list として扱う。
   - HTTP GET、memo PUT、WebSocket upgrade の不正 Host rejection と security headers を同じ assertion に通す。
 - Existing helper: `tests/integration/support.rs`
   - 変更しない。`setup_single_file_server` など既存 helper をそのまま使う。
@@ -48,6 +48,7 @@ struct HostSmokeCase {
 }
 
 const HOST_SMOKE_CASES: &[HostSmokeCase] = &[
+    // 新規 route を追加した場合は、Host/security smoke 対象としてここへ追加する。
     HostSmokeCase {
         name: "index",
         request: HostSmokeRequest::Get("/"),
@@ -237,55 +238,12 @@ git add tests/integration/security.rs
 git commit -m "test: Host拒否smoke testをcase table化"
 ```
 
-## Task 2: Security Layer Helper and Route Smoke List
+## Task 2: Security Layer Helper
 
 **Files:**
 - Modify: `src/server/routes.rs:33-90`
 
-- [ ] **Step 1: Add a failing routes module test that expects a smoke route list**
-
-Insert this block after `fn build_routes() -> RouteDefinitions` in `src/server/routes.rs`.
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_security_smoke_routesは主要routeを列挙する() {
-        let routes = security_smoke_routes();
-        let actual: Vec<(&str, &str)> = routes
-            .iter()
-            .map(|route| (route.method, route.path))
-            .collect();
-
-        assert_eq!(
-            actual,
-            vec![
-                ("GET", "/"),
-                ("GET", "/api/content"),
-                ("GET", "/api/search?q=test"),
-                ("GET", "/api/memo"),
-                ("PUT", "/api/memo"),
-                ("GET", "/api/files"),
-                ("GET", "/ws"),
-            ]
-        );
-    }
-}
-```
-
-- [ ] **Step 2: Run the new routes test and verify it fails**
-
-Run:
-
-```bash
-cargo test --lib server::routes::tests::test_security_smoke_routesは主要routeを列挙する
-```
-
-Expected: FAIL with an error like `cannot find function security_smoke_routes in this scope`.
-
-- [ ] **Step 3: Implement the route smoke list and security layer helper**
+- [ ] **Step 1: Implement the security layer helper**
 
 Replace `create_router()` and add the helper definitions near `RouteDefinitions`.
 
@@ -295,47 +253,6 @@ Replace `create_router()` and add the helper definitions near `RouteDefinitions`
 /// 裸の `Router` と区別することで、route 定義と共通 security layer 適用を
 /// `create_router` 側へ集約する契約を型で表現する。
 struct RouteDefinitions(Router<Arc<AppState>>);
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SecuritySmokeRoute {
-    method: &'static str,
-    path: &'static str,
-}
-
-#[cfg(test)]
-fn security_smoke_routes() -> &'static [SecuritySmokeRoute] {
-    &[
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/content",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/search?q=test",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/memo",
-        },
-        SecuritySmokeRoute {
-            method: "PUT",
-            path: "/api/memo",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/api/files",
-        },
-        SecuritySmokeRoute {
-            method: "GET",
-            path: "/ws",
-        },
-    ]
-}
 
 /// axumルーターを構築する
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -378,17 +295,17 @@ fn apply_security_layers(
 }
 ```
 
-- [ ] **Step 4: Run the routes unit test**
+- [ ] **Step 2: Run the routes unit tests**
 
 Run:
 
 ```bash
-cargo test --lib server::routes::tests::test_security_smoke_routesは主要routeを列挙する
+cargo test --lib server::routes
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the integration smoke test**
+- [ ] **Step 3: Run the integration smoke test**
 
 Run:
 
@@ -398,7 +315,7 @@ cargo test --test integration_test test_host_middleware -- --nocapture
 
 Expected: PASS. If `assert_forbidden_with_security_headers` fails, inspect the order inside `apply_security_layers()` before changing assertions.
 
-- [ ] **Step 6: Commit the router helper refactor**
+- [ ] **Step 4: Commit the router helper refactor**
 
 Run:
 
