@@ -78,14 +78,20 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
                 let url = format!("ws://{}/ws", addr);
                 let origin = format!("http://{}", addr);
                 connect_ws(&url, &origin).await.unwrap_or_else(|err| {
-                    panic!("{} should connect with allowed Host/Origin: {err}", case.name)
+                    panic!(
+                        "{} should connect with allowed Host/Origin: {err}",
+                        case.name
+                    )
                 });
             }
             _ => {
                 let resp = send_host_smoke_request(&client, addr, &allowed_host, case)
                     .await
                     .unwrap_or_else(|err| {
-                        panic!("{} should receive a response with allowed Host: {err}", case.name)
+                        panic!(
+                            "{} should receive a response with allowed Host: {err}",
+                            case.name
+                        )
                     });
 
                 assert_ne!(
