@@ -209,10 +209,20 @@ fn assert_security_headers(headers: &axum::http::HeaderMap) {
             .and_then(|value| value.to_str().ok()),
         Some("DENY")
     );
-    assert!(headers
+
+    let csp = headers
         .get(axum::http::header::CONTENT_SECURITY_POLICY)
         .and_then(|value| value.to_str().ok())
-        .is_some());
+        .expect("Content-Security-Policy header should be present");
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("script-src 'sha256-"));
+    assert!(csp.contains("style-src 'sha256-"));
+    assert!(csp.contains("img-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("object-src 'none'"));
+    assert!(!csp.contains("script-src 'unsafe-inline'"));
+    assert!(!csp.contains("style-src 'unsafe-inline'"));
+    assert!(!csp.contains("data:"));
 }
 
 #[tokio::test]
@@ -249,31 +259,7 @@ async fn test_セキュリティヘッダが設定されている() {
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
 
-    // X-Content-Type-Options
-    assert_eq!(
-        resp.headers().get("x-content-type-options").unwrap(),
-        "nosniff"
-    );
-
-    // X-Frame-Options
-    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
-
-    // Content-Security-Policy
-    let csp = resp
-        .headers()
-        .get("content-security-policy")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert!(csp.contains("default-src 'self'"));
-    assert!(csp.contains("script-src 'sha256-"));
-    assert!(csp.contains("style-src 'sha256-"));
-    assert!(csp.contains("img-src 'self'"));
-    assert!(csp.contains("frame-ancestors 'none'"));
-    assert!(csp.contains("object-src 'none'"));
-    assert!(!csp.contains("script-src 'unsafe-inline'"));
-    assert!(!csp.contains("style-src 'unsafe-inline'"));
-    assert!(!csp.contains("data:"));
+    assert_security_headers(resp.headers());
     assert!(
         resp.headers()
             .get("x-markdown-view-security-warning")

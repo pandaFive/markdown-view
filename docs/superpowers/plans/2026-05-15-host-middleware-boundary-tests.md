@@ -17,7 +17,7 @@
   - 許可 Host smoke test を追加する。
   - 空 Host rejection test を追加する。
 - Reference only: `src/server/guards.rs`
-  - 欠落 Host と非 ASCII Host は既存 unit test の `test_check_ws_origin_variants_網羅` などで guard 境界が固定済み。今回の実装では private guard を外部 integration test 用に公開しない。
+  - 欠落 Host と非 ASCII Host は request Host guard 境界の unit test で固定する。HTTP 経由で送れない異常値を integration test 用に無理に公開しない。
 - Reference only: `tests/integration/support.rs`
   - `/ws` 許可 Host smoke では既存 `connect_ws` helper を使う。
 
@@ -187,29 +187,49 @@ git add tests/integration/security.rs
 git commit -m "test: Host middlewareの空Host拒否を固定"
 ```
 
-## Task 3: 欠落・Malformed Host の既存 Guard Coverage を確認する
+## Task 3: 欠落・Malformed Host の Request Host Guard Coverage を追加する
 
 **Files:**
 - Reference: `src/server/guards.rs`
 - Test: `src/server/guards.rs`
 
-- [ ] **Step 1: Confirm existing tests cover missing and non-ASCII Host guard behavior**
+- [ ] **Step 1: Add request Host guard tests for missing and non-ASCII Host**
 
-Run:
+Add unit tests in `src/server/guards.rs`:
 
-```bash
-rg -n "MissingHost|HostMalformed|test_check_ws_origin_variants_網羅|test_ws_host_malformed" src/server/guards.rs
+```rust
+#[test]
+fn test_request_host_guardは欠落hostをforbidden_jsonで拒否する() {
+    let headers = HeaderMap::new();
+
+    assert_request_host_guard_forbidden(&headers);
+}
+
+#[test]
+fn test_request_host_guardは非ascii_hostをforbidden_jsonで拒否する() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HOST,
+        axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+    );
+
+    assert_request_host_guard_forbidden(&headers);
+}
+
+fn assert_request_host_guard_forbidden(headers: &HeaderMap) {
+    let error = ensure_allowed_request_host(headers).unwrap_err();
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+    assert_eq!(error.1["error"], "許可されていないHostヘッダーです");
+}
 ```
-
-Expected: Output includes `MissingHost`, `HostMalformed`, `test_check_ws_origin_variants_網羅`, and `test_ws_host_malformedはhost検証異常ログに記録する`.
 
 - [ ] **Step 2: Run guard tests**
 
 Run:
 
 ```bash
-cargo test --lib --all-features server::guards::tests::test_check_ws_origin_variants_網羅
-cargo test --lib --all-features server::guards::tests::test_ws_host_malformedはhost検証異常ログに記録する
+cargo test --lib --all-features server::guards::tests::test_request_host_guardは欠落hostをforbidden_jsonで拒否する
+cargo test --lib --all-features server::guards::tests::test_request_host_guardは非ascii_hostをforbidden_jsonで拒否する
 ```
 
 Expected: Both commands PASS.
