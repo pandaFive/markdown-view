@@ -2,7 +2,7 @@
 
 レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
 
-最終整理: 2026-05-09。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
+最終整理: 2026-05-15。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
 レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## High Priority
@@ -13,26 +13,12 @@
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
 
-- [ ] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
-  - ファイル: `src/server/routes.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-04-host-middleware-structure-observability-design.md`
-  - 現状: PR #123 で `build_routes() -> RouteDefinitions` として route 定義と Host middleware 適用の境界を命名・可視性で明示した。ただし `RouteDefinitions(Router<Arc<AppState>>)` の中身は通常の `Router` なので、`build_routes()` 内に共通 `.layer(...)` を混ぜても型エラーにはならない。これは型による強制というより intent marker であり、構造契約の強制力は限定的
-  - 対応: `apply_security_layers(routes, csp_header)` のような private helper へ Host middleware / security headers / CSP 適用を集約し、route 定義と layer 適用の呼び出し順をさらに読みやすくする。必要なら許可 Host / 不正 Host の route 横断テストを route 一覧 helper に寄せ、route 追加時にテスト対象へ自然に入る構造へ整理する
-  - 昇格理由: Host / CSP / security header の適用順を将来 route 追加時に読み違えにくくする設計負債対応のため Medium とする
-  - 由来: PR #123 レビュー follow-up (2026-05-04)
-
 - [ ] Host middleware 化後の低優先 follow-up を整理して追加検証する
   - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-02-host-middleware-guard-design.md`
   - 現状: PR #120 で Host 検証を router middleware へ集約し、主要 route の不正 Host 拒否、security headers、WS Host/Origin 経路の分離、大容量 PUT body の順序を固定した。一方、許可 Host の全 route smoke、malformed/missing/empty Host の middleware 統合テスト、WS Origin 拒否の error message assert、middleware warn ログへの URI path 追加、test helper 内 `axum::serve(...).unwrap()` の panic 観測性、CHANGELOG 相当の運用ドキュメント化は未対応
   - 対応: 追加する価値が高い順に、許可 Host 明示ループ、malformed/missing/empty Host の middleware 経路 403、WS Origin 拒否 message assert、warn ログへの `request.uri().path()` 追加を検討する。`axum::serve(...).unwrap()` は test helper の失敗文脈が分かる `expect(...)` へ寄せる。WS Host 拒否 message 変更は PR 本文には明記済みなので、必要になった時点で README か CHANGELOG 相当へ移す
   - 昇格理由: Host security boundary の検証網を厚くするが、主要 middleware 化は実装済みなので Medium とする
   - 由来: PR #120 再レビュー follow-up (2026-05-02)
-
-- [ ] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
-  - ファイル: `src/renderer/mod.rs`, `src/template/assets/js/content-renderer.js`, `src/template/assets/js/memo.js`, `README.md`
-  - 現状: Rust 側は `SanitizedHtml` newtype、raw HTML 破棄、URL policy、CSP hash で XSS 境界を作っている。一方ブラウザ側は `contentEl.innerHTML = safeData.content` / `memoPreviewEl.innerHTML = data.html` を使うため、境界の正しさは「サーバー生成 HTML だけが入る」という暗黙契約に依存している
-  - 対応: renderer の信頼境界、HTTP/WS JSON の `content`/`toc`/`html` フィールド、JS 側の `innerHTML` 使用許可条件を短い設計メモにまとめる。E2E hook やテスト用 expose が production 経路で任意 HTML を流し込まないことも確認項目に含める
-  - 昇格理由: XSS 境界の契約明文化は複数機能の前提になるが、今回は設計メモ化であり直接の実装修正ではないため Medium とする
-  - 由来: Unix 哲学レビュー (2026-04-30)
 
 - [ ] assets バンドルの sentinel 衝突回避テストを追加
   - ファイル: `src/template/assets/css_bundle.rs` L19, `src/template/assets/inline_script.rs` L17-22
@@ -50,6 +36,10 @@
 
 ## Done Summary
 
+- [x] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
+  - 完了根拠: PR #155 で `apply_security_layers(RouteDefinitions, HeaderValue)` を追加し、Host middleware、security headers、CSP の適用を `create_router()` の共通 helper へ集約した。`build_routes()` は route 定義だけを返し、`create_router()` は `build_routes()` → `apply_security_layers()` → `.with_state(state)` の流れに整理された。integration test では `HOST_SMOKE_CASES` を追加し、index、content、memo、files、search、memo PUT、WebSocket upgrade の不正 Host 拒否と security headers を同じ assertion で固定した。残る許可 Host 全 route smoke、malformed/missing/empty Host の追加統合テスト、warn ログ URI path 追加などは別 follow-up として継続する。
+- [x] `SanitizedHtml` から `innerHTML` までの信頼境界を設計メモ化する
+  - 完了根拠: `src/renderer/mod.rs` に `SanitizedHtml` 構築権を持つ renderer モジュールツリーの信頼境界を明記し、`content-renderer.js` にサーバーサイドでサニタイズ済み HTML だけを `#content` / `#toc` へ反映する境界コメントを追加した。`content-controller.js` 側にもサーバーサイド sanitize 済み HTML 反映の XSS 境界を明示している。さらに PR #153 で `inline_script.rs` に tree-sitter ベースの `innerHTML` sink scanner を追加し、許可済み sink を `contentEl.innerHTML`、`tocEl.innerHTML`、document search clear、memo preview に限定してテストで固定した。production hook は既存どおり `window.__MV_E2E__ === true` の場合だけ公開される。
 - [x] Windows メモ原子保存のエラー処理と retry 条件を細分化する
   - 完了根拠: `MoveFileExW` の `JoinError` を panic / cancelled / その他 join error に分類してログと `io::Error` message に残す構成にした。Windows の `ERROR_ACCESS_DENIED`、`ERROR_SHARING_VIOLATION`、`ERROR_LOCK_VIOLATION` だけを一時 lock 系として扱い、初回失敗後に `10ms`、`25ms`、`50ms` の最大3回だけ同じ tmp/final path で retry する。retry は `MoveFileExW` 呼び出しだけに限定し、tmp 作成、本文書き込み、rename 前検証、cleanup、親ディレクトリ sync、HTTP API 契約は変更していない。retry 対象判定と JoinError 分類は unit test で固定した。Windows target check は `x86_64-w64-mingw32-gcc` 不足により完走できなかったため、Windows 実機/CI での確認は残リスクとして扱う
 - [x] `panic::catch_unwind` の init 経路で `init_tx` 残存時に `ThreadPanic` を init 結果として送出
