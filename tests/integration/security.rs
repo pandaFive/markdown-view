@@ -100,6 +100,23 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
     }
 }
 
+#[tokio::test]
+async fn test_host_middlewareは空hostを拒否しsecurity_headerを維持する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Empty Host").await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/", addr))
+        .header("Host", "")
+        .send()
+        .await
+        .unwrap();
+
+    assert_forbidden_with_security_headers(&resp);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "許可されていないHostヘッダーです");
+}
+
 async fn send_host_smoke_request(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
