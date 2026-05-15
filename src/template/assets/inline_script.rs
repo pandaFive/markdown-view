@@ -37,7 +37,14 @@ pub(super) fn inline_js(max_file_size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{inline_js, TEMPLATE};
     use tree_sitter::{Node, Parser};
+
+    const MAX_FILE_SIZE_SENTINEL: &str = "__MAX_FILE_SIZE_MB__";
+
+    fn count_occurrences(source: &str, needle: &str) -> usize {
+        source.matches(needle).count()
+    }
 
     #[derive(Debug, Eq, PartialEq)]
     struct InnerHtmlSink {
@@ -860,6 +867,75 @@ mod tests {
         assert_eq!(
             inner_html_sinks(r#"({ html: target.innerHTML } = payload);"#).len(),
             1
+        );
+    }
+
+    #[test]
+    fn test_max_file_size_sentinelはbootstrap_jsだけに存在する() {
+        let allowed_bootstrap_js = include_str!("js/bootstrap.js");
+        let disallowed_sources = [
+            ("js/selection.js", include_str!("js/selection.js")),
+            (
+                "js/content-renderer.js",
+                include_str!("js/content-renderer.js"),
+            ),
+            (
+                "js/content-enhancements.js",
+                include_str!("js/content-enhancements.js"),
+            ),
+            (
+                "js/content-navigation.js",
+                include_str!("js/content-navigation.js"),
+            ),
+            (
+                "js/document-search.js",
+                include_str!("js/document-search.js"),
+            ),
+            (
+                "js/directory-search.js",
+                include_str!("js/directory-search.js"),
+            ),
+            (
+                "js/content-controller.js",
+                include_str!("js/content-controller.js"),
+            ),
+            ("js/memo.js", include_str!("js/memo.js")),
+            ("js/fetch.js", include_str!("js/fetch.js")),
+            ("js/websocket.js", include_str!("js/websocket.js")),
+            ("js/sidebar.js", include_str!("js/sidebar.js")),
+        ];
+
+        assert_eq!(
+            count_occurrences(allowed_bootstrap_js, MAX_FILE_SIZE_SENTINEL),
+            1,
+            "bootstrap.js の max file size sentinel 出現回数が変わった"
+        );
+
+        for (path, source) in disallowed_sources {
+            assert!(
+                !source.contains(MAX_FILE_SIZE_SENTINEL),
+                "{path} に max file size sentinel が混入している"
+            );
+        }
+
+        assert_eq!(
+            count_occurrences(TEMPLATE, MAX_FILE_SIZE_SENTINEL),
+            1,
+            "結合済み JS template の max file size sentinel 出現回数が変わった"
+        );
+    }
+
+    #[test]
+    fn test_inline_jsはmax_file_size_mbを10へ置換する() {
+        let generated = inline_js(crate::server::MAX_FILE_SIZE);
+
+        assert!(
+            !generated.contains(MAX_FILE_SIZE_SENTINEL),
+            "生成済み JS に max file size sentinel が残っている"
+        );
+        assert!(
+            generated.contains("maxFileSizeMb: 10"),
+            "生成済み JS の maxFileSizeMb が MAX_FILE_SIZE 由来の 10MB 表示になっていない"
         );
     }
 
