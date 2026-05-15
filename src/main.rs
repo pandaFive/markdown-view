@@ -59,9 +59,8 @@ async fn bind_preview_listener(
 fn build_app_mode_for_canonical_path(path: &Path) -> Result<AppMode> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("パスのメタデータ取得に失敗: {}", path.display()))?;
-    let file_type = metadata.file_type();
 
-    if file_type.is_file() {
+    if metadata.file_type().is_file() {
         if metadata.len() > MAX_FILE_SIZE {
             bail!(
                 "ファイルサイズが上限（{}MB）を超えています: {}",
@@ -70,7 +69,7 @@ fn build_app_mode_for_canonical_path(path: &Path) -> Result<AppMode> {
             );
         }
         AppMode::new_single_file(path).context("単一ファイルモードの初期化に失敗")
-    } else if file_type.is_dir() {
+    } else if metadata.file_type().is_dir() {
         AppMode::new_directory(path).context("ディレクトリモードの初期化に失敗")
     } else {
         bail!(

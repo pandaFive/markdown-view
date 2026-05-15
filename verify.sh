@@ -70,8 +70,43 @@ run_playwright_e2e() {
 }
 
 check_appmode_toctou_regression() {
-  local pattern='canonical\.as_path\(\)\.is_(file|dir)|path\.is_(file|dir)\(\)'
-  if rg -n "$pattern" src/server/state.rs src/main.rs; then
+  local pattern='\.is_(file|dir)\(\)'
+  local allowed_pattern='(^|[^[:alnum:]_])metadata\.file_type\(\)\.is_(file|dir)\(\)'
+  local files=(src/server/state.rs src/main.rs)
+  local matches
+  local search_status
+  if command -v rg >/dev/null 2>&1; then
+    set +e
+    matches="$(rg -n "$pattern" "${files[@]}")"
+    search_status=$?
+    set -e
+  else
+    set +e
+    matches="$(grep -En "$pattern" "${files[@]}")"
+    search_status=$?
+    set -e
+  fi
+
+  if [[ $search_status -eq 1 ]]; then
+    return 0
+  fi
+  if [[ $search_status -ne 0 ]]; then
+    echo "エラー: AppMode TOCTOU回帰チェックの検索に失敗しました。" >&2
+    return 1
+  fi
+
+  local forbidden_matches
+  local local_without_allowed
+  forbidden_matches="$(
+    while IFS= read -r match_line; do
+      local_without_allowed="$(printf '%s\n' "$match_line" | sed -E "s/$allowed_pattern//g")"
+      if printf '%s\n' "$local_without_allowed" | grep -Eq "$pattern"; then
+        printf '%s\n' "$match_line"
+      fi
+    done <<<"$matches"
+  )"
+  if [[ -n "$forbidden_matches" ]]; then
+    printf '%s\n' "$forbidden_matches"
     echo "エラー: AppModeの種別判定にis_file()/is_dir()が再導入されています。" >&2
     return 1
   fi
