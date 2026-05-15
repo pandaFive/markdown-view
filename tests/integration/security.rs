@@ -66,6 +66,40 @@ async fn test_host_middlewareは主要routeの不正hostを拒否しsecurity_hea
     }
 }
 
+#[tokio::test]
+async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_headerを維持する() {
+    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Allowed").await;
+    let client = reqwest::Client::new();
+    let allowed_host = format!("127.0.0.1:{}", addr.port());
+
+    for case in HOST_SMOKE_CASES {
+        match &case.request {
+            HostSmokeRequest::WebSocketUpgrade => {
+                let url = format!("ws://{}/ws", addr);
+                let origin = format!("http://{}", addr);
+                connect_ws(&url, &origin).await.unwrap_or_else(|err| {
+                    panic!("{} should connect with allowed Host/Origin: {err}", case.name)
+                });
+            }
+            _ => {
+                let resp = send_host_smoke_request(&client, addr, &allowed_host, case)
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("{} should receive a response with allowed Host: {err}", case.name)
+                    });
+
+                assert_ne!(
+                    resp.status(),
+                    reqwest::StatusCode::FORBIDDEN,
+                    "{} should not be rejected by Host middleware",
+                    case.name
+                );
+                assert_security_headers(&resp);
+            }
+        }
+    }
+}
+
 async fn send_host_smoke_request(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -134,6 +168,10 @@ async fn test_host_middlewareは巨大body付きmemo_putもbody_limit前に不�
 
 fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_security_headers(resp);
+}
+
+fn assert_security_headers(resp: &reqwest::Response) {
     assert_eq!(
         resp.headers()
             .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
