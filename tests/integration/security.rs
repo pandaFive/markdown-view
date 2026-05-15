@@ -77,12 +77,14 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
             HostSmokeRequest::WebSocketUpgrade => {
                 let url = format!("ws://{}/ws", addr);
                 let origin = format!("http://{}", addr);
-                connect_ws(&url, &origin).await.unwrap_or_else(|err| {
-                    panic!(
-                        "{} should connect with allowed Host/Origin: {err}",
-                        case.name
-                    )
-                });
+                let (_ws_stream, response) =
+                    connect_ws(&url, &origin).await.unwrap_or_else(|err| {
+                        panic!(
+                            "{} should connect with allowed Host/Origin: {err}",
+                            case.name
+                        )
+                    });
+                assert_security_headers(response.headers());
             }
             _ => {
                 let resp = send_host_smoke_request(&client, addr, &allowed_host, case)
@@ -100,7 +102,7 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
                     "{} should not be rejected by Host middleware",
                     case.name
                 );
-                assert_security_headers(&resp);
+                assert_security_headers(resp.headers());
             }
         }
     }
@@ -126,21 +128,21 @@ async fn test_host_middlewareは空hostを拒否しsecurity_headerを維持す�
 async fn send_host_smoke_request(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
-    attack_host: &str,
+    request_host: &str,
     case: &HostSmokeCase,
 ) -> reqwest::Result<reqwest::Response> {
     match &case.request {
         HostSmokeRequest::Get(path) => {
             client
                 .get(format!("http://{}{}", addr, path))
-                .header("Host", attack_host)
+                .header("Host", request_host)
                 .send()
                 .await
         }
         HostSmokeRequest::MemoPut => {
             client
                 .put(format!("http://{}/api/memo", addr))
-                .header("Host", attack_host)
+                .header("Host", request_host)
                 .json(&serde_json::json!({
                     "raw": "blocked memo"
                 }))
@@ -152,7 +154,7 @@ async fn send_host_smoke_request(
 
             client
                 .get(format!("http://{}/ws", addr))
-                .header("Host", attack_host)
+                .header("Host", request_host)
                 .header("Origin", allowed_origin)
                 .header("Connection", "Upgrade")
                 .header("Upgrade", "websocket")
@@ -191,25 +193,24 @@ async fn test_host_middlewareは巨大body付きmemo_putもbody_limit前に不�
 
 fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
-    assert_security_headers(resp);
+    assert_security_headers(resp.headers());
 }
 
-fn assert_security_headers(resp: &reqwest::Response) {
+fn assert_security_headers(headers: &axum::http::HeaderMap) {
     assert_eq!(
-        resp.headers()
-            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+        headers
+            .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
     assert_eq!(
-        resp.headers()
-            .get(reqwest::header::X_FRAME_OPTIONS)
+        headers
+            .get(axum::http::header::X_FRAME_OPTIONS)
             .and_then(|value| value.to_str().ok()),
         Some("DENY")
     );
-    assert!(resp
-        .headers()
-        .get(reqwest::header::CONTENT_SECURITY_POLICY)
+    assert!(headers
+        .get(axum::http::header::CONTENT_SECURITY_POLICY)
         .and_then(|value| value.to_str().ok())
         .is_some());
 }
