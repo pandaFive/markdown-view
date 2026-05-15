@@ -609,6 +609,30 @@ mod tests {
         assert!(!is_allowed_request_host(&headers));
     }
 
+    #[test]
+    fn test_request_host_guardは欠落hostをforbidden_jsonで拒否する() {
+        let headers = HeaderMap::new();
+
+        assert_request_host_guard_forbidden(&headers);
+    }
+
+    #[test]
+    fn test_request_host_guardは非ascii_hostをforbidden_jsonで拒否する() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+
+        assert_request_host_guard_forbidden(&headers);
+    }
+
+    fn assert_request_host_guard_forbidden(headers: &HeaderMap) {
+        let error = ensure_allowed_request_host(headers).unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(error.1["error"], "許可されていないHostヘッダーです");
+    }
+
     #[tokio::test]
     async fn test_host_middlewareは不正hostを拒否して許可hostを通す() {
         let app = Router::new()
