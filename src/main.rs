@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -55,6 +56,29 @@ async fn bind_preview_listener(
     )
 }
 
+fn build_app_mode_for_canonical_path(path: &Path) -> Result<AppMode> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("パスのメタデータ取得に失敗: {}", path.display()))?;
+
+    if metadata.file_type().is_file() {
+        if metadata.len() > MAX_FILE_SIZE {
+            bail!(
+                "ファイルサイズが上限（{}MB）を超えています: {}",
+                MAX_FILE_SIZE / 1024 / 1024,
+                path.display()
+            );
+        }
+        AppMode::new_single_file(path).context("単一ファイルモードの初期化に失敗")
+    } else if metadata.file_type().is_dir() {
+        AppMode::new_directory(path).context("ディレクトリモードの初期化に失敗")
+    } else {
+        bail!(
+            "指定されたパスはファイルでもディレクトリでもありません: {}",
+            path.display()
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -68,25 +92,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("パスが見つかりません: {}", args.path.display()))?;
 
     // ファイルかディレクトリかを判定してモードを決定
-    let mode = if path.is_file() {
-        // 単一ファイルモード: 起動時にサイズチェック
-        let metadata = std::fs::metadata(&path).context("ファイルのメタデータ取得に失敗")?;
-        if metadata.len() > MAX_FILE_SIZE {
-            bail!(
-                "ファイルサイズが上限（{}MB）を超えています: {}",
-                MAX_FILE_SIZE / 1024 / 1024,
-                path.display()
-            );
-        }
-        AppMode::new_single_file(&path).context("単一ファイルモードの初期化に失敗")?
-    } else if path.is_dir() {
-        AppMode::new_directory(&path).context("ディレクトリモードの初期化に失敗")?
-    } else {
-        bail!(
-            "指定されたパスはファイルでもディレクトリでもありません: {}",
-            path.display()
-        );
-    };
+    let mode = build_app_mode_for_canonical_path(&path)?;
 
     // テーマ名の起動時検証（存在しない場合は即座にエラー）
     if let Some(ref theme_name) = args.theme {
@@ -217,5 +223,73 @@ mod tests {
 
         let service = WatchService::start(state).await.expect("監視開始");
         service.shutdown().await;
+    }
+
+    #[test]
+    fn test_build_app_mode_for_canonical_path_mdファイルは単一ファイルモード() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let file_path = dir.path().join("note.md");
+        std::fs::write(&file_path, "# note").expect("Markdown作成");
+        let canonical = file_path.canonicalize().expect("canonical path");
+
+        let mode = build_app_mode_for_canonical_path(&canonical).expect("単一ファイルモード");
+
+        assert_eq!(mode.single_file(), Some(canonical.as_path()));
+    }
+
+    #[test]
+    fn test_build_app_mode_for_canonical_path_ディレクトリはディレクトリモード() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let canonical = dir.path().canonicalize().expect("canonical path");
+
+        let mode = build_app_mode_for_canonical_path(&canonical).expect("ディレクトリモード");
+
+        assert_eq!(mode.directory(), Some(canonical.as_path()));
+    }
+
+    #[test]
+    fn test_build_app_mode_for_canonical_path_サイズ超過は起動時に拒否() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let file_path = dir.path().join("large.md");
+        let file = std::fs::File::create(&file_path).expect("Markdown作成");
+        file.set_len(MAX_FILE_SIZE + 1).expect("サイズ設定");
+        let canonical = file_path.canonicalize().expect("canonical path");
+
+        let error = build_app_mode_for_canonical_path(&canonical).expect_err("サイズ超過エラー");
+        let message = error.to_string();
+
+        assert!(message.contains("ファイルサイズが上限"));
+        assert!(message.contains(&canonical.display().to_string()));
+    }
+
+    #[test]
+    fn test_build_app_mode_for_canonical_path_metadata失敗はpathを含む() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let file_path = dir.path().join("vanish.md");
+        std::fs::write(&file_path, "# vanish").expect("Markdown作成");
+        let canonical = file_path.canonicalize().expect("canonical path");
+        std::fs::remove_file(&file_path).expect("Markdown削除");
+
+        let error = build_app_mode_for_canonical_path(&canonical).expect_err("metadataエラー");
+        let message = format!("{:#}", error);
+
+        assert!(message.contains("パスのメタデータ取得に失敗"));
+        assert!(message.contains(&canonical.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_build_app_mode_for_canonical_path_特殊ファイルは拒否() {
+        let dir = tempfile::tempdir().expect("一時ディレクトリ");
+        let socket_path = dir.path().join("preview.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("Unix socket作成");
+        let canonical = socket_path.canonicalize().expect("canonical path");
+
+        let error = build_app_mode_for_canonical_path(&canonical).expect_err("特殊ファイル拒否");
+        let message = error.to_string();
+
+        assert!(message.contains("指定されたパスはファイルでもディレクトリでもありません"));
+        assert!(message.contains(&canonical.display().to_string()));
     }
 }

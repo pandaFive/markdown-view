@@ -92,7 +92,42 @@ impl std::fmt::Display for AppModeBuildError {
     }
 }
 
-impl std::error::Error for AppModeBuildError {}
+impl std::error::Error for AppModeBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppModeBuildError::CanonicalPath(error) => Some(error),
+            AppModeBuildError::NotFile(_)
+            | AppModeBuildError::NotDirectory(_)
+            | AppModeBuildError::NotMarkdown(_) => None,
+        }
+    }
+}
+
+fn metadata_for_mode(canonical: &CanonicalPath) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(canonical.as_path())
+}
+
+fn ensure_canonical_file(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotFile(canonical.as_path().to_path_buf()))?;
+    if !metadata.file_type().is_file() {
+        return Err(AppModeBuildError::NotFile(
+            canonical.as_path().to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBuildError> {
+    let metadata = metadata_for_mode(canonical)
+        .map_err(|_| AppModeBuildError::NotDirectory(canonical.as_path().to_path_buf()))?;
+    if !metadata.file_type().is_dir() {
+        return Err(AppModeBuildError::NotDirectory(
+            canonical.as_path().to_path_buf(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 enum AppModeKind {
@@ -109,11 +144,7 @@ impl AppMode {
     pub fn new_single_file(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
         let canonical =
             CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
-        if !canonical.as_path().is_file() {
-            return Err(AppModeBuildError::NotFile(
-                canonical.as_path().to_path_buf(),
-            ));
-        }
+        ensure_canonical_file(&canonical)?;
         match canonical.as_path().extension() {
             Some(ext) if ext.eq_ignore_ascii_case("md") => {}
             _ => {
@@ -129,11 +160,7 @@ impl AppMode {
     pub fn new_directory(path: impl AsRef<Path>) -> Result<Self, AppModeBuildError> {
         let canonical =
             CanonicalPath::try_from_path(path).map_err(AppModeBuildError::CanonicalPath)?;
-        if !canonical.as_path().is_dir() {
-            return Err(AppModeBuildError::NotDirectory(
-                canonical.as_path().to_path_buf(),
-            ));
-        }
+        ensure_canonical_directory(&canonical)?;
         Ok(Self(AppModeKind::Directory(canonical)))
     }
 
@@ -353,6 +380,36 @@ mod tests {
         let (_dir, file_path) = create_markdown_fixture("note.md", "# note");
         let result = AppMode::new_directory(&file_path);
         assert!(matches!(result, Err(AppModeBuildError::NotDirectory(_))));
+    }
+
+    #[test]
+    fn test_ensure_canonical_file_metadata失敗はnotfileへ集約する() {
+        let (_dir, file_path) = create_markdown_fixture("vanish.md", "# vanish");
+        let canonical = file_path.canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_file(&file_path).unwrap();
+
+        let result = ensure_canonical_file(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotFile(path)) if path == canonical
+        ));
+    }
+
+    #[test]
+    fn test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let canonical_path = CanonicalPath(canonical.clone());
+        std::fs::remove_dir(dir.path()).unwrap();
+
+        let result = ensure_canonical_directory(&canonical_path);
+
+        assert!(matches!(
+            result,
+            Err(AppModeBuildError::NotDirectory(path)) if path == canonical
+        ));
     }
 
     #[test]
