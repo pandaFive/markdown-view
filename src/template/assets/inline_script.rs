@@ -873,6 +873,7 @@ mod tests {
     #[test]
     fn test_max_file_size_sentinelはbootstrap_jsだけに存在する() {
         let allowed_bootstrap_js = include_str!("js/bootstrap.js");
+        // 違反時にファイル名を出すため、bootstrap.js以外のTEMPLATE includeと同期する。
         let disallowed_sources = [
             ("js/selection.js", include_str!("js/selection.js")),
             (
