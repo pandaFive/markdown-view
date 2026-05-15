@@ -4,7 +4,7 @@
 
 **Goal:** Host middleware 化後の主要 route 境界を統合テストで固定し、許可 Host は通り、異常 Host は security headers 付き `403` で拒否されることを確認する。
 
-**Architecture:** 既存の `tests/integration/security.rs` にある `HOST_SMOKE_CASES` を唯一の route 列挙元として使い、許可 Host smoke と拒否 Host smoke の両方を同じ route 群へ適用する。production code は変更せず、HTTP 経由で再現できない malformed Host は既存の `src/server/guards.rs` unit test で担保済みであることを確認し、今回の新規差分は integration smoke に集中する。
+**Architecture:** 既存の `tests/integration/security.rs` にある `HOST_SMOKE_CASES` を唯一の route 列挙元として使い、許可 Host smoke と拒否 Host smoke の両方を同じ route 群へ適用する。production behavior は変更せず、HTTP 経由で再現できない malformed Host は `src/server/guards.rs` の request Host guard unit test で固定する。今回の新規差分は integration smoke と guard 境界 test に集中する。
 
 **Tech Stack:** Rust, Tokio, reqwest, tokio-tungstenite, axum integration tests.
 
@@ -16,7 +16,7 @@
   - `HOST_SMOKE_CASES` と `HostSmokeRequest` を既存の route 列挙元として維持する。
   - 許可 Host smoke test を追加する。
   - 空 Host rejection test を追加する。
-- Reference only: `src/server/guards.rs`
+- Modify tests only: `src/server/guards.rs`
   - 欠落 Host と非 ASCII Host は request Host guard 境界の unit test で固定する。HTTP 経由で送れない異常値を integration test 用に無理に公開しない。
 - Reference only: `tests/integration/support.rs`
   - `/ws` 許可 Host smoke では既存 `connect_ws` helper を使う。
@@ -45,9 +45,14 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
             HostSmokeRequest::WebSocketUpgrade => {
                 let url = format!("ws://{}/ws", addr);
                 let origin = format!("http://{}", addr);
-                connect_ws(&url, &origin).await.unwrap_or_else(|err| {
-                    panic!("{} should connect with allowed Host/Origin: {err}", case.name)
-                });
+                let (_ws_stream, response) =
+                    connect_ws(&url, &origin).await.unwrap_or_else(|err| {
+                        panic!(
+                            "{} should connect with allowed Host/Origin: {err}",
+                            case.name
+                        )
+                    });
+                assert_security_headers(response.headers());
             }
             _ => {
                 let resp = send_host_smoke_request(&client, addr, &allowed_host, case)
@@ -62,7 +67,7 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
                     "{} should not be rejected by Host middleware",
                     case.name
                 );
-                assert_security_headers(&resp);
+                assert_security_headers(resp.headers());
             }
         }
     }
@@ -86,27 +91,36 @@ In `tests/integration/security.rs`, replace `assert_forbidden_with_security_head
 ```rust
 fn assert_forbidden_with_security_headers(resp: &reqwest::Response) {
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
-    assert_security_headers(resp);
+    assert_security_headers(resp.headers());
 }
 
-fn assert_security_headers(resp: &reqwest::Response) {
+fn assert_security_headers(headers: &axum::http::HeaderMap) {
     assert_eq!(
-        resp.headers()
-            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+        headers
+            .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
     assert_eq!(
-        resp.headers()
-            .get(reqwest::header::X_FRAME_OPTIONS)
+        headers
+            .get(axum::http::header::X_FRAME_OPTIONS)
             .and_then(|value| value.to_str().ok()),
         Some("DENY")
     );
-    assert!(resp
-        .headers()
-        .get(reqwest::header::CONTENT_SECURITY_POLICY)
+
+    let csp = headers
+        .get(axum::http::header::CONTENT_SECURITY_POLICY)
         .and_then(|value| value.to_str().ok())
-        .is_some());
+        .expect("Content-Security-Policy header should be present");
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("script-src 'sha256-"));
+    assert!(csp.contains("style-src 'sha256-"));
+    assert!(csp.contains("img-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("object-src 'none'"));
+    assert!(!csp.contains("script-src 'unsafe-inline'"));
+    assert!(!csp.contains("style-src 'unsafe-inline'"));
+    assert!(!csp.contains("data:"));
 }
 ```
 

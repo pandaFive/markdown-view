@@ -36,7 +36,7 @@ HTTP クライアントが実ネットワーク経由で送れない Host 異常
 
 `HOST_SMOKE_CASES` を使い、`127.0.0.1:<port>` または `localhost:<port>` の許可 Host で主要 route へリクエストする。HTTP route は成功 status または既存仕様上の正常な client error を許容し、Host middleware 由来の `403` ではないことを確認する。security headers は既存の Host 拒否テストと同じ観点で確認する。
 
-`/ws` は許可 Host かつ許可 Origin で接続できることを確認する。WebSocket は HTTP response headers を通常の `reqwest::Response` と同じ形で確認しにくいため、Host middleware に拒否されないことを主眼にする。
+`/ws` は許可 Host かつ許可 Origin で接続できることを確認し、WebSocket handshake response headers でも HTTP route と同じ security headers が維持されることを確認する。
 
 ### 異常 Host rejection
 
