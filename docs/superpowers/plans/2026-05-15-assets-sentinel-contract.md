@@ -4,7 +4,7 @@
 
 **Goal:** CSS/JS asset template sentinel の許可箇所と `MAX_FILE_SIZE` 表示値を単体テストで固定する。
 
-**Architecture:** Production code の挙動は変えず、置換元に最も近い `css_bundle.rs` と `inline_script.rs` の unit test を追加する。CSS は `base.css` だけ、JS は `bootstrap.js` だけを sentinel 許可ファイルとして扱い、生成後 asset に sentinel が残らないことも確認する。
+**Architecture:** 現行 10MiB 上限の表示は維持し、置換元に最も近い `css_bundle.rs` と `inline_script.rs` の unit test を追加する。CSS は `base.css` だけ、JS は `bootstrap.js` だけを sentinel 許可ファイルとして扱い、生成後 asset に sentinel が残らないことも確認する。
 
 **Tech Stack:** Rust unit tests, `include_str!`, existing `cargo test`, repository `./verify.sh`
 
@@ -17,7 +17,8 @@
   - `css(...)` 生成後に sentinel が残らないことをテストする。
 - Modify: `src/template/assets/inline_script.rs`
   - `__MAX_FILE_SIZE_MB__` の許可出現箇所をテストする。
-  - `inline_js(crate::server::MAX_FILE_SIZE)` 生成後に `maxFileSizeMb: 10` が含まれ、sentinel が残らないことをテストする。
+  - `inline_js(crate::server::MAX_FILE_SIZE)` 生成後に `MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれ、sentinel が残らないことをテストする。
+  - 非整数 MiB の上限は MB 表示を切り上げる private helper で扱う。
 - Read-only dependency: `src/template/assets/css/*.css`
 - Read-only dependency: `src/template/assets/js/*.js`
 - Read-only dependency: `src/server/files/content.rs`
@@ -47,6 +48,7 @@ mod tests {
     #[test]
     fn test_dark_theme_sentinelはbase_cssだけに存在する() {
         let allowed_base_css = include_str!("css/base.css");
+        let expected_sentinel_count = count_occurrences(allowed_base_css, DARK_THEME_SENTINEL);
         let disallowed_sources = [
             ("css/sidebar.css", include_str!("css/sidebar.css")),
             ("css/content.css", include_str!("css/content.css")),
@@ -56,28 +58,31 @@ mod tests {
         ];
 
         assert_eq!(
-            count_occurrences(allowed_base_css, DARK_THEME_SENTINEL),
+            expected_sentinel_count,
             2,
             "base.css の dark theme sentinel 出現回数が変わった"
         );
 
+        let mut listed_sentinel_count = expected_sentinel_count;
         for (path, source) in disallowed_sources {
+            let source_sentinel_count = count_occurrences(source, DARK_THEME_SENTINEL);
+            listed_sentinel_count += source_sentinel_count;
             assert!(
-                !source.contains(DARK_THEME_SENTINEL),
+                source_sentinel_count == 0,
                 "{path} に dark theme sentinel が混入している"
             );
         }
 
         assert_eq!(
             count_occurrences(TEMPLATE, DARK_THEME_SENTINEL),
-            2,
-            "結合済み CSS template の dark theme sentinel 出現回数が変わった"
+            listed_sentinel_count,
+            "CSS template include一覧とsentinel契約テストの一覧が同期していない"
         );
     }
 
     #[test]
     fn test_css生成後にdark_theme_sentinelが残らない() {
-        let generated = css(":root { --test-color: #fff; }");
+        let generated = TEMPLATE.replace(DARK_THEME_SENTINEL, ":root { --test-color: #fff; }");
 
         assert!(
             !generated.contains(DARK_THEME_SENTINEL),
@@ -140,6 +145,8 @@ Still inside the same `tests` module in `src/template/assets/inline_script.rs`, 
     #[test]
     fn test_max_file_size_sentinelはbootstrap_jsだけに存在する() {
         let allowed_bootstrap_js = include_str!("js/bootstrap.js");
+        let expected_sentinel_count =
+            count_occurrences(allowed_bootstrap_js, MAX_FILE_SIZE_SENTINEL);
         let disallowed_sources = [
             ("js/selection.js", include_str!("js/selection.js")),
             (
@@ -173,42 +180,57 @@ Still inside the same `tests` module in `src/template/assets/inline_script.rs`, 
         ];
 
         assert_eq!(
-            count_occurrences(allowed_bootstrap_js, MAX_FILE_SIZE_SENTINEL),
+            expected_sentinel_count,
             1,
             "bootstrap.js の max file size sentinel 出現回数が変わった"
         );
 
+        let mut listed_sentinel_count = expected_sentinel_count;
         for (path, source) in disallowed_sources {
+            let source_sentinel_count = count_occurrences(source, MAX_FILE_SIZE_SENTINEL);
+            listed_sentinel_count += source_sentinel_count;
             assert!(
-                !source.contains(MAX_FILE_SIZE_SENTINEL),
+                source_sentinel_count == 0,
                 "{path} に max file size sentinel が混入している"
             );
         }
 
         assert_eq!(
             count_occurrences(TEMPLATE, MAX_FILE_SIZE_SENTINEL),
-            1,
-            "結合済み JS template の max file size sentinel 出現回数が変わった"
+            listed_sentinel_count,
+            "JS template include一覧とsentinel契約テストの一覧が同期していない"
         );
     }
 ```
 
-- [ ] **Step 3: Write the generated JS display value test**
+- [ ] **Step 3: Write the generated JS display value tests**
 
-Still inside the same `tests` module in `src/template/assets/inline_script.rs`, add this test:
+Add a private `file_size_display_mb(max_file_size: u64) -> String` helper that uses `div_ceil(1024 * 1024)`, and have `inline_js` call it. Still inside the same `tests` module in `src/template/assets/inline_script.rs`, add a small tree-sitter helper that reads the numeric `maxFileSizeMb` property value from generated JS, then add these tests:
 
 ```rust
     #[test]
-    fn test_inline_jsはmax_file_size_mbを10へ置換する() {
+    fn test_inline_jsはmax_file_size由来のmb値へ置換する() {
         let generated = inline_js(crate::server::MAX_FILE_SIZE);
 
         assert!(
             !generated.contains(MAX_FILE_SIZE_SENTINEL),
             "生成済み JS に max file size sentinel が残っている"
         );
-        assert!(
-            generated.contains("maxFileSizeMb: 10"),
-            "生成済み JS の maxFileSizeMb が MAX_FILE_SIZE 由来の 10MB 表示になっていない"
+        assert_eq!(
+            max_file_size_mb_value(&generated),
+            Some(file_size_display_mb(crate::server::MAX_FILE_SIZE).parse().unwrap()),
+            "生成済み JS の maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示になっていない"
+        );
+    }
+
+    #[test]
+    fn test_inline_jsは非整数mibのmax_file_sizeを切り上げ表示する() {
+        let generated = inline_js(11_000_000);
+
+        assert_eq!(
+            max_file_size_mb_value(&generated),
+            Some(11),
+            "非整数MiBの maxFileSizeMb は過小表示を避けるため切り上げる"
         );
     }
 ```
@@ -225,6 +247,7 @@ Expected:
 
 - Existing innerHTML sink scanner tests still pass.
 - New sentinel tests pass.
+- `inline_js(11_000_000)` returns JS whose `maxFileSizeMb` value is `11`.
 - If a future source file contains `__MAX_FILE_SIZE_MB__` outside `bootstrap.js`, this command should fail with a message naming the offending file.
 
 - [ ] **Step 5: Commit the JS test change**
@@ -253,7 +276,7 @@ In `docs/todo/TODO.md`, move or rewrite the item `assets バンドルの sentine
 
 ```markdown
 - [x] assets バンドルの sentinel 衝突回避テストを追加
-  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `maxFileSizeMb: 10` へ置換されることを単体テストで固定した。production code、CSP hash 計算、ユーザー向け文言は変更していない。
+  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の `maxFileSizeMb` へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられることを単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。
 ```
 
 - [ ] **Step 2: Run formatting check**
@@ -321,6 +344,6 @@ Expected:
 
 ## Self-Review
 
-- Spec coverage: The plan covers CSS sentinel location, generated CSS sentinel removal, JS sentinel location, generated JS sentinel removal, `maxFileSizeMb: 10`, unchanged production behavior, full verification, security rationale, rollback by removing tests, and TODO completion.
+- Spec coverage: The plan covers CSS sentinel location, generated CSS sentinel removal, JS sentinel location, generated JS sentinel removal, `MAX_FILE_SIZE` derived `maxFileSizeMb`, non-integer MiB rounding, full verification, security rationale, rollback, and TODO completion.
 - Placeholder scan: No TBD, TODO, unspecified validation, or "similar to" steps are present.
 - Type consistency: `TEMPLATE`, `css`, and `inline_js` are accessed from tests in their defining modules. `crate::server::MAX_FILE_SIZE` is the existing public re-export path used elsewhere in the repository.

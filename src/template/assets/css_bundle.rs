@@ -32,6 +32,7 @@ mod tests {
     #[test]
     fn test_dark_theme_sentinelはbase_cssだけに存在する() {
         let allowed_base_css = include_str!("css/base.css");
+        let expected_sentinel_count = count_occurrences(allowed_base_css, DARK_THEME_SENTINEL);
         let disallowed_sources = [
             ("css/sidebar.css", include_str!("css/sidebar.css")),
             ("css/content.css", include_str!("css/content.css")),
@@ -41,28 +42,30 @@ mod tests {
         ];
 
         assert_eq!(
-            count_occurrences(allowed_base_css, DARK_THEME_SENTINEL),
-            2,
+            expected_sentinel_count, 2,
             "base.css の dark theme sentinel 出現回数が変わった"
         );
 
+        let mut listed_sentinel_count = expected_sentinel_count;
         for (path, source) in disallowed_sources {
+            let source_sentinel_count = count_occurrences(source, DARK_THEME_SENTINEL);
+            listed_sentinel_count += source_sentinel_count;
             assert!(
-                !source.contains(DARK_THEME_SENTINEL),
+                source_sentinel_count == 0,
                 "{path} に dark theme sentinel が混入している"
             );
         }
 
         assert_eq!(
             count_occurrences(TEMPLATE, DARK_THEME_SENTINEL),
-            2,
-            "結合済み CSS template の dark theme sentinel 出現回数が変わった"
+            listed_sentinel_count,
+            "CSS template include一覧とsentinel契約テストの一覧が同期していない"
         );
     }
 
     #[test]
     fn test_css生成後にdark_theme_sentinelが残らない() {
-        let generated = css(":root { --test-color: #fff; }");
+        let generated = TEMPLATE.replace(DARK_THEME_SENTINEL, ":root { --test-color: #fff; }");
 
         assert!(
             !generated.contains(DARK_THEME_SENTINEL),

@@ -30,7 +30,7 @@
 ## Done Summary
 
 - [x] assets バンドルの sentinel 衝突回避テストを追加
-  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `maxFileSizeMb: 10` へ置換されることを単体テストで固定した。production code、CSP hash 計算、ユーザー向け文言は変更していない。
+  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の `maxFileSizeMb` へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられることを単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。
 
 - [x] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
   - 完了根拠: PR #155 で `apply_security_layers(RouteDefinitions, HeaderValue)` を追加し、Host middleware、security headers、CSP の適用を `create_router()` の共通 helper へ集約した。`build_routes()` は route 定義だけを返し、`create_router()` は `build_routes()` → `apply_security_layers()` → `.with_state(state)` の流れに整理された。integration test では `HOST_SMOKE_CASES` を追加し、index、content、memo、files、search、memo PUT、WebSocket upgrade の不正 Host 拒否と security headers を同じ assertion で固定した。残る許可 Host 全 route smoke、malformed/missing/empty Host の追加統合テスト、warn ログ URI path 追加などは別 follow-up として継続する。

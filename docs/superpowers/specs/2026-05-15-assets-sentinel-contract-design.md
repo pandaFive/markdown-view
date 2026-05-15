@@ -9,7 +9,7 @@
 - `__DARK_THEME_VARS__`
 - `__MAX_FILE_SIZE_MB__`
 
-既存の production code の挙動は変更しない。置換処理の helper 化、実行時エラー処理、`MAX_FILE_SIZE` 定数、ユーザー向け文言、CSP hash 計算は非目標とする。
+現行 `MAX_FILE_SIZE` の 10MB 表示は維持する。実行時エラー処理、`MAX_FILE_SIZE` 定数、ユーザー向け文言、CSP hash 計算は非目標とする。
 
 ## 背景
 
@@ -30,7 +30,8 @@
   - `js/bootstrap.js` だけが `__MAX_FILE_SIZE_MB__` を含んでよい。
   - その他の JS include 元には `__MAX_FILE_SIZE_MB__` が含まれてはならない。
   - 結合済み `TEMPLATE` の `__MAX_FILE_SIZE_MB__` 出現回数は 1 とする。
-  - `inline_js(crate::server::MAX_FILE_SIZE)` の生成結果には sentinel が残らず、`maxFileSizeMb: 10` が含まれる。
+  - `inline_js(crate::server::MAX_FILE_SIZE)` の生成結果には sentinel が残らず、`MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれる。
+  - 非整数 MiB の `MAX_FILE_SIZE` は、過小表示を避けるため MB 表示を切り上げる。
 
 公開 API は増やさない。テストは private const と private function に近い場所へ追加する。
 
@@ -38,7 +39,8 @@
 
 - `__DARK_THEME_VARS__` は `base.css` の期待箇所以外に存在しないことがテストで固定される。
 - `__MAX_FILE_SIZE_MB__` は `bootstrap.js` の期待箇所以外に存在しないことがテストで固定される。
-- `inline_js(MAX_FILE_SIZE)` の生成結果に sentinel が残らず、フロントエンド設定値として `maxFileSizeMb: 10` が含まれる。
+- `inline_js(MAX_FILE_SIZE)` の生成結果に sentinel が残らず、フロントエンド設定値として `MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれる。
+- `inline_js(11_000_000)` は `maxFileSizeMb` を `11` として生成する。
 - 既存の inline CSS/JS 生成挙動、CSP hash 計算、ユーザー向け文言は変わらない。
 - `./verify.sh` が通る。
 
@@ -54,7 +56,7 @@
 - `src/template/assets/css/*.css`
 - `src/template/assets/js/*.js`
 
-`crate::server::MAX_FILE_SIZE` は読み取り依存のみとし、値は変更しない。
+`crate::server::MAX_FILE_SIZE` は読み取り依存のみとし、値は変更しない。MB 表示計算は `inline_script.rs` 内の private helper へ閉じる。
 
 ## セキュリティ考慮
 
@@ -70,7 +72,7 @@ sentinel 混入は、意図しない CSS/JS 置換を通じて inline asset の�
 
 ## ロールバック
 
-追加したテストコードを削除すれば元の状態へ戻せる。production code は変更しないため、実行時挙動のロールバック作業は不要。
+追加したテストコードと `inline_script.rs` の private helper 変更を戻せば元の状態へ戻せる。現行 10MiB 上限の表示は 10MB のままなので、通常利用時の表示ロールバック作業は不要。
 
 ## 見積もり
 
