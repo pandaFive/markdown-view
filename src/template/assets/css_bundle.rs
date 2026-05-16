@@ -16,7 +16,11 @@ const TEMPLATE: &str = concat!(
 
 pub(super) fn css(dark_theme_vars: &str) -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
-    CSS.get_or_init(|| TEMPLATE.replace("__DARK_THEME_VARS__", dark_theme_vars))
+    CSS.get_or_init(|| render_css(dark_theme_vars))
+}
+
+fn render_css(dark_theme_vars: &str) -> String {
+    TEMPLATE.replace("__DARK_THEME_VARS__", dark_theme_vars)
 }
 
 #[cfg(test)]
@@ -65,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_css生成後にdark_theme_sentinelが残らない() {
-        let generated = TEMPLATE.replace(DARK_THEME_SENTINEL, ":root { --test-color: #fff; }");
+        let generated = render_css(":root { --test-color: #fff; }");
 
         assert!(
             !generated.contains(DARK_THEME_SENTINEL),

@@ -48,7 +48,7 @@ mod tests {
         source.matches(needle).count()
     }
 
-    fn max_file_size_mb_value(source: &str) -> Option<u64> {
+    fn max_file_size_mb_object_property_values(source: &str) -> Vec<Option<u64>> {
         let mut parser = Parser::new();
         parser
             .set_language(tree_sitter_javascript::language())
@@ -61,28 +61,32 @@ mod tests {
             "JavaScript source should not contain parse errors: {source}"
         );
 
-        find_max_file_size_mb_value(tree.root_node(), source)
+        let mut values = Vec::new();
+        collect_max_file_size_mb_object_property_values(tree.root_node(), source, &mut values);
+        values
     }
 
-    fn find_max_file_size_mb_value(node: Node<'_>, source: &str) -> Option<u64> {
+    fn collect_max_file_size_mb_object_property_values(
+        node: Node<'_>,
+        source: &str,
+        values: &mut Vec<Option<u64>>,
+    ) {
         if node.kind() == "pair" {
             let key = node
                 .child_by_field_name("key")
                 .and_then(|key| static_object_property_key_name(key, source));
             if key.as_deref() == Some("maxFileSizeMb") {
-                return node
+                let value = node
                     .child_by_field_name("value")
                     .and_then(|value| numeric_literal_value(value, source));
+                values.push(value);
             }
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if let Some(value) = find_max_file_size_mb_value(child, source) {
-                return Some(value);
-            }
+            collect_max_file_size_mb_object_property_values(child, source, values);
         }
-        None
     }
 
     fn numeric_literal_value(node: Node<'_>, source: &str) -> Option<u64> {
@@ -985,13 +989,13 @@ mod tests {
             "生成済み JS に max file size sentinel が残っている"
         );
         assert_eq!(
-            max_file_size_mb_value(&generated),
-            Some(
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(
                 file_size_display_mb(crate::server::MAX_FILE_SIZE)
-                    .parse()
+                    .parse::<u64>()
                     .expect("MAX_FILE_SIZE display value should be numeric")
-            ),
-            "生成済み JS の maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示になっていない"
+            )],
+            "生成済み JS の object property maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示1件になっていない"
         );
     }
 
@@ -1000,9 +1004,9 @@ mod tests {
         let generated = inline_js(11_000_000);
 
         assert_eq!(
-            max_file_size_mb_value(&generated),
-            Some(11),
-            "非整数MiBの maxFileSizeMb は過小表示を避けるため切り上げる"
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(11)],
+            "非整数MiBの object property maxFileSizeMb は過小表示を避けるため切り上げた値1件にする"
         );
     }
 

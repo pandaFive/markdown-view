@@ -4,7 +4,7 @@
 
 **Goal:** CSS/JS asset template sentinel の許可箇所と `MAX_FILE_SIZE` 表示値を単体テストで固定する。
 
-**Architecture:** 現行 10MiB 上限の表示は維持し、置換元に最も近い `css_bundle.rs` と `inline_script.rs` の unit test を追加する。CSS は `base.css` だけ、JS は `bootstrap.js` だけを sentinel 許可ファイルとして扱い、生成後 asset に sentinel が残らないことも確認する。
+**Architecture:** 現行 10MiB 上限の表示は維持し、置換元に最も近い `css_bundle.rs` と `inline_script.rs` の unit test を追加する。CSS は `base.css` だけ、JS は `bootstrap.js` だけを sentinel 許可ファイルとして扱い、生成後 asset に sentinel が残らないことも確認する。非整数 MiB の入力は過小表示を避けるため切り上げ表示にする契約として固定する。
 
 **Tech Stack:** Rust unit tests, `include_str!`, existing `cargo test`, repository `./verify.sh`
 
@@ -14,11 +14,11 @@
 
 - Modify: `src/template/assets/css_bundle.rs`
   - `__DARK_THEME_VARS__` の許可出現箇所をテストする。
-  - `css(...)` 生成後に sentinel が残らないことをテストする。
+  - `css(...)` とテストが同じ private helper を通り、生成後に sentinel が残らないことをテストする。
 - Modify: `src/template/assets/inline_script.rs`
   - `__MAX_FILE_SIZE_MB__` の許可出現箇所をテストする。
-  - `inline_js(crate::server::MAX_FILE_SIZE)` 生成後に `MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれ、sentinel が残らないことをテストする。
-  - 非整数 MiB の上限は MB 表示を切り上げる private helper で扱う。
+  - `inline_js(crate::server::MAX_FILE_SIZE)` 生成後に `MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property が1件だけ含まれ、sentinel が残らないことをテストする。
+  - 非整数 MiB の上限は MB 表示を切り上げる契約として固定する。
 - Read-only dependency: `src/template/assets/css/*.css`
 - Read-only dependency: `src/template/assets/js/*.js`
 - Read-only dependency: `src/server/files/content.rs`
@@ -30,7 +30,7 @@
 - Modify: `src/template/assets/css_bundle.rs`
 - Test: `src/template/assets/css_bundle.rs`
 
-- [ ] **Step 1: Write the failing CSS sentinel tests**
+- [x] **Step 1: Write the failing CSS sentinel tests**
 
 Add this test module to the end of `src/template/assets/css_bundle.rs`:
 
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_css生成後にdark_theme_sentinelが残らない() {
-        let generated = TEMPLATE.replace(DARK_THEME_SENTINEL, ":root { --test-color: #fff; }");
+        let generated = render_css(":root { --test-color: #fff; }");
 
         assert!(
             !generated.contains(DARK_THEME_SENTINEL),
@@ -92,7 +92,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the CSS module tests and confirm the expected failure or pass state**
+- [x] **Step 2: Run the CSS module tests and confirm the expected failure or pass state**
 
 Run:
 
@@ -104,6 +104,8 @@ Expected:
 
 - If the copied test module compiles against the current file, the tests should pass because the current asset layout already satisfies the intended contract.
 - If a future source file contains `__DARK_THEME_VARS__` outside `base.css`, this command should fail with a message naming the offending file.
+
+Observed (2026-05-16 JST): PASS via `./verify.sh` coverage.
 
 - [ ] **Step 3: Commit the CSS test change**
 
@@ -119,13 +121,15 @@ Expected:
 - Commit succeeds.
 - Only `src/template/assets/css_bundle.rs` is included.
 
+Current state: Not committed in this review-fix pass; leave unchecked until the final commit is created.
+
 ## Task 2: JS Sentinel と MAX_FILE_SIZE 表示契約テスト
 
 **Files:**
 - Modify: `src/template/assets/inline_script.rs`
 - Test: `src/template/assets/inline_script.rs`
 
-- [ ] **Step 1: Add JS sentinel helper constants inside the existing test module**
+- [x] **Step 1: Add JS sentinel helper constants inside the existing test module**
 
 In `src/template/assets/inline_script.rs`, find the existing `#[cfg(test)] mod tests { ... }` module. Add these items near the top of the module, after the current `use` statements:
 
@@ -137,7 +141,7 @@ In `src/template/assets/inline_script.rs`, find the existing `#[cfg(test)] mod t
     }
 ```
 
-- [ ] **Step 2: Write the failing JS sentinel location test**
+- [x] **Step 2: Write the failing JS sentinel location test**
 
 Still inside the same `tests` module in `src/template/assets/inline_script.rs`, add this test:
 
@@ -203,9 +207,9 @@ Still inside the same `tests` module in `src/template/assets/inline_script.rs`, 
     }
 ```
 
-- [ ] **Step 3: Write the generated JS display value tests**
+- [x] **Step 3: Write the generated JS display value tests**
 
-Add a private `file_size_display_mb(max_file_size: u64) -> String` helper that uses `div_ceil(1024 * 1024)`, and have `inline_js` call it. Still inside the same `tests` module in `src/template/assets/inline_script.rs`, add a small tree-sitter helper that reads the numeric `maxFileSizeMb` property value from generated JS, then add these tests:
+Use the existing private `file_size_display_mb(max_file_size: u64) -> String` helper as the source of truth for the `div_ceil(1024 * 1024)` display contract. Still inside the same `tests` module in `src/template/assets/inline_script.rs`, add a small tree-sitter helper that reads every `maxFileSizeMb` property value from generated JS, preserving non-numeric values as `None`, then add these tests:
 
 ```rust
     #[test]
@@ -217,9 +221,9 @@ Add a private `file_size_display_mb(max_file_size: u64) -> String` helper that u
             "生成済み JS に max file size sentinel が残っている"
         );
         assert_eq!(
-            max_file_size_mb_value(&generated),
-            Some(file_size_display_mb(crate::server::MAX_FILE_SIZE).parse().unwrap()),
-            "生成済み JS の maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示になっていない"
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(file_size_display_mb(crate::server::MAX_FILE_SIZE).parse().unwrap())],
+            "生成済み JS の object property maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示1件になっていない"
         );
     }
 
@@ -228,14 +232,14 @@ Add a private `file_size_display_mb(max_file_size: u64) -> String` helper that u
         let generated = inline_js(11_000_000);
 
         assert_eq!(
-            max_file_size_mb_value(&generated),
-            Some(11),
-            "非整数MiBの maxFileSizeMb は過小表示を避けるため切り上げる"
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(11)],
+            "非整数MiBの object property maxFileSizeMb は過小表示を避けるため切り上げた値1件にする"
         );
     }
 ```
 
-- [ ] **Step 4: Run the JS module tests**
+- [x] **Step 4: Run the JS module tests**
 
 Run:
 
@@ -249,6 +253,8 @@ Expected:
 - New sentinel tests pass.
 - `inline_js(11_000_000)` returns JS whose `maxFileSizeMb` value is `11`.
 - If a future source file contains `__MAX_FILE_SIZE_MB__` outside `bootstrap.js`, this command should fail with a message naming the offending file.
+
+Observed (2026-05-16 JST): PASS via `./verify.sh` coverage.
 
 - [ ] **Step 5: Commit the JS test change**
 
@@ -264,22 +270,24 @@ Expected:
 - Commit succeeds.
 - Only `src/template/assets/inline_script.rs` is included.
 
+Current state: Not committed in this review-fix pass; leave unchecked until the final commit is created.
+
 ## Task 3: Full Verification and TODO Update
 
 **Files:**
 - Modify: `docs/todo/TODO.md`
 - Verify: full repository
 
-- [ ] **Step 1: Mark the TODO item complete**
+- [x] **Step 1: Mark the TODO item complete**
 
 In `docs/todo/TODO.md`, move or rewrite the item `assets バンドルの sentinel 衝突回避テストを追加` from unchecked Medium Priority to completed Done Summary. Use this completion text:
 
 ```markdown
 - [x] assets バンドルの sentinel 衝突回避テストを追加
-  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の `maxFileSizeMb` へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられることを単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。
+  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、CSS 生成 helper 経由の生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property 1件へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられる契約を単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。
 ```
 
-- [ ] **Step 2: Run formatting check**
+- [x] **Step 2: Run formatting check**
 
 Run:
 
@@ -291,7 +299,9 @@ Expected:
 
 - PASS.
 
-- [ ] **Step 3: Run clippy**
+Observed (2026-05-16 JST): PASS via `./verify.sh`.
+
+- [x] **Step 3: Run clippy**
 
 Run:
 
@@ -303,7 +313,9 @@ Expected:
 
 - PASS with no warnings.
 
-- [ ] **Step 4: Run full test suite**
+Observed (2026-05-16 JST): PASS via `./verify.sh`.
+
+- [x] **Step 4: Run full test suite**
 
 Run:
 
@@ -315,7 +327,9 @@ Expected:
 
 - PASS.
 
-- [ ] **Step 5: Run repository verification script**
+Observed (2026-05-16 JST): PASS via `./verify.sh`.
+
+- [x] **Step 5: Run repository verification script**
 
 Run:
 
@@ -327,6 +341,8 @@ Expected:
 
 - PASS.
 - This is the final required verification.
+
+Observed (2026-05-16 JST): PASS.
 
 - [ ] **Step 6: Commit TODO update**
 
@@ -341,6 +357,8 @@ Expected:
 
 - Commit succeeds.
 - Only `docs/todo/TODO.md` is included.
+
+Current state: Not committed in this review-fix pass; leave unchecked until the final commit is created.
 
 ## Self-Review
 

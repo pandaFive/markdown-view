@@ -9,7 +9,7 @@
 - `__DARK_THEME_VARS__`
 - `__MAX_FILE_SIZE_MB__`
 
-現行 `MAX_FILE_SIZE` の 10MB 表示は維持する。実行時エラー処理、`MAX_FILE_SIZE` 定数、ユーザー向け文言、CSP hash 計算は非目標とする。
+現行 `MAX_FILE_SIZE` の 10MB 表示は維持する。非整数 MiB の入力は過小表示を避けるため切り上げ表示にする契約としてテストで固定する。実行時エラー処理、`MAX_FILE_SIZE` 定数、ユーザー向け文言、CSP hash 計算は非目標とする。
 
 ## 背景
 
@@ -25,13 +25,13 @@
   - `css/base.css` だけが `__DARK_THEME_VARS__` を含んでよい。
   - その他の CSS include 元には `__DARK_THEME_VARS__` が含まれてはならない。
   - 結合済み `TEMPLATE` の出現回数は、`css/base.css` の期待出現回数と一致する。
-  - 生成済み CSS には `__DARK_THEME_VARS__` が残らない。
+  - CSS 生成 helper 経由の生成済み CSS には `__DARK_THEME_VARS__` が残らない。
 - `inline_script.rs`
   - `js/bootstrap.js` だけが `__MAX_FILE_SIZE_MB__` を含んでよい。
   - その他の JS include 元には `__MAX_FILE_SIZE_MB__` が含まれてはならない。
   - 結合済み `TEMPLATE` の `__MAX_FILE_SIZE_MB__` 出現回数は 1 とする。
-  - `inline_js(crate::server::MAX_FILE_SIZE)` の生成結果には sentinel が残らず、`MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれる。
-  - 非整数 MiB の `MAX_FILE_SIZE` は、過小表示を避けるため MB 表示を切り上げる。
+  - `inline_js(crate::server::MAX_FILE_SIZE)` の生成結果には sentinel が残らず、`MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property が1件だけ含まれる。
+  - 非整数 MiB の `MAX_FILE_SIZE` は、過小表示を避けるため MB 表示を切り上げる契約として固定する。
 
 公開 API は増やさない。テストは private const と private function に近い場所へ追加する。
 
@@ -39,14 +39,14 @@
 
 - `__DARK_THEME_VARS__` は `base.css` の期待箇所以外に存在しないことがテストで固定される。
 - `__MAX_FILE_SIZE_MB__` は `bootstrap.js` の期待箇所以外に存在しないことがテストで固定される。
-- `inline_js(MAX_FILE_SIZE)` の生成結果に sentinel が残らず、フロントエンド設定値として `MAX_FILE_SIZE` 由来の `maxFileSizeMb` が含まれる。
-- `inline_js(11_000_000)` は `maxFileSizeMb` を `11` として生成する。
-- 既存の inline CSS/JS 生成挙動、CSP hash 計算、ユーザー向け文言は変わらない。
+- `inline_js(MAX_FILE_SIZE)` の生成結果に sentinel が残らず、フロントエンド設定値として `MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property が1件だけ含まれる。
+- `inline_js(11_000_000)` は object literal の `maxFileSizeMb` property を `11` として1件だけ生成する。
+- 現行 10MiB 上限の表示、CSP hash 計算、ユーザー向け文言は変わらない。非整数 MiB 入力の切り上げ表示契約はテストで固定される。
 - `./verify.sh` が通る。
 
 ## 影響範囲
 
-直接の変更対象は次の2ファイルのテストコードに限定する。
+直接のコード変更対象は次の2ファイルに限定する。`css_bundle.rs` は CSS 生成 helper とテストを変更し、`inline_script.rs` は既存 MB 表示 helper の契約をテストで固定する。文書更新対象は本 spec、対応する plan、`docs/todo/TODO.md` に限定する。既存の MB 表示契約を変える場合は別変更として扱う。
 
 - `src/template/assets/css_bundle.rs`
 - `src/template/assets/inline_script.rs`
@@ -72,7 +72,7 @@ sentinel 混入は、意図しない CSS/JS 置換を通じて inline asset の�
 
 ## ロールバック
 
-追加したテストコードと `inline_script.rs` の private helper 変更を戻せば元の状態へ戻せる。現行 10MiB 上限の表示は 10MB のままなので、通常利用時の表示ロールバック作業は不要。
+追加した CSS 生成 helper、テストコード、文書差分を戻せば元の状態へ戻せる。現行 10MiB 上限の表示は 10MB のままなので、通常利用時の表示ロールバック作業は不要。既存の `file_size_display_mb` は今回の追加対象ではなく、その挙動を戻す場合は別変更として扱う。
 
 ## 見積もり
 
