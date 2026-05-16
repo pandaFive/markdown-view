@@ -48,7 +48,7 @@ pub fn render_page(params: RenderPageParams<'_>) -> String {
         .memo
         .file()
         .map(|file| html_attr("data-memo-file", file))
-        .unwrap_or_else(|| html_attr("data-memo-file", ""));
+        .unwrap_or_default();
 
     render_html_document(HtmlDocumentParts {
         theme: if params.dark_mode { "dark" } else { "light" },
@@ -684,6 +684,19 @@ mod tests {
             html.contains("<blockquote") && html.contains("</blockquote>"),
             "raw=\"> 引用メモ\" から render_markdown 経由で <blockquote> 要素が描画されること"
         );
+    }
+
+    #[test]
+    fn test_メモfileがnoneの場合data_memo_file属性を出力しない() {
+        let memo = MemoResponse::empty(None);
+        let html = render_single_file_page(&memo);
+
+        assert!(
+            !html.contains("data-memo-file"),
+            "file=None は空属性ではなく属性なしとして表現すること"
+        );
+        assert!(html.contains("id=\"memo-editor\""));
+        assert!(html.contains("id=\"memo-preview\""));
     }
 
     #[test]
