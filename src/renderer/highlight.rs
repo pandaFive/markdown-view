@@ -98,6 +98,22 @@ fn truncate_to_utf8_boundary(value: &str, max_bytes: usize) -> Option<&str> {
     Some(&value[..end])
 }
 
+fn should_log_unknown_language_fallback(
+    tracker: &UnknownLanguageLogTracker,
+    language: &str,
+) -> bool {
+    tracker.mark_seen(language)
+}
+
+fn log_unknown_language_fallback(language: &str) {
+    if should_log_unknown_language_fallback(unknown_language_log_tracker(), language) {
+        tracing::debug!(
+            "[markdown-view] 未知のコードブロック言語のためプレーン表示にフォールバックしました (lang={})",
+            log_safe_language(language)
+        );
+    }
+}
+
 fn plain_code_block_html(language: Option<&str>, code: &str, line_attrs: &str) -> String {
     if let Some(lang) = language {
         return format!(
@@ -116,9 +132,14 @@ fn plain_code_block_html(language: Option<&str>, code: &str, line_attrs: &str) -
 }
 
 fn highlighted_code_html(syntax_set: &SyntaxSet, language: &str, code: &str) -> Option<String> {
-    let syntax = syntax_set
+    let Some(syntax) = syntax_set
         .find_syntax_by_token(language)
-        .or_else(|| syntax_set.find_syntax_by_extension(language))?;
+        .or_else(|| syntax_set.find_syntax_by_extension(language))
+    else {
+        log_unknown_language_fallback(language);
+        return None;
+    };
+
     let mut generator = ClassedHTMLGenerator::new_with_class_style(
         syntax,
         syntax_set,
@@ -194,6 +215,24 @@ mod tests {
     }
 
     #[test]
+    fn test_log_unknown_language_fallbackは同じ言語を一度だけログ対象にする() {
+        let tracker = UnknownLanguageLogTracker::new();
+
+        assert!(should_log_unknown_language_fallback(
+            &tracker,
+            "unknown-lang"
+        ));
+        assert!(!should_log_unknown_language_fallback(
+            &tracker,
+            "unknown-lang"
+        ));
+        assert!(should_log_unknown_language_fallback(
+            &tracker,
+            "another-lang"
+        ));
+    }
+
+    #[test]
     fn test_log_safe_languageは制御文字をescapeする() {
         assert_eq!(
             log_safe_language("bad\nlang\t\u{1b}"),
@@ -207,7 +246,10 @@ mod tests {
 
         assert_eq!(
             log_safe_language(&language),
-            format!("{}...(truncated)", "a".repeat(MAX_LOGGED_LANGUAGE_BYTES - 1))
+            format!(
+                "{}...(truncated)",
+                "a".repeat(MAX_LOGGED_LANGUAGE_BYTES - 1)
+            )
         );
     }
 }
