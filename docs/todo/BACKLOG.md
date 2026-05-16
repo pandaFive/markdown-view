@@ -72,8 +72,8 @@
 
 - [x] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
   - ファイル: `src/server/messages.rs`
-  - 内容: `BroadcastMessage::Update` の JSON 生成に明示 fallback を追加し、シリアライズ失敗時も最小構造の update JSON を返す契約に整理した。fallback は本文やファイルパスを含めず、漏えい面を広げない。
-  - 完了根拠: `cargo test --all-targets --all-features`, `./verify.sh`
+  - 内容: `BroadcastMessage::Update` の JSON 生成に明示 fallback を追加し、シリアライズ失敗時も最小構造の update JSON を返す契約に整理した。fallback は本文を含めず、`file` はディレクトリモードの routing に必要な場合だけ保持する。
+  - 完了根拠: `cargo test server::messages`, `cargo test --all-targets --all-features`, `./verify.sh`
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [x] `read_route_memo` の二重サイズチェックを単一化する

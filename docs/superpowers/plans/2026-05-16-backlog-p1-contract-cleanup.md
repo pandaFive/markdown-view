@@ -33,7 +33,7 @@
 - Modify: `src/server/messages.rs`
 - Test: `src/server/messages.rs`
 
-- [ ] **Step 1: 通常 Update JSON の既存契約テストを追加する**
+- [x] **Step 1: 通常 Update JSON の既存契約テストを追加する**
 
 `src/server/messages.rs` の `#[cfg(test)] mod tests` に次のテストを追加する。既存 `test_broadcast_message_lagged_recoveryのjson直列化` の前後に置く。
 
@@ -57,7 +57,7 @@
     }
 ```
 
-- [ ] **Step 2: テストを実行し、現状の通常契約が通ることを確認する**
+- [x] **Step 2: テストを実行し、現状の通常契約が通ることを確認する**
 
 Run:
 
@@ -67,15 +67,15 @@ cargo test server::messages::tests::test_broadcast_message_updateのjson直列�
 
 Expected: `test result: ok. 1 passed`
 
-- [ ] **Step 3: fallback helper のテストを追加する**
+- [x] **Step 3: fallback helper と失敗分岐のテストを追加する**
 
-同じ test module に次のテストを追加する。
+同じ test module に、`file` なし fallback、`file` あり fallback、成功時 pass-through、直列化失敗時 fallback を固定するテストを追加する。
 
 ```rust
     #[test]
     fn test_update_fallback_jsonは空content_tocだけを返す() {
-        let json = update_fallback_json();
-        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let json = update_fallback_json(None);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(value["content"], "");
         assert_eq!(value["toc"], "");
@@ -83,9 +83,44 @@ Expected: `test result: ok. 1 passed`
         assert!(value.get("refresh").is_none());
         assert!(value.get("error").is_none());
     }
+
+    #[test]
+    fn test_update_fallback_jsonはfileありならfileを保持する() {
+        let json = update_fallback_json(Some("docs/guide.md"));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_json_or_fallbackは成功時jsonをそのまま返す() {
+        let json = r#"{"content":"ok","toc":""}"#.to_string();
+
+        let result = update_json_or_fallback(Ok(json.clone()), Some("docs/guide.md"));
+
+        assert_eq!(result, json);
+    }
+
+    #[test]
+    fn test_update_json_or_fallbackは直列化失敗時にfile付きfallbackを返す() {
+        let error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+
+        let json = update_json_or_fallback(Err(error), Some("docs/guide.md"));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
 ```
 
-- [ ] **Step 4: fallback helper 未定義で失敗することを確認する**
+- [x] **Step 4: fallback helper 未定義で失敗することを確認する**
 
 Run:
 
@@ -93,19 +128,40 @@ Run:
 cargo test server::messages::tests::test_update_fallback_jsonは空content_tocだけを返す
 ```
 
-Expected: FAIL with `cannot find function update_fallback_json`
+Expected: FAIL with missing `update_fallback_json` / `update_json_or_fallback` helpers, or signature mismatch before implementation.
 
-- [ ] **Step 5: fallback helper を実装する**
+- [x] **Step 5: fallback helper を実装する**
 
 `impl BroadcastMessage` の直前または直後に、module-private helper を追加する。
 
 ```rust
-fn update_fallback_json() -> &'static str {
-    r#"{"content":"","toc":""}"#
+fn update_fallback_json(file: Option<&str>) -> String {
+    match file {
+        Some(file) => serde_json::json!({
+            "content": "",
+            "toc": "",
+            "file": file,
+        })
+        .to_string(),
+        None => r#"{"content":"","toc":""}"#.to_string(),
+    }
+}
+
+fn update_json_or_fallback(
+    serialized: Result<String, serde_json::Error>,
+    file: Option<&str>,
+) -> String {
+    serialized.unwrap_or_else(|error| {
+        tracing::error!(
+            "[markdown-view] UpdateメッセージJSON化失敗。最小updateへfallbackします: {}",
+            error
+        );
+        update_fallback_json(file)
+    })
 }
 ```
 
-- [ ] **Step 6: fallback helper テストが通ることを確認する**
+- [x] **Step 6: fallback helper テストが通ることを確認する**
 
 Run:
 
@@ -115,22 +171,17 @@ cargo test server::messages::tests::test_update_fallback_jsonは空content_toc�
 
 Expected: `test result: ok. 1 passed`
 
-- [ ] **Step 7: `BroadcastMessage::to_json()` の Update arm を fallback 経路へ変更する**
+- [x] **Step 7: `BroadcastMessage::to_json()` の Update arm を fallback 経路へ変更する**
 
 `src/server/messages.rs` の `BroadcastMessage::to_json()` を次の形へ変更する。
 
 ```rust
     pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
         match self {
-            BroadcastMessage::Update(update) => {
-                Ok(serde_json::to_string(update).unwrap_or_else(|error| {
-                    tracing::error!(
-                        "[markdown-view] UpdateメッセージJSON化失敗。空updateへfallbackします: {}",
-                        error
-                    );
-                    update_fallback_json().to_string()
-                }))
-            }
+            BroadcastMessage::Update(update) => Ok(update_json_or_fallback(
+                serde_json::to_string(update),
+                update.file(),
+            )),
             BroadcastMessage::MemoUpdate(update) => serde_json::to_string(update),
             BroadcastMessage::LaggedRecovery(message) => serde_json::to_string(message),
             BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
@@ -142,9 +193,9 @@ Expected: `test result: ok. 1 passed`
     }
 ```
 
-この変更で `Update` arm は `Ok` を常に返す。ほかの variant は既存どおり `serde_json::Error` を呼び出し側へ返す。
+この変更で `Update` arm は `Ok` を常に返す。fallback は本文を空にしつつ、元の `UpdateMessage` に `file` がある場合だけ routing 用に保持する。ほかの variant は既存どおり `serde_json::Error` を呼び出し側へ返す。
 
-- [ ] **Step 8: messages tests を実行する**
+- [x] **Step 8: messages tests を実行する**
 
 Run:
 
@@ -154,7 +205,7 @@ cargo test server::messages
 
 Expected: `test result: ok`
 
-- [ ] **Step 9: 変更をコミットする**
+- [x] **Step 9: 変更をコミットする**
 
 ```bash
 git add src/server/messages.rs
@@ -167,7 +218,7 @@ git commit -m "fix: Updateメッセージのfallback契約を明示"
 - Modify: `src/server/files/memo_fs.rs`
 - Test: `src/server/files/memo_fs.rs`
 
-- [ ] **Step 1: `TokioMemoFs::read_with_limit` の上限超過テストを追加する**
+- [x] **Step 1: `TokioMemoFs::read_with_limit` の上限超過テストを追加する**
 
 `src/server/files/memo_fs.rs` の末尾に `#[cfg(test)] mod tests` が既にある場合はそこへ追加する。ない場合は末尾に次を追加する。
 
@@ -194,7 +245,7 @@ mod tests {
 
 既存 test module がある場合は、`use super::*;` と `use crate::server::files::MAX_FILE_SIZE;` が重複しないよう統合する。
 
-- [ ] **Step 2: テストを実行し、既存実装で通ることを確認する**
+- [x] **Step 2: テストを実行し、既存実装で通ることを確認する**
 
 Run:
 
@@ -204,7 +255,7 @@ cargo test server::files::memo_fs::tests::test_tokio_memo_fs_read_with_limitは�
 
 Expected: `test result: ok. 1 passed`
 
-- [ ] **Step 3: `MemoFs::read_with_limit` の doc コメントを具体化する**
+- [x] **Step 3: `MemoFs::read_with_limit` の doc コメントを具体化する**
 
 `src/server/files/memo_fs.rs` の trait method コメントを次の内容へ置き換える。
 
@@ -217,7 +268,7 @@ Expected: `test result: ok. 1 passed`
     async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError>;
 ```
 
-- [ ] **Step 4: memo_fs のテストを実行する**
+- [x] **Step 4: memo_fs のテストを実行する**
 
 Run:
 
@@ -227,7 +278,7 @@ cargo test server::files::memo_fs
 
 Expected: `test result: ok`
 
-- [ ] **Step 5: 変更をコミットする**
+- [x] **Step 5: 変更をコミットする**
 
 ```bash
 git add src/server/files/memo_fs.rs
@@ -240,7 +291,7 @@ git commit -m "test: メモ読込上限契約を固定"
 - Modify: `src/server/files/memo.rs`
 - Test: `src/server/files/tests/memo_route.rs`, existing integration memo tests
 
-- [ ] **Step 1: metadata 超過の既存 API 契約を確認する targeted test を実行する**
+- [x] **Step 1: metadata 超過の既存 API 契約を確認する targeted test を実行する**
 
 Run:
 
@@ -258,7 +309,7 @@ cargo test server::files::tests::memo_route
 
 Expected: `test result: ok`
 
-- [ ] **Step 2: 読み込み後の重複サイズチェックを削除する**
+- [x] **Step 2: 読み込み後の重複サイズチェックを削除する**
 
 `src/server/files/memo.rs` の `read_memo_file_if_present` から次の block を削除する。
 
@@ -273,11 +324,11 @@ Expected: `test result: ok`
 
 削除後、`String::from_utf8(bytes)` が `fs.read_with_limit` 成功結果をそのまま処理する形にする。
 
-- [ ] **Step 3: unused import が出ないか確認する**
+- [x] **Step 3: unused import が出ないか確認する**
 
 `src/server/files/memo.rs` 冒頭の `use super::content::MAX_FILE_SIZE;` は保存時 raw size check と metadata check でまだ使われるため残す。`StatusCode` も既存 error mapping で使われるため残す。
 
-- [ ] **Step 4: memo route tests を実行する**
+- [x] **Step 4: memo route tests を実行する**
 
 Run:
 
@@ -287,7 +338,7 @@ cargo test server::files::tests::memo_route
 
 Expected: `test result: ok`
 
-- [ ] **Step 5: memo integration tests を実行する**
+- [x] **Step 5: memo integration tests を実行する**
 
 Run:
 
@@ -297,7 +348,7 @@ cargo test --test integration_test memo
 
 Expected: `test result: ok`
 
-- [ ] **Step 6: 変更をコミットする**
+- [x] **Step 6: 変更をコミットする**
 
 ```bash
 git add src/server/files/memo.rs
@@ -310,7 +361,7 @@ git commit -m "refactor: メモ読込サイズチェックを契約へ集約"
 - Modify: `src/server/session.rs`
 - Test: compile through targeted test or full cargo test
 
-- [ ] **Step 1: `tokio::select!` 直前にコメントを追加する**
+- [x] **Step 1: `tokio::select!` 直前にコメントを追加する**
 
 `src/server/session.rs` の `loop {` と `tokio::select! {` の間に次を追加する。
 
@@ -331,7 +382,7 @@ git commit -m "refactor: メモ読込サイズチェックを契約へ集約"
             incoming = socket.recv() => {
 ```
 
-- [ ] **Step 2: formatting check を実行する**
+- [x] **Step 2: formatting check を実行する**
 
 Run:
 
@@ -341,7 +392,7 @@ cargo fmt --all -- --check
 
 Expected: no output ending in an error, exit code 0
 
-- [ ] **Step 3: session 関連を含む tests を実行する**
+- [x] **Step 3: session 関連を含む tests を実行する**
 
 Run:
 
@@ -357,7 +408,7 @@ cargo test --test integration_test websocket
 
 Expected: `test result: ok`
 
-- [ ] **Step 4: 変更をコミットする**
+- [x] **Step 4: 変更をコミットする**
 
 ```bash
 git add src/server/session.rs
@@ -370,7 +421,7 @@ git commit -m "docs: WebSocket selectのcancel-safe前提を明記"
 - Modify if implementing cleanup: `docs/todo/BACKLOG.md`
 - Test: repository verification
 
-- [ ] **Step 1: full Rust tests を実行する**
+- [x] **Step 1: full Rust tests を実行する**
 
 Run:
 
@@ -380,7 +431,7 @@ cargo test --all-targets --all-features
 
 Expected: `test result: ok`
 
-- [ ] **Step 2: required verification を実行する**
+- [x] **Step 2: required verification を実行する**
 
 Run:
 
@@ -390,19 +441,19 @@ Run:
 
 Expected: format, clippy, tests all pass.
 
-- [ ] **Step 3: BACKLOG 更新方針を確認する**
+- [x] **Step 3: BACKLOG 更新方針を確認する**
 
 実装完了後に `docs/todo/BACKLOG.md` の対象 3 件を Done へ移すか、別コミットで処理するかを判断する。今回のコード差分だけで PR を小さく保つ場合は、BACKLOG 更新を separate docs commit にする。
 
 対象 3 件:
 
 ```markdown
-- [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
-- [ ] `read_route_memo` の二重サイズチェックを単一化する
-- [ ] `tokio::select!` の cancel-safe 性をコメントで明記する
+- [x] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
+- [x] `read_route_memo` の二重サイズチェックを単一化する
+- [x] `tokio::select!` の cancel-safe 性をコメントで明記する
 ```
 
-- [ ] **Step 4: BACKLOG を更新する場合は対象 3 件を Done へ移す**
+- [x] **Step 4: BACKLOG を更新する場合は対象 3 件を Done へ移す**
 
 更新する場合は、各項目に完了根拠として実行した verification を追記する。新規の未検証主張は書かない。
 
@@ -413,7 +464,7 @@ git add docs/todo/BACKLOG.md
 git commit -m "docs: BACKLOG P1契約整理を完了扱いに更新"
 ```
 
-- [ ] **Step 5: 最終差分を確認する**
+- [x] **Step 5: 最終差分を確認する**
 
 Run:
 
@@ -443,6 +494,6 @@ Placeholder scan:
 
 Type consistency:
 
-- `update_fallback_json()` は `src/server/messages.rs` 内の module-private helper として定義し、test から同一 module 内で参照する。
+- `update_fallback_json(file)` と `update_json_or_fallback(...)` は `src/server/messages.rs` 内の module-private helper として定義し、test から同一 module 内で参照する。
 - `MemoReadError::TooLarge`、`TokioMemoFs`、`MAX_FILE_SIZE` は既存型・定数を使う。
 - `cargo test` filter は既存 module path に合わせ、filter が合わない場合の代替コマンドも明記した。
