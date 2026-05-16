@@ -34,7 +34,9 @@ pub(super) fn inline_js(max_file_size: u64) -> String {
 
 fn file_size_display_mb(max_file_size: u64) -> String {
     const MIB: u64 = 1024 * 1024;
-    max_file_size.div_ceil(MIB).to_string()
+    let whole_mib = max_file_size / MIB;
+    let has_remainder = whole_mib * MIB != max_file_size;
+    (whole_mib + u64::from(has_remainder)).to_string()
 }
 
 #[cfg(test)]
@@ -1007,6 +1009,29 @@ mod tests {
             max_file_size_mb_object_property_values(&generated),
             vec![Some(11)],
             "非整数MiBの object property maxFileSizeMb は過小表示を避けるため切り上げた値1件にする"
+        );
+    }
+
+    #[test]
+    fn test_file_size_display_mbは境界値を切り上げ表示する() {
+        assert_eq!(file_size_display_mb(0), "0");
+        assert_eq!(file_size_display_mb(10 * 1024 * 1024), "10");
+        assert_eq!(file_size_display_mb(10 * 1024 * 1024 + 1), "11");
+        assert_eq!(file_size_display_mb(u64::MAX), "17592186044416");
+    }
+
+    #[test]
+    fn test_file_size_display_mbはrust_1_70互換apiだけを使う() {
+        let source = include_str!("inline_script.rs");
+        assert!(
+            !source.contains(concat!("div", "_ceil")),
+            "{}",
+            concat!(
+                "READMEのRust 1.70+要件を守るため、Rust 1.73+のu64::",
+                "div",
+                "_ceil",
+                "は使わない"
+            )
         );
     }
 
