@@ -126,7 +126,11 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// メタデータ取得（サイズ制限の一段目チェック用）
     async fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
 
-    /// バイト列読み込み。TOCTOU 対策として実読み取り量を上限以下に制限する。
+    /// バイト列読み込み。
+    ///
+    /// 呼び出し側の metadata 事前チェック後にファイルが増える TOCTOU へ備え、
+    /// 実読み取り量が `MAX_FILE_SIZE` を超えた場合は `MemoReadError::TooLarge`
+    /// を返す。成功時に返す `Vec<u8>` は上限以下である。
     async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError>;
 
     /// 親ディレクトリを再帰的に作成（既存ならエラーを返さない）
@@ -632,6 +636,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::server::files::MAX_FILE_SIZE;
 
     #[test]
     fn is_retryable_windows_replace_errorは一時lock系windowsエラーだけtrueにする() {
@@ -964,6 +969,19 @@ mod tests {
                 .expect("slept delays mutex should not be poisoned"),
             WINDOWS_REPLACE_RETRY_DELAYS_MS
         );
+    }
+
+    #[tokio::test]
+    async fn test_tokio_memo_fs_read_with_limitは実読み取り上限超過をtoo_largeにする() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".README.md.memo.md");
+        tokio::fs::write(&path, vec![b'a'; (MAX_FILE_SIZE + 1) as usize])
+            .await
+            .unwrap();
+
+        let result = TokioMemoFs.read_with_limit(&path).await;
+
+        assert!(matches!(result, Err(MemoReadError::TooLarge)));
     }
 
     #[test]
