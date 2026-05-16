@@ -8,7 +8,7 @@ use super::support::setup_dir_server;
 
 #[tokio::test]
 async fn test_ディレクトリモード_indexページ取得() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -23,7 +23,7 @@ async fn test_ディレクトリモード_indexページ取得() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_ファイル一覧api() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/files", addr))
         .await
@@ -40,7 +40,7 @@ async fn test_ディレクトリモード_ファイル一覧api() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_ファイル指定コンテンツ取得() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content?file=docs/guide.md", addr))
         .await
@@ -55,7 +55,7 @@ async fn test_ディレクトリモード_ファイル指定コンテンツ取�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_api_content_file空文字は404を返す() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content?file=", addr))
         .await
@@ -67,7 +67,7 @@ async fn test_ディレクトリモード_api_content_file空文字は404を返�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_存在しないファイル() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content?file=nonexistent.md", addr))
         .await
@@ -78,7 +78,7 @@ async fn test_ディレクトリモード_存在しないファイル() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_非mdファイル拒否() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content?file=notes.txt", addr))
         .await
@@ -87,7 +87,7 @@ async fn test_ディレクトリモード_非mdファイル拒否() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_ファイル指定でindex取得() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/?file=docs/guide.md", addr))
         .await
@@ -99,7 +99,7 @@ async fn test_ディレクトリモード_ファイル指定でindex取得() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_アクティブファイルマーカーが表示される() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -227,7 +227,7 @@ async fn test_ディレクトリモード_readmeなし時はアルファベッ�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_readmeがデフォルト表示される() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content", addr))
         .await
@@ -240,7 +240,7 @@ async fn test_ディレクトリモード_readmeがデフォルト表示され�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_ファイルツリーにディレクトリ構造が含まれる() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);

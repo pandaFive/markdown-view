@@ -2,7 +2,7 @@ use super::support::{setup_dir_server, setup_single_file_server};
 
 #[tokio::test]
 async fn test_ディレクトリモード_タブuiが表示される() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -42,7 +42,7 @@ async fn test_ディレクトリモード_タブuiが表示される() {
 }
 #[tokio::test]
 async fn test_単一ファイルモード_タブが表示されない() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test\n\nHello").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test\n\nHello").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -63,7 +63,7 @@ async fn test_単一ファイルモード_タブが表示されない() {
 }
 #[tokio::test]
 async fn test_本文htmlにソース行番号属性と引用ボタンが含まれる() {
-    let (_state, addr, _tmp_dir) =
+    let (_state, addr, _server, _tmp_dir) =
         setup_single_file_server("# Heading\n\nLine one\n\nLine two").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();

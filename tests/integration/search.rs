@@ -20,7 +20,7 @@ async fn test_ディレクトリモード_検索apiは複数ファイルから�
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
 
     let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
         .await
@@ -61,7 +61,7 @@ async fn test_ディレクトリモード_api_searchは長すぎるqueryを400�
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
     let client = reqwest::Client::new();
     let query = "あ".repeat(257);
 
@@ -89,7 +89,7 @@ async fn test_ディレクトリモード_api_searchは削除済みbaseでも長
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
     tokio::fs::remove_dir_all(tmp_dir.path()).await.unwrap();
     let client = reqwest::Client::new();
     let query = "あ".repeat(257);
@@ -118,7 +118,7 @@ async fn test_ディレクトリモード_api_searchはraw_query上限超過を4
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
     let query = "a".repeat(4097);
 
     let resp = reqwest::get(format!("http://{}/api/search?q={}", addr, query))
@@ -142,7 +142,7 @@ async fn test_ディレクトリモード_api_searchは不正percent_encodingを
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
     let invalid_query = "%E0%A4%A";
 
     let resp = reqwest::get(format!("http://{}/api/search?q={}", addr, invalid_query))
@@ -165,7 +165,7 @@ async fn test_ディレクトリモード_api_searchは結果数打ち切りをj
     std::fs::write(dir.path().join("many.md"), markdown).unwrap();
 
     let state = build_dir_state(dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
     let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
         .await
         .unwrap();
@@ -197,7 +197,7 @@ async fn test_ディレクトリモード_検索apiは巨大ファイルをス�
     .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state).await;
+    let (addr, _server) = spawn_test_server(state).await;
 
     let resp = reqwest::get(format!("http://{}/api/search?q=alpha%20note", addr))
         .await
@@ -211,7 +211,7 @@ async fn test_ディレクトリモード_検索apiは巨大ファイルをス�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_api_searchは不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 

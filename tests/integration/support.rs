@@ -6,7 +6,8 @@ use std::time::Duration;
 use std::{fs, os::unix::fs::PermissionsExt};
 
 use futures_util::{stream::SplitStream, StreamExt};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use markdown_view::server::{AppMode, AppState};
@@ -14,6 +15,41 @@ use markdown_view::server::{AppMode, AppState};
 pub(super) type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 pub(super) type WsReadHalf = SplitStream<WsStream>;
+
+#[must_use]
+pub(super) struct TestServerGuard {
+    handle: JoinHandle<()>,
+    early_exit: oneshot::Receiver<Result<(), String>>,
+}
+
+impl Drop for TestServerGuard {
+    fn drop(&mut self) {
+        match self.early_exit.try_recv() {
+            Ok(Ok(())) => {
+                self.handle.abort();
+                if !std::thread::panicking() {
+                    panic!("integration test server exited before test shutdown");
+                }
+            }
+            Ok(Err(error)) => {
+                self.handle.abort();
+                if !std::thread::panicking() {
+                    panic!("integration test server failed before test shutdown: {error}");
+                }
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.handle.abort();
+                if !std::thread::panicking() {
+                    panic!("integration test server task ended without reporting status");
+                }
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {
+                self.handle.abort();
+            }
+        }
+    }
+}
+
 fn build_single_file_state(file_path: &Path) -> Arc<AppState> {
     let (tx, _rx) = broadcast::channel(16);
     Arc::new(AppState::new_with_tokio_memo_fs(
@@ -32,7 +68,9 @@ pub(super) fn build_dir_state(base_dir: &Path) -> Arc<AppState> {
         tx,
     ))
 }
-pub(super) async fn spawn_test_server(state: Arc<AppState>) -> std::net::SocketAddr {
+pub(super) async fn spawn_test_server(
+    state: Arc<AppState>,
+) -> (std::net::SocketAddr, TestServerGuard) {
     let router = markdown_view::server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -40,19 +78,21 @@ pub(super) async fn spawn_test_server(state: Arc<AppState>) -> std::net::SocketA
     let addr = listener
         .local_addr()
         .expect("integration test server should expose local_addr after bind");
-    tokio::spawn(async move {
-        axum::serve(listener, router)
+    let (early_exit_tx, early_exit) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let result = axum::serve(listener, router)
             .await
-            .expect("integration test server should run until test shutdown");
+            .map_err(|error| error.to_string());
+        let _ = early_exit_tx.send(result);
     });
-    addr
+    (addr, TestServerGuard { handle, early_exit })
 }
 pub(super) async fn setup_single_file_server_from_path(
     file_path: &Path,
-) -> (Arc<AppState>, std::net::SocketAddr) {
+) -> (Arc<AppState>, std::net::SocketAddr, TestServerGuard) {
     let state = build_single_file_state(file_path);
-    let addr = spawn_test_server(state.clone()).await;
-    (state, addr)
+    let (addr, server) = spawn_test_server(state.clone()).await;
+    (state, addr, server)
 }
 pub(super) fn atomic_save_markdown_file(path: &Path, new_content: &str) {
     let swp_path = path.with_extension("md.swp");
@@ -69,14 +109,15 @@ pub(super) async fn setup_single_file_server_with_bytes(
 ) -> (
     Arc<AppState>,
     std::net::SocketAddr,
+    TestServerGuard,
     tempfile::TempDir,
     std::path::PathBuf,
 ) {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join(file_name);
     tokio::fs::write(&file_path, content).await.unwrap();
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
-    (state, addr, tmp_dir, file_path)
+    let (state, addr, server) = setup_single_file_server_from_path(&file_path).await;
+    (state, addr, server, tmp_dir, file_path)
 }
 pub(super) async fn assert_json_error_for_paths(
     addr: std::net::SocketAddr,
@@ -126,18 +167,28 @@ pub(super) fn make_file_unreadable(path: &Path) -> Option<FilePermissionGuard> {
 }
 pub(super) async fn setup_single_file_server(
     markdown_content: &str,
-) -> (Arc<AppState>, std::net::SocketAddr, tempfile::TempDir) {
+) -> (
+    Arc<AppState>,
+    std::net::SocketAddr,
+    TestServerGuard,
+    tempfile::TempDir,
+) {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("test.md");
     tokio::fs::write(&file_path, markdown_content)
         .await
         .unwrap();
 
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (state, addr, server) = setup_single_file_server_from_path(&file_path).await;
 
-    (state, addr, tmp_dir)
+    (state, addr, server, tmp_dir)
 }
-pub(super) async fn setup_dir_server() -> (Arc<AppState>, std::net::SocketAddr, tempfile::TempDir) {
+pub(super) async fn setup_dir_server() -> (
+    Arc<AppState>,
+    std::net::SocketAddr,
+    TestServerGuard,
+    tempfile::TempDir,
+) {
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // ファイル構造を作成
@@ -167,9 +218,9 @@ pub(super) async fn setup_dir_server() -> (Arc<AppState>, std::net::SocketAddr, 
         .unwrap();
 
     let state = build_dir_state(tmp_dir.path());
-    let addr = spawn_test_server(state.clone()).await;
+    let (addr, server) = spawn_test_server(state.clone()).await;
 
-    (state, addr, tmp_dir)
+    (state, addr, server, tmp_dir)
 }
 pub(super) async fn connect_ws(
     url: &str,

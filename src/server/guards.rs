@@ -91,7 +91,7 @@ fn ensure_allowed_request_host_with_path(
 /// Host 検証を通過したリクエストだけを後続 route へ渡す axum middleware。
 ///
 /// 拒否時の warn 監査ログと `403` JSON 応答は
-/// `ensure_allowed_request_host` に委譲する。許可時だけ `next.run` を呼び、
+/// path 付きの Host guard helper に委譲する。許可時だけ `next.run` を呼び、
 /// handler 側で Host 検証を重複実装しないための共通境界として使う。
 ///
 /// 適用範囲は呼び出し側の `Router::layer` 配置で決まるため、route 追加時は

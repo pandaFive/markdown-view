@@ -1,6 +1,7 @@
 # Host Middleware Observability Follow-up Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Safety precondition:** Implementation and git mutation steps in this plan are only valid after explicit user approval, on an approved work branch/worktree, and never directly on `develop` or `main`.
 
 **Goal:** Complete the Host middleware follow-up by adding path-aware Host rejection logging, fixing WS Origin rejection message coverage, improving test server failure context, and moving the TODO item to Done Summary.
 
