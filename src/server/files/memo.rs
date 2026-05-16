@@ -615,12 +615,6 @@ async fn read_memo_file_if_present(
         }
         Err(error) => return Err(memo_read_error_to_api_error(target, request, error)),
     };
-    if bytes.len() as u64 > MAX_FILE_SIZE {
-        return Err(json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "メモサイズが上限（10MB）を超えています",
-        ));
-    }
     String::from_utf8(bytes).map(Some).map_err(|error| {
         tracing::warn!(
             "[markdown-view] {}メモUTF-8デコード失敗 ({}): {}",

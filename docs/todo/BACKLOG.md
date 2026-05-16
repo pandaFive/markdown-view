@@ -8,27 +8,6 @@
 
 ## P1: リスク低減・契約明文化
 
-- [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
-  - ファイル: `src/server/messages.rs` L46-56, `src/server/session.rs` L80-93
-  - 現状: `serde_json::to_string(update)` の失敗は実質不可能だが、`session.rs` 側でエラー処理を持つ。Update メッセージ用の最小サイズ fallback (`{"content":"","toc":""}` 等) を返す `to_json_or_empty` 経路が無い
-  - 対応: `BroadcastMessage::Update` の `to_json` に明示 fallback を追加。観測性として `tracing::error!` を残す
-  - 判断: 実質不可能な失敗経路の契約整理であり、直接の実行時リスクは限定的なため BACKLOG P1 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `read_route_memo` の二重サイズチェックを単一化する
-  - ファイル: `src/server/files/memo.rs` L455-481, `src/server/files/content.rs` L298-311
-  - 現状: `fs.read_with_limit` が `MAX_FILE_SIZE+1` で `take` し超過時に `MemoReadError::TooLarge` を返すのに、`memo.rs:476-481` が読み込み完了後に `bytes.len() as u64 > MAX_FILE_SIZE` を再度チェックしている
-  - 対応: `read_with_limit` の契約を doc コメントで明示し、呼び出し側の重複チェックを削除
-  - 判断: メモ読込の契約明文化として価値は高いが、現状は防御が重複している状態なので BACKLOG P1 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
-- [ ] `tokio::select!` の cancel-safe 性をコメントで明記する
-  - ファイル: `src/server/session.rs` L54-132
-  - 現状: `socket.recv()` と `rx.recv()` を `tokio::select!` で競わせているが、両者が cancel safe である根拠コメントが無い。将来の改修で cancel-unsafe な future を入れる事故リスク
-  - 対応: 各 branch の future が cancel safe であることを doc コメントで明記し、新規 branch 追加時のチェックリストを残す
-  - 判断: 将来の WebSocket 改修時の守りとして重要だが、現行 branch は cancel-safe なため BACKLOG P1 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 ## P2: 保守性・局所回帰検知
 
 - [ ] ディレクトリ検索のキャンセル境界と allocation 削減を検討する
@@ -90,6 +69,24 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
+  - ファイル: `src/server/messages.rs`
+  - 内容: `BroadcastMessage::Update` の JSON 生成に明示 fallback を追加し、シリアライズ失敗時も最小構造の update JSON を返す契約に整理した。fallback は本文を含めず、`file` はディレクトリモードの routing に必要な場合だけ保持する。
+  - 完了根拠: `cargo test server::messages`, `cargo test --all-targets --all-features`, `./verify.sh`
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [x] `read_route_memo` の二重サイズチェックを単一化する
+  - ファイル: `src/server/files/memo.rs`, `src/server/files/memo_fs.rs`
+  - 内容: メモ読込サイズ上限の契約を `read_with_limit` 側へ集約し、呼び出し側の post-read 重複チェックを削除した。サイズ上限は metadata と `read_with_limit` による実読込上限で維持し、read 時に `MemoReadError::TooLarge` へ落ちる経路も API レベルで 413 に変換されることを固定した。
+  - 完了根拠: `cargo test server::files::tests::memo_route::test_load_route_memo_read_with_limit_too_largeは413を返す`, `cargo test --all-targets --all-features`, `./verify.sh`
+  - 由来: アーキテクチャレビュー (2026-04-30)
+
+- [x] `tokio::select!` の cancel-safe 性をコメントで明記する
+  - ファイル: `src/server/session.rs`
+  - 内容: WebSocket セッションの `tokio::select!` について、現在の branch が cancel-safe な future だけで構成される前提をコメントで明記した。挙動変更はなく、将来の branch 追加時の確認観点を残した。
+  - 完了根拠: `cargo test --all-targets --all-features`, `./verify.sh`
+  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [x] 未知言語コードブロックの silent fallback に debug 観測ログを追加
   - ファイル: `src/renderer/highlight.rs`, `tests/renderer_test.rs`

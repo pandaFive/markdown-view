@@ -52,6 +52,9 @@ pub(super) async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     loop {
+        // 現在の branch はどちらも cancel-safe な受信待機だけに限定する。
+        // 新しい branch を追加する場合は、select! で中断されても
+        // WebSocket frame や broadcast message を失わないことを確認する。
         tokio::select! {
             incoming = socket.recv() => {
                 match incoming {

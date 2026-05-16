@@ -47,10 +47,38 @@ pub(super) struct BroadcastMessageLogSummary {
     pub has_file: bool,
 }
 
+fn update_fallback_json(file: Option<&str>) -> String {
+    match file {
+        Some(file) => serde_json::json!({
+            "content": "",
+            "toc": "",
+            "file": file,
+        })
+        .to_string(),
+        None => r#"{"content":"","toc":""}"#.to_string(),
+    }
+}
+
+fn update_json_or_fallback(
+    serialized: Result<String, serde_json::Error>,
+    file: Option<&str>,
+) -> String {
+    serialized.unwrap_or_else(|error| {
+        tracing::error!(
+            "[markdown-view] UpdateメッセージJSON化失敗。最小updateへfallbackします: {}",
+            error
+        );
+        update_fallback_json(file)
+    })
+}
+
 impl BroadcastMessage {
     pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
         match self {
-            BroadcastMessage::Update(update) => serde_json::to_string(update),
+            BroadcastMessage::Update(update) => Ok(update_json_or_fallback(
+                serde_json::to_string(update),
+                update.file(),
+            )),
             BroadcastMessage::MemoUpdate(update) => serde_json::to_string(update),
             BroadcastMessage::LaggedRecovery(message) => serde_json::to_string(message),
             BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
@@ -130,6 +158,71 @@ mod tests {
         assert!(value.get("refresh").is_none());
         assert!(value.get("error").is_none());
         assert!(value.get("content").is_none());
+    }
+
+    #[test]
+    fn test_broadcast_message_updateのjson直列化はcontent_toc_fileを維持する() {
+        let json = BroadcastMessage::Update(UpdateMessage::new(
+            crate::renderer::render_markdown("# title"),
+            crate::toc::generate_toc("# title"),
+            Some("docs/guide.md".to_string()),
+        ))
+        .to_json()
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["content"].as_str().unwrap().contains("title"));
+        assert!(value["toc"].as_str().unwrap().contains("title"));
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_fallback_jsonは空content_tocだけを返す() {
+        let json = update_fallback_json(None);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert!(value.get("file").is_none());
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_fallback_jsonはfileありならfileを保持する() {
+        let json = update_fallback_json(Some("docs/guide.md"));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_json_or_fallbackは成功時jsonをそのまま返す() {
+        let json = r#"{"content":"ok","toc":""}"#.to_string();
+
+        let result = update_json_or_fallback(Ok(json.clone()), Some("docs/guide.md"));
+
+        assert_eq!(result, json);
+    }
+
+    #[test]
+    fn test_update_json_or_fallbackは直列化失敗時にfile付きfallbackを返す() {
+        let error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+
+        let json = update_json_or_fallback(Err(error), Some("docs/guide.md"));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
     }
 
     #[test]
