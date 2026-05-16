@@ -47,10 +47,22 @@ pub(super) struct BroadcastMessageLogSummary {
     pub has_file: bool,
 }
 
+fn update_fallback_json() -> &'static str {
+    r#"{"content":"","toc":""}"#
+}
+
 impl BroadcastMessage {
     pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
         match self {
-            BroadcastMessage::Update(update) => serde_json::to_string(update),
+            BroadcastMessage::Update(update) => {
+                Ok(serde_json::to_string(update).unwrap_or_else(|error| {
+                    tracing::error!(
+                        "[markdown-view] UpdateメッセージJSON化失敗。空updateへfallbackします: {}",
+                        error
+                    );
+                    update_fallback_json().to_string()
+                }))
+            }
             BroadcastMessage::MemoUpdate(update) => serde_json::to_string(update),
             BroadcastMessage::LaggedRecovery(message) => serde_json::to_string(message),
             BroadcastMessage::Refresh => serde_json::to_string(&serde_json::json!({
@@ -130,6 +142,36 @@ mod tests {
         assert!(value.get("refresh").is_none());
         assert!(value.get("error").is_none());
         assert!(value.get("content").is_none());
+    }
+
+    #[test]
+    fn test_broadcast_message_updateのjson直列化はcontent_toc_fileを維持する() {
+        let json = BroadcastMessage::Update(UpdateMessage::new(
+            crate::renderer::render_markdown("# title"),
+            crate::toc::generate_toc("# title"),
+            Some("docs/guide.md".to_string()),
+        ))
+        .to_json()
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["content"].as_str().unwrap().contains("title"));
+        assert!(value["toc"].as_str().unwrap().contains("title"));
+        assert_eq!(value["file"], "docs/guide.md");
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn test_update_fallback_jsonは空content_tocだけを返す() {
+        let json = update_fallback_json();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        assert_eq!(value["content"], "");
+        assert_eq!(value["toc"], "");
+        assert!(value.get("file").is_none());
+        assert!(value.get("refresh").is_none());
+        assert!(value.get("error").is_none());
     }
 
     #[test]
