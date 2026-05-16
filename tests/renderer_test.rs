@@ -824,6 +824,21 @@ fn test_syntax_theme_css_noneはデフォルトテーマで非空cssを返す() 
 }
 
 #[test]
+fn test_syntax_theme_css_無効テーマは空文字を返しui_cssを注入しない() {
+    let css = syntax_theme_css(Some("nonexistent-theme"));
+
+    assert_eq!(css, "");
+    assert!(
+        !css.contains("body::before"),
+        "無効テーマ時に global pseudo-element CSS を注入してはいけない"
+    );
+    assert!(
+        !css.contains("構文ハイライトを無効化しました"),
+        "無効テーマ時に画面通知 CSS を注入してはいけない"
+    );
+}
+
+#[test]
 fn test_有効なテーマ名の検証が成功する() {
     assert!(validate_theme("base16-ocean.dark").is_ok());
     assert!(validate_theme("InspiredGitHub").is_ok());

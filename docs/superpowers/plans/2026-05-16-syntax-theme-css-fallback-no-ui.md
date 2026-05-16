@@ -16,6 +16,7 @@
   - 無効テーマ時に `syntax_theme_css` が空文字を返し、`body::before` や通知文言を含まないことを固定する。
 - Modify: `src/renderer/mod.rs`
   - `syntax_theme_css` の失敗経路を `String::new()` に変更する。
+  - 無効な明示テーマ名の warn log は `resolve_theme` に寄せ、`syntax_theme_css` 側の汎用 warn と二重化させない。
   - `highlight_disabled_notice_css()` を削除する。
   - doc コメントで「空文字は構文ハイライト無効、UI 通知 CSS は注入しない」契約を明記する。
 - Modify: `docs/todo/TODO.md`
@@ -88,7 +89,11 @@ In `src/renderer/mod.rs`, replace the current `syntax_theme_css` function and de
 pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
     let ts = theme_set();
     let Some(theme) = resolve_theme(ts, theme_name) else {
-        tracing::warn!("[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません");
+        if theme_name.is_none() {
+            tracing::warn!(
+                "[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません"
+            );
+        }
         return String::new();
     };
 
@@ -102,6 +107,23 @@ pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
             String::new()
         }
     }
+}
+```
+
+Also update `resolve_theme` so an invalid explicit theme logs the theme name and available themes, then returns `None` instead of falling back to the default theme:
+
+```rust
+if let Some(name) = theme_name {
+    if let Some(theme) = theme_set.themes.get(name) {
+        return Some(theme);
+    }
+    let available: Vec<&str> = theme_set.themes.keys().map(|s| s.as_str()).collect();
+    tracing::warn!(
+        "[markdown-view] 警告: テーマ '{}' が見つからないため構文ハイライトCSSを生成できません。構文ハイライトを無効化します。利用可能: {:?}",
+        name,
+        available
+    );
+    return None;
 }
 ```
 
@@ -241,6 +263,7 @@ Expected:
 
 - `highlight_disabled_notice_css()` is removed.
 - `syntax_theme_css` returns `String::new()` on both failure paths.
+- Invalid explicit theme names log once in `resolve_theme` and do not also emit the generic `syntax_theme_css` warning.
 - One renderer test covers invalid theme fallback behavior.
 - The TODO item moved from active Medium Priority to Done Summary.
 

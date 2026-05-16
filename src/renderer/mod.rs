@@ -114,11 +114,16 @@ pub fn validate_theme(name: &str) -> Result<(), Vec<String>> {
 ///
 /// テーマが見つからない場合やCSS生成に失敗した場合は空文字列を返す。
 /// 空文字列の場合、構文ハイライトは無効化される。
+/// 失敗時は warn log で通知し、画面上の通知 CSS は注入しない。
 pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
     let ts = theme_set();
     let Some(theme) = resolve_theme(ts, theme_name) else {
-        tracing::warn!("[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません");
-        return highlight_disabled_notice_css();
+        if theme_name.is_none() {
+            tracing::warn!(
+                "[markdown-view] テーマが見つからないため構文ハイライトCSSを生成できません"
+            );
+        }
+        return String::new();
     };
 
     match css_for_theme_with_class_style(theme, ClassStyle::SpacedPrefixed { prefix: "syn-" }) {
@@ -128,30 +133,9 @@ pub fn syntax_theme_css(theme_name: Option<&str>) -> String {
                 "[markdown-view] 構文ハイライトCSS生成に失敗したため無効化します: {}",
                 e
             );
-            highlight_disabled_notice_css()
+            String::new()
         }
     }
-}
-
-fn highlight_disabled_notice_css() -> String {
-    r#"
-/* 構文ハイライト無効化時のユーザー通知 */
-body::before {
-  content: '構文ハイライトを無効化しました（テーマ読み込み失敗）';
-  position: fixed;
-  top: 0;
-  right: 0;
-  z-index: 1100;
-  background: #fff4ce;
-  color: #5c4500;
-  border: 1px solid #d9b84f;
-  border-radius: 0 0 0 6px;
-  padding: 0.35rem 0.55rem;
-  font-size: 0.75rem;
-  font-family: sans-serif;
-}
-"#
-    .to_string()
 }
 
 /// Markdownから抽出した見出し情報
@@ -219,10 +203,11 @@ fn resolve_theme<'a>(
         }
         let available: Vec<&str> = theme_set.themes.keys().map(|s| s.as_str()).collect();
         tracing::warn!(
-            "[markdown-view] 警告: テーマ '{}' が見つかりません。デフォルトテーマを使用します。利用可能: {:?}",
+            "[markdown-view] 警告: テーマ '{}' が見つからないため構文ハイライトCSSを生成できません。構文ハイライトを無効化します。利用可能: {:?}",
             name,
             available
         );
+        return None;
     }
 
     if let Some(theme) = theme_set.themes.get(DEFAULT_THEME) {

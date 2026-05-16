@@ -26,7 +26,8 @@ CSP については `csp_hash_sources` が `combined_css(syntax_css)` の実体�
 
 失敗時の戻り値を空文字にする。
 
-- `resolve_theme` 失敗時は warn log を残して `String::new()` を返す。
+- 明示テーマ名が見つからない場合は `resolve_theme` で warn log を残し、`syntax_theme_css` は `String::new()` を返す。
+- デフォルトテーマも fallback テーマも解決できない場合は `syntax_theme_css` で warn log を残し、`String::new()` を返す。
 - `css_for_theme_with_class_style` 失敗時も warn log を残して `String::new()` を返す。
 - `highlight_disabled_notice_css()` は削除する。
 - `syntax_theme_css` の doc コメントを「空文字は構文ハイライト無効を表す。UI 通知 CSS は注入しない」方針へ更新する。
@@ -59,7 +60,7 @@ fallback CSS を削除しても、CSP hash は実際に埋め込まれる style 
 
 ## テスト計画
 
-1. `cargo test --all-targets --all-features renderer_test::test_syntax_theme_css_無効テーマは空文字を返しui_cssを注入しない`
+1. `cargo test --all-targets --all-features test_syntax_theme_css_無効テーマは空文字を返しui_cssを注入しない`
 2. `cargo test --all-targets --all-features template::assets`
 3. `./verify.sh`
 
