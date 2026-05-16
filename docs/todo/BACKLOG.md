@@ -8,13 +8,6 @@
 
 ## P1: リスク低減・契約明文化
 
-- [ ] 未知言語コードブロックの silent fallback に警告ログを追加
-  - ファイル: `src/renderer/highlight.rs` L14-50, `tests/renderer_test.rs` L346
-  - 現状: `find_syntax_by_token().or_else(find_syntax_by_extension())?` が None を返すと `plain_code_block_html` で `class="language-{lang}"` だけ付与する fallback が走るが、ユーザーに「ハイライトが効いていない」ことを知らせる経路がない。`tests/renderer_test.rs:346` `test_未知言語コードブロックはフォールバック描画される` で仕様固定済み
-  - 対応: 初回フォールバック時に `tracing::debug!` 程度のログを 1 回だけ出す（同じ言語名の繰り返しは抑制）。CLI 起動時に「対応シンタックス一覧」コマンドで利用可能言語を確認できるドキュメント追加も検討
-  - 判断: silent fallback の観測性改善だが、描画安全性は既存 fallback で保たれているため BACKLOG P1 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
   - ファイル: `src/server/messages.rs` L46-56, `src/server/session.rs` L80-93
   - 現状: `serde_json::to_string(update)` の失敗は実質不可能だが、`session.rs` 側でエラー処理を持つ。Update メッセージ用の最小サイズ fallback (`{"content":"","toc":""}` 等) を返す `to_json_or_empty` 経路が無い
@@ -97,6 +90,12 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] 未知言語コードブロックの silent fallback に debug 観測ログを追加
+  - ファイル: `src/renderer/highlight.rs`, `tests/renderer_test.rs`
+  - 内容: 未知言語の syntax lookup 失敗時に、同一 language につき初回だけ `tracing::debug!` を出すようにした。HTML fallback 出力は維持し、ログに出す language は制御文字を escape し、長大入力は UTF-8 境界で切り詰める。重複抑制は固定長 fingerprint と 256 件上限で、未知言語名の長大文字列を保持しない。
+  - 完了根拠: `cargo test --lib renderer::highlight -- --nocapture`, `cargo test --test renderer_test test_未知言語コードブロックはフォールバック描画される -- --nocapture`, `cargo test --all-targets --all-features`, `./verify.sh`
+  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [x] README のアーキテクチャ図を実装構成に揃える
   - ファイル: `README.md`
