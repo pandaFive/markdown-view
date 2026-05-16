@@ -13,14 +13,10 @@
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
 
-- [ ] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
-  - ファイル: `src/renderer/mod.rs` L91-108, `src/template/assets.rs` L42-61
-  - 現状: `syntax_theme_css` 失敗時に `highlight_disabled_notice_css()`（`body::before` グローバル CSS）を返し、`combined_css` に連結される。CSP ハッシュは fallback ベースで再計算されるため整合性は保たれるが、Markdown 側で `body::before` を期待する CSS が無いという暗黙前提がドキュメントに無い
-  - 対応: `body::before` 衝突を許容しない旨を doc コメントに明記。または fallback CSS のセレクタを `.markdown-view-fallback-notice` 等の局所スコープに変更する
-  - 昇格理由: CSP と fallback CSS の契約を明示し、将来の renderer/template 変更時の判断材料にするため Medium とする
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 ## Done Summary
+
+- [x] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
+  - 完了根拠: `syntax_theme_css` のテーマ解決失敗時と syntect CSS 生成失敗時は warn log を残して空文字を返す契約に整理し、画面上の fallback 通知 CSS は注入しない方針にした。これにより `combined_css("")` の既存契約に合流し、ページへ埋め込まれる CSS はベース CSS のみになる。既存 `base.css` の `body::before` 背景レイヤーを fallback CSS で上書きしないことを、無効テーマ時の unit test で固定した。CSP hash は実際に埋め込まれる CSS から計算する既存方式を維持している。
 
 - [x] Host middleware 化後の低優先 follow-up を整理して追加検証する
   - 完了根拠: 主要 route の不正 Host 拒否、許可 Host smoke、空 Host 拒否、巨大 body 付き memo PUT の body limit 前拒否を統合テストで固定済み。追加で WS Origin 拒否が Host 拒否とは別の `WebSocket接続元が許可されていません` message を返すことを固定し、Host middleware 拒否ログには query string を含めず request path を出すようにした。共通 integration test server helper の `axum::serve(...).unwrap()` は失敗文脈付き `expect(...)` に寄せた。Host/Origin 許可条件、security headers、CSP、route layer 構造は変更していない。
