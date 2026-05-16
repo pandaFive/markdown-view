@@ -226,12 +226,26 @@ fn assert_security_headers(headers: &axum::http::HeaderMap) {
 }
 
 #[tokio::test]
-async fn test_websocketは異なるoriginを拒否する() {
+async fn test_websocketは異なるoriginをorigin拒否messageで拒否する() {
     let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let client = reqwest::Client::new();
+    let allowed_host = format!("127.0.0.1:{}", addr.port());
 
-    let url = format!("ws://{}/ws", addr);
-    let result = connect_ws(&url, "https://evil.example").await;
-    assert!(result.is_err());
+    let resp = client
+        .get(format!("http://{}/ws", addr))
+        .header("Host", &allowed_host)
+        .header("Origin", "https://evil.example")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+
+    assert_forbidden_with_security_headers(&resp);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "WebSocket接続元が許可されていません");
 }
 #[tokio::test]
 async fn test_websocketはoriginポート不一致を拒否する() {
