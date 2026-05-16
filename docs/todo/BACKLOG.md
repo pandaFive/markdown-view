@@ -91,7 +91,7 @@
 
 ## Done
 
-- [x] 未知言語コードブロックの silent fallback に警告ログを追加
+- [x] 未知言語コードブロックの silent fallback に debug 観測ログを追加
   - ファイル: `src/renderer/highlight.rs`, `tests/renderer_test.rs`
   - 内容: 未知言語の syntax lookup 失敗時に、同一 language につき初回だけ `tracing::debug!` を出すようにした。HTML fallback 出力は維持し、ログに出す language は制御文字を escape し、長大入力は UTF-8 境界で切り詰める。重複抑制は固定長 fingerprint と 256 件上限で、未知言語名の長大文字列を保持しない。
   - 完了根拠: `cargo test --lib renderer::highlight -- --nocapture`, `cargo test --test renderer_test test_未知言語コードブロックはフォールバック描画される -- --nocapture`, `cargo test --all-targets --all-features`, `./verify.sh`
