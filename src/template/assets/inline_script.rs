@@ -29,15 +29,74 @@ const TEMPLATE: &str = concat!(
 );
 
 pub(super) fn inline_js(max_file_size: u64) -> String {
-    TEMPLATE.replace(
-        "__MAX_FILE_SIZE_MB__",
-        &(max_file_size / 1024 / 1024).to_string(),
-    )
+    TEMPLATE.replace("__MAX_FILE_SIZE_MB__", &file_size_display_mb(max_file_size))
+}
+
+fn file_size_display_mb(max_file_size: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    let whole_mib = max_file_size / MIB;
+    let has_remainder = whole_mib * MIB != max_file_size;
+    (whole_mib + u64::from(has_remainder)).to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{file_size_display_mb, inline_js, TEMPLATE};
     use tree_sitter::{Node, Parser};
+
+    const MAX_FILE_SIZE_SENTINEL: &str = "__MAX_FILE_SIZE_MB__";
+
+    fn count_occurrences(source: &str, needle: &str) -> usize {
+        source.matches(needle).count()
+    }
+
+    fn max_file_size_mb_object_property_values(source: &str) -> Vec<Option<u64>> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(tree_sitter_javascript::language())
+            .expect("JavaScript grammar should load");
+        let tree = parser
+            .parse(source, None)
+            .expect("JavaScript source should parse");
+        assert!(
+            !tree.root_node().has_error(),
+            "JavaScript source should not contain parse errors: {source}"
+        );
+
+        let mut values = Vec::new();
+        collect_max_file_size_mb_object_property_values(tree.root_node(), source, &mut values);
+        values
+    }
+
+    fn collect_max_file_size_mb_object_property_values(
+        node: Node<'_>,
+        source: &str,
+        values: &mut Vec<Option<u64>>,
+    ) {
+        if node.kind() == "pair" {
+            let key = node
+                .child_by_field_name("key")
+                .and_then(|key| static_object_property_key_name(key, source));
+            if key.as_deref() == Some("maxFileSizeMb") {
+                let value = node
+                    .child_by_field_name("value")
+                    .and_then(|value| numeric_literal_value(value, source));
+                values.push(value);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_max_file_size_mb_object_property_values(child, source, values);
+        }
+    }
+
+    fn numeric_literal_value(node: Node<'_>, source: &str) -> Option<u64> {
+        if node.kind() != "number" {
+            return None;
+        }
+        node_text(node, source).parse().ok()
+    }
 
     #[derive(Debug, Eq, PartialEq)]
     struct InnerHtmlSink {
@@ -860,6 +919,119 @@ mod tests {
         assert_eq!(
             inner_html_sinks(r#"({ html: target.innerHTML } = payload);"#).len(),
             1
+        );
+    }
+
+    #[test]
+    fn test_max_file_size_sentinelはbootstrap_jsだけに存在する() {
+        let allowed_bootstrap_js = include_str!("js/bootstrap.js");
+        let expected_sentinel_count =
+            count_occurrences(allowed_bootstrap_js, MAX_FILE_SIZE_SENTINEL);
+        // 違反時にファイル名を出すため、bootstrap.js以外のTEMPLATE includeと同期する。
+        let disallowed_sources = [
+            ("js/selection.js", include_str!("js/selection.js")),
+            (
+                "js/content-renderer.js",
+                include_str!("js/content-renderer.js"),
+            ),
+            (
+                "js/content-enhancements.js",
+                include_str!("js/content-enhancements.js"),
+            ),
+            (
+                "js/content-navigation.js",
+                include_str!("js/content-navigation.js"),
+            ),
+            (
+                "js/document-search.js",
+                include_str!("js/document-search.js"),
+            ),
+            (
+                "js/directory-search.js",
+                include_str!("js/directory-search.js"),
+            ),
+            (
+                "js/content-controller.js",
+                include_str!("js/content-controller.js"),
+            ),
+            ("js/memo.js", include_str!("js/memo.js")),
+            ("js/fetch.js", include_str!("js/fetch.js")),
+            ("js/websocket.js", include_str!("js/websocket.js")),
+            ("js/sidebar.js", include_str!("js/sidebar.js")),
+        ];
+
+        assert_eq!(
+            expected_sentinel_count, 1,
+            "bootstrap.js の max file size sentinel 出現回数が変わった"
+        );
+
+        let mut listed_sentinel_count = expected_sentinel_count;
+        for (path, source) in disallowed_sources {
+            let source_sentinel_count = count_occurrences(source, MAX_FILE_SIZE_SENTINEL);
+            listed_sentinel_count += source_sentinel_count;
+            assert!(
+                source_sentinel_count == 0,
+                "{path} に max file size sentinel が混入している"
+            );
+        }
+
+        assert_eq!(
+            count_occurrences(TEMPLATE, MAX_FILE_SIZE_SENTINEL),
+            listed_sentinel_count,
+            "JS template include一覧とsentinel契約テストの一覧が同期していない"
+        );
+    }
+
+    #[test]
+    fn test_inline_jsはmax_file_size由来のmb値へ置換する() {
+        let generated = inline_js(crate::server::MAX_FILE_SIZE);
+
+        assert!(
+            !generated.contains(MAX_FILE_SIZE_SENTINEL),
+            "生成済み JS に max file size sentinel が残っている"
+        );
+        assert_eq!(
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(
+                file_size_display_mb(crate::server::MAX_FILE_SIZE)
+                    .parse::<u64>()
+                    .expect("MAX_FILE_SIZE display value should be numeric")
+            )],
+            "生成済み JS の object property maxFileSizeMb が MAX_FILE_SIZE 由来のMB表示1件になっていない"
+        );
+    }
+
+    #[test]
+    fn test_inline_jsは非整数mibのmax_file_sizeを切り上げ表示する() {
+        let generated = inline_js(11_000_000);
+
+        assert_eq!(
+            max_file_size_mb_object_property_values(&generated),
+            vec![Some(11)],
+            "非整数MiBの object property maxFileSizeMb は過小表示を避けるため切り上げた値1件にする"
+        );
+    }
+
+    #[test]
+    fn test_file_size_display_mbは境界値を切り上げ表示する() {
+        assert_eq!(file_size_display_mb(0), "0");
+        assert_eq!(file_size_display_mb(10 * 1024 * 1024), "10");
+        assert_eq!(file_size_display_mb(10 * 1024 * 1024 + 1), "11");
+        assert_eq!(file_size_display_mb(u64::MAX), "17592186044416");
+    }
+
+    #[test]
+    fn test_file_size_display_mbはrust_1_70互換apiだけを使う() {
+        let source = include_str!("inline_script.rs");
+        assert!(
+            !source.contains(concat!("div", "_ceil")),
+            "{}",
+            concat!(
+                "READMEのRust 1.70+要件を守るため、Rust 1.73+のu64::",
+                "div",
+                "_ceil",
+                "は使わない"
+            )
         );
     }
 

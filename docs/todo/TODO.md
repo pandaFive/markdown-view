@@ -20,13 +20,6 @@
   - 昇格理由: Host security boundary の検証網を厚くするが、主要 middleware 化は実装済みなので Medium とする
   - 由来: PR #120 再レビュー follow-up (2026-05-02)
 
-- [ ] assets バンドルの sentinel 衝突回避テストを追加
-  - ファイル: `src/template/assets/css_bundle.rs` L19, `src/template/assets/inline_script.rs` L17-22
-  - 現状: `TEMPLATE.replace("__DARK_THEME_VARS__", ...)` / `replace("__MAX_FILE_SIZE_MB__", ...)` のプレースホルダーは sentinel 衝突に脆弱。`include_str!` した CSS/JS 内に同文字列が無いことを保証するテストが無い
-  - 対応: `#[cfg(test)] mod tests` で「include 対象ソースに sentinel 文字列が含まれない」アサートを追加。`MAX_FILE_SIZE / 1024 / 1024` の整数除算で 11MB → 10MB 表示の丸め事故が起きないかも境界テスト
-  - 昇格理由: template 埋め込みの回帰検知基盤で、将来の asset 追加時の守り忘れを防ぐため Medium とする
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
   - ファイル: `src/renderer/mod.rs` L91-108, `src/template/assets.rs` L42-61
   - 現状: `syntax_theme_css` 失敗時に `highlight_disabled_notice_css()`（`body::before` グローバル CSS）を返し、`combined_css` に連結される。CSP ハッシュは fallback ベースで再計算されるため整合性は保たれるが、Markdown 側で `body::before` を期待する CSS が無いという暗黙前提がドキュメントに無い
@@ -35,6 +28,9 @@
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 ## Done Summary
+
+- [x] assets バンドルの sentinel 衝突回避テストを追加
+  - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、CSS 生成 helper 経由の生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property 1件へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられる契約を単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。
 
 - [x] Host middleware 適用境界を `RouteDefinitions` marker から security layer helper へ強化する
   - 完了根拠: PR #155 で `apply_security_layers(RouteDefinitions, HeaderValue)` を追加し、Host middleware、security headers、CSP の適用を `create_router()` の共通 helper へ集約した。`build_routes()` は route 定義だけを返し、`create_router()` は `build_routes()` → `apply_security_layers()` → `.with_state(state)` の流れに整理された。integration test では `HOST_SMOKE_CASES` を追加し、index、content、memo、files、search、memo PUT、WebSocket upgrade の不正 Host 拒否と security headers を同じ assertion で固定した。残る許可 Host 全 route smoke、malformed/missing/empty Host の追加統合テスト、warn ログ URI path 追加などは別 follow-up として継続する。
