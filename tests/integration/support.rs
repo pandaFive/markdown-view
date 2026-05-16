@@ -34,10 +34,16 @@ pub(super) fn build_dir_state(base_dir: &Path) -> Arc<AppState> {
 }
 pub(super) async fn spawn_test_server(state: Arc<AppState>) -> std::net::SocketAddr {
     let router = markdown_view::server::create_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("integration test server should bind to an ephemeral loopback port");
+    let addr = listener
+        .local_addr()
+        .expect("integration test server should expose local_addr after bind");
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router)
+            .await
+            .expect("integration test server should run until test shutdown");
     });
     addr
 }
