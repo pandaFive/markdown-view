@@ -24,13 +24,6 @@
   - 判断: path safety に関係するが起動時限定で影響が小さいため BACKLOG P2 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] `data-memo-file` 属性を None 時にスキップする
-  - ファイル: `src/template/page.rs` L43/L47, `src/template/message.rs` L9-11
-  - 現状: `params.memo.file().unwrap_or_default()` で常に `data-memo-file=""`（空文字）を出力する。`UpdateMessage` の `#[serde(skip_serializing_if = "Option::is_none")]` と非対称
-  - 対応: `data-memo-file` も None 時に属性ごとスキップする経路に変更し、bootstrap.js 側を「属性無し ⇒ memo 無し」と扱うよう揃える
-  - 判断: template/message 契約の整合性改善であり、データ安全性への直接影響は限定的なため BACKLOG P2 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 - [ ] `log_path::canonicalize_status` の毎回 syscall を削減する
   - ファイル: `src/server/log_path.rs` L52-65
   - 現状: ログ出力ごとに `path` と `base` を canonicalize する。warn/error 時のみ呼ばれるが、ログ storm 状況下では I/O が増える
@@ -69,6 +62,12 @@
   - 由来: PR #59 探索 (2026-04-18)
 
 ## Done
+
+- [x] `data-memo-file` 属性を None 時にスキップする
+  - ファイル: `src/template/page.rs`
+  - 内容: `MemoResponse.file()` が `None` の初期 HTML では `data-memo-file` 属性を出力せず、`Some(file)` の場合だけ既存の `html_attr` / `html_escape` 経由で属性を出力する契約へ揃えた。現行 JS は `data-memo-file` を参照していないため、bootstrap.js 側の新規読み取り契約は追加しない方針にした。
+  - 完了根拠: `cargo test template::page::tests::test_メモfileがnoneの場合data_memo_file属性を出力しない`, `cargo test template::page::tests::test_メモuiが描画される`, `cargo test template::page`, `cargo test --all-targets --all-features`, `./verify.sh`
+  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [x] `BroadcastMessage::Update` 系のシリアライズ失敗時の fallback JSON を整備する
   - ファイル: `src/server/messages.rs`
