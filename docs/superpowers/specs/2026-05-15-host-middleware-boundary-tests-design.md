@@ -26,9 +26,9 @@ Host middleware 化後の境界を統合テストで固定し、新規 route 追
 追加する検証は次の 2 系統に分ける。
 
 1. 許可 Host で主要 route が Host middleware に拒否されず、既存の security headers も維持されること。
-2. 欠落 Host、空 Host、非 ASCII など malformed Host、不正 Host が middleware 境界で `403` JSON と security headers を返すこと。
+2. 空 Host と不正 Host が HTTP 経由で `403` JSON と security headers を返し、欠落 Host と非 ASCII Host は request Host guard 境界で `403` JSON を返すこと。
 
-HTTP クライアントが実ネットワーク経由で送れない Host 異常値は、無理に reqwest 経由へ載せない。`missing Host` や非 ASCII Host のようにクライアントや HTTP 実装が補正・拒否し得るケースは、axum router または middleware 関数境界を直接呼ぶテストへ寄せる。
+HTTP クライアントが実ネットワーク経由で送れない Host 異常値は、無理に reqwest 経由へ載せない。`missing Host` や非 ASCII Host のようにクライアントや HTTP 実装が補正・拒否し得るケースは、request Host guard 境界を直接呼ぶテストへ寄せる。
 
 ## テスト設計
 
@@ -36,7 +36,7 @@ HTTP クライアントが実ネットワーク経由で送れない Host 異常
 
 `HOST_SMOKE_CASES` を使い、`127.0.0.1:<port>` または `localhost:<port>` の許可 Host で主要 route へリクエストする。HTTP route は成功 status または既存仕様上の正常な client error を許容し、Host middleware 由来の `403` ではないことを確認する。security headers は既存の Host 拒否テストと同じ観点で確認する。
 
-`/ws` は許可 Host かつ許可 Origin で接続できることを確認する。WebSocket は HTTP response headers を通常の `reqwest::Response` と同じ形で確認しにくいため、Host middleware に拒否されないことを主眼にする。
+`/ws` は許可 Host かつ許可 Origin で接続できることを確認し、WebSocket handshake response headers でも HTTP route と同じ security headers が維持されることを確認する。
 
 ### 異常 Host rejection
 
@@ -46,9 +46,9 @@ HTTP クライアントが実ネットワーク経由で送れない Host 異常
 
 対象ケースは以下を優先する。
 
-- Host 欠落: middleware または guard 境界で `403`
+- Host 欠落: request Host guard 境界で `403`
 - Host 空文字: HTTP 経由または guard 境界で `403`
-- Host 非 ASCII: guard 境界で `403`
+- Host 非 ASCII: request Host guard 境界で `403`
 - Host 不正 authority: 既存 smoke と同じ HTTP 経由で `403`
 
 テスト名は日本語にする。
