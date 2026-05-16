@@ -2,7 +2,7 @@
 
 レビュー指摘・コードベース探索で検出した改善項目のうち、次に実行する **High / Medium** のみを優先度順に掲載する。Low 項目は [`BACKLOG.md`](./BACKLOG.md) を参照。
 
-最終整理: 2026-05-15。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
+最終整理: 2026-05-16。重要度と将来影響度を基準に、`BACKLOG.md` から実行優先候補を昇格した。完了済みの長文履歴は本ファイル末尾の Done サマリに圧縮し、未完了項目だけを実行候補として残す。
 レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## High Priority
@@ -13,13 +13,6 @@
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
 
-- [ ] Host middleware 化後の低優先 follow-up を整理して追加検証する
-  - ファイル: `src/server/routes.rs`, `src/server/guards.rs`, `tests/integration_test.rs`, `docs/superpowers/specs/2026-05-02-host-middleware-guard-design.md`
-  - 現状: PR #120 で Host 検証を router middleware へ集約し、主要 route の不正 Host 拒否、security headers、WS Host/Origin 経路の分離、大容量 PUT body の順序を固定した。一方、許可 Host の全 route smoke、malformed/missing/empty Host の middleware 統合テスト、WS Origin 拒否の error message assert、middleware warn ログへの URI path 追加、test helper 内 `axum::serve(...).unwrap()` の panic 観測性、CHANGELOG 相当の運用ドキュメント化は未対応
-  - 対応: 追加する価値が高い順に、許可 Host 明示ループ、malformed/missing/empty Host の middleware 経路 403、WS Origin 拒否 message assert、warn ログへの `request.uri().path()` 追加を検討する。`axum::serve(...).unwrap()` は test helper の失敗文脈が分かる `expect(...)` へ寄せる。WS Host 拒否 message 変更は PR 本文には明記済みなので、必要になった時点で README か CHANGELOG 相当へ移す
-  - 昇格理由: Host security boundary の検証網を厚くするが、主要 middleware 化は実装済みなので Medium とする
-  - 由来: PR #120 再レビュー follow-up (2026-05-02)
-
 - [ ] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
   - ファイル: `src/renderer/mod.rs` L91-108, `src/template/assets.rs` L42-61
   - 現状: `syntax_theme_css` 失敗時に `highlight_disabled_notice_css()`（`body::before` グローバル CSS）を返し、`combined_css` に連結される。CSP ハッシュは fallback ベースで再計算されるため整合性は保たれるが、Markdown 側で `body::before` を期待する CSS が無いという暗黙前提がドキュメントに無い
@@ -28,6 +21,9 @@
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 ## Done Summary
+
+- [x] Host middleware 化後の低優先 follow-up を整理して追加検証する
+  - 完了根拠: 主要 route の不正 Host 拒否、許可 Host smoke、空 Host 拒否、巨大 body 付き memo PUT の body limit 前拒否を統合テストで固定済み。追加で WS Origin 拒否が Host 拒否とは別の `WebSocket接続元が許可されていません` message を返すことを固定し、Host middleware 拒否ログには query string を含めず request path を出すようにした。共通 integration test server helper の `axum::serve(...).unwrap()` は失敗文脈付き `expect(...)` に寄せた。Host/Origin 許可条件、security headers、CSP、route layer 構造は変更していない。
 
 - [x] assets バンドルの sentinel 衝突回避テストを追加
   - 完了根拠: `css_bundle.rs` で `__DARK_THEME_VARS__` が `base.css` の期待箇所以外に混入していないことを固定し、CSS 生成 helper 経由の生成済み CSS に sentinel が残らないことを確認した。`inline_script.rs` では `__MAX_FILE_SIZE_MB__` が `bootstrap.js` の期待箇所以外に混入していないこと、生成済み JS に sentinel が残らず `MAX_FILE_SIZE` 由来の object literal の数値 literal `maxFileSizeMb` property 1件へ置換されること、非整数 MiB の上限が過小表示を避けて切り上げられる契約を単体テストで固定した。現行10MiB上限の表示、CSP hash 計算、ユーザー向け文言は変更していない。

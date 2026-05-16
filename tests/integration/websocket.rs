@@ -17,7 +17,7 @@ use super::support::{
 
 #[tokio::test]
 async fn test_websocket接続() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -33,7 +33,7 @@ async fn test_websocket接続() {
 }
 #[tokio::test]
 async fn test_websocketブロードキャスト受信() {
-    let (state, addr, _tmp_dir) = setup_single_file_server("initial").await;
+    let (state, addr, _server, _tmp_dir) = setup_single_file_server("initial").await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -65,7 +65,7 @@ async fn test_ファイル変更でwebsocket更新() {
     let file_path = tmp_dir.path().join("watch_test.md");
     tokio::fs::write(&file_path, "# Before").await.unwrap();
 
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
 
     // ファイル監視開始
     let watch_service = WatchService::start(state.clone()).await.unwrap();
@@ -100,7 +100,7 @@ async fn test_単一ファイルモード_atomic_save後にwebsocket更新() {
         .await
         .unwrap();
 
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
     let watch_service = WatchService::start(state.clone()).await.unwrap();
 
     let url = format!("ws://{}/ws", addr);
@@ -130,7 +130,7 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
     let file_path = tmp_dir.path().join("watch_io_error.md");
     tokio::fs::write(&file_path, "# Before").await.unwrap();
 
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
     let watch_service = WatchService::start(state.clone()).await.unwrap();
 
     let url = format!("ws://{}/ws", addr);
@@ -165,7 +165,7 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
 }
 #[tokio::test]
 async fn test_websocket切断時に購読が速やかに解放される() {
-    let (state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let (state, addr, _server, _tmp_dir) = setup_single_file_server("# WS Test").await;
     let url = format!("ws://{}/ws", addr);
     let (mut ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
 
@@ -190,7 +190,7 @@ async fn test_websocket切断時に購読が速やかに解放される() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_websocket更新にfileフィールドが含まれる() {
-    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let (state, addr, _server, tmp_dir) = setup_dir_server().await;
     let watch_service = markdown_view::server::WatchService::start(state.clone())
         .await
         .unwrap();
@@ -220,7 +220,7 @@ async fn test_ディレクトリモード_websocket更新にfileフィールド�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_atomic_save後にwebsocket更新() {
-    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let (state, addr, _server, tmp_dir) = setup_dir_server().await;
     let watch_service = markdown_view::server::WatchService::start(state.clone())
         .await
         .unwrap();
@@ -256,7 +256,7 @@ async fn test_ディレクトリモード_atomic_save後にwebsocket更新() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_ディレクトリモード_websocket更新はbackslashファイル名を保持する() {
-    let (state, addr, tmp_dir) = setup_dir_server().await;
+    let (state, addr, _server, tmp_dir) = setup_dir_server().await;
     let file_path = tmp_dir.path().join("back\\slash.md");
     tokio::fs::write(&file_path, "# Backslash\n\nBefore")
         .await
@@ -291,7 +291,7 @@ async fn test_ディレクトリモード_websocket更新はbackslashファイ�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_websocket初期メッセージが送信されない() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -307,7 +307,7 @@ async fn test_ディレクトリモード_websocket初期メッセージが送�
 }
 #[tokio::test]
 async fn test_監視エラーがwebsocketクライアントにエラーjsonとして届く() {
-    let (state, addr, _tmp_dir) = setup_single_file_server("# Error Test").await;
+    let (state, addr, _server, _tmp_dir) = setup_single_file_server("# Error Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
@@ -337,7 +337,7 @@ async fn test_監視エラーがwebsocketクライアントにエラーjsonと�
 }
 #[tokio::test]
 async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含まれる() {
-    let (_state, addr, _tmp_dir, _file_path) =
+    let (_state, addr, _server, _tmp_dir, _file_path) =
         setup_single_file_server_with_bytes("binary.md", &[0xff, 0xfe, 0xfd]).await;
 
     let url = format!("ws://{}/ws", addr);
@@ -349,7 +349,7 @@ async fn test_websocket_non_utf8ファイルでclose_frameにuser_messageが含�
 }
 #[tokio::test]
 async fn test_websocket_削除済みファイルでclose_frameにuser_messageが含まれる() {
-    let (_state, addr, _tmp_dir, file_path) =
+    let (_state, addr, _server, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("deleted.md", b"# before delete").await;
 
     // AppMode生成後にファイルを削除
@@ -369,7 +369,7 @@ async fn test_websocket_削除済みファイルでclose_frameにuser_messageが
 #[tokio::test]
 async fn test_websocket_サイズ超過ファイルでclose_frameにuser_messageが含まれる() {
     let content = "x".repeat(10 * 1024 * 1024 + 1);
-    let (_state, addr, _tmp_dir, _file_path) =
+    let (_state, addr, _server, _tmp_dir, _file_path) =
         setup_single_file_server_with_bytes("large.md", content.as_bytes()).await;
 
     let url = format!("ws://{}/ws", addr);
@@ -389,7 +389,7 @@ async fn test_websocket_ioエラーでclose_frameが1011を返す() {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
 
-    let (_state, addr, _tmp_dir, file_path) =
+    let (_state, addr, _server, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
 
     // 読込 IO を誘発: resolve (canonicalize/is_file) はパスするが open(2) が EACCES で失敗
@@ -416,7 +416,7 @@ async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する(
         .await
         .unwrap();
 
-    let (state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
 
     let url = format!("ws://{}/ws", addr);
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();

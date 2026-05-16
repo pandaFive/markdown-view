@@ -10,7 +10,7 @@ use super::support::{
 
 #[tokio::test]
 async fn test_indexページ取得() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test\n\nHello world").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test\n\nHello world").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
     assert_eq!(resp.status(), 200);
@@ -23,7 +23,7 @@ async fn test_indexページ取得() {
 }
 #[tokio::test]
 async fn test_apiコンテンツ取得() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("**bold** text").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("**bold** text").await;
 
     let resp = reqwest::get(format!("http://{}/api/content", addr))
         .await
@@ -38,7 +38,7 @@ async fn test_apiコンテンツ取得() {
 }
 #[tokio::test]
 async fn test_単一ファイルモードでfileクエリは無視される() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Single Mode").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Single Mode").await;
 
     let resp = reqwest::get(format!(
         "http://{}/api/content?file=does-not-matter.md",
@@ -54,7 +54,7 @@ async fn test_単一ファイルモードでfileクエリは無視される() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_api_content_io_エラーで500を返す() {
-    let (_state, addr, _tmp_dir, file_path) =
+    let (_state, addr, _server, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
 
     // resolve (canonicalize/is_file) はパスし、open(2) のみが EACCES で失敗する状態を作る
@@ -77,7 +77,7 @@ async fn test_存在しないファイル時は404を返す() {
     tokio::fs::write(&file_path, "# before delete")
         .await
         .unwrap();
-    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
 
     // AppMode生成後にファイルが消えたケースを再現
     tokio::fs::remove_file(&file_path).await.unwrap();
@@ -99,7 +99,7 @@ async fn test_存在しないファイル時は404を返す() {
 }
 #[tokio::test]
 async fn test_non_utf8ファイル読み込み時は422を返す() {
-    let (_state, addr, _tmp_dir, _file_path) =
+    let (_state, addr, _server, _tmp_dir, _file_path) =
         setup_single_file_server_with_bytes("binary.md", &[0xff, 0xfe, 0xfd]).await;
 
     assert_json_error_for_paths(
@@ -119,7 +119,7 @@ async fn test_ファイルサイズ上限超過で413を返す() {
     let content = "x".repeat(10 * 1024 * 1024 + 1);
     tokio::fs::write(&large_file, &content).await.unwrap();
 
-    let (_state, addr) = setup_single_file_server_from_path(&large_file).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&large_file).await;
 
     assert_json_error_for_paths(
         addr,
@@ -138,7 +138,7 @@ async fn test_ファイルサイズ上限ちょうど10mbは200を返す() {
     let content = "x".repeat(10 * 1024 * 1024);
     tokio::fs::write(&limit_file, &content).await.unwrap();
 
-    let (_state, addr) = setup_single_file_server_from_path(&limit_file).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&limit_file).await;
 
     for path in ["/", "/api/content"] {
         let resp = reqwest::get(format!("http://{}{}", addr, path))
@@ -150,7 +150,7 @@ async fn test_ファイルサイズ上限ちょうど10mbは200を返す() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_単一ファイルモード_シンボリックリンク差し替えを拒否する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Test").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Test").await;
     let file_path = tmp_dir.path().join("test.md");
     let outside_path = tmp_dir.path().join("outside.md");
     tokio::fs::write(&outside_path, "# Outside").await.unwrap();
@@ -168,7 +168,7 @@ async fn test_単一ファイルモード_シンボリックリンク差し替�
 }
 #[tokio::test]
 async fn test_単一ファイルモードの後方互換_api_filesは空配列() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test").await;
 
     let resp = reqwest::get(format!("http://{}/api/files", addr))
         .await
@@ -180,7 +180,7 @@ async fn test_単一ファイルモードの後方互換_api_filesは空配列()
 }
 #[tokio::test]
 async fn test_単一ファイルモードの後方互換_api_searchは空結果() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test").await;
 
     let resp = reqwest::get(format!("http://{}/api/search?q=test", addr))
         .await
@@ -195,7 +195,7 @@ async fn test_単一ファイルモードの後方互換_api_searchは空結果(
 }
 #[tokio::test]
 async fn test_単一ファイルモード_api_searchは長すぎるqueryを400で拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test").await;
     let client = reqwest::Client::new();
     let query = "あ".repeat(257);
 

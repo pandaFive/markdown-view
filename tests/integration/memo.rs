@@ -10,7 +10,7 @@ use super::support::{setup_single_file_server, setup_single_file_server_from_pat
 
 #[tokio::test]
 async fn test_apiメモ_未作成時は空を返す() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
 
     let resp = reqwest::get(format!("http://{}/api/memo", addr))
         .await
@@ -24,7 +24,7 @@ async fn test_apiメモ_未作成時は空を返す() {
 }
 #[tokio::test]
 async fn test_apiメモ_保存と再取得ができる() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -56,7 +56,7 @@ async fn test_apiメモ_保存と再取得ができる() {
 }
 #[tokio::test]
 async fn test_apiメモ_put_raw欠落は422で拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -70,7 +70,7 @@ async fn test_apiメモ_put_raw欠落は422で拒否する() {
 }
 #[tokio::test]
 async fn test_apiメモ_put_raw非文字列は422で拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -86,7 +86,7 @@ async fn test_apiメモ_put_raw非文字列は422で拒否する() {
 }
 #[tokio::test]
 async fn test_apiメモ_保存成功後にtmpファイルが残らない() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -117,7 +117,7 @@ async fn test_apiメモ_保存成功後にtmpファイルが残らない() {
 }
 #[tokio::test]
 async fn test_apiメモ_保存成功時にmemo_updateをbroadcastする() {
-    let (state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let mut rx = state.tx().subscribe();
 
@@ -145,7 +145,7 @@ async fn test_apiメモ_保存成功時にmemo_updateをbroadcastする() {
 }
 #[tokio::test]
 async fn test_apiメモ_保存失敗時はmemo_updateをbroadcastしない() {
-    let (state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let mut rx = state.tx().subscribe();
     let oversized = "a".repeat((markdown_view::server::MAX_FILE_SIZE as usize) + 1);
@@ -167,7 +167,7 @@ async fn test_apiメモ_保存失敗時はmemo_updateをbroadcastしない() {
 }
 #[tokio::test]
 async fn test_apiメモ_空白のみ保存で既存メモが削除される() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let memo_path = tmp_dir.path().join(".test.md.memo.md");
 
@@ -208,7 +208,7 @@ async fn test_apiメモ_空白のみ保存で既存メモが削除される() {
 }
 #[tokio::test]
 async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら保存できる() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let raw = "\\".repeat(markdown_view::server::MAX_FILE_SIZE as usize);
 
@@ -230,7 +230,7 @@ async fn test_apiメモ_jsonエスケープで膨らんでも上限内rawなら�
 }
 #[tokio::test]
 async fn test_apiメモ_jsonボディ制限超過は413で拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let escaped_raw = "\\\\".repeat(markdown_view::server::MAX_FILE_SIZE as usize);
     let padding = " ".repeat(4096 + 128);
@@ -250,7 +250,7 @@ async fn test_apiメモ_jsonボディ制限超過は413で拒否する() {
 }
 #[tokio::test]
 async fn test_apiメモ_10mb超過は413で拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let raw = "a".repeat((markdown_view::server::MAX_FILE_SIZE as usize) + 1);
 
@@ -269,7 +269,7 @@ async fn test_apiメモ_10mb超過は413で拒否する() {
 }
 #[tokio::test]
 async fn test_apiメモ_getは旧保存先をそのまま読み込む() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
     let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
     tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
@@ -291,7 +291,7 @@ async fn test_apiメモ_getは旧保存先をそのまま読み込む() {
 }
 #[tokio::test]
 async fn test_apiメモ_putは旧保存先から新sidecarへ自動移行する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
     let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
@@ -320,7 +320,7 @@ async fn test_apiメモ_putは旧保存先から新sidecarへ自動移行する(
 #[cfg(unix)]
 #[tokio::test]
 async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削除を優先する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
     tokio::fs::write(&sidecar_memo_path, "memo").await.unwrap();
@@ -361,7 +361,7 @@ async fn test_apiメモ_空白保存はunsafeなlegacyがあってもsidecar削�
 #[cfg(unix)]
 #[tokio::test]
 async fn test_apiメモ_空白保存でsafe_legacyも通常削除する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let sidecar_memo_path = tmp_dir.path().join(".test.md.memo.md");
     tokio::fs::write(&sidecar_memo_path, "memo").await.unwrap();
@@ -389,7 +389,7 @@ async fn test_apiメモ_空白保存でsafe_legacyも通常削除する() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_apiメモ_unsafeなlegacy_symlinkがあってもsidecar保存を継続できる() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
 
     let outside_dir = tempfile::tempdir().unwrap();
@@ -416,7 +416,7 @@ async fn test_apiメモ_unsafeなlegacy_symlinkがあってもsidecar保存を�
 #[cfg(unix)]
 #[tokio::test]
 async fn test_apiメモ_保存成功後にlegacyをsidecarへ移行して削除する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let client = reqwest::Client::new();
     let legacy_memo_path = tmp_dir.path().join(".markdown-view/memos/test.md");
     tokio::fs::create_dir_all(legacy_memo_path.parent().unwrap())
@@ -451,7 +451,7 @@ async fn test_apiメモ_長いファイル名でも短縮sidecarへ保存でき�
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = tmp_dir.path().join(&file_name);
     tokio::fs::write(&file_path, "# Long").await.unwrap();
-    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -484,7 +484,7 @@ async fn test_apiメモ_長いファイル名で未作成時は空を返す() {
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = tmp_dir.path().join(&file_name);
     tokio::fs::write(&file_path, "# Long").await.unwrap();
-    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
 
     let resp = reqwest::get(format!("http://{}/api/memo", addr))
         .await
@@ -501,7 +501,7 @@ async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で�
     let file_name = format!("{}.md", "a".repeat(251));
     let file_path = tmp_dir.path().join(&file_name);
     tokio::fs::write(&file_path, "# Long").await.unwrap();
-    let (_state, addr) = setup_single_file_server_from_path(&file_path).await;
+    let (_state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
     let client = reqwest::Client::new();
     let legacy_path = tmp_dir.path().join(".markdown-view/memos").join(&file_name);
     tokio::fs::create_dir_all(legacy_path.parent().unwrap())
@@ -525,7 +525,7 @@ async fn test_apiメモ_長いファイル名のlegacyメモは空白保存で�
 }
 #[tokio::test]
 async fn test_indexページ取得_壊れたメモがあっても本文表示は継続する() {
-    let (_state, addr, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;
     let memo_path = tmp_dir.path().join(".test.md.memo.md");
     tokio::fs::write(&memo_path, [0xff, 0xfe, 0xfd])
         .await

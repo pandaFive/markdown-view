@@ -47,7 +47,7 @@ const HOST_SMOKE_CASES: &[HostSmokeCase] = &[
 
 #[tokio::test]
 async fn test_host_middlewareは主要routeの不正hostを拒否しsecurity_headerを維持する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Check").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Host Check").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 
@@ -68,7 +68,7 @@ async fn test_host_middlewareは主要routeの不正hostを拒否しsecurity_hea
 
 #[tokio::test]
 async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_headerを維持する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Allowed").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Host Allowed").await;
     let client = reqwest::Client::new();
     let allowed_host = format!("127.0.0.1:{}", addr.port());
 
@@ -110,7 +110,7 @@ async fn test_host_middlewareは許可hostで主要routeを通過させsecurity_
 
 #[tokio::test]
 async fn test_host_middlewareは空hostを拒否しsecurity_headerを維持する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Empty Host").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Empty Host").await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -168,7 +168,7 @@ async fn send_host_smoke_request(
 
 #[tokio::test]
 async fn test_host_middlewareは巨大body付きmemo_putもbody_limit前に不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Host Memo PUT").await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
     let oversized_raw = "x".repeat(21 * 1024 * 1024);
@@ -226,16 +226,30 @@ fn assert_security_headers(headers: &axum::http::HeaderMap) {
 }
 
 #[tokio::test]
-async fn test_websocketは異なるoriginを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+async fn test_websocketは異なるoriginをorigin拒否messageで拒否する() {
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let client = reqwest::Client::new();
+    let allowed_host = format!("127.0.0.1:{}", addr.port());
 
-    let url = format!("ws://{}/ws", addr);
-    let result = connect_ws(&url, "https://evil.example").await;
-    assert!(result.is_err());
+    let resp = client
+        .get(format!("http://{}/ws", addr))
+        .header("Host", &allowed_host)
+        .header("Origin", "https://evil.example")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+
+    assert_forbidden_with_security_headers(&resp);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "WebSocket接続元が許可されていません");
 }
 #[tokio::test]
 async fn test_websocketはoriginポート不一致を拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let wrong_port_origin = format!("http://localhost:{}", addr.port() + 1);
@@ -245,7 +259,7 @@ async fn test_websocketはoriginポート不一致を拒否する() {
 
 #[tokio::test]
 async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# WS Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# WS Test").await;
 
     let url = format!("ws://{}/ws", addr);
     let rebinding_authority = format!("evil.example:{}", addr.port());
@@ -255,7 +269,7 @@ async fn test_websocketはrebind相当のhost_origin一致を拒否する() {
 }
 #[tokio::test]
 async fn test_セキュリティヘッダが設定されている() {
-    let (_state, addr, _tmp_dir) = setup_single_file_server("# Test").await;
+    let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test").await;
 
     let resp = reqwest::get(format!("http://{}/", addr)).await.unwrap();
 
@@ -269,7 +283,7 @@ async fn test_セキュリティヘッダが設定されている() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_トラバーサル攻撃拒否() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     let resp = reqwest::get(format!("http://{}/api/content?file=../../etc/passwd", addr))
         .await
@@ -278,7 +292,7 @@ async fn test_ディレクトリモード_トラバーサル攻撃拒否() {
 }
 #[tokio::test]
 async fn test_ディレクトリモード_メモapiのパストラバーサルを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
     let client = reqwest::Client::new();
 
     let save = client
@@ -301,7 +315,7 @@ async fn test_ディレクトリモード_メモapiのパストラバーサル�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_隠しファイルの直接アクセスが拒否される() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
 
     // 隠しディレクトリ内のファイル
     let resp = reqwest::get(format!(
@@ -320,7 +334,7 @@ async fn test_ディレクトリモード_隠しファイルの直接アクセ�
 }
 #[tokio::test]
 async fn test_ディレクトリモード_api_filesは不正hostを拒否する() {
-    let (_state, addr, _tmp_dir) = setup_dir_server().await;
+    let (_state, addr, _server, _tmp_dir) = setup_dir_server().await;
     let client = reqwest::Client::new();
     let attack_host = format!("evil.example:{}", addr.port());
 

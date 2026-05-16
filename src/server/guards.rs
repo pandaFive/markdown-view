@@ -51,15 +51,36 @@ fn log_value_for_header<'a>(headers: &'a HeaderMap, name: &axum::http::HeaderNam
 }
 
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
+#[cfg(test)]
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
+    ensure_allowed_request_host_with_path(headers, None)
+}
+
+fn ensure_allowed_request_host_with_path(
+    headers: &HeaderMap,
+    request_path: Option<&str>,
+) -> Result<(), ApiError> {
     if is_allowed_request_host(headers) {
         Ok(())
     } else {
         let host = log_value_for_header(headers, &HOST);
-        tracing::warn!(
-            "[markdown-view] 許可されていないHostヘッダーを拒否: {:?}",
-            host
-        );
+        match request_path {
+            Some(path) => {
+                tracing::warn!(
+                    host = ?host,
+                    request_path = path,
+                    "[markdown-view] 許可されていないHostヘッダーを拒否: host={:?} path={:?}",
+                    host,
+                    path
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "[markdown-view] 許可されていないHostヘッダーを拒否: {:?}",
+                    host
+                );
+            }
+        }
         Err(json_error(
             StatusCode::FORBIDDEN,
             "許可されていないHostヘッダーです",
@@ -70,13 +91,15 @@ pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), Api
 /// Host 検証を通過したリクエストだけを後続 route へ渡す axum middleware。
 ///
 /// 拒否時の warn 監査ログと `403` JSON 応答は
-/// `ensure_allowed_request_host` に委譲する。許可時だけ `next.run` を呼び、
+/// path 付きの Host guard helper に委譲する。許可時だけ `next.run` を呼び、
 /// handler 側で Host 検証を重複実装しないための共通境界として使う。
 ///
 /// 適用範囲は呼び出し側の `Router::layer` 配置で決まるため、route 追加時は
 /// `create_router` 側の Host middleware 配下に入る構造を維持すること。
 pub(super) async fn require_allowed_request_host(request: Request, next: Next) -> Response {
-    if let Err(error) = ensure_allowed_request_host(request.headers()) {
+    if let Err(error) =
+        ensure_allowed_request_host_with_path(request.headers(), Some(request.uri().path()))
+    {
         return error.into_response();
     }
 
@@ -631,6 +654,31 @@ mod tests {
         let error = ensure_allowed_request_host(headers).unwrap_err();
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         assert_eq!(error.1["error"], "許可されていないHostヘッダーです");
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_request_host_guard拒否ログはpathを含みqueryを含めない() {
+        let app = Router::new()
+            .route("/api/search", get(|| async { "ok" }))
+            .layer(middleware::from_fn(require_allowed_request_host));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{}/api/search?q=secret", addr))
+            .header("Host", format!("evil.example:{}", addr.port()))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(logs_contain("許可されていないHostヘッダーを拒否"));
+        assert!(logs_contain("path=\"/api/search\""));
+        assert!(!logs_contain("q=secret"));
     }
 
     #[tokio::test]
