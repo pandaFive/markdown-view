@@ -1,6 +1,7 @@
 # BACKLOG P1 Contract Cleanup Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** Completed. Do not re-run this plan as-is. Any future execution of these steps requires explicit user approval, a confirmed non-`main`/non-`develop` work branch or worktree, and a fresh check that the steps still match the current codebase. The `git add` / `git commit` commands below are historical/approved execution steps, not blanket permission for future agents.
 
 **Goal:** BACKLOG P1 の低リスク契約整理として、Update JSON fallback、memo read size limit 契約、WebSocket select cancel-safe コメントを実装する。
 

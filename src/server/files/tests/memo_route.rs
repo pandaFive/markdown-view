@@ -62,6 +62,21 @@ struct MismatchedTmpParentMemoFs {
     inner: TokioMemoFs,
 }
 
+#[derive(Debug)]
+struct TooLargeOnReadMemoFs {
+    inner: TokioMemoFs,
+    too_large_path: PathBuf,
+}
+
+impl TooLargeOnReadMemoFs {
+    fn new(too_large_path: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            too_large_path,
+        })
+    }
+}
+
 impl MismatchedTmpParentMemoFs {
     fn new() -> Arc<Self> {
         Arc::new(Self { inner: TokioMemoFs })
@@ -103,6 +118,41 @@ impl MemoFs for MismatchedTmpParentMemoFs {
             ))),
             Err(error) => Err(MemoWriteError::BeforeRename(error)),
         }
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(path).await
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoFs for TooLargeOnReadMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.inner.metadata(path).await
+    }
+
+    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+        if path == self.too_large_path {
+            return Err(MemoReadError::TooLarge);
+        }
+        self.inner.read_with_limit(path).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_rename: &BeforeRenameCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        self.inner.write_atomic(path, content, before_rename).await
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
@@ -1149,6 +1199,30 @@ async fn test_load_route_memo_非utf8メモは422を返す() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモはUTF-8テキストである必要があります");
+}
+
+#[tokio::test]
+async fn test_load_route_memo_read_with_limit_too_largeは413を返す() {
+    let workspace = TempWorkspace::new().expect("workspace should be created");
+    let file_path = workspace
+        .write_md(Path::new("note.md"), "# note")
+        .expect("target markdown should be written");
+    let sidecar_path = workspace
+        .write_file(Path::new(".note.md.memo.md"), "small memo")
+        .expect("sidecar memo should be written");
+    let memo_fs = TooLargeOnReadMemoFs::new(sidecar_path);
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, memo_fs);
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("read-time size overflow should be rejected");
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモサイズが上限（10MB）を超えています");
 }
 
 #[tokio::test]

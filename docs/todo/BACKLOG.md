@@ -78,8 +78,8 @@
 
 - [x] `read_route_memo` の二重サイズチェックを単一化する
   - ファイル: `src/server/files/memo.rs`, `src/server/files/memo_fs.rs`
-  - 内容: メモ読込サイズ上限の契約を `read_with_limit` 側へ集約し、呼び出し側の post-read 重複チェックを削除した。サイズ上限は metadata と `read_with_limit` による実読込上限で維持する。
-  - 完了根拠: `cargo test --all-targets --all-features`, `./verify.sh`
+  - 内容: メモ読込サイズ上限の契約を `read_with_limit` 側へ集約し、呼び出し側の post-read 重複チェックを削除した。サイズ上限は metadata と `read_with_limit` による実読込上限で維持し、read 時に `MemoReadError::TooLarge` へ落ちる経路も API レベルで 413 に変換されることを固定した。
+  - 完了根拠: `cargo test server::files::tests::memo_route::test_load_route_memo_read_with_limit_too_largeは413を返す`, `cargo test --all-targets --all-features`, `./verify.sh`
   - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [x] `tokio::select!` の cancel-safe 性をコメントで明記する
