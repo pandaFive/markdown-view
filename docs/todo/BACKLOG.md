@@ -25,13 +25,6 @@
   - 判断: path safety に関係するが起動時限定で影響が小さいため BACKLOG P2 に残す
   - 由来: アーキテクチャレビュー (2026-04-30)
 
-- [ ] `log_path::canonicalize_status` の毎回 syscall を削減する
-  - ファイル: `src/server/log_path.rs` L52-65
-  - 現状: ログ出力ごとに `path` と `base` を canonicalize する。warn/error 時のみ呼ばれるが、ログ storm 状況下では I/O が増える
-  - 対応: `base` の canonicalize 結果を起動時に一度だけ算出してキャッシュし、ログ経路では path 側のみ canonicalize する。または `OnceLock` で base を保持
-  - 判断: ログ storm 時の効率化であり、現行の安全性を弱めていないため BACKLOG P2 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 ## P3: 長期改善・低緊急
 
 - [ ] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
