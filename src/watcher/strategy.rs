@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 
-use crate::server::log_path::sanitize_path_for_logging;
+use crate::server::log_path::{sanitize_path_for_logging, LogBasePath};
 use crate::server::{AppMode, CanonicalPath};
 use crate::workspace_exclusion::{
     exclusion_reason_for_name, exclusion_reason_for_relative_path, WorkspaceExclusionReason,
@@ -13,8 +13,14 @@ use crate::workspace_exclusion::{
 
 #[derive(Debug, Clone)]
 pub(super) enum WatchStrategy {
-    SingleFile { target_path: CanonicalPath },
-    Directory { base_dir: CanonicalPath },
+    SingleFile {
+        target_path: CanonicalPath,
+        log_base: LogBasePath,
+    },
+    Directory {
+        base_dir: CanonicalPath,
+        log_base: LogBasePath,
+    },
 }
 
 #[allow(dead_code)]
@@ -141,15 +147,29 @@ pub(super) enum ExcludeReason {
 }
 
 impl WatchStrategy {
+    fn single_file(target_path: CanonicalPath) -> Self {
+        let base = target_path
+            .as_path()
+            .parent()
+            .unwrap_or_else(|| target_path.as_path());
+        Self::SingleFile {
+            log_base: LogBasePath::new(base),
+            target_path,
+        }
+    }
+
+    fn directory(base_dir: CanonicalPath) -> Self {
+        Self::Directory {
+            log_base: LogBasePath::new(base_dir.as_path()),
+            base_dir,
+        }
+    }
+
     pub(super) fn from_mode(mode: &AppMode) -> Result<Self> {
         if let Some(file_path) = mode.single_file_canonical() {
-            Ok(Self::SingleFile {
-                target_path: file_path.clone(),
-            })
+            Ok(Self::single_file(file_path.clone()))
         } else if let Some(dir_path) = mode.directory_canonical() {
-            Ok(Self::Directory {
-                base_dir: dir_path.clone(),
-            })
+            Ok(Self::directory(dir_path.clone()))
         } else {
             anyhow::bail!("未知のAppModeです")
         }
@@ -158,7 +178,7 @@ impl WatchStrategy {
     #[allow(dead_code)]
     pub(super) fn watch_plan(&self) -> Result<WatchPlan> {
         match self {
-            Self::SingleFile { target_path } => {
+            Self::SingleFile { target_path, .. } => {
                 let watch_dir = target_path
                     .as_path()
                     .parent()
@@ -171,7 +191,7 @@ impl WatchStrategy {
                     diagnostics,
                 })
             }
-            Self::Directory { base_dir } => build_directory_watch_plan(base_dir.as_path()),
+            Self::Directory { base_dir, .. } => build_directory_watch_plan(base_dir.as_path()),
         }
     }
 
@@ -226,25 +246,18 @@ impl WatchStrategy {
 
     pub(super) fn path_for_log(&self, path: &Path) -> String {
         match self {
-            Self::SingleFile { target_path } => {
-                let base = target_path
-                    .as_path()
-                    .parent()
-                    .unwrap_or_else(|| target_path.as_path());
-                sanitize_path_for_logging(path, base).into_owned()
-            }
-            Self::Directory { base_dir } => {
-                sanitize_path_for_logging(path, base_dir.as_path()).into_owned()
+            Self::SingleFile { log_base, .. } | Self::Directory { log_base, .. } => {
+                log_base.sanitize(path).into_owned()
             }
         }
     }
 
     pub(super) fn collect_changed_paths(&self, events: &[DebouncedEvent]) -> Vec<PathBuf> {
         match self {
-            Self::SingleFile { target_path } => {
+            Self::SingleFile { target_path, .. } => {
                 collect_single_file_changes(target_path.as_path(), events)
             }
-            Self::Directory { base_dir } => collect_directory_changes(base_dir, events),
+            Self::Directory { base_dir, .. } => collect_directory_changes(base_dir, events),
         }
     }
 
@@ -254,7 +267,7 @@ impl WatchStrategy {
     ) -> Vec<PathBuf> {
         match self {
             Self::SingleFile { .. } => Vec::new(),
-            Self::Directory { base_dir } => collect_directory_candidates(base_dir, events),
+            Self::Directory { base_dir, .. } => collect_directory_candidates(base_dir, events),
         }
     }
 }
@@ -876,6 +889,14 @@ mod tests {
         (dir, file_path)
     }
 
+    fn single_file_strategy(target: &Path) -> WatchStrategy {
+        WatchStrategy::single_file(CanonicalPath::try_from_path(target).unwrap())
+    }
+
+    fn directory_strategy(base: &Path) -> WatchStrategy {
+        WatchStrategy::directory(CanonicalPath::try_from_path(base).unwrap())
+    }
+
     fn plan_paths(plan: &super::WatchPlan) -> Vec<PathBuf> {
         let mut paths = plan
             .entries()
@@ -894,9 +915,7 @@ mod tests {
     #[test]
     fn test_watch_plan_単一ファイルは親ディレクトリをnonrecursiveで登録する() {
         let (_dir, target) = create_markdown_fixture("target.md", "# target");
-        let strategy = WatchStrategy::SingleFile {
-            target_path: CanonicalPath::try_from_path(&target).unwrap(),
-        };
+        let strategy = single_file_strategy(&target);
 
         let plan = strategy.watch_plan().unwrap();
 
@@ -927,9 +946,7 @@ mod tests {
         ] {
             std::fs::create_dir_all(dir.path().join(path)).unwrap();
         }
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let plan = strategy.watch_plan().unwrap();
         let paths = plan_paths(&plan);
@@ -979,9 +996,7 @@ mod tests {
         let hidden_base = parent.path().join(".workspace");
         std::fs::create_dir_all(hidden_base.join("docs")).unwrap();
         std::fs::create_dir_all(hidden_base.join(".draft")).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(&hidden_base).unwrap(),
-        };
+        let strategy = directory_strategy(&hidden_base);
 
         let plan = strategy.watch_plan().unwrap();
         let paths = plan_paths(&plan);
@@ -1000,9 +1015,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(outside.path().join("docs")).unwrap();
         symlink(outside.path(), dir.path().join("linked")).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let plan = strategy.watch_plan().unwrap();
         let paths = plan_paths(&plan);
@@ -1099,9 +1112,7 @@ mod tests {
             std::fs::set_permissions(&unreadable, original_permissions).unwrap();
             return;
         }
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let plan = strategy.watch_plan().unwrap();
         let paths = plan_paths(&plan);
@@ -1165,9 +1176,7 @@ mod tests {
     #[test]
     fn test_strategy_単一ファイルモードのラベルとモードを返す() {
         let (_dir, target) = create_markdown_fixture("target.md", "# target");
-        let strategy = WatchStrategy::SingleFile {
-            target_path: CanonicalPath::try_from_path(&target).unwrap(),
-        };
+        let strategy = single_file_strategy(&target);
 
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-file");
         assert_eq!(
@@ -1187,9 +1196,7 @@ mod tests {
     #[test]
     fn test_strategy_ディレクトリモードのラベルとモードを返す() {
         let dir = tempfile::tempdir().unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         assert_eq!(strategy.thread_name(), "markdown-view-watcher-dir");
         assert_eq!(
@@ -1210,13 +1217,32 @@ mod tests {
     }
 
     #[test]
+    fn test_watch_strategy_path_for_log_単一ファイルは親ディレクトリ相対で表示する() {
+        let (_dir, target) = create_markdown_fixture("target.md", "# target");
+        let strategy = single_file_strategy(&target);
+
+        let path = target.parent().unwrap().join("nested.md");
+
+        assert_eq!(strategy.path_for_log(&path), "nested.md");
+    }
+
+    #[test]
+    fn test_watch_strategy_path_for_log_ディレクトリはbase相対で表示する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let path = dir.path().join("docs/note.md");
+        std::fs::write(&path, "# note").unwrap();
+        let strategy = directory_strategy(dir.path());
+
+        assert_eq!(strategy.path_for_log(&path), "docs/note.md");
+    }
+
+    #[test]
     fn test_collect_changed_paths_単一ファイル対象のみ通知する() {
         let (_dir, target) = create_markdown_fixture("target.md", "# target");
         let sibling = target.parent().unwrap().join("other.md");
         std::fs::write(&sibling, "# other").unwrap();
-        let strategy = WatchStrategy::SingleFile {
-            target_path: CanonicalPath::try_from_path(&target).unwrap(),
-        };
+        let strategy = single_file_strategy(&target);
 
         let received = strategy.collect_changed_paths(&[
             debounced_event(sibling.clone(), DebouncedEventKind::Any),
@@ -1231,9 +1257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let text_file = dir.path().join("notes.txt");
         std::fs::write(&text_file, "memo").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let received =
             strategy.collect_changed_paths(&[debounced_event(text_file, DebouncedEventKind::Any)]);
@@ -1248,9 +1272,7 @@ mod tests {
         std::fs::create_dir_all(&hidden_dir).unwrap();
         let hidden_file = hidden_dir.join("note.md");
         std::fs::write(&hidden_file, "# hidden").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let received = strategy
             .collect_changed_paths(&[debounced_event(hidden_file, DebouncedEventKind::Any)]);
@@ -1267,9 +1289,7 @@ mod tests {
         std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
         std::fs::write(&node_file, "# generated").unwrap();
         std::fs::write(&target_file, "# generated").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let received = strategy.collect_changed_paths(&[
             debounced_event(node_file, DebouncedEventKind::Any),
@@ -1287,9 +1307,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("guide.md");
         std::fs::write(&file_path, "# guide").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let received = strategy.collect_changed_paths(&[
             debounced_event(file_path.clone(), DebouncedEventKind::Any),
@@ -1307,9 +1325,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("guide.md");
         std::fs::write(&file_path, "# guide").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
 
         let received = strategy.collect_changed_paths(&[debounced_event(
             file_path,
@@ -1325,9 +1341,7 @@ mod tests {
     #[test]
     fn test_collect_new_directory_candidates_単一ファイルは空を返す() {
         let (_dir, target) = create_markdown_fixture("target.md", "# target");
-        let strategy = WatchStrategy::SingleFile {
-            target_path: CanonicalPath::try_from_path(&target).unwrap(),
-        };
+        let strategy = single_file_strategy(&target);
         let events = vec![debounced_event(
             target.parent().unwrap().to_path_buf(),
             DebouncedEventKind::Any,
@@ -1345,9 +1359,7 @@ mod tests {
         std::fs::create_dir_all(&new_dir).unwrap();
         let markdown = new_dir.join("note.md");
         std::fs::write(&markdown, "# note").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![
             debounced_event(markdown, DebouncedEventKind::Any),
             debounced_event(new_dir.clone(), DebouncedEventKind::Any),
@@ -1366,9 +1378,7 @@ mod tests {
         std::fs::create_dir_all(&hidden).unwrap();
         let outside_dir = outside.path().join("new");
         std::fs::create_dir_all(&outside_dir).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![
             debounced_event(hidden, DebouncedEventKind::Any),
             debounced_event(outside_dir, DebouncedEventKind::Any),
@@ -1388,9 +1398,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let linked = dir.path().join("linked");
         symlink(outside.path(), &linked).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![debounced_event(linked, DebouncedEventKind::Any)];
 
         let candidates = strategy.collect_new_directory_candidates(&events);
@@ -1461,10 +1469,7 @@ mod tests {
         let deleted = canonical_base.as_path().join("docs").join("deleted.md");
         let events = vec![debounced_event(deleted.clone(), DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert_eq!(changes, vec![normalize_lexical_path(&deleted)]);
     }
@@ -1477,10 +1482,7 @@ mod tests {
         let outside_file = outside.path().join("outside.md");
         let events = vec![debounced_event(outside_file, DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1499,10 +1501,7 @@ mod tests {
         symlink(&outside_file, &link).unwrap();
         let events = vec![debounced_event(link, DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1524,10 +1523,7 @@ mod tests {
             DebouncedEventKind::Any,
         )];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1547,10 +1543,7 @@ mod tests {
         symlink(&hidden_file, &link).unwrap();
         let events = vec![debounced_event(link, DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1568,10 +1561,7 @@ mod tests {
         symlink(&visible_file, &hidden_link).unwrap();
         let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1588,10 +1578,7 @@ mod tests {
         symlink(&missing_target, &hidden_link).unwrap();
         let events = vec![debounced_event(hidden_link, DebouncedEventKind::Any)];
 
-        let changes = WatchStrategy::Directory {
-            base_dir: canonical_base,
-        }
-        .collect_changed_paths(&events);
+        let changes = WatchStrategy::directory(canonical_base).collect_changed_paths(&events);
 
         assert!(changes.is_empty());
     }
@@ -1602,9 +1589,7 @@ mod tests {
         let outside_dir = tempfile::tempdir().unwrap();
         let outside_file = outside_dir.path().join("outside.md");
         std::fs::write(&outside_file, "# outside").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: CanonicalPath::try_from_path(base_dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(base_dir.path());
 
         let received = strategy
             .collect_changed_paths(&[debounced_event(outside_file, DebouncedEventKind::Any)]);

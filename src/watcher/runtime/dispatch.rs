@@ -398,9 +398,18 @@ mod tests {
     use tokio::sync::mpsc;
     use tracing_test::traced_test;
 
-    use crate::server::AppMode;
+    use crate::server::log_path::LogBasePath;
+    use crate::server::{AppMode, CanonicalPath};
     use crate::watcher::strategy::WatchStrategy;
     use crate::watcher::{WatchErrorKind, WatchEvent, WatcherHealth};
+
+    fn directory_strategy(base: &Path) -> WatchStrategy {
+        let base_dir = CanonicalPath::try_from_path(base).unwrap();
+        WatchStrategy::Directory {
+            log_base: LogBasePath::new(base_dir.as_path()),
+            base_dir,
+        }
+    }
 
     #[test]
     fn test_process_internal_events_新規ディレクトリをwatch追加して既存markdownを通知する() {
@@ -409,9 +418,7 @@ mod tests {
         std::fs::create_dir_all(&new_dir).unwrap();
         let md = new_dir.join("created.md");
         std::fs::write(&md, "# created").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -450,9 +457,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let new_dir = dir.path().join("new");
         std::fs::create_dir_all(&new_dir).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir,
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -493,9 +498,7 @@ mod tests {
         std::fs::write(&root_md, "# root").unwrap();
         std::fs::write(&nested_md, "# child").unwrap();
         let nested_canonical = nested.canonicalize().unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -548,9 +551,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let new_dir = dir.path().join("new");
         std::fs::create_dir_all(&new_dir).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir,
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -587,9 +588,7 @@ mod tests {
         std::fs::create_dir_all(&existing_dir).unwrap();
         let md = existing_dir.join("created.md");
         std::fs::write(&md, "# created").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             existing_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -633,9 +632,7 @@ mod tests {
         std::fs::create_dir_all(&existing_dir).unwrap();
         let md = existing_dir.join("created.md");
         std::fs::write(&md, "# created").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             existing_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -686,9 +683,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let existing_dir = dir.path().join("existing");
         std::fs::create_dir_all(&existing_dir).unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let mut registered = WatchDirectoryRegistry::default();
         registered.insert(dir.path().canonicalize().unwrap());
         registered.insert(existing_dir.canonicalize().unwrap());
@@ -747,9 +742,7 @@ mod tests {
         std::fs::create_dir(&recreated_dir).unwrap();
         let md = recreated_dir.join("created.md");
         std::fs::write(&md, "# recreated").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             recreated_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -792,9 +785,7 @@ mod tests {
         let new_md = new_dir.join("created.md");
         std::fs::write(&old_md, "# old").unwrap();
         std::fs::write(&new_md, "# created").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -834,9 +825,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let md = nested.join("created.md");
         std::fs::write(&md, "# created").unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let events = vec![notify_debouncer_mini::DebouncedEvent::new(
             new_dir.clone(),
             notify_debouncer_mini::DebouncedEventKind::Any,
@@ -900,9 +889,7 @@ mod tests {
     #[test]
     fn test_send_internal_watch_result_満杯時はhealth_failedとerror_eventを送る() {
         let dir = tempfile::tempdir().unwrap();
-        let strategy = WatchStrategy::Directory {
-            base_dir: crate::server::CanonicalPath::try_from_path(dir.path()).unwrap(),
-        };
+        let strategy = directory_strategy(dir.path());
         let (internal_tx, _internal_rx) =
             std::sync::mpsc::sync_channel::<super::InternalWatchResult>(1);
         internal_tx
