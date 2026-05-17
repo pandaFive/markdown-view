@@ -12,6 +12,57 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+/// 監査ログ用 base path。base の canonicalize 結果を再利用する。
+#[derive(Debug, Clone)]
+pub(crate) struct LogBasePath {
+    base: PathBuf,
+    canonical_base: Option<PathBuf>,
+}
+
+impl LogBasePath {
+    pub(crate) fn new(base: &Path) -> Self {
+        Self {
+            base: base.to_path_buf(),
+            canonical_base: base.canonicalize().ok(),
+        }
+    }
+
+    /// 監査ログ用にパスを base 相対化する。
+    pub(crate) fn sanitize(&self, path: &Path) -> Cow<'static, str> {
+        match self.canonicalize_status(path) {
+            CanonicalizeStatus::Relative(relative) if relative.as_os_str().is_empty() => {
+                Cow::Borrowed(".")
+            }
+            CanonicalizeStatus::Relative(relative) => Cow::Owned(relative.display().to_string()),
+            CanonicalizeStatus::OutsideBase => {
+                Cow::Owned(sanitize_outside_path_for_logging(path).into_owned())
+            }
+            CanonicalizeStatus::Unavailable => {
+                Cow::Owned(sanitize_path_for_logging_lexical(path, &self.base).into_owned())
+            }
+        }
+    }
+
+    /// 監査ログ用 path を相対化し、制御文字を可視化する。
+    pub(crate) fn sanitize_escaped(&self, path: &Path) -> String {
+        self.sanitize(path).as_ref().escape_debug().to_string()
+    }
+
+    fn canonicalize_status(&self, path: &Path) -> CanonicalizeStatus {
+        let Some(canonical_base) = &self.canonical_base else {
+            return CanonicalizeStatus::Unavailable;
+        };
+        let canonical_path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return CanonicalizeStatus::Unavailable,
+        };
+        match canonical_path.strip_prefix(canonical_base) {
+            Ok(relative) => CanonicalizeStatus::Relative(relative.to_path_buf()),
+            Err(_) => CanonicalizeStatus::OutsideBase,
+        }
+    }
+}
+
 /// 監査ログ用にパスを base 相対化する。
 ///
 /// - `path` が `base` 配下: 相対パス文字列（例: `"subdir/file.md"`）
@@ -22,26 +73,12 @@ use std::path::{Component, Path, PathBuf};
 /// 存在するパスでは canonicalize 後の実パスで base 配下判定を優先し、
 /// symlink 経由で base 外へ出るパスの誤判定を防ぐ。
 pub(crate) fn sanitize_path_for_logging<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
-    match canonical_path_status(path, base) {
-        Some(relative) if relative.as_os_str().is_empty() => Cow::Borrowed("."),
-        Some(relative) => Cow::Owned(relative.display().to_string()),
-        None if matches!(
-            canonicalize_status(path, base),
-            CanonicalizeStatus::OutsideBase
-        ) =>
-        {
-            sanitize_outside_path_for_logging(path)
-        }
-        None => sanitize_path_for_logging_lexical(path, base),
-    }
+    LogBasePath::new(base).sanitize(path)
 }
 
 /// 監査ログ用 path を相対化し、制御文字を可視化する。
 pub(crate) fn sanitize_path_for_logging_escaped(path: &Path, base: &Path) -> String {
-    sanitize_path_for_logging(path, base)
-        .as_ref()
-        .escape_debug()
-        .to_string()
+    LogBasePath::new(base).sanitize_escaped(path)
 }
 
 /// 監査ログ用 path を字句的に相対化し、制御文字を可視化する。
@@ -56,28 +93,6 @@ enum CanonicalizeStatus {
     Relative(PathBuf),
     OutsideBase,
     Unavailable,
-}
-
-fn canonical_path_status(path: &Path, base: &Path) -> Option<PathBuf> {
-    match canonicalize_status(path, base) {
-        CanonicalizeStatus::Relative(relative) => Some(relative),
-        CanonicalizeStatus::OutsideBase | CanonicalizeStatus::Unavailable => None,
-    }
-}
-
-fn canonicalize_status(path: &Path, base: &Path) -> CanonicalizeStatus {
-    let canonical_path = match path.canonicalize() {
-        Ok(path) => path,
-        Err(_) => return CanonicalizeStatus::Unavailable,
-    };
-    let canonical_base = match base.canonicalize() {
-        Ok(base) => base,
-        Err(_) => return CanonicalizeStatus::Unavailable,
-    };
-    match canonical_path.strip_prefix(&canonical_base) {
-        Ok(relative) => CanonicalizeStatus::Relative(relative.to_path_buf()),
-        Err(_) => CanonicalizeStatus::OutsideBase,
-    }
 }
 
 fn sanitize_path_for_logging_lexical<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
