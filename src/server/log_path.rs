@@ -240,6 +240,77 @@ mod tests {
         assert_eq!(sanitize_path_for_logging(&path, &base), ".");
     }
 
+    #[test]
+    fn test_log_base_path_cached_baseでもbase配下を相対パスにする() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        std::fs::create_dir_all(base.join("subdir")).unwrap();
+        std::fs::write(base.join("subdir/file.md"), "# doc").unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let sanitized = log_base.sanitize(&base.join("subdir/file.md"));
+
+        assert_eq!(sanitized, "subdir/file.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_log_base_path_cached_baseでもsymlink経由のbase外はoutside扱い() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(outside.join("private")).unwrap();
+        std::fs::write(outside.join("private/doc.md"), "# doc").unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let sanitized = log_base.sanitize(&base.join("link/private/doc.md"));
+
+        assert_eq!(sanitized, "<outside-base>/doc.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_log_base_path_cached_baseでもsymlink経由のbase配下は相対化する() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("doc.md"), "# doc").unwrap();
+        symlink(&nested, base.join("link")).unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let sanitized = log_base.sanitize(&base.join("link/doc.md"));
+
+        assert_eq!(sanitized, "nested/doc.md");
+    }
+
+    #[test]
+    fn test_log_base_path_base正規化失敗時はlexical_fallbackで継続する() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("missing-base");
+        let path = base.join("docs/../file.md");
+        let log_base = LogBasePath::new(&base);
+
+        let sanitized = log_base.sanitize(&path);
+
+        assert_eq!(sanitized, "file.md");
+    }
+
+    #[test]
+    fn test_log_base_path_escapedは制御文字を可視化する() {
+        let base = PathBuf::from("/base");
+        let log_base = LogBasePath::new(&base);
+        let path = base.join("line\n\x1b.md");
+
+        let sanitized = log_base.sanitize_escaped(&path);
+
+        assert_eq!(sanitized, "line\\n\\u{1b}.md");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\x1b'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_sanitize_非utf8_file_name() {
