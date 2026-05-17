@@ -147,7 +147,7 @@ pub(super) enum ExcludeReason {
 }
 
 impl WatchStrategy {
-    fn single_file(target_path: CanonicalPath) -> Self {
+    pub(super) fn single_file(target_path: CanonicalPath) -> Self {
         let base = target_path
             .as_path()
             .parent()
@@ -158,7 +158,7 @@ impl WatchStrategy {
         }
     }
 
-    fn directory(base_dir: CanonicalPath) -> Self {
+    pub(super) fn directory(base_dir: CanonicalPath) -> Self {
         Self::Directory {
             log_base: LogBasePath::new(base_dir.as_path()),
             base_dir,
@@ -247,7 +247,7 @@ impl WatchStrategy {
     pub(super) fn path_for_log(&self, path: &Path) -> String {
         match self {
             Self::SingleFile { log_base, .. } | Self::Directory { log_base, .. } => {
-                log_base.sanitize(path).into_owned()
+                log_base.sanitize_escaped(path)
             }
         }
     }
@@ -1235,6 +1235,20 @@ mod tests {
         let strategy = directory_strategy(dir.path());
 
         assert_eq!(strategy.path_for_log(&path), "docs/note.md");
+    }
+
+    #[test]
+    fn test_watch_strategy_path_for_log_制御文字を可視化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("line\n\x1b.md");
+        std::fs::write(&path, "# note").unwrap();
+        let strategy = directory_strategy(dir.path());
+
+        let sanitized = strategy.path_for_log(&path);
+
+        assert_eq!(sanitized, "line\\n\\u{1b}.md");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\x1b'));
     }
 
     #[test]

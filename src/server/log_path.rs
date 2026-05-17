@@ -28,18 +28,14 @@ impl LogBasePath {
     }
 
     /// 監査ログ用にパスを base 相対化する。
-    pub(crate) fn sanitize(&self, path: &Path) -> Cow<'static, str> {
+    pub(crate) fn sanitize<'a>(&self, path: &'a Path) -> Cow<'a, str> {
         match self.canonicalize_status(path) {
             CanonicalizeStatus::Relative(relative) if relative.as_os_str().is_empty() => {
                 Cow::Borrowed(".")
             }
             CanonicalizeStatus::Relative(relative) => Cow::Owned(relative.display().to_string()),
-            CanonicalizeStatus::OutsideBase => {
-                Cow::Owned(sanitize_outside_path_for_logging(path).into_owned())
-            }
-            CanonicalizeStatus::Unavailable => {
-                Cow::Owned(sanitize_path_for_logging_lexical(path, &self.base).into_owned())
-            }
+            CanonicalizeStatus::OutsideBase => sanitize_outside_path_for_logging(path),
+            CanonicalizeStatus::Unavailable => sanitize_path_for_logging_lexical(path, &self.base),
         }
     }
 
@@ -263,7 +259,8 @@ mod tests {
         std::fs::write(base.join("subdir/file.md"), "# doc").unwrap();
         let log_base = LogBasePath::new(&base);
 
-        let sanitized = log_base.sanitize(&base.join("subdir/file.md"));
+        let path = base.join("subdir/file.md");
+        let sanitized = log_base.sanitize(&path);
 
         assert_eq!(sanitized, "subdir/file.md");
     }
@@ -280,7 +277,8 @@ mod tests {
         symlink(&outside, base.join("link")).unwrap();
         let log_base = LogBasePath::new(&base);
 
-        let sanitized = log_base.sanitize(&base.join("link/private/doc.md"));
+        let path = base.join("link/private/doc.md");
+        let sanitized = log_base.sanitize(&path);
 
         assert_eq!(sanitized, "<outside-base>/doc.md");
     }
@@ -296,7 +294,8 @@ mod tests {
         symlink(&nested, base.join("link")).unwrap();
         let log_base = LogBasePath::new(&base);
 
-        let sanitized = log_base.sanitize(&base.join("link/doc.md"));
+        let path = base.join("link/doc.md");
+        let sanitized = log_base.sanitize(&path);
 
         assert_eq!(sanitized, "nested/doc.md");
     }

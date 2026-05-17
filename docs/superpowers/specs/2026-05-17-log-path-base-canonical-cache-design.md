@@ -56,7 +56,7 @@ pub(crate) struct LogBasePath {
 
 ### 呼び出し側への適用
 
-まず `src/watcher/strategy.rs` のように同じ `log_base` で繰り返しログ整形する箇所へ限定して適用する。
+まず `src/watcher/strategy.rs` の `WatchStrategy::path_for_log` のように同じ `log_base` で繰り返しログ整形する箇所へ限定して適用する。`WatchStrategy` の生成は `single_file` / `directory` constructor に集約し、隣接モジュールのテストも同じ生成経路を使う。
 
 単発の `src/server/files/*` 呼び出しは既存 API のまま残す。広範囲の churn を避け、今回の変更は「再利用できる境界を作ること」と「高頻度候補へ限定適用すること」に絞る。
 
@@ -102,13 +102,14 @@ pub(crate) struct LogBasePath {
 
 - `src/server/log_path.rs`: `LogBasePath` と既存 API の委譲先を追加する。既存サニタイズ契約とテストを維持する。
 - `src/watcher/strategy.rs`: 同じ base で繰り返すログ整形に `LogBasePath` を渡せる範囲で限定適用する。
+- `src/watcher/runtime/dispatch.rs`: `WatchStrategy` の constructor 経由化に伴う test-only の追随を行う。
 - `docs/todo/BACKLOG.md`: 実装後に対象項目を完了または更新する。
 
 HTTP API、WebSocket payload、HTML sanitize、CSP、Host/Origin validation、path validation、memo sidecar、file size limit には影響しない。
 
 ## ロールバック
 
-`LogBasePath` 追加と `watcher/strategy.rs` の呼び出し側差分を revert すれば戻せる。既存 API を削除しない設計のため、ロールバック時に他モジュールの利用者を広く修正する必要はない。
+`LogBasePath` 追加、`watcher/strategy.rs` の呼び出し側差分、`watcher/runtime/dispatch.rs` の test-only 追随を revert すれば戻せる。既存 API を削除しない設計のため、ロールバック時に他モジュールの利用者を広く修正する必要はない。
 
 ## 見積もり
 

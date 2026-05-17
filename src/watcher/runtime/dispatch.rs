@@ -398,17 +398,12 @@ mod tests {
     use tokio::sync::mpsc;
     use tracing_test::traced_test;
 
-    use crate::server::log_path::LogBasePath;
     use crate::server::{AppMode, CanonicalPath};
     use crate::watcher::strategy::WatchStrategy;
     use crate::watcher::{WatchErrorKind, WatchEvent, WatcherHealth};
 
     fn directory_strategy(base: &Path) -> WatchStrategy {
-        let base_dir = CanonicalPath::try_from_path(base).unwrap();
-        WatchStrategy::Directory {
-            log_base: LogBasePath::new(base_dir.as_path()),
-            base_dir,
-        }
+        WatchStrategy::directory(CanonicalPath::try_from_path(base).unwrap())
     }
 
     #[test]

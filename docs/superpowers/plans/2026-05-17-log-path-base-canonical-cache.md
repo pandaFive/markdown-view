@@ -4,7 +4,7 @@
 
 **Goal:** `log_path` の base canonicalize 結果を再利用できる型を追加し、監査ログの安全契約を維持したまま watcher の繰り返しログ整形で余分な syscall を減らす。
 
-**Architecture:** `src/server/log_path.rs` に `LogBasePath` を追加し、既存の `sanitize_path_for_logging` API は互換層として残す。`src/watcher/strategy.rs` は `WatchStrategy::path_for_log` の繰り返し呼び出しで `LogBasePath` を使えるようにする範囲へ限定し、`server/files/*` の単発ログ呼び出しは変更しない。
+**Architecture:** `src/server/log_path.rs` に `LogBasePath` を追加し、既存の `sanitize_path_for_logging` API は互換層として残す。`src/watcher/strategy.rs` は `WatchStrategy::path_for_log` の繰り返し呼び出しで `LogBasePath` を使い、ログ出力用には制御文字を可視化する。`server/files/*` の単発ログ呼び出しは変更しない。
 
 **Tech Stack:** Rust, std::path, tempfile, cargo test, repository-local `./verify.sh`.
 
@@ -18,6 +18,9 @@
 - Modify: `src/watcher/strategy.rs`
   - 責務: watcher の監視対象判定、ログ用 path 表示、監視計画生成。
   - 今回の変更: `WatchStrategy` が `LogBasePath` を保持し、`path_for_log` で同じ cached base を再利用する。
+- Modify: `src/watcher/runtime/dispatch.rs`
+  - 責務: watcher runtime dispatch の単体テスト。
+  - 今回の変更: `WatchStrategy` の保持フィールド追加に伴う test-only 構築箇所を `WatchStrategy::directory` constructor 経由へ追随する。
 - Modify: `docs/todo/BACKLOG.md`
   - 責務: 未完了の低優先・長期改善候補を保持する。
   - 今回の変更: `log_path::canonicalize_status` 項目を完了扱いにして `docs/done/DONE-2026-05.md` へ移すか、少なくとも完了根拠を追記して未完了一覧から外す。
@@ -254,6 +257,12 @@ Expected: command exits 0. If formatting changes `src/server/log_path.rs`, keep 
 
 - [ ] **Step 5: Commit `log_path` implementation**
 
+Before running git mutation commands, verify all of these are true:
+
+- The user has explicitly approved implementation for this plan.
+- `git branch --show-current` is not `develop` or `main`.
+- `git status --short` contains only files listed in this task.
+
 Run:
 
 ```bash
@@ -267,6 +276,7 @@ Expected: commit succeeds and includes only `src/server/log_path.rs`.
 
 **Files:**
 - Modify: `src/watcher/strategy.rs`
+- Modify: `src/watcher/runtime/dispatch.rs`
 
 - [ ] **Step 1: Import `LogBasePath`**
 
@@ -313,7 +323,7 @@ pub(super) enum WatchStrategy {
 In `impl WatchStrategy`, before `pub(super) fn from_mode(mode: &AppMode) -> Result<Self>`, add:
 
 ```rust
-    fn single_file(target_path: CanonicalPath) -> Self {
+    pub(super) fn single_file(target_path: CanonicalPath) -> Self {
         let base = target_path
             .as_path()
             .parent()
@@ -324,7 +334,7 @@ In `impl WatchStrategy`, before `pub(super) fn from_mode(mode: &AppMode) -> Resu
         }
     }
 
-    fn directory(base_dir: CanonicalPath) -> Self {
+    pub(super) fn directory(base_dir: CanonicalPath) -> Self {
         Self::Directory {
             log_base: LogBasePath::new(base_dir.as_path()),
             base_dir,
@@ -427,7 +437,7 @@ with:
     pub(super) fn path_for_log(&self, path: &Path) -> String {
         match self {
             Self::SingleFile { log_base, .. } | Self::Directory { log_base, .. } => {
-                log_base.sanitize(path).into_owned()
+                log_base.sanitize_escaped(path)
             }
         }
     }
@@ -481,7 +491,19 @@ Run this search to find remaining direct constructions:
 rg -n "WatchStrategy::(SingleFile|Directory)" src/watcher/strategy.rs
 ```
 
-Expected after replacements: direct constructions remain only in the two helper functions added above.
+Expected after replacements: direct constructions remain only in historical code snippets inside this plan, not in `src/watcher/strategy.rs`.
+
+- [ ] **Step 7b: Update sibling runtime dispatch tests to use the constructor**
+
+In `src/watcher/runtime/dispatch.rs`, replace the local `WatchStrategy::Directory { ... }` construction in the test helper with:
+
+```rust
+    fn directory_strategy(base: &Path) -> WatchStrategy {
+        WatchStrategy::directory(CanonicalPath::try_from_path(base).unwrap())
+    }
+```
+
+Remove any now-unused `LogBasePath` import from that test module.
 
 - [ ] **Step 8: Add watcher path log regression tests**
 
@@ -508,6 +530,20 @@ In `src/watcher/strategy.rs`, inside `#[cfg(test)] mod tests`, add these tests n
 
         assert_eq!(strategy.path_for_log(&path), "docs/note.md");
     }
+
+    #[test]
+    fn test_watch_strategy_path_for_log_制御文字を可視化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("line\n\x1b.md");
+        std::fs::write(&path, "# note").unwrap();
+        let strategy = directory_strategy(dir.path());
+
+        let sanitized = strategy.path_for_log(&path);
+
+        assert_eq!(sanitized, "line\\n\\u{1b}.md");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\x1b'));
+    }
 ```
 
 - [ ] **Step 9: Run watcher strategy focused tests**
@@ -528,6 +564,12 @@ Expected: PASS or no matching tests only if the first command passed. Do not tre
 
 - [ ] **Step 10: Commit watcher integration**
 
+Before running git mutation commands, verify all of these are true:
+
+- The user has explicitly approved implementation for this plan.
+- `git branch --show-current` is not `develop` or `main`.
+- `git status --short` contains only files listed in this task.
+
 Run:
 
 ```bash
@@ -535,7 +577,7 @@ git add src/watcher/strategy.rs
 git commit -m "refactor: watcherログでbase正規化結果を再利用"
 ```
 
-Expected: commit succeeds and includes only `src/watcher/strategy.rs`.
+Expected: commit succeeds and includes `src/watcher/strategy.rs` and the test-only `src/watcher/runtime/dispatch.rs` follow-up.
 
 ## Task 4: BACKLOG を更新して検証する
 
@@ -559,7 +601,10 @@ Append this block under `## BACKLOG 完了履歴` near the top of `docs/done/DON
 
 ```markdown
 - [x] `log_path::canonicalize_status` の毎回 syscall を削減する
-  - 完了根拠: `src/server/log_path.rs` に `LogBasePath` を追加し、base の canonicalize 結果を生成時に保持して再利用できるようにした。既存の `sanitize_path_for_logging` / `sanitize_path_for_logging_escaped` は互換 API として残し、単発呼び出しの契約は維持している。`WatchStrategy::path_for_log` は `LogBasePath` 経由でログ用 path を相対化する構成にした。base 配下、base 自身、base 外、symlink 経由の base 外脱出、symlink 経由の base 内解決、base canonicalize 失敗時の lexical fallback、制御文字 escape を unit test で固定した。HTTP API、WebSocket payload、HTML sanitize、CSP、Host/Origin validation、path validation、memo sidecar、file size limit は変更していない。
+  - ファイル: src/server/log_path.rs, src/watcher/strategy.rs, src/watcher/runtime/dispatch.rs (test-only)
+  - 内容: `LogBasePath` を追加し、base の canonicalize 結果を生成時に保持して再利用できるようにした。既存の `sanitize_path_for_logging` / `sanitize_path_for_logging_escaped` は互換 API として残し、単発呼び出しの契約は維持している。`WatchStrategy::path_for_log` は `LogBasePath` 経由でログ用 path を相対化し、ログ出力用に制御文字を可視化する構成にした。
+  - 完了根拠: base 配下、base 自身、base 外、symlink 経由の base 外脱出、symlink 経由の base 内解決、base canonicalize 失敗時の lexical fallback、制御文字 escape を unit test / focused test で固定した。`cargo test --all-targets --all-features log_path`、`cargo test --all-targets --all-features watcher`、`./verify.sh` で確認した。
+  - セキュリティ影響: HTTP API、WebSocket payload、HTML sanitize、CSP、Host/Origin validation、path validation、memo sidecar、file size limit は変更していない。
   - 由来: アーキテクチャレビュー (2026-04-30)
 ```
 
@@ -591,6 +636,12 @@ Expected:
 - The design spec references `LogBasePath`.
 
 - [ ] **Step 5: Commit docs update**
+
+Before running git mutation commands, verify all of these are true:
+
+- The user has explicitly approved implementation for this plan.
+- `git branch --show-current` is not `develop` or `main`.
+- `git status --short` contains only files listed in this task.
 
 Run:
 
@@ -655,9 +706,15 @@ git diff --stat HEAD
 git diff -- src/server/log_path.rs src/watcher/strategy.rs docs/todo/BACKLOG.md docs/done/DONE-2026-05.md
 ```
 
-Expected: no unstaged implementation changes if all task commits were made. If the docs plan file is still uncommitted, commit it separately with:
+Expected: no unstaged implementation changes if all task commits were made. If the docs plan file is still uncommitted, commit it separately only after verifying all of these are true:
+
+- The user has explicitly approved implementation for this plan.
+- `git branch --show-current` is not `develop` or `main`.
+- `git status --short` contains only `docs/superpowers/plans/2026-05-17-log-path-base-canonical-cache.md`.
 
 ```bash
+git branch --show-current
+git status --short
 git add docs/superpowers/plans/2026-05-17-log-path-base-canonical-cache.md
 git commit -m "docs: log_path base canonicalize cacheの実装計画を追加"
 ```
