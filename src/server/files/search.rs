@@ -75,6 +75,7 @@ impl SearchStats {
 #[derive(Debug, Clone)]
 pub(in crate::server) struct SearchCancellation {
     generation: Option<SearchGeneration>,
+    #[cfg(test)]
     cancel_after_files_for_test: Option<usize>,
 }
 
@@ -83,6 +84,7 @@ impl SearchCancellation {
     pub(in crate::server) fn new(generation: SearchGeneration) -> Self {
         Self {
             generation: Some(generation),
+            #[cfg(test)]
             cancel_after_files_for_test: None,
         }
     }
@@ -90,6 +92,7 @@ impl SearchCancellation {
     pub(in crate::server) fn none() -> Self {
         Self {
             generation: None,
+            #[cfg(test)]
             cancel_after_files_for_test: None,
         }
     }
@@ -101,10 +104,21 @@ impl SearchCancellation {
     }
 
     fn is_cancelled_after_files(&self, searched_files: usize) -> bool {
-        self.is_cancelled()
-            || self
-                .cancel_after_files_for_test
+        if self.is_cancelled() {
+            return true;
+        }
+
+        #[cfg(test)]
+        {
+            self.cancel_after_files_for_test
                 .is_some_and(|limit| searched_files >= limit)
+        }
+
+        #[cfg(not(test))]
+        {
+            let _ = searched_files;
+            false
+        }
     }
 
     #[cfg(test)]
@@ -263,15 +277,20 @@ fn search_directory_with_limits_blocking(
         return Ok(SearchResponse::empty(query));
     }
 
+    if cancellation.is_cancelled() {
+        return Ok(SearchResponse::from_parts(
+            query,
+            Vec::new(),
+            limits,
+            SearchStats::new(),
+        ));
+    }
+
     let files =
         list_markdown_files_from_canonical_base(base_dir, limits.max_files.saturating_add(1))?;
     let base_path = base_dir.as_path();
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
-
-    if cancellation.is_cancelled() {
-        return Ok(SearchResponse::from_parts(query, results, limits, stats));
-    }
 
     if files.len() > limits.max_files {
         stats.mark_truncated(SearchTruncationReason::File);
@@ -1046,6 +1065,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
         let canonical = canonical_of(dir.path());
+        let cancellation = SearchCancellation::cancelled_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(!response.truncated);
+        assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_directory_キャンセル済みならbase列挙前に空結果を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
         let cancellation = SearchCancellation::cancelled_for_test();
 
         let response = search_directory_with_limits_blocking(
