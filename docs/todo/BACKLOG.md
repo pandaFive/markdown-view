@@ -4,7 +4,7 @@
 未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
 最終整理: 2026-05-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
-完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) に移動した。
+過去の完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) に移動した。
 レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## P1: リスク低減・契約明文化
@@ -49,4 +49,4 @@
 - [x] `catalog.rs` の相対パス構築で中間 Vec allocation を避ける
   - 完了根拠: `src/server/files/catalog.rs` に `relative_path_to_slash_string()` を追加し、catalog.rs の相対パス構築で `components().map(...).collect::<Vec<_>>().join("/")` を使わずに `/` 区切り文字列を構築するようにした。ファイル列挙の sort、件数上限、除外ルール、canonicalize 再検証、symlink handling は変更していない。helper の単一 component とネスト path の出力を unit test で固定した
 
-完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) へ移動した。
+過去の完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) へ移動した。
