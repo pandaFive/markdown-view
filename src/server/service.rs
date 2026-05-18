@@ -3,7 +3,8 @@ use axum::http::StatusCode;
 use super::files::{
     list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
     normalize_search_query, resolve_route_target, run_blocking_file_task, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchCancellation, SearchResponse,
+    MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -211,7 +212,7 @@ pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResp
         return Ok(SearchResponse::empty(query));
     };
 
-    search_directory(base_dir, &query)
+    search_directory(base_dir, &query, SearchCancellation::none())
         .await
         .map_err(map_search_error)
 }

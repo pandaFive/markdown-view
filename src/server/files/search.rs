@@ -8,7 +8,7 @@ use super::catalog::list_markdown_files_from_canonical_base;
 use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
-use crate::server::CanonicalPath;
+use crate::server::{CanonicalPath, SearchGeneration};
 
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
@@ -69,6 +69,63 @@ impl SearchStats {
 
     fn truncated(&self) -> bool {
         !self.truncated_reasons.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::server) struct SearchCancellation {
+    generation: Option<SearchGeneration>,
+    cancel_after_files_for_test: Option<usize>,
+}
+
+impl SearchCancellation {
+    #[allow(dead_code)]
+    pub(in crate::server) fn new(generation: SearchGeneration) -> Self {
+        Self {
+            generation: Some(generation),
+            cancel_after_files_for_test: None,
+        }
+    }
+
+    pub(in crate::server) fn none() -> Self {
+        Self {
+            generation: None,
+            cancel_after_files_for_test: None,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.generation
+            .as_ref()
+            .is_some_and(SearchGeneration::is_stale)
+    }
+
+    fn is_cancelled_after_files(&self, searched_files: usize) -> bool {
+        self.is_cancelled()
+            || self
+                .cancel_after_files_for_test
+                .is_some_and(|limit| searched_files >= limit)
+    }
+
+    #[cfg(test)]
+    fn cancelled_for_test() -> Self {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        current.store(2, Ordering::Release);
+        Self::new(generation)
+    }
+
+    #[cfg(test)]
+    fn cancel_after_files_for_test(limit: usize) -> Self {
+        Self {
+            generation: None,
+            cancel_after_files_for_test: Some(limit),
+        }
     }
 }
 
@@ -172,11 +229,12 @@ fn search_query_too_long_error() -> std::io::Error {
 pub(in crate::server) async fn search_directory(
     base_dir: &CanonicalPath,
     raw_query: &str,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
     let query = normalize_search_query(raw_query)?;
     let base_dir = base_dir.clone();
 
-    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query))
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query, cancellation))
         .await
         .map_err(map_search_join_error)?
 }
@@ -184,14 +242,21 @@ pub(in crate::server) async fn search_directory(
 fn search_directory_blocking(
     base_dir: &CanonicalPath,
     raw_query: &str,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
-    search_directory_with_limits_blocking(base_dir, raw_query, SearchLimits::default())
+    search_directory_with_limits_blocking(
+        base_dir,
+        raw_query,
+        SearchLimits::default(),
+        cancellation,
+    )
 }
 
 fn search_directory_with_limits_blocking(
     base_dir: &CanonicalPath,
     raw_query: &str,
     limits: SearchLimits,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
     let query = normalize_search_query(raw_query)?;
     if query.is_empty() {
@@ -204,11 +269,19 @@ fn search_directory_with_limits_blocking(
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
 
+    if cancellation.is_cancelled() {
+        return Ok(SearchResponse::from_parts(query, results, limits, stats));
+    }
+
     if files.len() > limits.max_files {
         stats.mark_truncated(SearchTruncationReason::File);
     }
 
     for relative in files.into_iter().take(limits.max_files) {
+        if cancellation.is_cancelled_after_files(stats.searched_files) {
+            break;
+        }
+
         let file_path = match resolve_file(base_path, &relative) {
             Ok(file_path) => file_path,
             Err(error) => {
@@ -250,6 +323,10 @@ fn search_directory_with_limits_blocking(
                 stats.mark_truncated(SearchTruncationReason::Result);
                 break;
             }
+        }
+
+        if cancellation.is_cancelled_after_files(stats.searched_files) {
+            break;
         }
 
         if results.len() >= limits.max_results {
@@ -946,6 +1023,75 @@ mod tests {
         CanonicalPath::try_from_path(path).unwrap()
     }
 
+    #[test]
+    fn test_search_cancellationは新しい世代を検知する() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+
+        assert!(!cancellation.is_cancelled());
+
+        current.store(2, Ordering::Release);
+
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn test_search_directory_キャンセル済みならファイル処理へ進まない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Home\n\nneedle").unwrap();
+        let canonical = canonical_of(dir.path());
+        let cancellation = SearchCancellation::cancelled_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(!response.truncated);
+        assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_directory_1ファイル後にキャンセルされたら後続ファイルへ進まない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle second").unwrap();
+        let canonical = canonical_of(dir.path());
+        let cancellation = SearchCancellation::cancel_after_files_for_test(1);
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+    }
+
     #[tokio::test]
     async fn test_search_directory_通常検索は打ち切りなしの統計を返す() {
         let dir = tempfile::tempdir().unwrap();
@@ -953,7 +1099,9 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", SearchCancellation::none())
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert!(!response.truncated);
@@ -982,7 +1130,9 @@ mod tests {
         .unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", SearchCancellation::none())
+            .await
+            .unwrap();
 
         assert!(!response.truncated);
         assert!(response.truncated_reasons.is_empty());
@@ -1002,7 +1152,9 @@ mod tests {
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", SearchCancellation::none())
+            .await
+            .unwrap();
 
         assert!(response.truncated);
         assert_eq!(
@@ -1033,6 +1185,7 @@ mod tests {
                 max_files: 2,
                 max_bytes: 64 * 1024 * 1024,
             },
+            SearchCancellation::none(),
         )
         .unwrap();
 
@@ -1065,6 +1218,7 @@ mod tests {
                 max_files: 2,
                 max_bytes: 64 * 1024 * 1024,
             },
+            SearchCancellation::none(),
         )
         .unwrap();
 
@@ -1089,6 +1243,7 @@ mod tests {
                 max_files: 1000,
                 max_bytes: "needle".len(),
             },
+            SearchCancellation::none(),
         )
         .unwrap();
 
@@ -1118,6 +1273,7 @@ mod tests {
                 max_files: 1000,
                 max_bytes: 64 * 1024 * 1024,
             },
+            SearchCancellation::none(),
         )
         .unwrap_err();
 
@@ -1132,7 +1288,9 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
         let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search_directory(&canonical, &query).await.unwrap_err();
+        let error = search_directory(&canonical, &query, SearchCancellation::none())
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
@@ -1152,6 +1310,7 @@ mod tests {
                 max_files: 1000,
                 max_bytes: 64 * 1024 * 1024,
             },
+            SearchCancellation::none(),
         )
         .unwrap();
 
@@ -1173,6 +1332,7 @@ mod tests {
                 max_files: 1000,
                 max_bytes: 64 * 1024 * 1024,
             },
+            SearchCancellation::none(),
         )
         .unwrap();
 

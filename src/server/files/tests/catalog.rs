@@ -165,7 +165,9 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "target").await.unwrap();
+    let response = search_directory(&canonical, "target", SearchCancellation::none())
+        .await
+        .unwrap();
 
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);
@@ -187,7 +189,9 @@ async fn test_search_directory_生成物ディレクトリ配下を検索しな�
     std::fs::write(dir.path().join("target/debug/build.md"), "needle generated").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "needle").await.unwrap();
+    let response = search_directory(&canonical, "needle", SearchCancellation::none())
+        .await
+        .unwrap();
 
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].file, "docs/guide.md");
