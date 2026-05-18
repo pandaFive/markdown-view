@@ -16,5 +16,6 @@ pub use self::files::{list_markdown_files, resolve_file, ResolveFileError, MAX_F
 pub use self::messages::BroadcastMessage;
 pub use self::routes::create_router;
 pub use self::state::{AppMode, AppModeBuildError, AppState};
-pub(crate) use self::state::{CanonicalPath, CanonicalPathError};
+#[allow(unused_imports)]
+pub(crate) use self::state::{CanonicalPath, CanonicalPathError, SearchGeneration};
 pub use self::watch::WatchService;

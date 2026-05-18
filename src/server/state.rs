@@ -1,7 +1,10 @@
 //! サーバー状態とモード判定を管理する。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use tokio::sync::broadcast;
 
@@ -233,6 +236,32 @@ fn relative_path_to_display_string(relative: &Path) -> String {
         .join("/")
 }
 
+/// ディレクトリ検索の開始世代と現在世代を比較するためのhandle。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct SearchGeneration {
+    started_at: u64,
+    current: Arc<AtomicU64>,
+}
+
+#[allow(dead_code)]
+impl SearchGeneration {
+    pub(crate) fn new(started_at: u64, current: Arc<AtomicU64>) -> Self {
+        Self {
+            started_at,
+            current,
+        }
+    }
+
+    pub(crate) fn started_at(&self) -> u64 {
+        self.started_at
+    }
+
+    pub(crate) fn is_stale(&self) -> bool {
+        self.current.load(Ordering::Acquire) != self.started_at
+    }
+}
+
 /// サーバー共有状態
 #[derive(Debug)]
 pub struct AppState {
@@ -241,6 +270,8 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
+    #[allow(dead_code)]
+    search_generation: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -268,6 +299,7 @@ impl AppState {
             dark_mode,
             tx,
             memo_fs,
+            search_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -294,6 +326,22 @@ impl AppState {
     /// メモ保存・読み込みで使用するファイルシステム抽象を返す
     pub(crate) fn memo_fs(&self) -> &Arc<dyn MemoFs> {
         &self.memo_fs
+    }
+
+    /// ディレクトリ検索用の新しい世代を発行する。
+    #[allow(dead_code)]
+    pub(crate) fn begin_search_generation(&self) -> SearchGeneration {
+        let generation = self
+            .search_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        SearchGeneration::new(generation, Arc::clone(&self.search_generation))
+    }
+
+    /// 現在のディレクトリ検索世代を返す。
+    #[allow(dead_code)]
+    pub(crate) fn current_search_generation(&self) -> u64 {
+        self.search_generation.load(Ordering::Acquire)
     }
 }
 
@@ -436,6 +484,34 @@ mod tests {
         assert!(state.dark_mode());
         assert!(!state.syntax_css().is_empty());
         assert_eq!(state.tx().receiver_count(), 1);
+    }
+
+    #[test]
+    fn test_app_state_search_generationは初期値0() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        assert_eq!(state.current_search_generation(), 0);
+    }
+
+    #[test]
+    fn test_begin_search_generationは世代を進めてhandleを返す() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let first = state.begin_search_generation();
+        let second = state.begin_search_generation();
+
+        assert_eq!(first.started_at(), 1);
+        assert_eq!(second.started_at(), 2);
+        assert!(first.is_stale());
+        assert!(!second.is_stale());
+        assert_eq!(state.current_search_generation(), 2);
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
