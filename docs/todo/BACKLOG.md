@@ -11,12 +11,12 @@
 
 ## P2: 保守性・局所回帰検知
 
-- [ ] ディレクトリ検索の allocation 削減を計測ベースで検討する
-  - ファイル: `src/server/files/search.rs`, `src/template/assets/js/directory-search.js`
-  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。連続検索時の古いレスポンスはブラウザ側の検索世代で破棄され、サーバ側の古い検索処理も検証済みクライアント ID 単位の協調的キャンセル境界で早期終了できる。一方、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
-  - 対応: `Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
-  - 判断: 検索負荷制御とキャンセル境界は実装済みで、残件は効率化なので BACKLOG P2 に残す
-  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界 (2026-05-18)
+- [ ] ディレクトリ検索の allocation 削減を計測結果に基づいて検討する
+  - ファイル: `src/server/files/search.rs`
+  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数・query 長の打ち切りが明示されている。連続検索時の古い検索処理はクライアント単位のサーバ側検索世代と `SearchCancellation` により、ファイル単位の安全な区切りで協調的に早期終了できる。検索クライアント ID がない互換呼び出しも、全体同時実行上限により blocking 検索の増加を抑える
+  - 対応: `SearchResultItem` の `before/current/after` がマッチごとに `String` を確保する点、検索ブロック抽出時の allocation、正規化処理のコストを計測したうえで、`Cow<str>` 化や処理単位の見直しを検討する
+  - 判断: キャンセル境界は実装済み。残件は効率化であり、計測なしのマイクロ最適化を避けるため BACKLOG P2 に残す
+  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界実装 (2026-05-18)
 
 - [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
   - ファイル: `src/server/state.rs` L18-24/L112/L132

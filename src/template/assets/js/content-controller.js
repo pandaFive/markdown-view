@@ -35,6 +35,9 @@ function createContentController(ctx, deps) {
     renderDirectorySearchUi: function() {
       return requireDirectorySearch().renderDirectorySearchUi();
     },
+    cancelDirectorySearch: function() {
+      return requireDirectorySearch().cancelDirectorySearch();
+    },
     scheduleDirectorySearch: function(query) {
       return requireDirectorySearch().scheduleDirectorySearch(query);
     }

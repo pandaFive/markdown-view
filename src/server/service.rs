@@ -8,7 +8,7 @@ use super::files::{
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
-use super::state::AppState;
+use super::state::{AppState, SearchConcurrencyLimitError, SearchGenerationLimitError};
 use crate::template::{MemoResponse, MemoUpdateMessage, UpdateMessage};
 
 /// indexページ表示に必要な対象ファイル指定。
@@ -205,42 +205,58 @@ fn map_search_error(error: std::io::Error) -> ApiError {
     )
 }
 
+fn map_search_generation_limit_error(_error: SearchGenerationLimitError) -> ApiError {
+    json_error(StatusCode::TOO_MANY_REQUESTS, "検索が混み合っています")
+}
+
+fn map_search_concurrency_limit_error(_error: SearchConcurrencyLimitError) -> ApiError {
+    json_error(StatusCode::TOO_MANY_REQUESTS, "検索が混み合っています")
+}
+
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
 pub(super) async fn search(
     state: &AppState,
     query: String,
-    search_client_id: Option<&str>,
+    client_id: Option<&str>,
+    client_sequence: Option<u64>,
 ) -> Result<SearchResponse, ApiError> {
+    let query = normalize_search_query(&query).map_err(map_search_error)?;
     let Some(base_dir) = state.mode().directory_canonical() else {
-        let query = normalize_search_query(&query).map_err(map_search_error)?;
         return Ok(SearchResponse::empty(query));
     };
 
-    let query = match normalize_search_query(&query) {
-        Ok(query) => query,
-        Err(error) => {
-            state.advance_existing_search_generation_for_client(search_client_id);
-            return Err(map_search_error(error));
-        }
-    };
-
-    let cancellation = search_cancellation_for_client(state, search_client_id);
-
-    search_directory(base_dir, &query, cancellation)
-        .await
-        .map_err(map_search_error)
-}
-
-fn search_cancellation_for_client(
-    state: &AppState,
-    search_client_id: Option<&str>,
-) -> SearchCancellation {
-    state
-        .next_search_generation_for_client(search_client_id)
-        .map(|(generation, current_generation)| {
-            SearchCancellation::new(generation, current_generation)
+    let cancellation = client_id
+        .map(|client_id| {
+            state
+                .begin_search_generation(client_id, client_sequence)
+                .map(|generation| {
+                    if generation.is_stale() {
+                        None
+                    } else {
+                        Some(SearchCancellation::new(generation))
+                    }
+                })
         })
-        .unwrap_or_else(SearchCancellation::never_cancelled)
+        .transpose()
+        .map_err(map_search_generation_limit_error)?
+        .flatten();
+
+    if query.is_empty() || cancellation.is_none() && client_id.is_some() {
+        return Ok(SearchResponse::empty(query));
+    }
+
+    let permit = state
+        .try_acquire_directory_search_permit()
+        .map_err(map_search_concurrency_limit_error)?;
+
+    search_directory(
+        base_dir,
+        &query,
+        cancellation.unwrap_or_else(SearchCancellation::none),
+        Some(permit),
+    )
+    .await
+    .map_err(map_search_error)
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
@@ -274,10 +290,19 @@ fn memo_message_file(target: &ResolvedTarget) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tokio::sync::broadcast;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, LazyLock,
+    };
+    use std::time::{Duration, Instant};
 
-    use crate::server::files::{MockMemoFs, Op, RouteTargetKind};
+    use super::*;
+    use tokio::sync::{broadcast, Mutex, MutexGuard};
+
+    use crate::server::files::{
+        set_catalog_progress_hook_for_test, set_search_progress_hook_for_test, MockMemoFs, Op,
+        RouteTargetKind,
+    };
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
     use crate::template::MemoState;
@@ -295,6 +320,501 @@ mod tests {
             None,
             tx,
         )
+    }
+
+    fn create_markdown_fixture(
+        name: &str,
+        content: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(name);
+        std::fs::write(&file_path, content).unwrap();
+        (dir, file_path)
+    }
+
+    static SEARCH_HOOK_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    async fn lock_search_hook_tests() -> MutexGuard<'static, ()> {
+        SEARCH_HOOK_TEST_LOCK.lock().await
+    }
+
+    async fn wait_for_blocked_search_count(
+        block_state: Arc<(std::sync::Mutex<(usize, bool)>, Condvar)>,
+        expected: usize,
+    ) {
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cvar) = &*block_state;
+            let mut blocked = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            while blocked.0 < expected {
+                let now = Instant::now();
+                assert!(
+                    now < deadline,
+                    "blocked search count did not reach {expected}; actual={}",
+                    blocked.0
+                );
+                let timeout = deadline.saturating_duration_since(now);
+                let (next_blocked, result) = cvar
+                    .wait_timeout(blocked, timeout)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                blocked = next_blocked;
+                assert!(
+                    !result.timed_out() || blocked.0 >= expected,
+                    "blocked search count did not reach {expected}; actual={}",
+                    blocked.0
+                );
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn wait_for_blocked_search(block_state: Arc<(std::sync::Mutex<(bool, bool)>, Condvar)>) {
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (lock, cvar) = &*block_state;
+            let mut blocked = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !blocked.0 {
+                let now = Instant::now();
+                assert!(now < deadline, "search progress hook was not reached");
+                let timeout = deadline.saturating_duration_since(now);
+                let (next_blocked, result) = cvar
+                    .wait_timeout(blocked, timeout)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                blocked = next_blocked;
+                assert!(
+                    !result.timed_out() || blocked.0,
+                    "search progress hook was not reached"
+                );
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 1);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードの空queryでも検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 1);
+        assert_eq!(response.query, "");
+        assert!(response.results.is_empty());
+        assert_eq!(response.searched_files, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_単一ファイルモードは検索世代を進めない() {
+        let (_dir, file_path) = create_markdown_fixture("note.md", "needle");
+        let state = create_single_file_state(&file_path);
+
+        let response = search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 0);
+        assert!(response.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_client_idなしでは検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string(), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 0);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_client_idなしでも全体同時実行上限到達時は429を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let _permits = (0..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|_| state.try_acquire_directory_search_permit().unwrap())
+            .collect::<Vec<_>>();
+
+        let error = search(&state, "needle".to_string(), None, None)
+            .await
+            .expect_err("client idなし検索も全体同時実行上限の対象にする");
+
+        assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.1["error"].as_str(), Some("検索が混み合っています"));
+    }
+
+    #[tokio::test]
+    async fn test_search_全体同時実行上限到達時もvalid_clientの検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let active = state.begin_search_generation("client-a", None).unwrap();
+        let _permits = (0..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|_| state.try_acquire_directory_search_permit().unwrap())
+            .collect::<Vec<_>>();
+
+        let error = search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .expect_err("同時実行上限到達時は旧世代をstale化してから拒否する");
+
+        assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.1["error"].as_str(), Some("検索が混み合っています"));
+        assert!(active.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_空queryは全体同時実行上限到達時もpermitなしで検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let active = state.begin_search_generation("client-a", Some(1)).unwrap();
+        let _permits = (0..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|_| state.try_acquire_directory_search_permit().unwrap())
+            .collect::<Vec<_>>();
+
+        let response = search(&state, "".to_string(), Some("client-a"), Some(2))
+            .await
+            .unwrap();
+
+        assert!(response.results.is_empty());
+        assert!(active.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_実行中searchが全体同時実行上限permitを保持する() {
+        let _lock = lock_search_hook_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("permit-hold-target.md"), "needle").unwrap();
+        let state = Arc::new(create_directory_state(dir.path()));
+        let block_state = Arc::new((std::sync::Mutex::new((0_usize, false)), Condvar::new()));
+        let _hook = set_search_progress_hook_for_test({
+            let block_state = Arc::clone(&block_state);
+            Arc::new(move |relative, searched_files| {
+                if relative != "permit-hold-target.md" || searched_files != 1 {
+                    return;
+                }
+
+                let (lock, cvar) = &*block_state;
+                let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.0 += 1;
+                cvar.notify_all();
+                while !state.1 {
+                    state = cvar
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            })
+        });
+
+        let handles = (0..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|index| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    search(
+                        &state,
+                        "needle".to_string(),
+                        Some(&format!("client-{index}")),
+                        None,
+                    )
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        wait_for_blocked_search_count(
+            Arc::clone(&block_state),
+            crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES,
+        )
+        .await;
+
+        let error = search(&state, "needle".to_string(), Some("overflow-client"), None)
+            .await
+            .expect_err("実行中のsearchがpermitを保持している間は追加検索を拒否する");
+
+        assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.1["error"].as_str(), Some("検索が混み合っています"));
+        assert_eq!(state.current_search_generation("overflow-client"), 1);
+
+        {
+            let (lock, cvar) = &*block_state;
+            let mut blocked = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            blocked.1 = true;
+            cvar.notify_all();
+        }
+
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_future中断後もblocking検索完了までpermitを保持する() {
+        let _lock = lock_search_hook_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("abort-permit-target.md"), "needle").unwrap();
+        let state = Arc::new(create_directory_state(dir.path()));
+        let block_state = Arc::new((std::sync::Mutex::new((false, false)), Condvar::new()));
+        let _hook = set_search_progress_hook_for_test({
+            let block_state = Arc::clone(&block_state);
+            Arc::new(move |relative, searched_files| {
+                if relative != "abort-permit-target.md" || searched_files != 1 {
+                    return;
+                }
+
+                let (lock, cvar) = &*block_state;
+                let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.0 = true;
+                cvar.notify_all();
+                while !state.1 {
+                    state = cvar
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            })
+        });
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                search(&state, "needle".to_string(), Some("client-a"), None).await
+            })
+        };
+
+        wait_for_blocked_search(Arc::clone(&block_state)).await;
+
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        let _permits = (1..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|_| state.try_acquire_directory_search_permit().unwrap())
+            .collect::<Vec<_>>();
+        let overflow = state.try_acquire_directory_search_permit();
+        assert!(overflow.is_err());
+
+        let (lock, cvar) = &*block_state;
+        let mut blocked = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        blocked.1 = true;
+        cvar.notify_all();
+    }
+
+    #[tokio::test]
+    async fn test_search_全体同時実行上限到達時の空queryで実行中の同一client検索をstale化する() {
+        let _lock = lock_search_hook_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty-cancel-target.md"), "needle").unwrap();
+        let state = Arc::new(create_directory_state(dir.path()));
+        let block_state = Arc::new((std::sync::Mutex::new((false, false)), Condvar::new()));
+        let _hook = set_search_progress_hook_for_test({
+            let block_state = Arc::clone(&block_state);
+            Arc::new(move |relative, searched_files| {
+                if relative != "empty-cancel-target.md" || searched_files != 1 {
+                    return;
+                }
+
+                let (lock, cvar) = &*block_state;
+                let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.0 = true;
+                cvar.notify_all();
+                while !state.1 {
+                    state = cvar
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            })
+        });
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                search(&state, "needle".to_string(), Some("client-a"), Some(1)).await
+            })
+        };
+
+        wait_for_blocked_search(Arc::clone(&block_state)).await;
+        let _permits = (1..crate::server::state::MAX_CONCURRENT_DIRECTORY_SEARCHES)
+            .map(|_| state.try_acquire_directory_search_permit().unwrap())
+            .collect::<Vec<_>>();
+
+        let cancel = search(&state, "".to_string(), Some("client-a"), Some(2))
+            .await
+            .unwrap();
+
+        assert!(cancel.results.is_empty());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+
+        {
+            let (lock, cvar) = &*block_state;
+            let mut blocked = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            blocked.1 = true;
+            cvar.notify_all();
+        }
+
+        let stale = handle.await.unwrap().unwrap();
+        assert!(stale.results.is_empty());
+        assert_eq!(stale.searched_files, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_全client_activeなら上限超過の新規clientを拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let active_handles = (0..crate::server::state::MAX_SEARCH_GENERATION_CLIENTS)
+            .map(|index| {
+                state
+                    .begin_search_generation(&format!("client-{index}"), None)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let error = search(&state, "needle".to_string(), Some("overflow-client"), None)
+            .await
+            .expect_err("全client activeの上限到達時は新規clientを拒否する");
+
+        assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.1["error"].as_str(), Some("検索が混み合っています"));
+        assert_eq!(state.current_search_generation("overflow-client"), 0);
+        assert!(!active_handles[0].is_stale());
+    }
+
+    #[tokio::test]
+    async fn test_search_同一clientの連続検索は同じ世代counterを進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+        search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_古いsequenceは検索世代を進めずstale応答にする() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let current = search(&state, "needle".to_string(), Some("client-a"), Some(2))
+            .await
+            .unwrap();
+        let stale = search(&state, "needle".to_string(), Some("client-a"), Some(1))
+            .await
+            .unwrap();
+
+        assert_eq!(current.results.len(), 1);
+        assert!(stale.results.is_empty());
+        assert_eq!(state.current_search_generation("client-a"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_別clientの検索世代は独立する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+        search(&state, "needle".to_string(), Some("client-b"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-a"), 1);
+        assert_eq!(state.current_search_generation("client-b"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_同一clientの後続検索で先行検索が早期終了する() {
+        let _lock = lock_search_hook_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("00-cancel-trigger.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("01-next.md"), "needle second").unwrap();
+        std::fs::write(dir.path().join("02-next.md"), "needle third").unwrap();
+        let state = Arc::new(create_directory_state(dir.path()));
+        let fired = Arc::new(AtomicBool::new(false));
+        let _hook = set_search_progress_hook_for_test({
+            let state = Arc::clone(&state);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |relative, searched_files| {
+                if relative == "00-cancel-trigger.md"
+                    && searched_files == 1
+                    && !fired.swap(true, Ordering::SeqCst)
+                {
+                    state.begin_search_generation("client-a", None).unwrap();
+                }
+            })
+        });
+
+        let response = search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert!(fired.load(Ordering::SeqCst));
+        assert_eq!(response.searched_files, 1);
+        assert!(response.results.is_empty());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_列挙中の後続検索で先行検索がファイル処理前に終了する() {
+        let _lock = lock_search_hook_tests().await;
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            std::fs::write(
+                dir.path().join(format!("note-{index:02}.md")),
+                "needle visible",
+            )
+            .unwrap();
+        }
+        let state = Arc::new(create_directory_state(dir.path()));
+        let fired = Arc::new(AtomicBool::new(false));
+        let base_dir = dir.path().to_path_buf();
+        let _hook = set_catalog_progress_hook_for_test({
+            let state = Arc::clone(&state);
+            let fired = Arc::clone(&fired);
+            Arc::new(move |display_path| {
+                if display_path.starts_with(&base_dir) && !fired.swap(true, Ordering::SeqCst) {
+                    state.begin_search_generation("client-a", None).unwrap();
+                }
+            })
+        });
+
+        let response = search(&state, "needle".to_string(), Some("client-a"), None)
+            .await
+            .unwrap();
+
+        assert!(fired.load(Ordering::SeqCst));
+        assert_eq!(response.searched_files, 0);
+        assert!(response.results.is_empty());
+        assert_eq!(state.current_search_generation("client-a"), 2);
     }
 
     #[test]
@@ -661,7 +1181,7 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
         let state = create_directory_state(dir.path());
 
-        let response = search(&state, " needle ".to_string(), Some("tab-a"))
+        let response = search(&state, " needle ".to_string(), Some("client-a"), None)
             .await
             .unwrap();
 
@@ -672,120 +1192,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_ディレクトリモードは検索世代を進める() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let response = search(&state, "needle".to_string(), Some("tab-a"))
-            .await
-            .unwrap();
-
-        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
-        assert_eq!(response.results.len(), 1);
-    }
-
-    #[test]
-    fn test_search_cancellation_for_client_同一clientの後続検索で旧検索をstale化する() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let first = search_cancellation_for_client(&state, Some("tab-a"));
-        let second = search_cancellation_for_client(&state, Some("tab-a"));
-
-        assert!(first.is_cancelled_for_test());
-        assert!(!second.is_cancelled_for_test());
-        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(2));
-    }
-
-    #[test]
-    fn test_search_cancellation_for_client_別clientの後続検索では旧検索をstale化しない() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let client_a = search_cancellation_for_client(&state, Some("tab-a"));
-        let client_b = search_cancellation_for_client(&state, Some("tab-b"));
-
-        assert!(!client_a.is_cancelled_for_test());
-        assert!(!client_b.is_cancelled_for_test());
-        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
-        assert_eq!(state.current_search_generation_for_client("tab-b"), Some(1));
-    }
-
-    #[test]
-    fn test_search_cancellation_for_client_無効clientは世代を作らない() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let missing = search_cancellation_for_client(&state, None);
-        let invalid = search_cancellation_for_client(&state, Some("tab.invalid"));
-
-        assert!(!missing.is_cancelled_for_test());
-        assert!(!invalid.is_cancelled_for_test());
-        assert_eq!(
-            state.current_search_generation_for_client("tab.invalid"),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn test_search_ディレクトリモードは長すぎるqueryでも既存検索をstale化する() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-        let (_, generation) = state
-            .next_search_generation_for_client(Some("tab-a"))
-            .expect("既存検索の世代を作る");
-        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
-
-        let error = search(&state, query, Some("tab-a"))
-            .await
-            .expect_err("長すぎる検索queryは拒否する");
-
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
-        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn test_search_ディレクトリモードは長すぎるqueryで新規client_idを作らない() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
-
-        let error = search(&state, query, Some("tab-new"))
-            .await
-            .expect_err("長すぎる検索queryは拒否する");
-
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
-        assert_eq!(state.current_search_generation_for_client("tab-new"), None);
-    }
-
-    #[tokio::test]
-    async fn test_search_ディレクトリモードはclient_id未指定なら検索世代を進めない() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let state = create_directory_state(dir.path());
-
-        let response = search(&state, "needle".to_string(), None).await.unwrap();
-
-        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
-        assert_eq!(response.results.len(), 1);
-    }
-
-    #[tokio::test]
     async fn test_search_単一ファイルモードでは空結果を返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");
         std::fs::write(&file_path, "# Note\n\nneedle").unwrap();
         let state = create_single_file_state(&file_path);
 
-        let response = search(&state, "needle".to_string(), Some("tab-a"))
+        let response = search(&state, "needle".to_string(), Some("client-a"), None)
             .await
             .unwrap();
 
@@ -802,21 +1215,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_単一ファイルモードは検索世代を進めない() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("README.md");
-        std::fs::write(&file_path, "needle").unwrap();
-        let state = create_single_file_state(&file_path);
-
-        let response = search(&state, "needle".to_string(), Some("tab-a"))
-            .await
-            .unwrap();
-
-        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
-        assert!(response.results.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_search_単一ファイルモードでも長すぎるqueryはbad_request() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");
@@ -824,7 +1222,7 @@ mod tests {
         let state = create_single_file_state(&file_path);
         let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search(&state, query, Some("tab-a"))
+        let error = search(&state, query, Some("client-a"), None)
             .await
             .expect_err("長すぎる検索queryは単一ファイルモードでも拒否する");
 

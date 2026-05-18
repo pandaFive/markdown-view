@@ -392,7 +392,11 @@ function createDocumentSearchController(ctx, deps) {
           clearTimeout(ctx.search.documentDebounceTimer);
           ctx.search.documentDebounceTimer = null;
         }
-        ctx.search.documentFetchGeneration += 1;
+        if (typeof deps.cancelDirectorySearch === 'function') {
+          deps.cancelDirectorySearch();
+        } else {
+          ctx.search.documentFetchGeneration += 1;
+        }
         ctx.search.currentDirectoryResults = [];
         ctx.search.currentDirectoryIndex = -1;
         ctx.search.currentDirectorySkippedFiles = 0;
@@ -425,7 +429,11 @@ function createDocumentSearchController(ctx, deps) {
       clearTimeout(ctx.search.documentDebounceTimer);
       ctx.search.documentDebounceTimer = null;
     }
-    ctx.search.documentFetchGeneration += 1;
+    if (ctx.config.isDirMode && typeof deps.cancelDirectorySearch === 'function') {
+      deps.cancelDirectorySearch();
+    } else {
+      ctx.search.documentFetchGeneration += 1;
+    }
     ctx.search.currentDocumentQuery = '';
     ctx.search.pendingDirectoryNavigation = null;
     ctx.search.currentDirectoryResults = [];

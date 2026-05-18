@@ -1,54 +1,17 @@
 'use strict';
 
-var DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY = 'markdown-view.directorySearchClientId';
-
-function isValidDirectorySearchClientId(clientId) {
-  return typeof clientId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(clientId);
-}
-
 function createDirectorySearchClientId() {
-  return 'tab-' + Date.now().toString(36) + '-' +
-    Math.random().toString(36).slice(2, 12);
-}
-
-function isReloadNavigation() {
-  var entries;
-
-  if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
-    return false;
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
   }
-
-  entries = window.performance.getEntriesByType('navigation');
-  return entries.length > 0 && entries[0].type === 'reload';
-}
-
-function getDirectorySearchClientId() {
-  var storage;
-  var storedClientId;
-  var generatedClientId;
-
-  try {
-    storage = window.sessionStorage;
-    storedClientId = storage && isReloadNavigation()
-      ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY)
-      : null;
-    if (isValidDirectorySearchClientId(storedClientId)) {
-      return storedClientId;
-    }
-  } catch (_storageReadError) {
-    storage = null;
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.prototype.map.call(bytes, function(byte) {
+      return byte.toString(16).padStart(2, '0');
+    }).join('');
   }
-
-  generatedClientId = createDirectorySearchClientId();
-  if (storage) {
-    try {
-      storage.setItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY, generatedClientId);
-    } catch (_storageWriteError) {
-      // sessionStorage が使えない環境では今回生成したIDだけを使う。
-    }
-  }
-
-  return generatedClientId;
+  return String(Date.now()) + '-' + String(Math.random()).slice(2);
 }
 
 function createAppContext(doc) {
@@ -118,9 +81,10 @@ function createAppContext(doc) {
       currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
-      directorySearchClientId: getDirectorySearchClientId(),
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
+      directorySearchClientId: createDirectorySearchClientId(),
+      directorySearchSequence: 0,
       pendingDirectoryNavigation: null
     },
     sidebar: {

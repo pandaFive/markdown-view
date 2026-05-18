@@ -96,6 +96,34 @@ function createDirectorySearchController(ctx, deps) {
     }, 300);
   }
 
+  function nextDirectorySearchSequence() {
+    ctx.search.directorySearchSequence += 1;
+    return ctx.search.directorySearchSequence;
+  }
+
+  function directorySearchHeaders(sequence) {
+    return {
+      'Accept': 'application/json',
+      'X-Markdown-View-Search-Client': ctx.search.directorySearchClientId,
+      'X-Markdown-View-Search-Sequence': String(sequence)
+    };
+  }
+
+  function cancelDirectorySearch() {
+    if (ctx.search.documentDebounceTimer) {
+      clearTimeout(ctx.search.documentDebounceTimer);
+      ctx.search.documentDebounceTimer = null;
+    }
+    ctx.search.documentFetchGeneration += 1;
+    var sequence = nextDirectorySearchSequence();
+
+    fetch('/api/search?q=', {
+      headers: directorySearchHeaders(sequence)
+    }).catch(function(err) {
+      console.debug('[markdown-view] ディレクトリ検索キャンセル通知に失敗しました:', err);
+    });
+  }
+
   function getPreferredDirectorySearchSelection() {
     if (ctx.search.pendingDirectoryNavigation) {
       return {
@@ -209,6 +237,7 @@ function createDirectorySearchController(ctx, deps) {
 
   function runDirectorySearch(query) {
     var generation = ++ctx.search.documentFetchGeneration;
+    var sequence = nextDirectorySearchSequence();
     var preferredSelection = getPreferredDirectorySearchSelection();
     ctx.search.currentDirectoryLoading = true;
     ctx.search.currentDirectoryError = '';
@@ -220,10 +249,7 @@ function createDirectorySearchController(ctx, deps) {
     renderDirectorySearchUi();
 
     fetch('/api/search?q=' + encodeURIComponent(query), {
-      headers: {
-        'Accept': 'application/json',
-        'X-Markdown-View-Search-Client': ctx.search.directorySearchClientId
-      }
+      headers: directorySearchHeaders(sequence)
     })
     .then(function(resp) {
       if (!resp.ok) return throwDirectorySearchHttpError(resp);
@@ -302,6 +328,7 @@ function createDirectorySearchController(ctx, deps) {
 
   return {
     applyPendingDirectorySearchNavigation: applyPendingDirectorySearchNavigation,
+    cancelDirectorySearch: cancelDirectorySearch,
     openDirectorySearchResult: openDirectorySearchResult,
     renderDirectorySearchResults: renderDirectorySearchResults,
     renderDirectorySearchUi: renderDirectorySearchUi,
