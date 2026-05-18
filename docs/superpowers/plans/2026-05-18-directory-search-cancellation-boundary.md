@@ -4,7 +4,7 @@
 
 **Goal:** Add cooperative server-side cancellation boundaries for stale directory searches without changing the search API response shape or UI display behavior. Cancellation is scoped to a validated browser search client ID so separate tabs/clients do not cancel one another.
 
-**Architecture:** Store process-local search generation counters in `AppState` as `Mutex<HashMap<String, Arc<AtomicU64>>>`, issue a new generation only for valid client IDs, and pass a `SearchCancellation` handle into the blocking search core. Missing, invalid, or over-capacity client IDs use a no-cancellation fallback. The blocking core checks cancellation only at safe processing boundaries and returns the partial `SearchResponse` instead of surfacing a user-facing error.
+**Architecture:** Store process-local search generation counters in `AppState` as a bounded client registry, issue a new generation only for valid client IDs, and pass a `SearchCancellation` handle into the blocking search core. Missing or invalid client IDs use a no-cancellation fallback; over-capacity valid IDs evict the least recently used entry and are accepted. The blocking core checks cancellation only at safe processing boundaries and returns the partial `SearchResponse` instead of surfacing a user-facing error.
 
 **Tech Stack:** Rust, axum service layer, Tokio `spawn_blocking`, `Mutex<HashMap<_, Arc<AtomicU64>>>`, browser fetch headers, existing Rust unit tests and E2E tests.
 
@@ -37,12 +37,12 @@ Apply these changes instead of the process-wide counter steps:
 
 - `AppState::next_search_generation_for_client(client_id: Option<&str>) -> Option<(u64, Arc<AtomicU64>)>`.
 - Valid client IDs are 1-64 bytes and limited to ASCII letters, digits, `-`, and `_`.
-- Store at most 64 client IDs. If a new valid ID would exceed the cap, return `None`.
-- Treat `None` from the API as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
-- Browser UI generates one tab-local ID in `ctx.search.directorySearchClientId` and sends it with `X-Markdown-View-Search-Client`.
+- Store at most 64 client IDs. If a new valid ID would exceed the cap, evict the least recently used entry and accept the new ID.
+- Treat missing or invalid client IDs as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
+- Browser UI stores one tab-local ID in `sessionStorage` as `ctx.search.directorySearchClientId` and sends it with `X-Markdown-View-Search-Client`.
 - Keep `SearchResponse` JSON shape and truncation semantics unchanged.
 - Do not log client ID, query, path, or body as part of this flow.
-- Add tests for same-client cancellation generation, different-client isolation, invalid/missing/over-capacity fallback, and mid-search cancellation before later files.
+- Add tests for same-client cancellation generation, different-client isolation, invalid/missing fallback, LRU eviction on over-capacity valid IDs, and mid-search cancellation before later files.
 
 ## Task 1: Add Search Generation State
 

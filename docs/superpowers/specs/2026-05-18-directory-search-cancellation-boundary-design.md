@@ -12,7 +12,8 @@
 
 - ディレクトリモードの検索リクエストごとに、検証済み検索クライアント ID 単位でサーバ側の検索世代を発行する。
 - 同じクライアント ID で新しい検索が始まったら、それ以前の同一クライアント検索が安全な区切りで早期終了できるようにする。
-- クライアント ID 未指定、不正 ID、ID 上限超過の検索は no-cancellation fallback で完走させ、他クライアントをキャンセルしない。
+- クライアント ID 未指定または不正 ID の検索は no-cancellation fallback で完走させ、他クライアントをキャンセルしない。
+- client ID map は上限 64 件に抑え、上限到達時は最も古く使われた entry を退避して新しい有効 ID を受け入れる。
 - キャンセルをユーザー向けエラーにしない。
 - `SearchResponse` の JSON 形状、検索 UI、既存の打ち切り契約を維持する。
 - path validation、Host/Origin 検証、CSP、HTML sanitize 境界を変更しない。
@@ -33,8 +34,8 @@
 `AppState` は次の小さな API を持つ。
 
 - `next_search_generation_for_client(client_id: Option<&str>)` は有効 ID の検索世代を 1 つ進め、発行された世代と handle を返す。
-- ID が無い、空、長すぎる、許可文字外、または新規 ID が上限 64 件を超える場合は `None` を返す。
-- 既存 ID は上限到達後も再利用できる。
+- ID が無い、空、長すぎる、または許可文字外の場合は `None` を返す。
+- 既存 ID は上限到達後も再利用できる。新規 ID が上限 64 件を超える場合は、最も古く使われた ID を退避して新規 ID を受け入れる。
 
 有効な client ID は 1-64 bytes、ASCII 英数字、`-`、`_` のみとする。これはキャンセル境界の識別子であり、認証・認可・暗号用途には使わない。
 
@@ -91,7 +92,8 @@ Rust 側の単体テストを中心にする。
 
 - `SearchCancellation` が現在世代の進行を検知することを確認する。
 - `AppState` が同一 client ID の世代だけを進め、別 client ID の世代を進めないことを確認する。
-- client ID 未指定、不正 ID、上限超過の新規 ID が cancellation handle を返さないことを確認する。
+- client ID 未指定と不正 ID が cancellation handle を返さないことを確認する。
+- 上限到達時に最も古い ID が退避され、新規の有効 ID が cancellation handle を受け取れることを確認する。
 - キャンセル済み `SearchCancellation` を同期検索コアへ渡した場合、ファイル処理へ進まず空結果を返すことを確認する。
 - 1 ファイル処理後にキャンセルされた場合、それ以上のファイルへ進まないことを小さい limit またはテスト用 hook で固定する。
 - `service::search()` でディレクトリ検索時に有効 client ID の世代が進み、client ID 未指定と単一ファイルモードでは世代が進まないことを確認する。
@@ -102,7 +104,8 @@ UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/ap
 ## 受け入れ基準
 
 - 同一クライアントで新しいディレクトリ検索が開始されると、それ以前の同一クライアント検索は協調的キャンセル判定で早期終了できる。
-- 別クライアント、client ID 未指定、不正 ID、上限超過 ID の検索は互いにキャンセルしない。
+- 別クライアント、client ID 未指定、不正 ID の検索は互いにキャンセルしない。
+- client ID map が上限に達しても、新規の有効 ID は最古 entry の退避によりキャンセル境界を利用できる。
 - キャンセルはユーザー向けエラーにならない。
 - `SearchResponse` の JSON 形状は変わらない。
 - 単一ファイルモードの `/api/search` は空結果を返し、検索世代を進めない。
@@ -142,7 +145,7 @@ UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/ap
 - 極端に大きい単一ファイルの処理時間は既存のファイルサイズ上限で抑えるが、キャンセル応答性は処理境界単位に留まる。
 - blocking thread pool の占有を完全には解消しない。検索インデックス、専用 worker、allocation 削減は後続候補として残る。
 - 古い検索の部分結果はサーバから返り得るが、現行 UI の generation check により同一タブの画面へ反映されない前提を維持する。
-- client ID map は上限 64 件で増加を止める。上限後の新規 client は no-cancellation になるため、長時間稼働時の古い ID cleanup は後続候補として残る。
+- client ID map は上限 64 件で増加を止める。上限到達時は最も古く使われた entry を退避するため、退避された client の実行中検索は古い handle を持ち続け、その後の同一 client ID の検索ではキャンセルされない可能性がある。UI 側の generation check により画面反映は防ぐ。
 
 ## 見積もり
 
