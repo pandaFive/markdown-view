@@ -11,6 +11,17 @@ function createDirectorySearchClientId() {
     Math.random().toString(36).slice(2, 12);
 }
 
+function isReloadNavigation() {
+  var entries;
+
+  if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
+    return false;
+  }
+
+  entries = window.performance.getEntriesByType('navigation');
+  return entries.length > 0 && entries[0].type === 'reload';
+}
+
 function getDirectorySearchClientId() {
   var storage;
   var storedClientId;
@@ -18,7 +29,9 @@ function getDirectorySearchClientId() {
 
   try {
     storage = window.sessionStorage;
-    storedClientId = storage ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY) : null;
+    storedClientId = storage && isReloadNavigation()
+      ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY)
+      : null;
     if (isValidDirectorySearchClientId(storedClientId)) {
       return storedClientId;
     }

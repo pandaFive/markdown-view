@@ -281,7 +281,9 @@ impl SearchGenerationRegistry {
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(client_id, _)| client_id.clone())
         {
-            self.entries.remove(&oldest_client_id);
+            if let Some(entry) = self.entries.remove(&oldest_client_id) {
+                entry.generation.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -617,6 +619,31 @@ mod tests {
         assert_eq!(overflow_generation, 1);
         assert_eq!(state.current_search_generation_for_client("tab-0"), Some(2));
         assert_eq!(state.current_search_generation_for_client("tab-1"), None);
+    }
+
+    #[test]
+    fn test_app_state_search_generationは退避するidの実行中検索をstale化する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let (_, evicted_handle) = state
+            .next_search_generation_for_client(Some("tab-0"))
+            .expect("最初のclient idはキャンセル世代を返す");
+        for index in 1..64 {
+            let client_id = format!("tab-{index}");
+            assert!(state
+                .next_search_generation_for_client(Some(&client_id))
+                .is_some());
+        }
+
+        state
+            .next_search_generation_for_client(Some("tab-overflow"))
+            .expect("上限到達時も新規idを受け入れる");
+
+        assert_eq!(evicted_handle.load(Ordering::Relaxed), 2);
+        assert_eq!(state.current_search_generation_for_client("tab-0"), None);
     }
 
     #[test]

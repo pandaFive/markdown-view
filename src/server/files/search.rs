@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::catalog::list_markdown_files_from_canonical_base;
+use super::catalog::list_markdown_files_from_canonical_base_with_cancellation;
 use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
@@ -284,8 +284,11 @@ fn search_directory_with_limits_and_cancellation_blocking(
         ));
     }
 
-    let files =
-        list_markdown_files_from_canonical_base(base_dir, limits.max_files.saturating_add(1))?;
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        base_dir,
+        limits.max_files.saturating_add(1),
+        &|| cancellation.is_cancelled(),
+    )?;
     let base_path = base_dir.as_path();
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
@@ -337,7 +340,13 @@ fn search_directory_with_limits_and_cancellation_blocking(
         stats.searched_files += 1;
         stats.searched_bytes += markdown.len();
         let blocks = extract_search_blocks(&markdown);
-        let file_results = find_matches_for_file(&relative, &blocks, &query);
+        let file_results = find_matches_for_file(
+            &relative,
+            &blocks,
+            &query,
+            limits.max_results.saturating_sub(results.len()),
+            &cancellation,
+        );
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -634,12 +643,22 @@ fn find_matches_for_file(
     file: &str,
     blocks: &[SearchBlockEntry],
     query: &str,
+    max_results: usize,
+    cancellation: &SearchCancellation,
 ) -> Vec<SearchResultItem> {
     let mut results = Vec::new();
+    if max_results == 0 {
+        return results;
+    }
+
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
     for (block_index, block) in blocks.iter().enumerate() {
+        if cancellation.is_cancelled() || results.len() >= max_results {
+            break;
+        }
+
         if block.text.is_empty() {
             continue;
         }
@@ -648,6 +667,10 @@ fn find_matches_for_file(
         let mut search_start = 0usize;
 
         while search_start <= normalized.normalized_text.len() {
+            if cancellation.is_cancelled() || results.len() >= max_results {
+                break;
+            }
+
             let Some(relative_index) =
                 normalized.normalized_text[search_start..].find(&normalized_query)
             else {
@@ -1016,7 +1039,13 @@ mod tests {
             },
         ];
 
-        let results = find_matches_for_file("README.md", &blocks, "alpha note");
+        let results = find_matches_for_file(
+            "README.md",
+            &blocks,
+            "alpha note",
+            usize::MAX,
+            &never_cancelled(),
+        );
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
@@ -1031,11 +1060,31 @@ mod tests {
             sentences: split_text_into_sentence_ranges(text),
         }];
 
-        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul");
+        let results = find_matches_for_file(
+            "README.md",
+            &blocks,
+            "i̇stanbul",
+            usize::MAX,
+            &never_cancelled(),
+        );
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[0].current, "İstanbul is here.");
+    }
+
+    #[test]
+    fn test_find_matches_for_file_上限到達後は追加一致を作らない() {
+        let blocks = vec![SearchBlockEntry {
+            text: "needle one. needle two. needle three.".to_string(),
+            sentences: split_text_into_sentence_ranges("needle one. needle two. needle three."),
+        }];
+
+        let results = find_matches_for_file("README.md", &blocks, "needle", 2, &never_cancelled());
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].file_match_index, 0);
+        assert_eq!(results[1].file_match_index, 1);
     }
 
     fn canonical_of(path: &Path) -> CanonicalPath {
@@ -1120,7 +1169,7 @@ mod tests {
         let canonical = canonical_of(dir.path());
         let generation = Arc::new(AtomicU64::new(1));
         let cancellation =
-            SearchCancellation::new_cancel_on_check_for_test(1, Arc::clone(&generation), 4);
+            SearchCancellation::new_cancel_on_check_for_test(1, Arc::clone(&generation), 9);
 
         let response = search_directory_with_limits_and_cancellation_blocking(
             &canonical,

@@ -39,16 +39,18 @@
 
 有効な client ID は 1-64 bytes、ASCII 英数字、`-`、`_` のみとする。これはキャンセル境界の識別子であり、認証・認可・暗号用途には使わない。
 
-`service::search()` は、query 正規化後にディレクトリモードだけ世代を発行する。有効な検索クライアント ID がない場合は `SearchCancellation::never_cancelled()` を使う。単一ファイルモードは従来通り `SearchResponse::empty(query)` を返し、検索世代を進めない。
+`service::search()` は、ディレクトリモードだけ世代を発行する。長すぎる query でも、同じクライアントの既存検索を stale 化してから 400 JSON を返す。単一ファイルモードは従来通り query 正規化後に `SearchResponse::empty(query)` を返し、検索世代を進めない。有効な検索クライアント ID がない場合は `SearchCancellation::never_cancelled()` を使う。
 
 `search.rs` には `SearchCancellation` を追加する。`SearchCancellation` は、開始時の世代と現在世代を読み取る handle を保持し、`is_cancelled()` で「現在世代が開始世代より新しいか」を判定する。
 
 `search_directory()` は `SearchCancellation` を受け取り、`spawn_blocking` 内の同期検索コアへ渡す。同期検索コアは次の境界でキャンセルを確認する。
 
-1. ファイル列挙後、結果処理へ進む前。
-2. 各ファイルの解決・読込・検索処理へ入る前。
-3. 各ファイルの検索結果を反映した後。
-4. 結果数、ファイル数、byte 数の既存上限判定後。
+1. ファイル列挙の再帰境界と entry loop。
+2. ファイル列挙後、結果処理へ進む前。
+3. 各ファイルの解決・読込・検索処理へ入る前。
+4. 1 ファイル内の一致走査中、結果上限またはキャンセルに到達した時点。
+5. 各ファイルの検索結果を反映した後。
+6. 結果数、ファイル数、byte 数の既存上限判定後。
 
 キャンセル時は `std::io::Error` を返さず、その時点までに作った `SearchResponse` を返す。古いレスポンスはブラウザ側の既存 generation check で破棄されるため、JSON へキャンセル情報を追加しない。
 
@@ -56,13 +58,13 @@
 
 `/api/search?q=...` は `routes.rs` で raw query byte 長と percent encoding を検証する。この入口契約は変更しない。`X-Markdown-View-Search-Client` ヘッダーがあれば service へ渡し、検証は `AppState` 側で行う。
 
-`service::search()` は `normalize_search_query()` で文字数上限と trim を確認する。ディレクトリモードでなければ空結果を返す。
+`service::search()` はディレクトリモードかどうかを先に判定する。単一ファイルモードでは `normalize_search_query()` で文字数上限と trim を確認して空結果を返す。
 
-ディレクトリモードでは `AppState::next_search_generation_for_client()` で世代を進め、`SearchCancellation` を作って `search_directory(base_dir, &query, cancellation).await` を呼ぶ。世代 handle が返らない場合は no-cancellation handle を渡す。
+ディレクトリモードでは `AppState::next_search_generation_for_client()` で世代を進め、`SearchCancellation` を作る。その後に `normalize_search_query()` で文字数上限と trim を確認し、正常 query なら `search_directory(base_dir, &query, cancellation).await` を呼ぶ。世代 handle が返らない場合は no-cancellation handle を渡す。
 
-ブラウザ UI は `bootstrap.js` でタブ内の安定 ID を生成し、`directory-search.js` の `/api/search` fetch で `X-Markdown-View-Search-Client` ヘッダーとして送る。レスポンス JSON shape は変更しない。
+ブラウザ UI は `bootstrap.js` でページ単位の安定 ID を生成し、reload 時だけ同じ `sessionStorage` 値を再利用する。複製タブ相当の通常 navigation では新しい ID を発行し、`directory-search.js` の `/api/search` fetch で `X-Markdown-View-Search-Client` ヘッダーとして送る。レスポンス JSON shape は変更しない。
 
-blocking task 内では、既存の `list_markdown_files_from_canonical_base()`、`resolve_file()`、`read_markdown_with_limit_blocking()`、`extract_search_blocks()`、`find_matches_for_file()` の流れを保つ。キャンセル確認は処理境界にだけ挿入し、読込直前検証や検索予算の意味を変えない。
+blocking task 内では、検索専用のキャンセル対応ファイル列挙、`resolve_file()`、`read_markdown_with_limit_blocking()`、`extract_search_blocks()`、`find_matches_for_file()` の流れを保つ。キャンセル確認は処理境界にだけ挿入し、読込直前検証や検索予算の意味を変えない。
 
 ## エラー処理
 
@@ -84,7 +86,7 @@ blocking task 内では、既存の `list_markdown_files_from_canonical_base()`�
 
 Host middleware、WebSocket Origin 検証、CSP、HTML sanitize 境界、`innerHTML` sink 制限は変更しない。
 
-キャンセル関連の状態はプロセス内の `AtomicU64` に閉じ、HTTP response へ公開しない。外部入力の client ID は長さと許可文字を検証し、不正値は no-cancellation fallback にする。ログへ client ID、query、path、body を不用意に出さない。
+キャンセル関連の状態はプロセス内の `AtomicU64` に閉じ、HTTP response へ公開しない。外部入力の client ID は長さと許可文字を検証し、不正値は no-cancellation fallback にする。この flow では client ID、query、body を新たにログへ出さない。既存のファイル単位 warn log は、制御文字 escape 済みの相対パスを出す場合がある。
 
 ## テスト方針
 
@@ -96,10 +98,12 @@ Rust 側の単体テストを中心にする。
 - 上限到達時に最も古い ID が退避され、新規の有効 ID が cancellation handle を受け取れることを確認する。
 - キャンセル済み `SearchCancellation` を同期検索コアへ渡した場合、ファイル処理へ進まず空結果を返すことを確認する。
 - 1 ファイル処理後にキャンセルされた場合、それ以上のファイルへ進まないことを小さい limit またはテスト用 hook で固定する。
+- ファイル列挙中のキャンセルと、1 ファイル内で結果上限に達した後に追加一致を作らないことを確認する。
 - `service::search()` でディレクトリ検索時に有効 client ID の世代が進み、client ID 未指定と単一ファイルモードでは世代が進まないことを確認する。
+- ディレクトリモードでは長すぎる query でも同一 client ID の既存検索が stale 化されることを確認する。
 - 既存の通常検索、結果数上限、ファイル数上限、総読込 byte 上限、query 上限、単一ファイル空結果のテストを維持する。
 
-UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/api/search` にタブ内クライアント ID ヘッダーが送られ、同じページ内で安定することを確認する。
+UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/api/search` にクライアント ID ヘッダーが送られ、reload 時は同じ ID を再利用し、複製タブ相当では新しい ID を発行することを確認する。
 
 ## 受け入れ基準
 
@@ -145,7 +149,7 @@ UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/ap
 - 極端に大きい単一ファイルの処理時間は既存のファイルサイズ上限で抑えるが、キャンセル応答性は処理境界単位に留まる。
 - blocking thread pool の占有を完全には解消しない。検索インデックス、専用 worker、allocation 削減は後続候補として残る。
 - 古い検索の部分結果はサーバから返り得るが、現行 UI の generation check により同一タブの画面へ反映されない前提を維持する。
-- client ID map は上限 64 件で増加を止める。上限到達時は最も古く使われた entry を退避するため、退避された client の実行中検索は古い handle を持ち続け、その後の同一 client ID の検索ではキャンセルされない可能性がある。UI 側の generation check により画面反映は防ぐ。
+- client ID map は上限 64 件で増加を止める。上限到達時は最も古く使われた entry を退避し、その entry の世代も進めて実行中検索を stale 化する。同じ client ID が後で戻った場合は新しい entry として扱われる。
 
 ## 見積もり
 

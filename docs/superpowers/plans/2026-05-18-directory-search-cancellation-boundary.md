@@ -33,16 +33,19 @@
 
 The initial plan below used one process-wide generation counter. Final-review feedback found that this lets one tab/client cancel another tab/client and can produce stale server responses that the receiving UI cannot reject with its own generation check.
 
+The detailed task snippets below are retained as execution history. Where they mention process-wide `current_search_generation`, `next_search_generation`, or `search_generation()` APIs, they are superseded by this client-scoped delta and the current implementation.
+
 Apply these changes instead of the process-wide counter steps:
 
 - `AppState::next_search_generation_for_client(client_id: Option<&str>) -> Option<(u64, Arc<AtomicU64>)>`.
 - Valid client IDs are 1-64 bytes and limited to ASCII letters, digits, `-`, and `_`.
 - Store at most 64 client IDs. If a new valid ID would exceed the cap, evict the least recently used entry and accept the new ID.
 - Treat missing or invalid client IDs as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
-- Browser UI stores one tab-local ID in `sessionStorage` as `ctx.search.directorySearchClientId` and sends it with `X-Markdown-View-Search-Client`.
+- Browser UI stores a reload-stable page ID in `sessionStorage` as `ctx.search.directorySearchClientId`, regenerates it for duplicated-tab-style normal navigation, and sends it with `X-Markdown-View-Search-Client`.
 - Keep `SearchResponse` JSON shape and truncation semantics unchanged.
-- Do not log client ID, query, path, or body as part of this flow.
+- Do not log client ID, query, or body as part of this flow. Existing file-level warn logs may still include sanitized relative paths.
 - Add tests for same-client cancellation generation, different-client isolation, invalid/missing fallback, LRU eviction on over-capacity valid IDs, and mid-search cancellation before later files.
+- Add follow-up tests for long-query stale marking, duplicated-tab ID regeneration, LRU-evicted in-flight stale marking, catalog traversal cancellation, and per-file result construction stopping at the remaining result budget.
 
 ## Task 1: Add Search Generation State
 
@@ -640,4 +643,4 @@ Mention these residual risks in the final report:
 
 - Cooperative cancellation does not interrupt a file read or Markdown parse already in progress.
 - Allocation reduction for `SearchResultItem` remains in `BACKLOG.md`.
-- No E2E was added because the UI contract is unchanged; existing search E2E remains the UI regression coverage.
+- E2E coverage now includes duplicated-tab-style client ID regeneration in addition to existing same-page/reload header behavior.

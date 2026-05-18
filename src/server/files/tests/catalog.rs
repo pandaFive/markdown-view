@@ -3,13 +3,14 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::support::{create_test_dir, make_dir_unsearchable};
 use crate::server::files::catalog::{
     canonicalize_dir_for_cycle, ensure_current_dir_still_canonical,
-    list_markdown_files_from_canonical_base, MAX_DIR_DEPTH, MAX_FILE_LIST,
+    list_markdown_files_from_canonical_base,
+    list_markdown_files_from_canonical_base_with_cancellation, MAX_DIR_DEPTH, MAX_FILE_LIST,
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
@@ -38,6 +39,23 @@ fn test_list_markdown_files_from_canonical_base_基本動作() {
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert_eq!(files, vec!["a.md".to_string(), "b.md".to_string()]);
+}
+
+#[test]
+fn test_list_markdown_files_from_canonical_base_キャンセル済みなら列挙しない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "# a").unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| cancelled.load(Ordering::Relaxed),
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
 }
 
 #[test]
