@@ -3,7 +3,8 @@ use axum::http::StatusCode;
 use super::files::{
     list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
     normalize_search_query, resolve_route_target, run_blocking_file_task, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchCancellation, SearchResponse,
+    MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -211,7 +212,10 @@ pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResp
         return Ok(SearchResponse::empty(query));
     };
 
-    search_directory(base_dir, &query)
+    let generation = state.next_search_generation();
+    let cancellation = SearchCancellation::new(generation, state.search_generation());
+
+    search_directory(base_dir, &query, cancellation)
         .await
         .map_err(map_search_error)
 }
@@ -643,6 +647,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_ディレクトリモードは検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string()).await.unwrap();
+
+        assert_eq!(state.current_search_generation(), 1);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_search_単一ファイルモードでは空結果を返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");
@@ -661,6 +677,19 @@ mod tests {
         assert_eq!(response.limits.max_files, 1000);
         assert_eq!(response.limits.max_bytes, 64 * 1024 * 1024);
         assert_eq!(response.searched_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_単一ファイルモードは検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("README.md");
+        std::fs::write(&file_path, "needle").unwrap();
+        let state = create_single_file_state(&file_path);
+
+        let response = search(&state, "needle".to_string()).await.unwrap();
+
+        assert_eq!(state.current_search_generation(), 0);
+        assert!(response.results.is_empty());
     }
 
     #[tokio::test]

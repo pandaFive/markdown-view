@@ -242,7 +242,6 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
-    #[allow(dead_code)]
     search_generation: Arc<AtomicU64>,
 }
 
@@ -300,7 +299,6 @@ impl AppState {
         &self.memo_fs
     }
 
-    #[allow(dead_code)]
     pub(crate) fn next_search_generation(&self) -> u64 {
         self.search_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -310,7 +308,6 @@ impl AppState {
         self.search_generation.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn search_generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.search_generation)
     }

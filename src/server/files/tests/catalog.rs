@@ -3,6 +3,8 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use super::support::{create_test_dir, make_dir_unsearchable};
 use crate::server::files::catalog::{
@@ -11,6 +13,10 @@ use crate::server::files::catalog::{
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
+
+fn never_cancelled() -> SearchCancellation {
+    SearchCancellation::new(0, Arc::new(AtomicU64::new(0)))
+}
 
 #[test]
 fn test_list_markdown_files_基本動作() {
@@ -165,7 +171,9 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "target").await.unwrap();
+    let response = search_directory(&canonical, "target", never_cancelled())
+        .await
+        .unwrap();
 
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);
@@ -187,7 +195,9 @@ async fn test_search_directory_生成物ディレクトリ配下を検索しな�
     std::fs::write(dir.path().join("target/debug/build.md"), "needle generated").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "needle").await.unwrap();
+    let response = search_directory(&canonical, "needle", never_cancelled())
+        .await
+        .unwrap();
 
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].file, "docs/guide.md");

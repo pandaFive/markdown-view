@@ -49,6 +49,7 @@ impl SearchCancellation {
         }
     }
 
+    #[cfg(test)]
     fn never_cancelled() -> Self {
         Self::new(0, Arc::new(AtomicU64::new(0)))
     }
@@ -197,15 +198,14 @@ fn search_query_too_long_error() -> std::io::Error {
 pub(in crate::server) async fn search_directory(
     base_dir: &CanonicalPath,
     raw_query: &str,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
     let query = normalize_search_query(raw_query)?;
     let base_dir = base_dir.clone();
 
-    tokio::task::spawn_blocking(move || {
-        search_directory_blocking(&base_dir, &query, SearchCancellation::never_cancelled())
-    })
-    .await
-    .map_err(map_search_join_error)?
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query, cancellation))
+        .await
+        .map_err(map_search_join_error)?
 }
 
 fn search_directory_blocking(
@@ -1013,6 +1013,10 @@ mod tests {
         CanonicalPath::try_from_path(path).unwrap()
     }
 
+    fn never_cancelled() -> SearchCancellation {
+        SearchCancellation::new(0, Arc::new(AtomicU64::new(0)))
+    }
+
     #[test]
     fn test_search_cancellationは新しい世代を検知する() {
         let generation = Arc::new(AtomicU64::new(1));
@@ -1086,7 +1090,9 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert!(!response.truncated);
@@ -1115,7 +1121,9 @@ mod tests {
         .unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert!(!response.truncated);
         assert!(response.truncated_reasons.is_empty());
@@ -1135,7 +1143,9 @@ mod tests {
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert!(response.truncated);
         assert_eq!(
@@ -1265,7 +1275,9 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
         let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search_directory(&canonical, &query).await.unwrap_err();
+        let error = search_directory(&canonical, &query, never_cancelled())
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
