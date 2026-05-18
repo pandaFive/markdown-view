@@ -1,8 +1,41 @@
 'use strict';
 
+var DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY = 'markdown-view.directorySearchClientId';
+
+function isValidDirectorySearchClientId(clientId) {
+  return typeof clientId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(clientId);
+}
+
 function createDirectorySearchClientId() {
   return 'tab-' + Date.now().toString(36) + '-' +
     Math.random().toString(36).slice(2, 12);
+}
+
+function getDirectorySearchClientId() {
+  var storage;
+  var storedClientId;
+  var generatedClientId;
+
+  try {
+    storage = window.sessionStorage;
+    storedClientId = storage ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY) : null;
+    if (isValidDirectorySearchClientId(storedClientId)) {
+      return storedClientId;
+    }
+  } catch (_storageReadError) {
+    storage = null;
+  }
+
+  generatedClientId = createDirectorySearchClientId();
+  if (storage) {
+    try {
+      storage.setItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY, generatedClientId);
+    } catch (_storageWriteError) {
+      // sessionStorage が使えない環境では今回生成したIDだけを使う。
+    }
+  }
+
+  return generatedClientId;
 }
 
 function createAppContext(doc) {
@@ -72,7 +105,7 @@ function createAppContext(doc) {
       currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
-      directorySearchClientId: createDirectorySearchClientId(),
+      directorySearchClientId: getDirectorySearchClientId(),
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
       pendingDirectoryNavigation: null

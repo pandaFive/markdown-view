@@ -246,7 +246,44 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
-    search_generations: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    search_generations: Mutex<SearchGenerationRegistry>,
+}
+
+#[derive(Debug)]
+struct SearchGenerationRegistry {
+    entries: HashMap<String, SearchGenerationEntry>,
+    access_counter: u64,
+}
+
+#[derive(Debug)]
+struct SearchGenerationEntry {
+    generation: Arc<AtomicU64>,
+    last_used: u64,
+}
+
+impl SearchGenerationRegistry {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            access_counter: 0,
+        }
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_counter = self.access_counter.saturating_add(1);
+        self.access_counter
+    }
+
+    fn evict_oldest_entry(&mut self) {
+        if let Some(oldest_client_id) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(client_id, _)| client_id.clone())
+        {
+            self.entries.remove(&oldest_client_id);
+        }
+    }
 }
 
 impl AppState {
@@ -274,7 +311,7 @@ impl AppState {
             dark_mode,
             tx,
             memo_fs,
-            search_generations: Mutex::new(HashMap::new()),
+            search_generations: Mutex::new(SearchGenerationRegistry::new()),
         }
     }
 
@@ -313,17 +350,25 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        if let Some(generation) = generations.get(client_id) {
-            let next = generation.fetch_add(1, Ordering::Relaxed) + 1;
-            return Some((next, Arc::clone(generation)));
+        let access = generations.next_access();
+        if let Some(entry) = generations.entries.get_mut(client_id) {
+            entry.last_used = access;
+            let next = entry.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            return Some((next, Arc::clone(&entry.generation)));
         }
 
-        if generations.len() >= MAX_SEARCH_CANCELLATION_CLIENTS {
-            return None;
+        if generations.entries.len() >= MAX_SEARCH_CANCELLATION_CLIENTS {
+            generations.evict_oldest_entry();
         }
 
         let generation = Arc::new(AtomicU64::new(1));
-        generations.insert(client_id.to_string(), Arc::clone(&generation));
+        generations.entries.insert(
+            client_id.to_string(),
+            SearchGenerationEntry {
+                generation: Arc::clone(&generation),
+                last_used: access,
+            },
+        );
         Some((1, generation))
     }
 
@@ -334,8 +379,9 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         generations
+            .entries
             .get(client_id)
-            .map(|generation| generation.load(Ordering::Relaxed))
+            .map(|entry| entry.generation.load(Ordering::Relaxed))
     }
 }
 
@@ -520,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_state_search_generationはclient_id上限超過の新規idを拒否する() {
+    fn test_app_state_search_generationは上限到達時に最古idを退避して新規idを受け入れる() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let mode = AppMode::new_single_file(&file_path).unwrap();
         let (tx, _rx) = broadcast::channel(16);
@@ -533,12 +579,44 @@ mod tests {
                 .is_some());
         }
 
-        assert!(state
+        let (overflow_generation, _) = state
             .next_search_generation_for_client(Some("tab-overflow"))
-            .is_none());
-        assert!(state
+            .expect("65個目のvalid client idも最古entry退避で受け入れる");
+
+        assert_eq!(overflow_generation, 1);
+        assert_eq!(
+            state.current_search_generation_for_client("tab-overflow"),
+            Some(1)
+        );
+        assert_eq!(state.current_search_generation_for_client("tab-0"), None);
+    }
+
+    #[test]
+    fn test_app_state_search_generationは再利用したidを上限退避から保護する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        for index in 0..64 {
+            let client_id = format!("tab-{index}");
+            assert!(state
+                .next_search_generation_for_client(Some(&client_id))
+                .is_some());
+        }
+
+        let (reused_generation, reused_handle) = state
             .next_search_generation_for_client(Some("tab-0"))
-            .is_some());
+            .expect("既存client idの再利用は同じ世代handleを進める");
+        let (overflow_generation, _) = state
+            .next_search_generation_for_client(Some("tab-overflow"))
+            .expect("上限到達時は最古未使用entryを退避して新規idを受け入れる");
+
+        assert_eq!(reused_generation, 2);
+        assert_eq!(reused_handle.load(Ordering::Relaxed), 2);
+        assert_eq!(overflow_generation, 1);
+        assert_eq!(state.current_search_generation_for_client("tab-0"), Some(2));
+        assert_eq!(state.current_search_generation_for_client("tab-1"), None);
     }
 
     #[test]
