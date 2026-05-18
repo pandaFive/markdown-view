@@ -212,7 +212,9 @@ pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResp
         return Ok(SearchResponse::empty(query));
     };
 
-    search_directory(base_dir, &query, SearchCancellation::none())
+    let cancellation = SearchCancellation::new(state.begin_search_generation());
+
+    search_directory(base_dir, &query, cancellation)
         .await
         .map_err(map_search_error)
 }
@@ -269,6 +271,39 @@ mod tests {
             None,
             tx,
         )
+    }
+
+    fn create_markdown_fixture(
+        name: &str,
+        content: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(name);
+        std::fs::write(&file_path, content).unwrap();
+        (dir, file_path)
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string()).await.unwrap();
+
+        assert_eq!(state.current_search_generation(), 1);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_単一ファイルモードは検索世代を進めない() {
+        let (_dir, file_path) = create_markdown_fixture("note.md", "needle");
+        let state = create_single_file_state(&file_path);
+
+        let response = search(&state, "needle".to_string()).await.unwrap();
+
+        assert_eq!(state.current_search_generation(), 0);
+        assert!(response.results.is_empty());
     }
 
     #[test]

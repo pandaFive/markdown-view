@@ -80,7 +80,6 @@ pub(in crate::server) struct SearchCancellation {
 }
 
 impl SearchCancellation {
-    #[allow(dead_code)]
     pub(in crate::server) fn new(generation: SearchGeneration) -> Self {
         Self {
             generation: Some(generation),
@@ -89,6 +88,7 @@ impl SearchCancellation {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::server) fn none() -> Self {
         Self {
             generation: None,

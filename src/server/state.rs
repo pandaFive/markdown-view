@@ -237,14 +237,12 @@ fn relative_path_to_display_string(relative: &Path) -> String {
 }
 
 /// ディレクトリ検索の開始世代と現在世代を比較するためのhandle。
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct SearchGeneration {
     started_at: u64,
     current: Arc<AtomicU64>,
 }
 
-#[allow(dead_code)]
 impl SearchGeneration {
     pub(crate) fn new(started_at: u64, current: Arc<AtomicU64>) -> Self {
         Self {
@@ -253,6 +251,7 @@ impl SearchGeneration {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn started_at(&self) -> u64 {
         self.started_at
     }
@@ -270,7 +269,6 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
-    #[allow(dead_code)]
     search_generation: Arc<AtomicU64>,
 }
 
@@ -329,7 +327,6 @@ impl AppState {
     }
 
     /// ディレクトリ検索用の新しい世代を発行する。
-    #[allow(dead_code)]
     pub(crate) fn begin_search_generation(&self) -> SearchGeneration {
         let generation = self
             .search_generation
@@ -339,7 +336,7 @@ impl AppState {
     }
 
     /// 現在のディレクトリ検索世代を返す。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn current_search_generation(&self) -> u64 {
         self.search_generation.load(Ordering::Acquire)
     }
