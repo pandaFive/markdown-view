@@ -12,6 +12,53 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+/// 監査ログ用 base path。base の canonicalize 結果を再利用する。
+#[derive(Debug, Clone)]
+pub(crate) struct LogBasePath {
+    base: PathBuf,
+    canonical_base: Option<PathBuf>,
+}
+
+impl LogBasePath {
+    pub(crate) fn new(base: &Path) -> Self {
+        Self {
+            base: base.to_path_buf(),
+            canonical_base: base.canonicalize().ok(),
+        }
+    }
+
+    /// 監査ログ用にパスを base 相対化する。
+    pub(crate) fn sanitize<'a>(&self, path: &'a Path) -> Cow<'a, str> {
+        match self.canonicalize_status(path) {
+            CanonicalizeStatus::Relative(relative) if relative.as_os_str().is_empty() => {
+                Cow::Borrowed(".")
+            }
+            CanonicalizeStatus::Relative(relative) => Cow::Owned(relative.display().to_string()),
+            CanonicalizeStatus::OutsideBase => sanitize_outside_path_for_logging(path),
+            CanonicalizeStatus::Unavailable => sanitize_path_for_logging_lexical(path, &self.base),
+        }
+    }
+
+    /// 監査ログ用 path を相対化し、制御文字を可視化する。
+    pub(crate) fn sanitize_escaped(&self, path: &Path) -> String {
+        self.sanitize(path).as_ref().escape_debug().to_string()
+    }
+
+    fn canonicalize_status(&self, path: &Path) -> CanonicalizeStatus {
+        let Some(canonical_base) = &self.canonical_base else {
+            return CanonicalizeStatus::Unavailable;
+        };
+        let canonical_path = match path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return CanonicalizeStatus::Unavailable,
+        };
+        match canonical_path.strip_prefix(canonical_base) {
+            Ok(relative) => CanonicalizeStatus::Relative(relative.to_path_buf()),
+            Err(_) => CanonicalizeStatus::OutsideBase,
+        }
+    }
+}
+
 /// 監査ログ用にパスを base 相対化する。
 ///
 /// - `path` が `base` 配下: 相対パス文字列（例: `"subdir/file.md"`）
@@ -22,26 +69,12 @@ use std::path::{Component, Path, PathBuf};
 /// 存在するパスでは canonicalize 後の実パスで base 配下判定を優先し、
 /// symlink 経由で base 外へ出るパスの誤判定を防ぐ。
 pub(crate) fn sanitize_path_for_logging<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
-    match canonical_path_status(path, base) {
-        Some(relative) if relative.as_os_str().is_empty() => Cow::Borrowed("."),
-        Some(relative) => Cow::Owned(relative.display().to_string()),
-        None if matches!(
-            canonicalize_status(path, base),
-            CanonicalizeStatus::OutsideBase
-        ) =>
-        {
-            sanitize_outside_path_for_logging(path)
-        }
-        None => sanitize_path_for_logging_lexical(path, base),
-    }
+    LogBasePath::new(base).sanitize(path)
 }
 
 /// 監査ログ用 path を相対化し、制御文字を可視化する。
 pub(crate) fn sanitize_path_for_logging_escaped(path: &Path, base: &Path) -> String {
-    sanitize_path_for_logging(path, base)
-        .as_ref()
-        .escape_debug()
-        .to_string()
+    LogBasePath::new(base).sanitize_escaped(path)
 }
 
 /// 監査ログ用 path を字句的に相対化し、制御文字を可視化する。
@@ -56,28 +89,6 @@ enum CanonicalizeStatus {
     Relative(PathBuf),
     OutsideBase,
     Unavailable,
-}
-
-fn canonical_path_status(path: &Path, base: &Path) -> Option<PathBuf> {
-    match canonicalize_status(path, base) {
-        CanonicalizeStatus::Relative(relative) => Some(relative),
-        CanonicalizeStatus::OutsideBase | CanonicalizeStatus::Unavailable => None,
-    }
-}
-
-fn canonicalize_status(path: &Path, base: &Path) -> CanonicalizeStatus {
-    let canonical_path = match path.canonicalize() {
-        Ok(path) => path,
-        Err(_) => return CanonicalizeStatus::Unavailable,
-    };
-    let canonical_base = match base.canonicalize() {
-        Ok(base) => base,
-        Err(_) => return CanonicalizeStatus::Unavailable,
-    };
-    match canonical_path.strip_prefix(&canonical_base) {
-        Ok(relative) => CanonicalizeStatus::Relative(relative.to_path_buf()),
-        Err(_) => CanonicalizeStatus::OutsideBase,
-    }
 }
 
 fn sanitize_path_for_logging_lexical<'a>(path: &'a Path, base: &Path) -> Cow<'a, str> {
@@ -238,6 +249,80 @@ mod tests {
         let base = PathBuf::from("/base");
         let path = PathBuf::from("/base");
         assert_eq!(sanitize_path_for_logging(&path, &base), ".");
+    }
+
+    #[test]
+    fn test_log_base_path_cached_baseでもbase配下を相対パスにする() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        std::fs::create_dir_all(base.join("subdir")).unwrap();
+        std::fs::write(base.join("subdir/file.md"), "# doc").unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let path = base.join("subdir/file.md");
+        let sanitized = log_base.sanitize(&path);
+
+        assert_eq!(sanitized, "subdir/file.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_log_base_path_cached_baseでもsymlink経由のbase外はoutside扱い() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(outside.join("private")).unwrap();
+        std::fs::write(outside.join("private/doc.md"), "# doc").unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let path = base.join("link/private/doc.md");
+        let sanitized = log_base.sanitize(&path);
+
+        assert_eq!(sanitized, "<outside-base>/doc.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_log_base_path_cached_baseでもsymlink経由のbase配下は相対化する() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("doc.md"), "# doc").unwrap();
+        symlink(&nested, base.join("link")).unwrap();
+        let log_base = LogBasePath::new(&base);
+
+        let path = base.join("link/doc.md");
+        let sanitized = log_base.sanitize(&path);
+
+        assert_eq!(sanitized, "nested/doc.md");
+    }
+
+    #[test]
+    fn test_log_base_path_base正規化失敗時はlexical_fallbackで継続する() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("missing-base");
+        let path = base.join("docs/../file.md");
+        let log_base = LogBasePath::new(&base);
+
+        let sanitized = log_base.sanitize(&path);
+
+        assert_eq!(sanitized, "file.md");
+    }
+
+    #[test]
+    fn test_log_base_path_escapedは制御文字を可視化する() {
+        let base = PathBuf::from("/base");
+        let log_base = LogBasePath::new(&base);
+        let path = base.join("line\n\x1b.md");
+
+        let sanitized = log_base.sanitize_escaped(&path);
+
+        assert_eq!(sanitized, "line\\n\\u{1b}.md");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\x1b'));
     }
 
     #[cfg(unix)]
