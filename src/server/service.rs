@@ -216,6 +216,14 @@ pub(super) async fn search(
         return Ok(SearchResponse::empty(query));
     };
 
+    let query = match normalize_search_query(&query) {
+        Ok(query) => query,
+        Err(error) => {
+            state.advance_existing_search_generation_for_client(search_client_id);
+            return Err(map_search_error(error));
+        }
+    };
+
     let cancellation = state
         .next_search_generation_for_client(search_client_id)
         .map(|(generation, current_generation)| {
@@ -223,7 +231,6 @@ pub(super) async fn search(
         })
         .unwrap_or_else(SearchCancellation::never_cancelled);
 
-    let query = normalize_search_query(&query).map_err(map_search_error)?;
     search_directory(base_dir, &query, cancellation)
         .await
         .map_err(map_search_error)
@@ -688,6 +695,22 @@ mod tests {
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
         assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは長すぎるqueryで新規client_idを作らない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search(&state, query, Some("tab-new"))
+            .await
+            .expect_err("長すぎる検索queryは拒否する");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
+        assert_eq!(state.current_search_generation_for_client("tab-new"), None);
     }
 
     #[tokio::test]

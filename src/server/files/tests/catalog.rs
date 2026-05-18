@@ -59,6 +59,24 @@ fn test_list_markdown_files_from_canonical_base_キャンセル済みなら列�
 }
 
 #[test]
+fn test_list_markdown_files_from_canonical_base_走査途中キャンセルなら子ディレクトリへ進まない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/hidden-by-cancel.md"), "# hidden").unwrap();
+    let checks = AtomicU64::new(0);
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| checks.fetch_add(1, Ordering::Relaxed) >= 1,
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
+}
+
+#[test]
 #[cfg(unix)]
 fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレクトリは除外() {
     use std::os::unix::fs::symlink;

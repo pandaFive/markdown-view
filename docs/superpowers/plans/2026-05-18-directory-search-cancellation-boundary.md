@@ -41,11 +41,13 @@ Apply these changes instead of the process-wide counter steps:
 - Valid client IDs are 1-64 bytes and limited to ASCII letters, digits, `-`, and `_`.
 - Store at most 64 client IDs. If a new valid ID would exceed the cap, evict the least recently used entry and accept the new ID.
 - Treat missing or invalid client IDs as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
+- Long-query rejection advances only existing client generations and does not create new client entries.
+- LRU eviction removes the oldest entry but does not advance the evicted generation handle, because another client must not force partial results into the evicted client's UI.
 - Browser UI stores a reload-stable page ID in `sessionStorage` as `ctx.search.directorySearchClientId`, regenerates it for duplicated-tab-style normal navigation, and sends it with `X-Markdown-View-Search-Client`.
 - Keep `SearchResponse` JSON shape and truncation semantics unchanged.
 - Do not log client ID, query, or body as part of this flow. Existing file-level warn logs may still include sanitized relative paths.
 - Add tests for same-client cancellation generation, different-client isolation, invalid/missing fallback, LRU eviction on over-capacity valid IDs, and mid-search cancellation before later files.
-- Add follow-up tests for long-query stale marking, duplicated-tab ID regeneration, LRU-evicted in-flight stale marking, catalog traversal cancellation, and per-file result construction stopping at the remaining result budget.
+- Add follow-up tests for long-query stale marking without new entry creation, duplicated-tab ID regeneration, LRU-evicted in-flight search not being stale-marked, catalog traversal cancellation, and per-file result construction stopping at the remaining result budget.
 
 ## Task 1: Add Search Generation State
 
@@ -601,10 +603,10 @@ Run:
 
 ```bash
 git diff --stat HEAD
-git diff -- src/server/state.rs src/server/files/search.rs src/server/service.rs docs/todo/BACKLOG.md
+git diff -- src/server/state.rs src/server/files/search.rs src/server/files/catalog.rs src/server/files/tests/catalog.rs src/server/service.rs src/template/assets/js/bootstrap.js tests/e2e/document_search.spec.ts docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-18-directory-search-cancellation-boundary-design.md docs/superpowers/plans/2026-05-18-directory-search-cancellation-boundary.md
 ```
 
-Expected: the diff is limited to search generation state, cooperative search cancellation, service wiring, tests, and backlog wording.
+Expected: the diff is limited to search generation state, cooperative search cancellation, catalog cancellation boundaries, service wiring, browser client ID handling, tests, and documentation/backlog wording.
 
 - [ ] **Step 5: Commit Task 4**
 

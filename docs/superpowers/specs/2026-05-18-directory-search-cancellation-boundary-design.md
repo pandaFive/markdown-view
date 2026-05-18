@@ -2,7 +2,7 @@
 
 ## 背景
 
-`docs/todo/BACKLOG.md` の P2 には、ディレクトリ検索のキャンセル境界と allocation 削減の検討が残っている。
+当初の `docs/todo/BACKLOG.md` の P2 には、ディレクトリ検索のキャンセル境界と allocation 削減の検討が残っていた。キャンセル境界の実装後、現在の BACKLOG 残件は allocation 削減の計測ベース検討に限定される。
 
 現行のディレクトリ検索は、サーバ側で `spawn_blocking` に隔離され、結果数、検索対象ファイル数、総読込 byte 数、query 長の上限も明示されている。ブラウザ側は `documentFetchGeneration` により古い検索レスポンスを UI へ反映しない。一方で、古い検索リクエストの blocking task 自体は、上限到達または完走まで処理を続ける。
 
@@ -34,12 +34,13 @@
 `AppState` は次の小さな API を持つ。
 
 - `next_search_generation_for_client(client_id: Option<&str>)` は有効 ID の検索世代を 1 つ進め、発行された世代と handle を返す。
+- `advance_existing_search_generation_for_client(client_id: Option<&str>)` は既存の有効 ID だけ検索世代を 1 つ進め、未登録 ID では entry を作らない。
 - ID が無い、空、長すぎる、または許可文字外の場合は `None` を返す。
-- 既存 ID は上限到達後も再利用できる。新規 ID が上限 64 件を超える場合は、最も古く使われた ID を退避して新規 ID を受け入れる。
+- 既存 ID は上限到達後も再利用できる。新規 ID が上限 64 件を超える場合は、最も古く使われた ID を退避して新規 ID を受け入れる。退避した ID の実行中検索は、別 client の結果完全性を保つためキャンセルしない。
 
 有効な client ID は 1-64 bytes、ASCII 英数字、`-`、`_` のみとする。これはキャンセル境界の識別子であり、認証・認可・暗号用途には使わない。
 
-`service::search()` は、ディレクトリモードだけ世代を発行する。長すぎる query でも、同じクライアントの既存検索を stale 化してから 400 JSON を返す。単一ファイルモードは従来通り query 正規化後に `SearchResponse::empty(query)` を返し、検索世代を進めない。有効な検索クライアント ID がない場合は `SearchCancellation::never_cancelled()` を使う。
+`service::search()` は、ディレクトリモードだけ世代を発行する。長すぎる query でも、同じクライアントの既存検索を stale 化してから 400 JSON を返す。ただし未登録の client ID では新規 entry を作らない。単一ファイルモードは従来通り query 正規化後に `SearchResponse::empty(query)` を返し、検索世代を進めない。有効な検索クライアント ID がない場合は `SearchCancellation::never_cancelled()` を使う。
 
 `search.rs` には `SearchCancellation` を追加する。`SearchCancellation` は、開始時の世代と現在世代を読み取る handle を保持し、`is_cancelled()` で「現在世代が開始世代より新しいか」を判定する。
 
@@ -60,7 +61,7 @@
 
 `service::search()` はディレクトリモードかどうかを先に判定する。単一ファイルモードでは `normalize_search_query()` で文字数上限と trim を確認して空結果を返す。
 
-ディレクトリモードでは `AppState::next_search_generation_for_client()` で世代を進め、`SearchCancellation` を作る。その後に `normalize_search_query()` で文字数上限と trim を確認し、正常 query なら `search_directory(base_dir, &query, cancellation).await` を呼ぶ。世代 handle が返らない場合は no-cancellation handle を渡す。
+ディレクトリモードでは `normalize_search_query()` で文字数上限と trim を確認する。正規化に失敗した場合は `AppState::advance_existing_search_generation_for_client()` で既存 client のみ stale 化してから 400 JSON を返す。正常 query なら `AppState::next_search_generation_for_client()` で世代を進め、`SearchCancellation` を作って `search_directory(base_dir, &query, cancellation).await` を呼ぶ。世代 handle が返らない場合は no-cancellation handle を渡す。
 
 ブラウザ UI は `bootstrap.js` でページ単位の安定 ID を生成し、reload 時だけ同じ `sessionStorage` 値を再利用する。複製タブ相当の通常 navigation では新しい ID を発行し、`directory-search.js` の `/api/search` fetch で `X-Markdown-View-Search-Client` ヘッダーとして送る。レスポンス JSON shape は変更しない。
 
@@ -96,11 +97,12 @@ Rust 側の単体テストを中心にする。
 - `AppState` が同一 client ID の世代だけを進め、別 client ID の世代を進めないことを確認する。
 - client ID 未指定と不正 ID が cancellation handle を返さないことを確認する。
 - 上限到達時に最も古い ID が退避され、新規の有効 ID が cancellation handle を受け取れることを確認する。
+- 上限到達時に退避された ID の実行中検索 handle が進まないことを確認する。
 - キャンセル済み `SearchCancellation` を同期検索コアへ渡した場合、ファイル処理へ進まず空結果を返すことを確認する。
 - 1 ファイル処理後にキャンセルされた場合、それ以上のファイルへ進まないことを小さい limit またはテスト用 hook で固定する。
 - ファイル列挙中のキャンセルと、1 ファイル内で結果上限に達した後に追加一致を作らないことを確認する。
 - `service::search()` でディレクトリ検索時に有効 client ID の世代が進み、client ID 未指定と単一ファイルモードでは世代が進まないことを確認する。
-- ディレクトリモードでは長すぎる query でも同一 client ID の既存検索が stale 化されることを確認する。
+- ディレクトリモードでは長すぎる query でも同一 client ID の既存検索が stale 化され、未登録 client ID の entry は作らないことを確認する。
 - 既存の通常検索、結果数上限、ファイル数上限、総読込 byte 上限、query 上限、単一ファイル空結果のテストを維持する。
 
 UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/api/search` にクライアント ID ヘッダーが送られ、reload 時は同じ ID を再利用し、複製タブ相当では新しい ID を発行することを確認する。
@@ -149,7 +151,7 @@ UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/ap
 - 極端に大きい単一ファイルの処理時間は既存のファイルサイズ上限で抑えるが、キャンセル応答性は処理境界単位に留まる。
 - blocking thread pool の占有を完全には解消しない。検索インデックス、専用 worker、allocation 削減は後続候補として残る。
 - 古い検索の部分結果はサーバから返り得るが、現行 UI の generation check により同一タブの画面へ反映されない前提を維持する。
-- client ID map は上限 64 件で増加を止める。上限到達時は最も古く使われた entry を退避し、その entry の世代も進めて実行中検索を stale 化する。同じ client ID が後で戻った場合は新しい entry として扱われる。
+- client ID map は上限 64 件で増加を止める。上限到達時は最も古く使われた entry を退避するが、その entry の世代は進めない。退避済み ID の実行中検索は完走し得る。同じ client ID が後で戻った場合は新しい entry として扱われる。
 
 ## 見積もり
 

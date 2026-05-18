@@ -281,9 +281,7 @@ impl SearchGenerationRegistry {
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(client_id, _)| client_id.clone())
         {
-            if let Some(entry) = self.entries.remove(&oldest_client_id) {
-                entry.generation.fetch_add(1, Ordering::Relaxed);
-            }
+            self.entries.remove(&oldest_client_id);
         }
     }
 }
@@ -372,6 +370,30 @@ impl AppState {
             },
         );
         Some((1, generation))
+    }
+
+    pub(crate) fn advance_existing_search_generation_for_client(
+        &self,
+        client_id: Option<&str>,
+    ) -> Option<(u64, Arc<AtomicU64>)> {
+        let client_id = client_id.filter(|id| is_valid_search_client_id(id))?;
+        let mut generations = self
+            .search_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if !generations.entries.contains_key(client_id) {
+            return None;
+        }
+
+        let access = generations.next_access();
+        let entry = generations
+            .entries
+            .get_mut(client_id)
+            .expect("contains_keyで確認済みのclient idは存在する");
+        entry.last_used = access;
+        let next = entry.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        Some((next, Arc::clone(&entry.generation)))
     }
 
     #[cfg(test)]
@@ -622,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_state_search_generationは退避するidの実行中検索をstale化する() {
+    fn test_app_state_search_generationは退避するidの実行中検索をstale化しない() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let mode = AppMode::new_single_file(&file_path).unwrap();
         let (tx, _rx) = broadcast::channel(16);
@@ -642,8 +664,34 @@ mod tests {
             .next_search_generation_for_client(Some("tab-overflow"))
             .expect("上限到達時も新規idを受け入れる");
 
-        assert_eq!(evicted_handle.load(Ordering::Relaxed), 2);
+        assert_eq!(evicted_handle.load(Ordering::Relaxed), 1);
         assert_eq!(state.current_search_generation_for_client("tab-0"), None);
+    }
+
+    #[test]
+    fn test_app_state_search_generationは既存idだけをstale化できる() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        assert!(state
+            .advance_existing_search_generation_for_client(Some("tab-a"))
+            .is_none());
+
+        let (_, generation) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .expect("既存検索の世代を作る");
+        let (next, advanced_generation) = state
+            .advance_existing_search_generation_for_client(Some("tab-a"))
+            .expect("既存client idだけ世代を進める");
+
+        assert_eq!(next, 2);
+        assert!(Arc::ptr_eq(&generation, &advanced_generation));
+        assert_eq!(generation.load(Ordering::Relaxed), 2);
+        assert!(state
+            .advance_existing_search_generation_for_client(Some("tab-missing"))
+            .is_none());
     }
 
     #[test]
