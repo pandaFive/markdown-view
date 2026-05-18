@@ -246,6 +246,15 @@ fn search_directory_with_limits_and_cancellation_blocking(
         return Ok(SearchResponse::empty(query));
     }
 
+    if cancellation.is_cancelled() {
+        return Ok(SearchResponse::from_parts(
+            query,
+            Vec::new(),
+            limits,
+            SearchStats::new(),
+        ));
+    }
+
     let files =
         list_markdown_files_from_canonical_base(base_dir, limits.max_files.saturating_add(1))?;
     let base_path = base_dir.as_path();
@@ -1021,6 +1030,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
         let canonical = canonical_of(dir.path());
+        let generation = Arc::new(AtomicU64::new(2));
+        let cancellation = SearchCancellation::new(1, Arc::clone(&generation));
+
+        let response = search_directory_with_limits_and_cancellation_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(!response.truncated);
+        assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_cancellation_キャンセル済みなら存在しないディレクトリを列挙しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
         let generation = Arc::new(AtomicU64::new(2));
         let cancellation = SearchCancellation::new(1, Arc::clone(&generation));
 
