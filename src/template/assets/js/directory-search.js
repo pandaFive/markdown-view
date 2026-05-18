@@ -220,7 +220,10 @@ function createDirectorySearchController(ctx, deps) {
     renderDirectorySearchUi();
 
     fetch('/api/search?q=' + encodeURIComponent(query), {
-      headers: { 'Accept': 'application/json' }
+      headers: {
+        'Accept': 'application/json',
+        'X-Markdown-View-Search-Client': ctx.search.directorySearchClientId
+      }
     })
     .then(function(resp) {
       if (!resp.ok) return throwDirectorySearchHttpError(resp);

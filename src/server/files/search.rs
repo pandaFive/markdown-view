@@ -39,6 +39,8 @@ impl Default for SearchLimits {
 pub(in crate::server) struct SearchCancellation {
     generation: u64,
     current_generation: Arc<AtomicU64>,
+    #[cfg(test)]
+    cancel_on_check: Option<Arc<AtomicU64>>,
 }
 
 impl SearchCancellation {
@@ -46,15 +48,42 @@ impl SearchCancellation {
         Self {
             generation,
             current_generation,
+            #[cfg(test)]
+            cancel_on_check: None,
         }
     }
 
-    #[cfg(test)]
-    fn never_cancelled() -> Self {
+    pub(in crate::server) fn never_cancelled() -> Self {
         Self::new(0, Arc::new(AtomicU64::new(0)))
     }
 
+    #[cfg(test)]
+    fn new_cancel_on_check_for_test(
+        generation: u64,
+        current_generation: Arc<AtomicU64>,
+        check_count: u64,
+    ) -> Self {
+        Self {
+            generation,
+            current_generation,
+            cancel_on_check: Some(Arc::new(AtomicU64::new(check_count))),
+        }
+    }
+
     fn is_cancelled(&self) -> bool {
+        #[cfg(test)]
+        if let Some(cancel_on_check) = &self.cancel_on_check {
+            let previous = cancel_on_check
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .unwrap_or(0);
+            if previous == 1 {
+                self.current_generation
+                    .store(self.generation.saturating_add(1), Ordering::Relaxed);
+            }
+        }
+
         self.current_generation.load(Ordering::Relaxed) > self.generation
     }
 }
@@ -1081,6 +1110,33 @@ mod tests {
         assert_eq!(response.skipped_files, 0);
         assert!(!response.truncated);
         assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_cancellation_途中で世代が進んだら後続ファイルへ進まない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle in first").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle in second").unwrap();
+        let canonical = canonical_of(dir.path());
+        let generation = Arc::new(AtomicU64::new(1));
+        let cancellation =
+            SearchCancellation::new_cancel_on_check_for_test(1, Arc::clone(&generation), 4);
+
+        let response = search_directory_with_limits_and_cancellation_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
     }
 
     #[tokio::test]

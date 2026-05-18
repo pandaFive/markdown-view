@@ -528,6 +528,42 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('notes.md');
 });
 
+test('ディレクトリ検索APIへタブ内クライアントIDを送る', async ({ page }) => {
+  const clientIds: string[] = [];
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    clientIds.push(route.request().headers()['x-markdown-view-search-client'] || '');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0,
+        truncated: false,
+        truncated_reasons: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha beta</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => clientIds.length).toBe(1);
+  await setDocumentSearchQuery(page, 'beta');
+  await expect.poll(() => clientIds.length).toBe(2);
+
+  expect(clientIds[0]).toMatch(/^tab-[a-z0-9]+-[a-z0-9]+$/);
+  expect(clientIds[1]).toBe(clientIds[0]);
+});
+
 test('ディレクトリ検索の不正な成功応答は検索エラーとして表示する', async ({ page }) => {
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({

@@ -1,5 +1,10 @@
 'use strict';
 
+function createDirectorySearchClientId() {
+  return 'tab-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 12);
+}
+
 function createAppContext(doc) {
   var html = doc.documentElement;
   var memoEditor = doc.getElementById('memo-editor');
@@ -67,6 +72,7 @@ function createAppContext(doc) {
       currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
+      directorySearchClientId: createDirectorySearchClientId(),
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
       pendingDirectoryNavigation: null

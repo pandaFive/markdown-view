@@ -2,24 +2,47 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add cooperative server-side cancellation boundaries for stale directory searches without changing the search API response shape or UI behavior.
+**Goal:** Add cooperative server-side cancellation boundaries for stale directory searches without changing the search API response shape or UI display behavior. Cancellation is scoped to a validated browser search client ID so separate tabs/clients do not cancel one another.
 
-**Architecture:** Store a process-local search generation counter in `AppState`, issue a new generation for each directory-mode `/api/search`, and pass a `SearchCancellation` handle into the blocking search core. The blocking core checks cancellation only at safe processing boundaries and returns the partial `SearchResponse` instead of surfacing a user-facing error.
+**Architecture:** Store process-local search generation counters in `AppState` as `Mutex<HashMap<String, Arc<AtomicU64>>>`, issue a new generation only for valid client IDs, and pass a `SearchCancellation` handle into the blocking search core. Missing, invalid, or over-capacity client IDs use a no-cancellation fallback. The blocking core checks cancellation only at safe processing boundaries and returns the partial `SearchResponse` instead of surfacing a user-facing error.
 
-**Tech Stack:** Rust, axum service layer, Tokio `spawn_blocking`, `Arc<AtomicU64>`, existing Rust unit tests and integration tests.
+**Tech Stack:** Rust, axum service layer, Tokio `spawn_blocking`, `Mutex<HashMap<_, Arc<AtomicU64>>>`, browser fetch headers, existing Rust unit tests and E2E tests.
 
 ---
 
 ## File Structure
 
 - Modify `src/server/state.rs`
-  - Owns `AppState`; add the search generation counter and tests for generation issuance.
+  - Owns `AppState`; add client-scoped search generation counters, ID validation, bounded client storage, and tests for generation issuance.
 - Modify `src/server/files/search.rs`
   - Owns directory search internals; add `SearchCancellation`, pass it through the async wrapper and blocking core, and test cooperative cancellation.
 - Modify `src/server/service.rs`
-  - Owns API service orchestration; issue generations only for directory mode and pass cancellation into `search_directory`.
+  - Owns API service orchestration; issue generations only for directory mode with valid client IDs and pass cancellation into `search_directory`.
+- Modify `src/server/routes.rs`
+  - Extract `X-Markdown-View-Search-Client` from `/api/search` and pass it to service without logging it.
+- Modify `src/template/assets/js/bootstrap.js`
+  - Generate a stable per-page search client ID for the browser tab.
+- Modify `src/template/assets/js/directory-search.js`
+  - Send the search client ID as an `/api/search` request header.
+- Modify `tests/e2e/document_search.spec.ts`
+  - Confirm the header is present and stable across requests from the same page.
 - Modify `docs/todo/BACKLOG.md`
   - After implementation passes, mark the cancellation-boundary portion as addressed and leave allocation reduction as a remaining long-term candidate.
+
+## 2026-05-18 Review Follow-up Delta
+
+The initial plan below used one process-wide generation counter. Final-review feedback found that this lets one tab/client cancel another tab/client and can produce stale server responses that the receiving UI cannot reject with its own generation check.
+
+Apply these changes instead of the process-wide counter steps:
+
+- `AppState::next_search_generation_for_client(client_id: Option<&str>) -> Option<(u64, Arc<AtomicU64>)>`.
+- Valid client IDs are 1-64 bytes and limited to ASCII letters, digits, `-`, and `_`.
+- Store at most 64 client IDs. If a new valid ID would exceed the cap, return `None`.
+- Treat `None` from the API as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
+- Browser UI generates one tab-local ID in `ctx.search.directorySearchClientId` and sends it with `X-Markdown-View-Search-Client`.
+- Keep `SearchResponse` JSON shape and truncation semantics unchanged.
+- Do not log client ID, query, path, or body as part of this flow.
+- Add tests for same-client cancellation generation, different-client isolation, invalid/missing/over-capacity fallback, and mid-search cancellation before later files.
 
 ## Task 1: Add Search Generation State
 

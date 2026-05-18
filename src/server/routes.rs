@@ -22,6 +22,8 @@ use super::session::handle_socket;
 use super::state::AppState;
 use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams, UpdateMessage};
 
+const SEARCH_CLIENT_HEADER: &str = "X-Markdown-View-Search-Client";
+
 // メモ本文の保存上限は save_route_memo 側の MAX_FILE_SIZE で判定する。
 // ここは JSON envelope と string escape を含む HTTP body の上限。
 // 通常の Markdown 本文で多い backslash や quote の escape 膨張を想定する。
@@ -308,9 +310,13 @@ async fn api_files_handler(
 async fn api_search_handler(
     State(state): State<Arc<AppState>>,
     uri: Uri,
+    headers: HeaderMap,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let query = search_query_from_uri(&uri)?;
-    let response = service::search(&state, query.q.unwrap_or_default()).await?;
+    let search_client_id = headers
+        .get(SEARCH_CLIENT_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let response = service::search(&state, query.q.unwrap_or_default(), search_client_id).await?;
     Ok(Json(response))
 }
 

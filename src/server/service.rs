@@ -206,14 +206,22 @@ fn map_search_error(error: std::io::Error) -> ApiError {
 }
 
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
-pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
+pub(super) async fn search(
+    state: &AppState,
+    query: String,
+    search_client_id: Option<&str>,
+) -> Result<SearchResponse, ApiError> {
     let query = normalize_search_query(&query).map_err(map_search_error)?;
     let Some(base_dir) = state.mode().directory_canonical() else {
         return Ok(SearchResponse::empty(query));
     };
 
-    let generation = state.next_search_generation();
-    let cancellation = SearchCancellation::new(generation, state.search_generation());
+    let cancellation = state
+        .next_search_generation_for_client(search_client_id)
+        .map(|(generation, current_generation)| {
+            SearchCancellation::new(generation, current_generation)
+        })
+        .unwrap_or_else(SearchCancellation::never_cancelled);
 
     search_directory(base_dir, &query, cancellation)
         .await
@@ -638,7 +646,9 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
         let state = create_directory_state(dir.path());
 
-        let response = search(&state, " needle ".to_string()).await.unwrap();
+        let response = search(&state, " needle ".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert_eq!(response.searched_files, 2);
@@ -652,9 +662,23 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
         let state = create_directory_state(dir.path());
 
-        let response = search(&state, "needle".to_string()).await.unwrap();
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
-        assert_eq!(state.current_search_generation(), 1);
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードはclient_id未指定なら検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string(), None).await.unwrap();
+
+        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
         assert_eq!(response.results.len(), 1);
     }
 
@@ -665,7 +689,9 @@ mod tests {
         std::fs::write(&file_path, "# Note\n\nneedle").unwrap();
         let state = create_single_file_state(&file_path);
 
-        let response = search(&state, "needle".to_string()).await.unwrap();
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert_eq!(response.searched_files, 0);
@@ -686,9 +712,11 @@ mod tests {
         std::fs::write(&file_path, "needle").unwrap();
         let state = create_single_file_state(&file_path);
 
-        let response = search(&state, "needle".to_string()).await.unwrap();
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
-        assert_eq!(state.current_search_generation(), 0);
+        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
         assert!(response.results.is_empty());
     }
 
@@ -700,7 +728,7 @@ mod tests {
         let state = create_single_file_state(&file_path);
         let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search(&state, query)
+        let error = search(&state, query, Some("tab-a"))
             .await
             .expect_err("長すぎる検索queryは単一ファイルモードでも拒否する");
 

@@ -1,14 +1,18 @@
 //! サーバー状態とモード判定を管理する。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
 use super::files::{MemoFs, TokioMemoFs};
 use super::messages::BroadcastMessage;
 use crate::renderer::syntax_theme_css;
+
+const MAX_SEARCH_CANCELLATION_CLIENTS: usize = 64;
+const MAX_SEARCH_CLIENT_ID_LEN: usize = 64;
 
 /// canonicalize済みの絶対パス
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -242,7 +246,7 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
-    search_generation: Arc<AtomicU64>,
+    search_generations: Mutex<HashMap<String, Arc<AtomicU64>>>,
 }
 
 impl AppState {
@@ -270,7 +274,7 @@ impl AppState {
             dark_mode,
             tx,
             memo_fs,
-            search_generation: Arc::new(AtomicU64::new(0)),
+            search_generations: Mutex::new(HashMap::new()),
         }
     }
 
@@ -299,18 +303,48 @@ impl AppState {
         &self.memo_fs
     }
 
-    pub(crate) fn next_search_generation(&self) -> u64 {
-        self.search_generation.fetch_add(1, Ordering::Relaxed) + 1
+    pub(crate) fn next_search_generation_for_client(
+        &self,
+        client_id: Option<&str>,
+    ) -> Option<(u64, Arc<AtomicU64>)> {
+        let client_id = client_id.filter(|id| is_valid_search_client_id(id))?;
+        let mut generations = self
+            .search_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(generation) = generations.get(client_id) {
+            let next = generation.fetch_add(1, Ordering::Relaxed) + 1;
+            return Some((next, Arc::clone(generation)));
+        }
+
+        if generations.len() >= MAX_SEARCH_CANCELLATION_CLIENTS {
+            return None;
+        }
+
+        let generation = Arc::new(AtomicU64::new(1));
+        generations.insert(client_id.to_string(), Arc::clone(&generation));
+        Some((1, generation))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn current_search_generation(&self) -> u64 {
-        self.search_generation.load(Ordering::Relaxed)
+    #[cfg(test)]
+    pub(crate) fn current_search_generation_for_client(&self, client_id: &str) -> Option<u64> {
+        let generations = self
+            .search_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        generations
+            .get(client_id)
+            .map(|generation| generation.load(Ordering::Relaxed))
     }
+}
 
-    pub(crate) fn search_generation(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.search_generation)
-    }
+fn is_valid_search_client_id(client_id: &str) -> bool {
+    !client_id.is_empty()
+        && client_id.len() <= MAX_SEARCH_CLIENT_ID_LEN
+        && client_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 #[cfg(test)]
@@ -441,38 +475,70 @@ mod tests {
     }
 
     #[test]
-    fn test_app_state_search_generationは初期値0() {
+    fn test_app_state_search_generationはクライアントごとに分離する() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let mode = AppMode::new_single_file(&file_path).unwrap();
         let (tx, _rx) = broadcast::channel(16);
         let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
 
-        assert_eq!(state.current_search_generation(), 0);
+        let (client_a_first, client_a_generation) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .expect("有効なclient idはキャンセル世代を返す");
+        let (client_b_first, client_b_generation) = state
+            .next_search_generation_for_client(Some("tab-b"))
+            .expect("別client idもキャンセル世代を返す");
+        let (client_a_second, client_a_generation_after) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .expect("同じclient idは同じ世代handleを返す");
+
+        assert_eq!(client_a_first, 1);
+        assert_eq!(client_b_first, 1);
+        assert_eq!(client_a_second, 2);
+        assert!(Arc::ptr_eq(
+            &client_a_generation,
+            &client_a_generation_after
+        ));
+        assert_eq!(client_a_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(client_b_generation.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn test_app_state_next_search_generationは世代を進める() {
+    fn test_app_state_search_generationは無効client_idでキャンセルhandleを返さない() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let mode = AppMode::new_single_file(&file_path).unwrap();
         let (tx, _rx) = broadcast::channel(16);
         let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
 
-        assert_eq!(state.next_search_generation(), 1);
-        assert_eq!(state.next_search_generation(), 2);
-        assert_eq!(state.current_search_generation(), 2);
+        assert!(state.next_search_generation_for_client(None).is_none());
+        assert!(state.next_search_generation_for_client(Some("")).is_none());
+        assert!(state
+            .next_search_generation_for_client(Some("tab a"))
+            .is_none());
+        assert!(state
+            .next_search_generation_for_client(Some(&"a".repeat(65)))
+            .is_none());
     }
 
     #[test]
-    fn test_app_state_search_generation_handleは同じ世代を共有する() {
+    fn test_app_state_search_generationはclient_id上限超過の新規idを拒否する() {
         let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
         let mode = AppMode::new_single_file(&file_path).unwrap();
         let (tx, _rx) = broadcast::channel(16);
         let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
-        let generation = state.search_generation();
 
-        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 0);
-        assert_eq!(state.next_search_generation(), 1);
-        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 1);
+        for index in 0..64 {
+            let client_id = format!("tab-{index}");
+            assert!(state
+                .next_search_generation_for_client(Some(&client_id))
+                .is_some());
+        }
+
+        assert!(state
+            .next_search_generation_for_client(Some("tab-overflow"))
+            .is_none());
+        assert!(state
+            .next_search_generation_for_client(Some("tab-0"))
+            .is_some());
     }
 
     #[test]

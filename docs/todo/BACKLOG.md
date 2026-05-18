@@ -13,7 +13,7 @@
 
 - [ ] ディレクトリ検索の allocation 削減を計測ベースで検討する
   - ファイル: `src/server/files/search.rs`, `src/template/assets/js/directory-search.js`
-  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。連続検索時の古いレスポンスはクライアント検索世代で破棄され、サーバ側の古い検索処理も検索世代による協調的キャンセル境界で早期終了できる。一方、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
+  - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数の打ち切りも明示されている。連続検索時の古いレスポンスはブラウザ側の検索世代で破棄され、サーバ側の古い検索処理も検証済みクライアント ID 単位の協調的キャンセル境界で早期終了できる。一方、`SearchResultItem` の `before/current/after` はマッチごとに `String` を確保する
   - 対応: `Cow<str>` 化や検索ブロック処理の allocation 削減を、計測結果に基づいて検討する
   - 判断: 検索負荷制御とキャンセル境界は実装済みで、残件は効率化なので BACKLOG P2 に残す
   - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界 (2026-05-18)
