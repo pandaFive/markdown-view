@@ -1,16 +1,20 @@
 //! サーバー状態とモード判定を管理する。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, MutexGuard,
 };
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 
 use super::files::{MemoFs, TokioMemoFs};
 use super::messages::BroadcastMessage;
 use crate::renderer::syntax_theme_css;
+
+pub(crate) const MAX_SEARCH_GENERATION_CLIENTS: usize = 128;
+pub(crate) const MAX_CONCURRENT_DIRECTORY_SEARCHES: usize = 4;
 
 /// canonicalize済みの絶対パス
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -241,13 +245,32 @@ fn relative_path_to_display_string(relative: &Path) -> String {
 pub(crate) struct SearchGeneration {
     started_at: u64,
     current: Arc<AtomicU64>,
+    force_stale: bool,
 }
+
+/// 検索client世代storeがactive entryだけで上限に到達している。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchGenerationLimitError;
+
+/// ディレクトリ検索の同時実行数が上限に到達している。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchConcurrencyLimitError;
 
 impl SearchGeneration {
     pub(crate) fn new(started_at: u64, current: Arc<AtomicU64>) -> Self {
         Self {
             started_at,
             current,
+            force_stale: false,
+        }
+    }
+
+    fn stale(current: Arc<AtomicU64>) -> Self {
+        let started_at = current.load(Ordering::Acquire);
+        Self {
+            started_at,
+            current,
+            force_stale: true,
         }
     }
 
@@ -257,7 +280,52 @@ impl SearchGeneration {
     }
 
     pub(crate) fn is_stale(&self) -> bool {
-        self.current.load(Ordering::Acquire) != self.started_at
+        self.force_stale || self.current.load(Ordering::Acquire) != self.started_at
+    }
+}
+
+#[derive(Debug)]
+struct SearchGenerationEntry {
+    current: Arc<AtomicU64>,
+    last_used: u64,
+    latest_sequence: Option<u64>,
+}
+
+#[derive(Debug)]
+struct SearchGenerationStore {
+    entries: HashMap<String, SearchGenerationEntry>,
+    next_access_order: u64,
+}
+
+impl SearchGenerationStore {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_access_order: 0,
+        }
+    }
+
+    fn next_order(&mut self) -> u64 {
+        self.next_access_order = self.next_access_order.wrapping_add(1);
+        self.next_access_order
+    }
+
+    fn evict_for_new_client(&mut self) -> bool {
+        let idle_key = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.current) == 1)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(client_id, _)| client_id.clone());
+        if let Some(client_id) = idle_key {
+            self.entries.remove(&client_id);
+            return true;
+        }
+
+        tracing::warn!(
+            "[markdown-view] 検索client世代の上限到達により新規clientの世代発行を拒否します"
+        );
+        false
     }
 }
 
@@ -269,7 +337,8 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
-    search_generation: Arc<AtomicU64>,
+    search_generations: Arc<Mutex<SearchGenerationStore>>,
+    directory_search_permits: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -297,7 +366,8 @@ impl AppState {
             dark_mode,
             tx,
             memo_fs,
-            search_generation: Arc::new(AtomicU64::new(0)),
+            search_generations: Arc::new(Mutex::new(SearchGenerationStore::new())),
+            directory_search_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DIRECTORY_SEARCHES)),
         }
     }
 
@@ -326,25 +396,77 @@ impl AppState {
         &self.memo_fs
     }
 
-    /// ディレクトリ検索用の新しい世代を発行する。
-    pub(crate) fn begin_search_generation(&self) -> SearchGeneration {
-        let generation = self
-            .search_generation
-            .fetch_add(1, Ordering::AcqRel)
-            .wrapping_add(1);
-        SearchGeneration::new(generation, Arc::clone(&self.search_generation))
+    fn lock_search_generations(&self) -> MutexGuard<'_, SearchGenerationStore> {
+        self.search_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// 現在のディレクトリ検索世代を返す。
+    /// ディレクトリ検索の同時実行数を制限するpermitを取得する。
+    pub(crate) fn try_acquire_directory_search_permit(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, SearchConcurrencyLimitError> {
+        Arc::clone(&self.directory_search_permits)
+            .try_acquire_owned()
+            .map_err(|_| SearchConcurrencyLimitError)
+    }
+
+    /// 指定クライアントのディレクトリ検索用に新しい世代を発行する。
+    pub(crate) fn begin_search_generation(
+        &self,
+        client_id: &str,
+        sequence: Option<u64>,
+    ) -> Result<SearchGeneration, SearchGenerationLimitError> {
+        let mut store = self.lock_search_generations();
+        if !store.entries.contains_key(client_id)
+            && store.entries.len() >= MAX_SEARCH_GENERATION_CLIENTS
+            && !store.evict_for_new_client()
+        {
+            return Err(SearchGenerationLimitError);
+        }
+
+        let last_used = store.next_order();
+        let current = {
+            let entry = store
+                .entries
+                .entry(client_id.to_string())
+                .or_insert_with(|| SearchGenerationEntry {
+                    current: Arc::new(AtomicU64::new(0)),
+                    last_used,
+                    latest_sequence: None,
+                });
+            match (entry.latest_sequence, sequence) {
+                (Some(latest), Some(sequence)) if sequence <= latest => {
+                    return Ok(SearchGeneration::stale(Arc::clone(&entry.current)));
+                }
+                (Some(_), None) => {
+                    return Ok(SearchGeneration::stale(Arc::clone(&entry.current)));
+                }
+                (_, Some(sequence)) => entry.latest_sequence = Some(sequence),
+                (None, None) => {}
+            }
+            entry.last_used = last_used;
+            Arc::clone(&entry.current)
+        };
+        let generation = current.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        Ok(SearchGeneration::new(generation, current))
+    }
+
+    /// 指定クライアントの現在のディレクトリ検索世代を返す。
     #[cfg(test)]
-    pub(crate) fn current_search_generation(&self) -> u64 {
-        self.search_generation.load(Ordering::Acquire)
+    pub(crate) fn current_search_generation(&self, client_id: &str) -> u64 {
+        self.lock_search_generations()
+            .entries
+            .get(client_id)
+            .map(|entry| entry.current.load(Ordering::Acquire))
+            .unwrap_or(0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
 
     use super::*;
 
@@ -491,7 +613,7 @@ mod tests {
 
         let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
 
-        assert_eq!(state.current_search_generation(), 0);
+        assert_eq!(state.current_search_generation("client-a"), 0);
     }
 
     #[test]
@@ -501,14 +623,176 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
 
-        let first = state.begin_search_generation();
-        let second = state.begin_search_generation();
+        let first = state.begin_search_generation("client-a", None).unwrap();
+        let second = state.begin_search_generation("client-a", None).unwrap();
 
         assert_eq!(first.started_at(), 1);
         assert_eq!(second.started_at(), 2);
         assert!(first.is_stale());
         assert!(!second.is_stale());
-        assert_eq!(state.current_search_generation(), 2);
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[test]
+    fn test_begin_search_generationはclientごとに独立する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let first_a = state.begin_search_generation("client-a", None).unwrap();
+        let first_b = state.begin_search_generation("client-b", None).unwrap();
+        let second_a = state.begin_search_generation("client-a", None).unwrap();
+
+        assert!(first_a.is_stale());
+        assert!(!first_b.is_stale());
+        assert!(!second_a.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+        assert_eq!(state.current_search_generation("client-b"), 1);
+    }
+
+    #[test]
+    fn test_begin_search_generationは古いsequenceでは世代を進めない() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let current = state.begin_search_generation("client-a", Some(2)).unwrap();
+        let stale = state.begin_search_generation("client-a", Some(1)).unwrap();
+
+        assert!(!current.is_stale());
+        assert!(stale.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 1);
+    }
+
+    #[test]
+    fn test_begin_search_generationのstale_handleは後続世代と衝突してもstaleのまま() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let current = state.begin_search_generation("client-a", Some(2)).unwrap();
+        let stale = state.begin_search_generation("client-a", Some(1)).unwrap();
+        let next = state.begin_search_generation("client-a", Some(3)).unwrap();
+
+        assert!(current.is_stale());
+        assert!(stale.is_stale());
+        assert!(!next.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+    }
+
+    #[test]
+    fn test_search_generation_force_staleはcurrent値と一致してもstaleのまま() {
+        let current = Arc::new(AtomicU64::new(1));
+        let stale = SearchGeneration {
+            started_at: 2,
+            current: Arc::clone(&current),
+            force_stale: true,
+        };
+
+        current.store(2, Ordering::Release);
+
+        assert!(stale.is_stale());
+    }
+
+    #[test]
+    fn test_begin_search_generationはsequenced_clientのsequenceなしrequestで世代を進めない() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let current = state.begin_search_generation("client-a", Some(1)).unwrap();
+        let stale = state.begin_search_generation("client-a", None).unwrap();
+
+        assert!(!current.is_stale());
+        assert!(stale.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 1);
+    }
+
+    #[test]
+    fn test_begin_search_generationは上限到達時に最古idle_clientを入れ替える() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        let active = state.begin_search_generation("client-0", None).unwrap();
+        for index in 1..MAX_SEARCH_GENERATION_CLIENTS {
+            state
+                .begin_search_generation(&format!("client-{index}"), None)
+                .unwrap();
+        }
+
+        let overflow = state
+            .begin_search_generation("overflow-client", None)
+            .unwrap();
+
+        assert_eq!(overflow.started_at(), 1);
+        assert!(!overflow.is_stale());
+        assert_eq!(state.current_search_generation("overflow-client"), 1);
+        assert_eq!(state.current_search_generation("client-1"), 0);
+        assert!(!active.is_stale());
+    }
+
+    #[test]
+    fn test_begin_search_generationは全client_activeなら新規clientを拒否する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+        let active_handles = (0..MAX_SEARCH_GENERATION_CLIENTS)
+            .map(|index| {
+                state
+                    .begin_search_generation(&format!("client-{index}"), None)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let overflow = state.begin_search_generation("overflow-client", None);
+
+        assert!(matches!(overflow, Err(SearchGenerationLimitError)));
+        assert_eq!(state.current_search_generation("overflow-client"), 0);
+        assert_eq!(state.current_search_generation("client-0"), 1);
+        assert!(!active_handles[0].is_stale());
+    }
+
+    #[test]
+    fn test_begin_search_generationは同一clientの並行発行でも世代が重複しない() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(mode, false, None, tx));
+        let worker_count = 16;
+        let barrier = Arc::new(Barrier::new(worker_count));
+
+        let handles = (0..worker_count)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    state.begin_search_generation("client-a", None).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut generations = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        generations.sort_by_key(SearchGeneration::started_at);
+
+        let started_at = generations
+            .iter()
+            .map(SearchGeneration::started_at)
+            .collect::<Vec<_>>();
+        assert_eq!(started_at, (1..=worker_count as u64).collect::<Vec<_>>());
+        assert!(generations[..worker_count - 1]
+            .iter()
+            .all(SearchGeneration::is_stale));
+        assert!(!generations[worker_count - 1].is_stale());
     }
 
     fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {

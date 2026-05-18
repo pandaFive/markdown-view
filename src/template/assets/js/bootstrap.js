@@ -1,5 +1,19 @@
 'use strict';
 
+function createDirectorySearchClientId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.prototype.map.call(bytes, function(byte) {
+      return byte.toString(16).padStart(2, '0');
+    }).join('');
+  }
+  return String(Date.now()) + '-' + String(Math.random()).slice(2);
+}
+
 function createAppContext(doc) {
   var html = doc.documentElement;
   var memoEditor = doc.getElementById('memo-editor');
@@ -69,6 +83,8 @@ function createAppContext(doc) {
       currentDirectoryError: '',
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
+      directorySearchClientId: createDirectorySearchClientId(),
+      directorySearchSequence: 0,
       pendingDirectoryNavigation: null
     },
     sidebar: {

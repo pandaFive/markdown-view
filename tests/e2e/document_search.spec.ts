@@ -1149,10 +1149,16 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
 test('ディレクトリ検索の古い応答は現在queryへ適用されない', async ({ page }) => {
   let firstRequestStarted = false;
   let releaseFirstResponse!: () => void;
+  const searchClientIds: string[] = [];
+  const searchSequences: string[] = [];
 
   await page.route('**/api/search**', async (route) => {
     const url = new URL(route.request().url());
     const query = url.searchParams.get('q');
+    const searchClientId = route.request().headers()['x-markdown-view-search-client'];
+    const searchSequence = route.request().headers()['x-markdown-view-search-sequence'];
+    if (searchClientId) searchClientIds.push(searchClientId);
+    if (searchSequence) searchSequences.push(searchSequence);
 
     if (query === 'alpha') {
       firstRequestStarted = true;
@@ -1203,6 +1209,13 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
 
   await setDocumentSearchQuery(page, 'beta');
   await expect(page.locator('#document-search-results')).toContainText('beta current');
+  expect(searchClientIds).toHaveLength(2);
+  expect(searchClientIds.every(Boolean)).toBe(true);
+  expect(new Set(searchClientIds).size).toBe(1);
+  for (const searchClientId of searchClientIds) {
+    expect(searchClientId).toMatch(/^[A-Za-z0-9_-]+(?:-[A-Za-z0-9_-]+)*$/);
+  }
+  expect(searchSequences).toEqual(['1', '2']);
 
   const alphaResponse = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -1212,5 +1225,87 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
   await alphaResponse;
   await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.locator('#document-search-results')).toContainText('beta current');
+  await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
+});
+
+test('ディレクトリ検索クリア時は同じclientで空検索を送り古い応答を破棄する', async ({ page }) => {
+  let firstRequestStarted = false;
+  let releaseFirstResponse!: () => void;
+  const requests: Array<{ query: string | null; clientId: string | undefined; sequence: string | undefined }> = [];
+
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q');
+    const clientId = route.request().headers()['x-markdown-view-search-client'];
+    const sequence = route.request().headers()['x-markdown-view-search-sequence'];
+    requests.push({ query, clientId, sequence });
+
+    if (query === 'alpha') {
+      firstRequestStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseFirstResponse = resolve;
+      });
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'alpha',
+          results: [{ file: 'README.md', before: '', current: 'alpha old', after: '', file_match_index: 0 }],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    if (query === '') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: '',
+          results: [],
+          skipped_files: 0,
+          truncated: false,
+          truncated_reasons: []
+        })
+      });
+      return;
+    }
+
+    await route.fallback();
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>alpha text</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstRequestStarted).toBe(true);
+
+  await page.locator('#document-search-clear').click();
+  await expect.poll(() => requests.some((request) => request.query === '')).toBe(true);
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+
+  const alphaRequest = requests.find((request) => request.query === 'alpha');
+  const cancelRequest = requests.find((request) => request.query === '');
+  expect(alphaRequest?.clientId).toBeTruthy();
+  expect(cancelRequest?.clientId).toBe(alphaRequest?.clientId);
+  expect(alphaRequest?.sequence).toBe('1');
+  expect(cancelRequest?.sequence).toBe('2');
+
+  const alphaResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/search' && url.searchParams.get('q') === 'alpha';
+  });
+  releaseFirstResponse();
+  await alphaResponse;
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
   await expect(page.locator('#document-search-results')).not.toContainText('alpha old');
 });

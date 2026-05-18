@@ -29,6 +29,10 @@ use crate::template::{render_page, MemoResponse, RenderPageParams, SidebarParams
 // 4096 bytes は MemoSaveRequest の現在の envelope と小さな schema 変更用の余白。
 const MEMO_JSON_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize * 2) + 4096;
 const MAX_SEARCH_RAW_QUERY_BYTES: usize = 4096;
+const SEARCH_CLIENT_HEADER: &str = "x-markdown-view-search-client";
+const SEARCH_SEQUENCE_HEADER: &str = "x-markdown-view-search-sequence";
+const MAX_SEARCH_CLIENT_ID_BYTES: usize = 64;
+const MAX_SEARCH_SEQUENCE: u64 = 9_007_199_254_740_991;
 
 /// Host middleware 適用前の route 定義だけを保持する。
 ///
@@ -100,6 +104,7 @@ fn build_routes() -> RouteDefinitions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::AppMode;
 
     fn api_error_message(error: &ApiError) -> Option<&str> {
         error.1["error"].as_str()
@@ -133,6 +138,177 @@ mod tests {
         let query = search_query_from_uri(&uri).unwrap();
 
         assert_eq!(query.q.as_deref(), Some("alpha note"));
+    }
+
+    #[test]
+    fn test_search_client_id_from_headers_validなopaque_idを受け取る() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SEARCH_CLIENT_HEADER,
+            HeaderValue::from_static("client-ABC_123"),
+        );
+
+        assert_eq!(
+            search_client_id_from_headers(&headers),
+            Some("client-ABC_123")
+        );
+    }
+
+    #[test]
+    fn test_search_client_id_from_headers不正値は無視する() {
+        for value in ["", "with space", "a/b", "x"] {
+            let mut headers = HeaderMap::new();
+            let header_value = if value == "x" {
+                HeaderValue::from_str(&"x".repeat(MAX_SEARCH_CLIENT_ID_BYTES + 1)).unwrap()
+            } else {
+                HeaderValue::from_str(value).unwrap()
+            };
+            headers.insert(SEARCH_CLIENT_HEADER, header_value);
+
+            assert_eq!(search_client_id_from_headers(&headers), None);
+        }
+    }
+
+    #[test]
+    fn test_search_client_sequence_from_headers_validなsequenceを受け取る() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SEARCH_SEQUENCE_HEADER, HeaderValue::from_static("42"));
+
+        assert_eq!(search_client_sequence_from_headers(&headers), Some(42));
+    }
+
+    #[test]
+    fn test_search_client_sequence_from_headers不正値は無視する() {
+        for value in [
+            "",
+            "0",
+            "-1",
+            "1.5",
+            "not-number",
+            "9007199254740992",
+            "18446744073709551615",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                SEARCH_SEQUENCE_HEADER,
+                HeaderValue::from_str(value).unwrap(),
+            );
+
+            assert_eq!(search_client_sequence_from_headers(&headers), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handlerはvalid_client_idをserviceへ渡す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SEARCH_CLIENT_HEADER,
+            HeaderValue::from_static("client-ABC_123"),
+        );
+        let uri: Uri = "/api/search?q=needle".parse().unwrap();
+
+        let Json(response) = api_search_handler(State(state.clone()), uri, headers)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("client-ABC_123"), 1);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handlerは古いsequenceで検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+
+        let mut first_headers = HeaderMap::new();
+        first_headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("client-a"));
+        first_headers.insert(SEARCH_SEQUENCE_HEADER, HeaderValue::from_static("2"));
+        let uri: Uri = "/api/search?q=needle".parse().unwrap();
+        let Json(first) = api_search_handler(State(state.clone()), uri.clone(), first_headers)
+            .await
+            .unwrap();
+
+        let mut old_headers = HeaderMap::new();
+        old_headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("client-a"));
+        old_headers.insert(SEARCH_SEQUENCE_HEADER, HeaderValue::from_static("1"));
+        let Json(old) = api_search_handler(State(state.clone()), uri, old_headers)
+            .await
+            .unwrap();
+
+        assert_eq!(first.results.len(), 1);
+        assert!(old.results.is_empty());
+        assert_eq!(state.current_search_generation("client-a"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handlerはinvalid_client_idを無視して検索する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("invalid/id"));
+        let uri: Uri = "/api/search?q=needle".parse().unwrap();
+
+        let Json(response) = api_search_handler(State(state.clone()), uri, headers)
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation("invalid/id"), 0);
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handlerは全client_activeの上限到達時に429を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(dir.path()).unwrap(),
+            false,
+            None,
+            tx,
+        ));
+        let active_handles = (0..crate::server::state::MAX_SEARCH_GENERATION_CLIENTS)
+            .map(|index| {
+                state
+                    .begin_search_generation(&format!("client-{index}"), None)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut headers = HeaderMap::new();
+        headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("overflow"));
+        let uri: Uri = "/api/search?q=needle".parse().unwrap();
+
+        let error = api_search_handler(State(state.clone()), uri, headers)
+            .await
+            .expect_err("全client activeの上限到達時は429にする");
+
+        assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(api_error_message(&error), Some("検索が混み合っています"));
+        assert_eq!(state.current_search_generation("overflow"), 0);
+        assert!(!active_handles[0].is_stale());
     }
 }
 
@@ -308,10 +484,42 @@ async fn api_files_handler(
 async fn api_search_handler(
     State(state): State<Arc<AppState>>,
     uri: Uri,
+    headers: HeaderMap,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let query = search_query_from_uri(&uri)?;
-    let response = service::search(&state, query.q.unwrap_or_default()).await?;
+    let client_id = search_client_id_from_headers(&headers);
+    let client_sequence = client_id.and_then(|_| search_client_sequence_from_headers(&headers));
+    let response = service::search(
+        &state,
+        query.q.unwrap_or_default(),
+        client_id,
+        client_sequence,
+    )
+    .await?;
     Ok(Json(response))
+}
+
+fn search_client_id_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(SEARCH_CLIENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| is_valid_search_client_id(value))
+}
+
+fn is_valid_search_client_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SEARCH_CLIENT_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn search_client_sequence_from_headers(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(SEARCH_SEQUENCE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|sequence| *sequence > 0 && *sequence <= MAX_SEARCH_SEQUENCE)
 }
 
 /// GET /ws : WebSocketアップグレード
