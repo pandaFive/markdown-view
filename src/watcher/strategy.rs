@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 
-use crate::server::log_path::{sanitize_path_for_logging, LogBasePath};
+use crate::server::log_path::{sanitize_path_for_logging_escaped, LogBasePath};
 use crate::server::{AppMode, CanonicalPath};
 use crate::workspace_exclusion::{
     exclusion_reason_for_name, exclusion_reason_for_relative_path, WorkspaceExclusionReason,
@@ -300,7 +300,7 @@ fn collect_directory_changes(base_dir: &CanonicalPath, events: &[DebouncedEvent]
         else {
             tracing::warn!(
                 "[markdown-view] ベースディレクトリ外のパスを検出（スキップ）: {}",
-                sanitize_path_for_logging(&event.path, base_path)
+                sanitize_path_for_logging_escaped(&event.path, base_path)
             );
             continue;
         };
@@ -333,7 +333,7 @@ fn collect_directory_candidates(
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
                         "[markdown-view] 新規ディレクトリ候補のメタデータ取得に失敗（スキップ）: {} ({})",
-                        sanitize_path_for_logging(&path, base_path),
+                        sanitize_path_for_logging_escaped(&path, base_path),
                         error
                     );
                 }
@@ -387,7 +387,7 @@ fn collect_markdown_files_for_recovery_inner(
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] watcher回復列挙: メタデータ取得失敗（スキップ）: {} ({})",
-                sanitize_path_for_logging(path, log_base),
+                sanitize_path_for_logging_escaped(path, log_base),
                 error
             );
             return;
@@ -397,7 +397,7 @@ fn collect_markdown_files_for_recovery_inner(
     if metadata.file_type().is_symlink() {
         tracing::warn!(
             "[markdown-view] watcher回復列挙: シンボリックリンクをスキップ: {}",
-            sanitize_path_for_logging(path, log_base)
+            sanitize_path_for_logging_escaped(path, log_base)
         );
         return;
     }
@@ -412,7 +412,7 @@ fn collect_markdown_files_for_recovery_inner(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] watcher回復列挙: ディレクトリ正規化失敗（スキップ）: {} ({})",
-                    sanitize_path_for_logging(path, log_base),
+                    sanitize_path_for_logging_escaped(path, log_base),
                     error
                 );
                 return;
@@ -427,7 +427,7 @@ fn collect_markdown_files_for_recovery_inner(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] watcher回復列挙: ディレクトリ読み取り失敗（スキップ）: {} ({})",
-                    sanitize_path_for_logging(path, log_base),
+                    sanitize_path_for_logging_escaped(path, log_base),
                     error
                 );
                 return;
@@ -445,7 +445,7 @@ fn collect_markdown_files_for_recovery_inner(
                 Err(error) => {
                     tracing::warn!(
                         "[markdown-view] watcher回復列挙: ディレクトリエントリ読み取り失敗（スキップ）: {} ({})",
-                        sanitize_path_for_logging(path, log_base),
+                        sanitize_path_for_logging_escaped(path, log_base),
                         error
                     );
                 }
@@ -473,7 +473,7 @@ fn collect_markdown_files_for_recovery_inner(
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] watcher回復列挙: Markdownパス正規化失敗（スキップ）: {} ({})",
-                sanitize_path_for_logging(path, log_base),
+                sanitize_path_for_logging_escaped(path, log_base),
                 error
             );
         }
@@ -503,7 +503,7 @@ fn is_hidden_relative_to_canonical_base(path: &Path, canonical_base: &Path) -> b
         None => {
             tracing::warn!(
                 "[markdown-view] 隠しファイル判定: 相対パス算出不可（安全側で除外）: {}",
-                sanitize_path_for_logging(path, canonical_base)
+                sanitize_path_for_logging_escaped(path, canonical_base)
             );
             true
         }
@@ -577,7 +577,7 @@ fn path_for_base_relative_checks(
         Err(error) => {
             tracing::warn!(
                 "[markdown-view] ベース配下判定: パス正規化失敗（スキップ）: {} ({})",
-                sanitize_path_for_logging(path, canonical_base),
+                sanitize_path_for_logging_escaped(path, canonical_base),
                 error
             );
             None
@@ -634,7 +634,7 @@ fn collect_watch_plan_entries(
             return Err(error).with_context(|| {
                 format!(
                     "監視対象ディレクトリのメタデータ取得に失敗: {}",
-                    sanitize_path_for_logging(dir, log_base)
+                    sanitize_path_for_logging_escaped(dir, log_base)
                 )
             });
         }
@@ -642,7 +642,7 @@ fn collect_watch_plan_entries(
             diagnostics.record_excluded(ExcludeReason::MetadataError);
             tracing::warn!(
                 "[markdown-view] watcher監視計画: メタデータ取得失敗（除外）: {} ({})",
-                sanitize_path_for_logging(dir, log_base),
+                sanitize_path_for_logging_escaped(dir, log_base),
                 error
             );
             return Ok(());
@@ -663,7 +663,7 @@ fn collect_watch_plan_entries(
             return Err(error).with_context(|| {
                 format!(
                     "監視対象ディレクトリの読み取りに失敗: {}",
-                    sanitize_path_for_logging(dir, log_base)
+                    sanitize_path_for_logging_escaped(dir, log_base)
                 )
             });
         }
@@ -671,7 +671,7 @@ fn collect_watch_plan_entries(
             diagnostics.record_excluded(ExcludeReason::MetadataError);
             tracing::warn!(
                 "[markdown-view] watcher監視計画: ディレクトリ読み取り失敗（除外）: {} ({})",
-                sanitize_path_for_logging(dir, log_base),
+                sanitize_path_for_logging_escaped(dir, log_base),
                 error
             );
             return Ok(());
@@ -686,7 +686,7 @@ fn collect_watch_plan_entries(
                 return Err(error).with_context(|| {
                     format!(
                         "監視対象ディレクトリのエントリ読み取りに失敗: {}",
-                        sanitize_path_for_logging(dir, log_base)
+                        sanitize_path_for_logging_escaped(dir, log_base)
                     )
                 });
             }
@@ -694,7 +694,7 @@ fn collect_watch_plan_entries(
                 diagnostics.record_excluded(ExcludeReason::MetadataError);
                 tracing::warn!(
                     "[markdown-view] watcher監視計画: ディレクトリエントリ読み取り失敗（除外）: {} ({})",
-                    sanitize_path_for_logging(dir, log_base),
+                    sanitize_path_for_logging_escaped(dir, log_base),
                     error
                 );
                 return Ok(());
@@ -727,7 +727,7 @@ fn validate_watch_plan_entry_dir(
             return Err(error).with_context(|| {
                 format!(
                     "監視対象ディレクトリの登録前メタデータ取得に失敗: {}",
-                    sanitize_path_for_logging(dir, log_base)
+                    sanitize_path_for_logging_escaped(dir, log_base)
                 )
             });
         }
@@ -735,7 +735,7 @@ fn validate_watch_plan_entry_dir(
             diagnostics.record_excluded(ExcludeReason::MetadataError);
             tracing::warn!(
                 "[markdown-view] watcher監視計画: 登録前メタデータ取得失敗（除外）: {} ({})",
-                sanitize_path_for_logging(dir, log_base),
+                sanitize_path_for_logging_escaped(dir, log_base),
                 error
             );
             return Ok(None);
@@ -756,7 +756,7 @@ fn validate_watch_plan_entry_dir(
             return Err(error).with_context(|| {
                 format!(
                     "監視対象ディレクトリの登録前正規化に失敗: {}",
-                    sanitize_path_for_logging(dir, log_base)
+                    sanitize_path_for_logging_escaped(dir, log_base)
                 )
             });
         }
@@ -764,7 +764,7 @@ fn validate_watch_plan_entry_dir(
             diagnostics.record_excluded(ExcludeReason::MetadataError);
             tracing::warn!(
                 "[markdown-view] watcher監視計画: 登録前正規化失敗（除外）: {} ({})",
-                sanitize_path_for_logging(dir, log_base),
+                sanitize_path_for_logging_escaped(dir, log_base),
                 error
             );
             return Ok(None);
@@ -782,14 +782,14 @@ fn validate_watch_plan_entry_dir(
         Err(error) if is_root => Err(error).with_context(|| {
             format!(
                 "監視対象ディレクトリの登録前メタデータ再取得に失敗: {}",
-                sanitize_path_for_logging(&canonical, log_base)
+                sanitize_path_for_logging_escaped(&canonical, log_base)
             )
         }),
         Err(error) => {
             diagnostics.record_excluded(ExcludeReason::MetadataError);
             tracing::warn!(
                 "[markdown-view] watcher監視計画: 登録前メタデータ再取得失敗（除外）: {} ({})",
-                sanitize_path_for_logging(&canonical, log_base),
+                sanitize_path_for_logging_escaped(&canonical, log_base),
                 error
             );
             Ok(None)
@@ -824,7 +824,7 @@ fn is_target_file(event_path: &Path, target_path: &Path) -> bool {
             let log_base: &Path = target_path.parent().unwrap_or_else(|| Path::new(""));
             tracing::warn!(
                 "[markdown-view] パス正規化に失敗（ファイル名比較にフォールバック）: {} ({})",
-                sanitize_path_for_logging(event_path, log_base),
+                sanitize_path_for_logging_escaped(event_path, log_base),
                 e
             );
             if event_path.file_name() != target_path.file_name() {
@@ -1474,6 +1474,26 @@ mod tests {
         let paths = sorted_paths(super::collect_markdown_files_for_recovery(&root));
 
         assert_eq!(paths, vec![visible.canonicalize().unwrap()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[tracing_test::traced_test]
+    fn test_collect_markdown_files_for_recoveryはsymlink_skipログの制御文字を可視化する() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.join("linked\n\x1b_dir");
+        symlink(outside.path(), &link).unwrap();
+
+        let paths = super::collect_markdown_files_for_recovery(&root);
+
+        assert!(paths.is_empty());
+        assert!(logs_contain("linked\\n\\u{1b}_dir"));
+        assert!(!logs_contain("linked\n\x1b_dir"));
     }
 
     #[test]

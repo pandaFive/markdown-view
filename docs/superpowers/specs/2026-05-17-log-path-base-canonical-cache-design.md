@@ -56,7 +56,7 @@ pub(crate) struct LogBasePath {
 
 ### 呼び出し側への適用
 
-まず `src/watcher/strategy.rs` の `WatchStrategy::path_for_log` のように同じ `log_base` で繰り返しログ整形する箇所へ限定して適用する。`WatchStrategy` の生成は `single_file` / `directory` constructor に集約し、隣接モジュールのテストも同じ生成経路を使う。
+まず `src/watcher/strategy.rs` の `WatchStrategy::path_for_log` のように同じ `log_base` で繰り返しログ整形する箇所へ限定して適用する。watcher strategy のログ出力用 path は escaped API に寄せ、制御文字でログ行を壊さない。`WatchStrategy` の生成は `single_file` / `directory` constructor に集約し、隣接モジュールのテストも同じ生成経路を使う。
 
 単発の `src/server/files/*` 呼び出しは既存 API のまま残す。広範囲の churn を避け、今回の変更は「再利用できる境界を作ること」と「高頻度候補へ限定適用すること」に絞る。
 
@@ -101,7 +101,7 @@ pub(crate) struct LogBasePath {
 ## 影響範囲
 
 - `src/server/log_path.rs`: `LogBasePath` と既存 API の委譲先を追加する。既存サニタイズ契約とテストを維持する。
-- `src/watcher/strategy.rs`: 同じ base で繰り返すログ整形に `LogBasePath` を渡せる範囲で限定適用する。
+- `src/watcher/strategy.rs`: 同じ base で繰り返すログ整形に `LogBasePath` を渡せる範囲で限定適用し、watcher strategy のログ用 path 表示は制御文字を可視化する。
 - `src/watcher/runtime/dispatch.rs`: `WatchStrategy` の constructor 経由化に伴う test-only の追随を行う。
 - `docs/todo/BACKLOG.md`: 実装後に対象項目を完了または更新する。
 

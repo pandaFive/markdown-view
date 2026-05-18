@@ -4,7 +4,7 @@
 
 **Goal:** `log_path` の base canonicalize 結果を再利用できる型を追加し、監査ログの安全契約を維持したまま watcher の繰り返しログ整形で余分な syscall を減らす。
 
-**Architecture:** `src/server/log_path.rs` に `LogBasePath` を追加し、既存の `sanitize_path_for_logging` API は互換層として残す。`src/watcher/strategy.rs` は `WatchStrategy::path_for_log` の繰り返し呼び出しで `LogBasePath` を使い、ログ出力用には制御文字を可視化する。`server/files/*` の単発ログ呼び出しは変更しない。
+**Architecture:** `src/server/log_path.rs` に `LogBasePath` を追加し、既存の `sanitize_path_for_logging` API は互換層として残す。`src/watcher/strategy.rs` は `WatchStrategy::path_for_log` の繰り返し呼び出しで `LogBasePath` を使い、watcher strategy のログ出力用 path は制御文字を可視化する。`server/files/*` の単発ログ呼び出しは変更しない。
 
 **Tech Stack:** Rust, std::path, tempfile, cargo test, repository-local `./verify.sh`.
 
@@ -17,7 +17,7 @@
   - 今回の変更: `LogBasePath` を追加し、cached canonical base を使う sanitize 経路と unit test を追加する。
 - Modify: `src/watcher/strategy.rs`
   - 責務: watcher の監視対象判定、ログ用 path 表示、監視計画生成。
-  - 今回の変更: `WatchStrategy` が `LogBasePath` を保持し、`path_for_log` で同じ cached base を再利用する。
+  - 今回の変更: `WatchStrategy` が `LogBasePath` を保持し、`path_for_log` で同じ cached base を再利用する。watcher strategy のログ用 path 表示は escaped API に寄せる。
 - Modify: `src/watcher/runtime/dispatch.rs`
   - 責務: watcher runtime dispatch の単体テスト。
   - 今回の変更: `WatchStrategy` の保持フィールド追加に伴う test-only 構築箇所を `WatchStrategy::directory` constructor 経由へ追随する。
@@ -289,7 +289,7 @@ use crate::server::log_path::sanitize_path_for_logging;
 with:
 
 ```rust
-use crate::server::log_path::{sanitize_path_for_logging, LogBasePath};
+use crate::server::log_path::{sanitize_path_for_logging_escaped, LogBasePath};
 ```
 
 - [ ] **Step 2: `WatchStrategy` の variant に cached log base を追加する**
@@ -602,8 +602,8 @@ Append this block under `## BACKLOG 完了履歴` near the top of `docs/done/DON
 ```markdown
 - [x] `log_path::canonicalize_status` の毎回 syscall を削減する
   - ファイル: src/server/log_path.rs, src/watcher/strategy.rs, src/watcher/runtime/dispatch.rs (test-only)
-  - 内容: `LogBasePath` を追加し、base の canonicalize 結果を生成時に保持して再利用できるようにした。既存の `sanitize_path_for_logging` / `sanitize_path_for_logging_escaped` は互換 API として残し、単発呼び出しの契約は維持している。`WatchStrategy::path_for_log` は `LogBasePath` 経由でログ用 path を相対化し、ログ出力用に制御文字を可視化する構成にした。
-  - 完了根拠: base 配下、base 自身、base 外、symlink 経由の base 外脱出、symlink 経由の base 内解決、base canonicalize 失敗時の lexical fallback、制御文字 escape を unit test / focused test で固定した。`cargo test --all-targets --all-features log_path`、`cargo test --all-targets --all-features watcher`、`./verify.sh` で確認した。
+  - 内容: `LogBasePath` を追加し、base の canonicalize 結果を生成時に保持して再利用できるようにした。既存の `sanitize_path_for_logging` / `sanitize_path_for_logging_escaped` は互換 API として残し、単発呼び出しの契約は維持している。`WatchStrategy::path_for_log` は `LogBasePath` 経由でログ用 path を相対化し、watcher strategy のログ出力用 path は制御文字を可視化する構成にした。
+  - 完了根拠: base 配下、base 自身、base 外、symlink 経由の base 外脱出、symlink 経由の base 内解決、base canonicalize 失敗時の lexical fallback、制御文字 escape を unit test / focused test で固定した。watcher recovery の symlink skip ログも制御文字を可視化することを固定した。`cargo test --all-targets --all-features log_path`、`cargo test --all-targets --all-features watcher`、`./verify.sh` で確認した。
   - セキュリティ影響: HTTP API、WebSocket payload、HTML sanitize、CSP、Host/Origin validation、path validation、memo sidecar、file size limit は変更していない。
   - 由来: アーキテクチャレビュー (2026-04-30)
 ```
@@ -726,5 +726,5 @@ Final report must include:
 - Changed files and rough line impact.
 - Affected dependent files: `src/watcher/strategy.rs` callers, `server/files/*` unchanged callers, docs archive.
 - Verification results from `cargo test --all-targets --all-features log_path`, watcher-focused tests, and `./verify.sh`.
-- Security note: base outside masking and symlink escape detection remain covered by tests.
+- Security note: base outside masking, symlink escape detection, and watcher log control-character escaping remain covered by tests.
 - Residual risk: cached base follows startup/canonical base identity; if base path is replaced after construction, logs are judged against the cached canonical base by design.
