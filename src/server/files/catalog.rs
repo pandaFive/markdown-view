@@ -392,6 +392,8 @@ pub(super) fn canonicalize_dir_for_cycle(
 mod tests {
     use super::relative_path_to_slash_string;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     #[test]
     fn test_relative_path_to_slash_stringはネストしたpathをslash区切りにする() {
@@ -408,6 +410,20 @@ mod tests {
         assert_eq!(
             relative_path_to_slash_string(Path::new("README.md")),
             "README.md"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_relative_path_to_slash_stringは非utf8_componentをlossy変換する() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let relative = PathBuf::from("docs").join(OsString::from_vec(b"bad-\xff.md".to_vec()));
+
+        assert_eq!(
+            relative_path_to_slash_string(&relative),
+            "docs/bad-\u{fffd}.md"
         );
     }
 }

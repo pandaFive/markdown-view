@@ -78,7 +78,8 @@ helper は `relative.components()` を1回走査し、2要素目以降の前に 
 
 ```bash
 cargo test --lib server::service
-cargo test --lib server::files::catalog
+cargo test --lib server::files::tests::catalog
+cargo test --lib relative_path_to_slash_string
 ./verify.sh
 ```
 

@@ -842,10 +842,15 @@ mod tests {
         assert_eq!(SidebarView::single_file(), SidebarView::SingleFile);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_sidebar_directory_name_fallbackは日本語名を返す() {
-        let state = create_directory_state(std::path::Path::new("/"));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .ancestors()
+            .last()
+            .expect("root directory should exist");
+        let state = create_directory_state(root);
 
         assert_eq!(sidebar_directory_name(&state), "ドキュメント");
     }
