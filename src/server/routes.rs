@@ -101,10 +101,59 @@ fn build_routes() -> RouteDefinitions {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::super::state::AppMode;
     use super::*;
 
     fn api_error_message(error: &ApiError) -> Option<&str> {
         error.1["error"].as_str()
+    }
+
+    fn directory_state_for_route_test(base_dir: &std::path::Path) -> Arc<AppState> {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(base_dir).unwrap(),
+            false,
+            None,
+            tx,
+        ))
+    }
+
+    fn search_client_headers(client_id: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static(client_id));
+        headers
+    }
+
+    fn raw_query_too_long_uri() -> Uri {
+        let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
+        format!("/api/search?{query}x").parse().unwrap()
+    }
+
+    fn invalid_percent_encoding_uri() -> Uri {
+        "/api/search?q=%E0%A4%A".parse().unwrap()
+    }
+
+    async fn assert_api_search_parse_error_does_not_create_client_entry(
+        uri: Uri,
+        headers: HeaderMap,
+        absent_client_id: &str,
+        expected_message: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = directory_state_for_route_test(dir.path());
+
+        let error = api_search_handler(State(Arc::clone(&state)), uri, headers)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some(expected_message));
+        assert_eq!(
+            state.current_search_generation_for_client(absent_client_id),
+            None
+        );
     }
 
     #[test]
@@ -135,6 +184,98 @@ mod tests {
         let query = search_query_from_uri(&uri).unwrap();
 
         assert_eq!(query.q.as_deref(), Some("alpha note"));
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_raw_query上限超過は既存検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = directory_state_for_route_test(dir.path());
+        let (_, generation) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .unwrap();
+
+        let error = api_search_handler(
+            State(Arc::clone(&state)),
+            raw_query_too_long_uri(),
+            search_client_headers("tab-a"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
+        assert_eq!(generation.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_raw_query上限超過は未登録clientを作成しない() {
+        assert_api_search_parse_error_does_not_create_client_entry(
+            raw_query_too_long_uri(),
+            search_client_headers("tab-new"),
+            "tab-new",
+            "検索クエリが長すぎます",
+        )
+        .await;
+        assert_api_search_parse_error_does_not_create_client_entry(
+            raw_query_too_long_uri(),
+            search_client_headers("tab.invalid"),
+            "tab.invalid",
+            "検索クエリが長すぎます",
+        )
+        .await;
+        assert_api_search_parse_error_does_not_create_client_entry(
+            raw_query_too_long_uri(),
+            HeaderMap::new(),
+            "tab-new",
+            "検索クエリが長すぎます",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_percent_encoding不正は既存検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = directory_state_for_route_test(dir.path());
+        let (_, generation) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .unwrap();
+
+        let error = api_search_handler(
+            State(Arc::clone(&state)),
+            invalid_percent_encoding_uri(),
+            search_client_headers("tab-a"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
+        assert_eq!(generation.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_percent_encoding不正は未登録clientを作成しない() {
+        assert_api_search_parse_error_does_not_create_client_entry(
+            invalid_percent_encoding_uri(),
+            search_client_headers("tab-new"),
+            "tab-new",
+            "検索クエリが不正です",
+        )
+        .await;
+        assert_api_search_parse_error_does_not_create_client_entry(
+            invalid_percent_encoding_uri(),
+            search_client_headers("tab.invalid"),
+            "tab.invalid",
+            "検索クエリが不正です",
+        )
+        .await;
+        assert_api_search_parse_error_does_not_create_client_entry(
+            invalid_percent_encoding_uri(),
+            HeaderMap::new(),
+            "tab-new",
+            "検索クエリが不正です",
+        )
+        .await;
     }
 }
 
@@ -312,10 +453,16 @@ async fn api_search_handler(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    let query = search_query_from_uri(&uri)?;
     let search_client_id = headers
         .get(SEARCH_CLIENT_HEADER)
         .and_then(|value| value.to_str().ok());
+    let query = match search_query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => {
+            state.advance_existing_search_generation_for_client(search_client_id);
+            return Err(error);
+        }
+    };
     let response = service::search(&state, query.q.unwrap_or_default(), search_client_id).await?;
     Ok(Json(response))
 }

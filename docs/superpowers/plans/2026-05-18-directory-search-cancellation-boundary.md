@@ -42,12 +42,13 @@ Apply these changes instead of the process-wide counter steps:
 - Store at most 64 client IDs. If a new valid ID would exceed the cap, evict the least recently used entry and accept the new ID.
 - Treat missing or invalid client IDs as no-cancellation fallback with `SearchCancellation::never_cancelled()`.
 - Long-query rejection advances only existing client generations and does not create new client entries.
+- Route-level `/api/search` parse errors, including raw query byte-limit rejection and invalid percent encoding, also advance only existing valid client generations before returning the original 400 JSON.
 - LRU eviction removes the oldest entry but does not advance the evicted generation handle, because another client must not force partial results into the evicted client's UI.
 - Browser UI stores a reload-stable page ID in `sessionStorage` as `ctx.search.directorySearchClientId`, regenerates it for duplicated-tab-style normal navigation, and sends it with `X-Markdown-View-Search-Client`.
 - Keep `SearchResponse` JSON shape and truncation semantics unchanged.
 - Do not log client ID, query, or body as part of this flow. Existing file-level warn logs may still include sanitized relative paths.
 - Add tests for same-client cancellation generation, different-client isolation, invalid/missing fallback, LRU eviction on over-capacity valid IDs, and mid-search cancellation before later files.
-- Add follow-up tests for long-query stale marking without new entry creation, duplicated-tab ID regeneration, LRU-evicted in-flight search not being stale-marked, catalog traversal cancellation, and per-file result construction stopping at the remaining result budget.
+- Add follow-up tests for long-query stale marking without new entry creation, route-level parse-error stale marking, duplicated-tab ID regeneration, LRU-evicted in-flight search not being stale-marked, catalog traversal cancellation, and per-file result construction stopping at the remaining result budget.
 
 ## Task 1: Add Search Generation State
 

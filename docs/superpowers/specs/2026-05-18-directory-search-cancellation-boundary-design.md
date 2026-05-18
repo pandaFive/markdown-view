@@ -57,7 +57,7 @@
 
 ## データフロー
 
-`/api/search?q=...` は `routes.rs` で raw query byte 長と percent encoding を検証する。この入口契約は変更しない。`X-Markdown-View-Search-Client` ヘッダーがあれば service へ渡し、検証は `AppState` 側で行う。
+`/api/search?q=...` は `routes.rs` で raw query byte 長と percent encoding を検証する。この入口契約は変更しない。`X-Markdown-View-Search-Client` ヘッダーは query 検証前に抽出する。route 層の raw query 上限超過や percent encoding 不正で 400 を返す場合も、既存の有効 client ID があれば `AppState::advance_existing_search_generation_for_client()` で stale 化してから同じエラーを返す。未登録 ID、未指定 ID、不正 ID では新規 entry を作らない。query 検証後は service へ client ID を渡し、ID 検証は `AppState` 側で行う。
 
 `service::search()` はディレクトリモードかどうかを先に判定する。単一ファイルモードでは `normalize_search_query()` で文字数上限と trim を確認して空結果を返す。
 
@@ -103,6 +103,7 @@ Rust 側の単体テストを中心にする。
 - ファイル列挙中のキャンセルと、1 ファイル内で結果上限に達した後に追加一致を作らないことを確認する。
 - `service::search()` でディレクトリ検索時に有効 client ID の世代が進み、client ID 未指定と単一ファイルモードでは世代が進まないことを確認する。
 - ディレクトリモードでは長すぎる query でも同一 client ID の既存検索が stale 化され、未登録 client ID の entry は作らないことを確認する。
+- route 層の raw query 上限超過と percent encoding 不正でも、既存 client ID の検索だけ stale 化され、400 JSON の文言は維持されることを確認する。
 - 既存の通常検索、結果数上限、ファイル数上限、総読込 byte 上限、query 上限、単一ファイル空結果のテストを維持する。
 
 UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/api/search` にクライアント ID ヘッダーが送られ、reload 時は同じ ID を再利用し、複製タブ相当では新しい ID を発行することを確認する。
@@ -115,6 +116,7 @@ UI 表示契約は変えない。`tests/e2e/document_search.spec.ts` では `/ap
 - キャンセルはユーザー向けエラーにならない。
 - `SearchResponse` の JSON 形状は変わらない。
 - 単一ファイルモードの `/api/search` は空結果を返し、検索世代を進めない。
+- `/api/search` の raw query 上限超過と percent encoding 不正は既存 client ID の検索を stale 化しつつ、従来どおり 400 JSON を返す。
 - 既存の検索上限と `truncated` / `truncated_reasons` / `limits` / `searched_bytes` 契約は変わらない。
 - path validation、Host/Origin 検証、CSP、HTML sanitize 境界を弱めない。
 - `cargo test --all-targets --all-features` が通る。

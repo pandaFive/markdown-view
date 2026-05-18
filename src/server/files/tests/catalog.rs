@@ -59,7 +59,7 @@ fn test_list_markdown_files_from_canonical_base_キャンセル済みなら列�
 }
 
 #[test]
-fn test_list_markdown_files_from_canonical_base_走査途中キャンセルなら子ディレクトリへ進まない() {
+fn test_list_markdown_files_from_canonical_base_root_entry後キャンセルなら結果を列挙しない() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
     std::fs::write(dir.path().join("docs/hidden-by-cancel.md"), "# hidden").unwrap();
@@ -69,7 +69,7 @@ fn test_list_markdown_files_from_canonical_base_走査途中キャンセルな�
     let files = list_markdown_files_from_canonical_base_with_cancellation(
         &canonical,
         MAX_FILE_LIST,
-        &|| checks.fetch_add(1, Ordering::Relaxed) >= 1,
+        &|| checks.fetch_add(1, Ordering::Relaxed) >= 2,
     )
     .unwrap();
 
@@ -90,6 +90,31 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
+fn test_list_markdown_files_root_entry後キャンセルならbase外symlink未判定() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), base.path().join("linked")).unwrap();
+    let checks = AtomicU64::new(0);
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| checks.fetch_add(1, Ordering::Relaxed) >= 2,
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
+    assert!(!logs_contain(
+        "ベースディレクトリ外を指すシンボリックリンク"
+    ));
 }
 
 #[test]
