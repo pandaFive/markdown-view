@@ -1,6 +1,7 @@
 //! サーバー状態とモード判定を管理する。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
@@ -241,6 +242,8 @@ pub struct AppState {
     syntax_css: String,
     tx: broadcast::Sender<BroadcastMessage>,
     memo_fs: Arc<dyn MemoFs>,
+    #[allow(dead_code)]
+    search_generation: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -268,6 +271,7 @@ impl AppState {
             dark_mode,
             tx,
             memo_fs,
+            search_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -294,6 +298,21 @@ impl AppState {
     /// メモ保存・読み込みで使用するファイルシステム抽象を返す
     pub(crate) fn memo_fs(&self) -> &Arc<dyn MemoFs> {
         &self.memo_fs
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn next_search_generation(&self) -> u64 {
+        self.search_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn current_search_generation(&self) -> u64 {
+        self.search_generation.load(Ordering::Relaxed)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn search_generation(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.search_generation)
     }
 }
 
@@ -422,6 +441,41 @@ mod tests {
         let state = AppState::new(mode, false, None, tx, Arc::clone(&memo_fs));
 
         assert!(Arc::ptr_eq(&memo_fs, state.memo_fs()));
+    }
+
+    #[test]
+    fn test_app_state_search_generationは初期値0() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        assert_eq!(state.current_search_generation(), 0);
+    }
+
+    #[test]
+    fn test_app_state_next_search_generationは世代を進める() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+
+        assert_eq!(state.next_search_generation(), 1);
+        assert_eq!(state.next_search_generation(), 2);
+        assert_eq!(state.current_search_generation(), 2);
+    }
+
+    #[test]
+    fn test_app_state_search_generation_handleは同じ世代を共有する() {
+        let (_dir, file_path) = create_markdown_fixture("test.md", "# test");
+        let mode = AppMode::new_single_file(&file_path).unwrap();
+        let (tx, _rx) = broadcast::channel(16);
+        let state = AppState::new_with_tokio_memo_fs(mode, false, None, tx);
+        let generation = state.search_generation();
+
+        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(state.next_search_generation(), 1);
+        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
