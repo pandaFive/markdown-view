@@ -1,10 +1,12 @@
 use std::io::Read;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-use super::catalog::list_markdown_files_from_canonical_base;
+use super::catalog::list_markdown_files_from_canonical_base_with_cancellation;
 use super::content::MAX_FILE_SIZE;
 use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
@@ -30,6 +32,64 @@ impl Default for SearchLimits {
             max_files: MAX_SEARCH_FILES,
             max_bytes: MAX_SEARCH_BYTES,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::server) struct SearchCancellation {
+    generation: u64,
+    current_generation: Arc<AtomicU64>,
+    #[cfg(test)]
+    cancel_on_check: Option<Arc<AtomicU64>>,
+}
+
+impl SearchCancellation {
+    pub(in crate::server) fn new(generation: u64, current_generation: Arc<AtomicU64>) -> Self {
+        Self {
+            generation,
+            current_generation,
+            #[cfg(test)]
+            cancel_on_check: None,
+        }
+    }
+
+    pub(in crate::server) fn never_cancelled() -> Self {
+        Self::new(0, Arc::new(AtomicU64::new(0)))
+    }
+
+    #[cfg(test)]
+    fn new_cancel_on_check_for_test(
+        generation: u64,
+        current_generation: Arc<AtomicU64>,
+        check_count: u64,
+    ) -> Self {
+        Self {
+            generation,
+            current_generation,
+            cancel_on_check: Some(Arc::new(AtomicU64::new(check_count))),
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        #[cfg(test)]
+        if let Some(cancel_on_check) = &self.cancel_on_check {
+            let previous = cancel_on_check
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .unwrap_or(0);
+            if previous == 1 {
+                self.current_generation
+                    .store(self.generation.saturating_add(1), Ordering::Relaxed);
+            }
+        }
+
+        self.current_generation.load(Ordering::Relaxed) > self.generation
+    }
+
+    #[cfg(test)]
+    pub(in crate::server) fn is_cancelled_for_test(&self) -> bool {
+        self.is_cancelled()
     }
 }
 
@@ -172,11 +232,12 @@ fn search_query_too_long_error() -> std::io::Error {
 pub(in crate::server) async fn search_directory(
     base_dir: &CanonicalPath,
     raw_query: &str,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
     let query = normalize_search_query(raw_query)?;
     let base_dir = base_dir.clone();
 
-    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query))
+    tokio::task::spawn_blocking(move || search_directory_blocking(&base_dir, &query, cancellation))
         .await
         .map_err(map_search_join_error)?
 }
@@ -184,22 +245,55 @@ pub(in crate::server) async fn search_directory(
 fn search_directory_blocking(
     base_dir: &CanonicalPath,
     raw_query: &str,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
-    search_directory_with_limits_blocking(base_dir, raw_query, SearchLimits::default())
+    search_directory_with_limits_and_cancellation_blocking(
+        base_dir,
+        raw_query,
+        SearchLimits::default(),
+        cancellation,
+    )
 }
 
+#[cfg(test)]
 fn search_directory_with_limits_blocking(
     base_dir: &CanonicalPath,
     raw_query: &str,
     limits: SearchLimits,
+) -> std::io::Result<SearchResponse> {
+    search_directory_with_limits_and_cancellation_blocking(
+        base_dir,
+        raw_query,
+        limits,
+        SearchCancellation::never_cancelled(),
+    )
+}
+
+fn search_directory_with_limits_and_cancellation_blocking(
+    base_dir: &CanonicalPath,
+    raw_query: &str,
+    limits: SearchLimits,
+    cancellation: SearchCancellation,
 ) -> std::io::Result<SearchResponse> {
     let query = normalize_search_query(raw_query)?;
     if query.is_empty() {
         return Ok(SearchResponse::empty(query));
     }
 
-    let files =
-        list_markdown_files_from_canonical_base(base_dir, limits.max_files.saturating_add(1))?;
+    if cancellation.is_cancelled() {
+        return Ok(SearchResponse::from_parts(
+            query,
+            Vec::new(),
+            limits,
+            SearchStats::new(),
+        ));
+    }
+
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        base_dir,
+        limits.max_files.saturating_add(1),
+        &|| cancellation.is_cancelled(),
+    )?;
     let base_path = base_dir.as_path();
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
@@ -208,7 +302,15 @@ fn search_directory_with_limits_blocking(
         stats.mark_truncated(SearchTruncationReason::File);
     }
 
+    if cancellation.is_cancelled() {
+        return Ok(SearchResponse::from_parts(query, results, limits, stats));
+    }
+
     for relative in files.into_iter().take(limits.max_files) {
+        if cancellation.is_cancelled() {
+            break;
+        }
+
         let file_path = match resolve_file(base_path, &relative) {
             Ok(file_path) => file_path,
             Err(error) => {
@@ -243,7 +345,13 @@ fn search_directory_with_limits_blocking(
         stats.searched_files += 1;
         stats.searched_bytes += markdown.len();
         let blocks = extract_search_blocks(&markdown);
-        let file_results = find_matches_for_file(&relative, &blocks, &query);
+        let file_results = find_matches_for_file(
+            &relative,
+            &blocks,
+            &query,
+            limits.max_results.saturating_sub(results.len()),
+            &cancellation,
+        );
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -252,7 +360,7 @@ fn search_directory_with_limits_blocking(
             }
         }
 
-        if results.len() >= limits.max_results {
+        if cancellation.is_cancelled() || results.len() >= limits.max_results {
             break;
         }
     }
@@ -540,12 +648,22 @@ fn find_matches_for_file(
     file: &str,
     blocks: &[SearchBlockEntry],
     query: &str,
+    max_results: usize,
+    cancellation: &SearchCancellation,
 ) -> Vec<SearchResultItem> {
     let mut results = Vec::new();
+    if max_results == 0 {
+        return results;
+    }
+
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
     for (block_index, block) in blocks.iter().enumerate() {
+        if cancellation.is_cancelled() || results.len() >= max_results {
+            break;
+        }
+
         if block.text.is_empty() {
             continue;
         }
@@ -554,6 +672,10 @@ fn find_matches_for_file(
         let mut search_start = 0usize;
 
         while search_start <= normalized.normalized_text.len() {
+            if cancellation.is_cancelled() || results.len() >= max_results {
+                break;
+            }
+
             let Some(relative_index) =
                 normalized.normalized_text[search_start..].find(&normalized_query)
             else {
@@ -742,6 +864,8 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
@@ -920,7 +1044,13 @@ mod tests {
             },
         ];
 
-        let results = find_matches_for_file("README.md", &blocks, "alpha note");
+        let results = find_matches_for_file(
+            "README.md",
+            &blocks,
+            "alpha note",
+            usize::MAX,
+            &never_cancelled(),
+        );
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
@@ -935,15 +1065,132 @@ mod tests {
             sentences: split_text_into_sentence_ranges(text),
         }];
 
-        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul");
+        let results = find_matches_for_file(
+            "README.md",
+            &blocks,
+            "i̇stanbul",
+            usize::MAX,
+            &never_cancelled(),
+        );
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[0].current, "İstanbul is here.");
     }
 
+    #[test]
+    fn test_find_matches_for_file_上限到達後は追加一致を作らない() {
+        let blocks = vec![SearchBlockEntry {
+            text: "needle one. needle two. needle three.".to_string(),
+            sentences: split_text_into_sentence_ranges("needle one. needle two. needle three."),
+        }];
+
+        let results = find_matches_for_file("README.md", &blocks, "needle", 2, &never_cancelled());
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].file_match_index, 0);
+        assert_eq!(results[1].file_match_index, 1);
+    }
+
     fn canonical_of(path: &Path) -> CanonicalPath {
         CanonicalPath::try_from_path(path).unwrap()
+    }
+
+    fn never_cancelled() -> SearchCancellation {
+        SearchCancellation::new(0, Arc::new(AtomicU64::new(0)))
+    }
+
+    #[test]
+    fn test_search_cancellationは新しい世代を検知する() {
+        let generation = Arc::new(AtomicU64::new(1));
+        let cancellation = SearchCancellation::new(1, Arc::clone(&generation));
+
+        assert!(!cancellation.is_cancelled());
+
+        generation.store(2, Ordering::Relaxed);
+
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn test_search_directory_キャンセル済みならファイル処理へ進まない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let canonical = canonical_of(dir.path());
+        let generation = Arc::new(AtomicU64::new(2));
+        let cancellation = SearchCancellation::new(1, Arc::clone(&generation));
+
+        let response = search_directory_with_limits_and_cancellation_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(!response.truncated);
+        assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_cancellation_キャンセル済みなら存在しないディレクトリを列挙しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = canonical_of(dir.path());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let generation = Arc::new(AtomicU64::new(2));
+        let cancellation = SearchCancellation::new(1, Arc::clone(&generation));
+
+        let response = search_directory_with_limits_and_cancellation_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.query, "needle");
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 0);
+        assert!(!response.truncated);
+        assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_cancellation_途中で世代が進んだら後続ファイルへ進まない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle in first").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle in second").unwrap();
+        let canonical = canonical_of(dir.path());
+        let generation = Arc::new(AtomicU64::new(1));
+        let cancellation =
+            SearchCancellation::new_cancel_on_check_for_test(1, Arc::clone(&generation), 9);
+
+        let response = search_directory_with_limits_and_cancellation_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
     }
 
     #[tokio::test]
@@ -953,7 +1200,9 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert!(!response.truncated);
@@ -982,7 +1231,9 @@ mod tests {
         .unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert!(!response.truncated);
         assert!(response.truncated_reasons.is_empty());
@@ -1002,7 +1253,9 @@ mod tests {
         std::fs::write(dir.path().join("many.md"), markdown).unwrap();
 
         let canonical = canonical_of(dir.path());
-        let response = search_directory(&canonical, "needle").await.unwrap();
+        let response = search_directory(&canonical, "needle", never_cancelled())
+            .await
+            .unwrap();
 
         assert!(response.truncated);
         assert_eq!(
@@ -1132,7 +1385,9 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
         let query = "あ".repeat(MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search_directory(&canonical, &query).await.unwrap_err();
+        let error = search_directory(&canonical, &query, never_cancelled())
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }

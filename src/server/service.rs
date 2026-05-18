@@ -3,7 +3,8 @@ use axum::http::StatusCode;
 use super::files::{
     list_markdown_files_from_canonical_base, load_route_memo, load_route_update,
     normalize_search_query, resolve_route_target, run_blocking_file_task, save_route_memo,
-    search_directory, ResolvedTarget, RouteTargetRequest, SearchResponse, MAX_FILE_LIST,
+    search_directory, ResolvedTarget, RouteTargetRequest, SearchCancellation, SearchResponse,
+    MAX_FILE_LIST,
 };
 use super::guards::json_error;
 use super::messages::{ApiError, BroadcastMessage};
@@ -205,15 +206,41 @@ fn map_search_error(error: std::io::Error) -> ApiError {
 }
 
 /// ディレクトリモードの全文検索を実行する。単一ファイルモードでは空結果を返す。
-pub(super) async fn search(state: &AppState, query: String) -> Result<SearchResponse, ApiError> {
-    let query = normalize_search_query(&query).map_err(map_search_error)?;
+pub(super) async fn search(
+    state: &AppState,
+    query: String,
+    search_client_id: Option<&str>,
+) -> Result<SearchResponse, ApiError> {
     let Some(base_dir) = state.mode().directory_canonical() else {
+        let query = normalize_search_query(&query).map_err(map_search_error)?;
         return Ok(SearchResponse::empty(query));
     };
 
-    search_directory(base_dir, &query)
+    let query = match normalize_search_query(&query) {
+        Ok(query) => query,
+        Err(error) => {
+            state.advance_existing_search_generation_for_client(search_client_id);
+            return Err(map_search_error(error));
+        }
+    };
+
+    let cancellation = search_cancellation_for_client(state, search_client_id);
+
+    search_directory(base_dir, &query, cancellation)
         .await
         .map_err(map_search_error)
+}
+
+fn search_cancellation_for_client(
+    state: &AppState,
+    search_client_id: Option<&str>,
+) -> SearchCancellation {
+    state
+        .next_search_generation_for_client(search_client_id)
+        .map(|(generation, current_generation)| {
+            SearchCancellation::new(generation, current_generation)
+        })
+        .unwrap_or_else(SearchCancellation::never_cancelled)
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
@@ -634,12 +661,121 @@ mod tests {
         std::fs::write(dir.path().join("other.md"), "# Other").unwrap();
         let state = create_directory_state(dir.path());
 
-        let response = search(&state, " needle ".to_string()).await.unwrap();
+        let response = search(&state, " needle ".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert_eq!(response.searched_files, 2);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "README.md");
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは検索世代を進める() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
+        assert_eq!(response.results.len(), 1);
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_同一clientの後続検索で旧検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let first = search_cancellation_for_client(&state, Some("tab-a"));
+        let second = search_cancellation_for_client(&state, Some("tab-a"));
+
+        assert!(first.is_cancelled_for_test());
+        assert!(!second.is_cancelled_for_test());
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(2));
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_別clientの後続検索では旧検索をstale化しない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let client_a = search_cancellation_for_client(&state, Some("tab-a"));
+        let client_b = search_cancellation_for_client(&state, Some("tab-b"));
+
+        assert!(!client_a.is_cancelled_for_test());
+        assert!(!client_b.is_cancelled_for_test());
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
+        assert_eq!(state.current_search_generation_for_client("tab-b"), Some(1));
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_無効clientは世代を作らない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let missing = search_cancellation_for_client(&state, None);
+        let invalid = search_cancellation_for_client(&state, Some("tab.invalid"));
+
+        assert!(!missing.is_cancelled_for_test());
+        assert!(!invalid.is_cancelled_for_test());
+        assert_eq!(
+            state.current_search_generation_for_client("tab.invalid"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは長すぎるqueryでも既存検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let (_, generation) = state
+            .next_search_generation_for_client(Some("tab-a"))
+            .expect("既存検索の世代を作る");
+        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search(&state, query, Some("tab-a"))
+            .await
+            .expect_err("長すぎる検索queryは拒否する");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
+        assert_eq!(generation.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードは長すぎるqueryで新規client_idを作らない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+        let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
+
+        let error = search(&state, query, Some("tab-new"))
+            .await
+            .expect_err("長すぎる検索queryは拒否する");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1["error"].as_str(), Some("検索クエリが長すぎます"));
+        assert_eq!(state.current_search_generation_for_client("tab-new"), None);
+    }
+
+    #[tokio::test]
+    async fn test_search_ディレクトリモードはclient_id未指定なら検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let response = search(&state, "needle".to_string(), None).await.unwrap();
+
+        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
+        assert_eq!(response.results.len(), 1);
     }
 
     #[tokio::test]
@@ -649,7 +785,9 @@ mod tests {
         std::fs::write(&file_path, "# Note\n\nneedle").unwrap();
         let state = create_single_file_state(&file_path);
 
-        let response = search(&state, "needle".to_string()).await.unwrap();
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
 
         assert_eq!(response.query, "needle");
         assert_eq!(response.searched_files, 0);
@@ -664,6 +802,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_単一ファイルモードは検索世代を進めない() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("README.md");
+        std::fs::write(&file_path, "needle").unwrap();
+        let state = create_single_file_state(&file_path);
+
+        let response = search(&state, "needle".to_string(), Some("tab-a"))
+            .await
+            .unwrap();
+
+        assert_eq!(state.current_search_generation_for_client("tab-a"), None);
+        assert!(response.results.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_search_単一ファイルモードでも長すぎるqueryはbad_request() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");
@@ -671,7 +824,7 @@ mod tests {
         let state = create_single_file_state(&file_path);
         let query = "あ".repeat(crate::server::files::MAX_SEARCH_QUERY_CHARS + 1);
 
-        let error = search(&state, query)
+        let error = search(&state, query, Some("tab-a"))
             .await
             .expect_err("長すぎる検索queryは単一ファイルモードでも拒否する");
 

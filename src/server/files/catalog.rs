@@ -25,6 +25,14 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
+    list_markdown_files_from_canonical_base_with_cancellation(base_dir, max_files, &|| false)
+}
+
+pub(in crate::server) fn list_markdown_files_from_canonical_base_with_cancellation(
+    base_dir: &CanonicalPath,
+    max_files: usize,
+    should_cancel: &dyn Fn() -> bool,
+) -> std::io::Result<Vec<String>> {
     let base_path = base_dir.as_path();
     let mut files = Vec::new();
     let mut visited_dirs = HashSet::new();
@@ -33,6 +41,7 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base(
         log_base_dir: base_path,
         canonical_base_dir: base_path,
         max_files,
+        should_cancel,
     };
 
     list_markdown_files_recursive(
@@ -52,6 +61,7 @@ struct CatalogTraversal<'a> {
     log_base_dir: &'a Path,
     canonical_base_dir: &'a Path,
     max_files: usize,
+    should_cancel: &'a dyn Fn() -> bool,
 }
 
 fn list_markdown_files_recursive(
@@ -62,6 +72,10 @@ fn list_markdown_files_recursive(
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
 ) -> std::io::Result<()> {
+    if (traversal.should_cancel)() {
+        return Ok(());
+    }
+
     if depth >= MAX_DIR_DEPTH {
         tracing::warn!(
             "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
@@ -78,6 +92,10 @@ fn list_markdown_files_recursive(
 
     let entries = std::fs::read_dir(current_dir)?;
     for entry in entries {
+        if (traversal.should_cancel)() {
+            return Ok(());
+        }
+
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -110,7 +128,7 @@ fn list_markdown_files_recursive(
         };
 
         if file_type.is_dir() || file_type.is_symlink() {
-            if files.len() >= traversal.max_files {
+            if files.len() >= traversal.max_files || (traversal.should_cancel)() {
                 return Ok(());
             }
 

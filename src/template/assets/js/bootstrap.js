@@ -1,5 +1,56 @@
 'use strict';
 
+var DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY = 'markdown-view.directorySearchClientId';
+
+function isValidDirectorySearchClientId(clientId) {
+  return typeof clientId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(clientId);
+}
+
+function createDirectorySearchClientId() {
+  return 'tab-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 12);
+}
+
+function isReloadNavigation() {
+  var entries;
+
+  if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
+    return false;
+  }
+
+  entries = window.performance.getEntriesByType('navigation');
+  return entries.length > 0 && entries[0].type === 'reload';
+}
+
+function getDirectorySearchClientId() {
+  var storage;
+  var storedClientId;
+  var generatedClientId;
+
+  try {
+    storage = window.sessionStorage;
+    storedClientId = storage && isReloadNavigation()
+      ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY)
+      : null;
+    if (isValidDirectorySearchClientId(storedClientId)) {
+      return storedClientId;
+    }
+  } catch (_storageReadError) {
+    storage = null;
+  }
+
+  generatedClientId = createDirectorySearchClientId();
+  if (storage) {
+    try {
+      storage.setItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY, generatedClientId);
+    } catch (_storageWriteError) {
+      // sessionStorage が使えない環境では今回生成したIDだけを使う。
+    }
+  }
+
+  return generatedClientId;
+}
+
 function createAppContext(doc) {
   var html = doc.documentElement;
   var memoEditor = doc.getElementById('memo-editor');
@@ -67,6 +118,7 @@ function createAppContext(doc) {
       currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
+      directorySearchClientId: getDirectorySearchClientId(),
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
       pendingDirectoryNavigation: null

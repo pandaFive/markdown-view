@@ -3,14 +3,21 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::support::{create_test_dir, make_dir_unsearchable};
 use crate::server::files::catalog::{
     canonicalize_dir_for_cycle, ensure_current_dir_still_canonical,
-    list_markdown_files_from_canonical_base, MAX_DIR_DEPTH, MAX_FILE_LIST,
+    list_markdown_files_from_canonical_base,
+    list_markdown_files_from_canonical_base_with_cancellation, MAX_DIR_DEPTH, MAX_FILE_LIST,
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
+
+fn never_cancelled() -> SearchCancellation {
+    SearchCancellation::new(0, Arc::new(AtomicU64::new(0)))
+}
 
 #[test]
 fn test_list_markdown_files_基本動作() {
@@ -35,6 +42,41 @@ fn test_list_markdown_files_from_canonical_base_基本動作() {
 }
 
 #[test]
+fn test_list_markdown_files_from_canonical_base_キャンセル済みなら列挙しない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.md"), "# a").unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| cancelled.load(Ordering::Relaxed),
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
+}
+
+#[test]
+fn test_list_markdown_files_from_canonical_base_root_entry後キャンセルなら結果を列挙しない() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/hidden-by-cancel.md"), "# hidden").unwrap();
+    let checks = AtomicU64::new(0);
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| checks.fetch_add(1, Ordering::Relaxed) >= 2,
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
+}
+
+#[test]
 #[cfg(unix)]
 fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレクトリは除外() {
     use std::os::unix::fs::symlink;
@@ -48,6 +90,31 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
+fn test_list_markdown_files_root_entry後キャンセルならbase外symlink未判定() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), base.path().join("linked")).unwrap();
+    let checks = AtomicU64::new(0);
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base_with_cancellation(
+        &canonical,
+        MAX_FILE_LIST,
+        &|| checks.fetch_add(1, Ordering::Relaxed) >= 2,
+    )
+    .unwrap();
+
+    assert!(files.is_empty());
+    assert!(!logs_contain(
+        "ベースディレクトリ外を指すシンボリックリンク"
+    ));
 }
 
 #[test]
@@ -165,7 +232,9 @@ async fn test_search_directory_canonical_base_再canonicalizeなしで検索す�
     std::fs::write(dir.path().join("guide.md"), "hello search target").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "target").await.unwrap();
+    let response = search_directory(&canonical, "target", never_cancelled())
+        .await
+        .unwrap();
 
     assert_eq!(response.query, "target");
     assert_eq!(response.results.len(), 1);
@@ -187,7 +256,9 @@ async fn test_search_directory_生成物ディレクトリ配下を検索しな�
     std::fs::write(dir.path().join("target/debug/build.md"), "needle generated").unwrap();
     let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
 
-    let response = search_directory(&canonical, "needle").await.unwrap();
+    let response = search_directory(&canonical, "needle", never_cancelled())
+        .await
+        .unwrap();
 
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].file, "docs/guide.md");

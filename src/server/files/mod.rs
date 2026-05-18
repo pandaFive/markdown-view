@@ -33,7 +33,7 @@ pub(in crate::server) use self::resolve::{
 #[cfg(test)]
 pub(in crate::server) use self::search::MAX_SEARCH_QUERY_CHARS;
 pub(in crate::server) use self::search::{
-    normalize_search_query, search_directory, SearchResponse,
+    normalize_search_query, search_directory, SearchCancellation, SearchResponse,
 };
 
 pub(in crate::server) async fn run_blocking_file_task<T, F>(
