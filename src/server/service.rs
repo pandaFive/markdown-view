@@ -224,16 +224,23 @@ pub(super) async fn search(
         }
     };
 
-    let cancellation = state
-        .next_search_generation_for_client(search_client_id)
-        .map(|(generation, current_generation)| {
-            SearchCancellation::new(generation, current_generation)
-        })
-        .unwrap_or_else(SearchCancellation::never_cancelled);
+    let cancellation = search_cancellation_for_client(state, search_client_id);
 
     search_directory(base_dir, &query, cancellation)
         .await
         .map_err(map_search_error)
+}
+
+fn search_cancellation_for_client(
+    state: &AppState,
+    search_client_id: Option<&str>,
+) -> SearchCancellation {
+    state
+        .next_search_generation_for_client(search_client_id)
+        .map(|(generation, current_generation)| {
+            SearchCancellation::new(generation, current_generation)
+        })
+        .unwrap_or_else(SearchCancellation::never_cancelled)
 }
 
 fn broadcast_saved_memo(state: &AppState, file: String) {
@@ -676,6 +683,52 @@ mod tests {
 
         assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
         assert_eq!(response.results.len(), 1);
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_同一clientの後続検索で旧検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let first = search_cancellation_for_client(&state, Some("tab-a"));
+        let second = search_cancellation_for_client(&state, Some("tab-a"));
+
+        assert!(first.is_cancelled_for_test());
+        assert!(!second.is_cancelled_for_test());
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(2));
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_別clientの後続検索では旧検索をstale化しない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let client_a = search_cancellation_for_client(&state, Some("tab-a"));
+        let client_b = search_cancellation_for_client(&state, Some("tab-b"));
+
+        assert!(!client_a.is_cancelled_for_test());
+        assert!(!client_b.is_cancelled_for_test());
+        assert_eq!(state.current_search_generation_for_client("tab-a"), Some(1));
+        assert_eq!(state.current_search_generation_for_client("tab-b"), Some(1));
+    }
+
+    #[test]
+    fn test_search_cancellation_for_client_無効clientは世代を作らない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle").unwrap();
+        let state = create_directory_state(dir.path());
+
+        let missing = search_cancellation_for_client(&state, None);
+        let invalid = search_cancellation_for_client(&state, Some("tab.invalid"));
+
+        assert!(!missing.is_cancelled_for_test());
+        assert!(!invalid.is_cancelled_for_test());
+        assert_eq!(
+            state.current_search_generation_for_client("tab.invalid"),
+            None
+        );
     }
 
     #[tokio::test]

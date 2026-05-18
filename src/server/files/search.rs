@@ -86,6 +86,11 @@ impl SearchCancellation {
 
         self.current_generation.load(Ordering::Relaxed) > self.generation
     }
+
+    #[cfg(test)]
+    pub(in crate::server) fn is_cancelled_for_test(&self) -> bool {
+        self.is_cancelled()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

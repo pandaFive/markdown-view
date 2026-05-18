@@ -190,8 +190,11 @@ mod tests {
     async fn test_api_search_handler_raw_query上限超過は既存検索をstale化する() {
         let dir = tempfile::tempdir().unwrap();
         let state = directory_state_for_route_test(dir.path());
-        let (_, generation) = state
+        let (_, client_a_generation) = state
             .next_search_generation_for_client(Some("tab-a"))
+            .unwrap();
+        let (_, client_b_generation) = state
+            .next_search_generation_for_client(Some("tab-b"))
             .unwrap();
 
         let error = api_search_handler(
@@ -204,7 +207,8 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
-        assert_eq!(generation.load(Ordering::Relaxed), 2);
+        assert_eq!(client_a_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(client_b_generation.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -236,8 +240,11 @@ mod tests {
     async fn test_api_search_handler_percent_encoding不正は既存検索をstale化する() {
         let dir = tempfile::tempdir().unwrap();
         let state = directory_state_for_route_test(dir.path());
-        let (_, generation) = state
+        let (_, client_a_generation) = state
             .next_search_generation_for_client(Some("tab-a"))
+            .unwrap();
+        let (_, client_b_generation) = state
+            .next_search_generation_for_client(Some("tab-b"))
             .unwrap();
 
         let error = api_search_handler(
@@ -250,7 +257,8 @@ mod tests {
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
-        assert_eq!(generation.load(Ordering::Relaxed), 2);
+        assert_eq!(client_a_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(client_b_generation.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
