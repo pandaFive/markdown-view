@@ -110,6 +110,31 @@ mod tests {
         error.1["error"].as_str()
     }
 
+    fn create_directory_state(base_dir: &std::path::Path) -> Arc<AppState> {
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        Arc::new(AppState::new_with_tokio_memo_fs(
+            AppMode::new_directory(base_dir).unwrap(),
+            false,
+            None,
+            tx,
+        ))
+    }
+
+    fn search_client_headers(client_id: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static(client_id));
+        headers
+    }
+
+    fn raw_query_too_long_uri() -> Uri {
+        let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
+        format!("/api/search?{query}x").parse().unwrap()
+    }
+
+    fn invalid_percent_encoding_uri() -> Uri {
+        "/api/search?q=%E0%A4%A".parse().unwrap()
+    }
+
     #[test]
     fn test_search_query_from_uri_raw_query上限超過はdecode前に400で拒否する() {
         let query = format!("q={}", "a".repeat(MAX_SEARCH_RAW_QUERY_BYTES));
@@ -138,6 +163,75 @@ mod tests {
         let query = search_query_from_uri(&uri).unwrap();
 
         assert_eq!(query.q.as_deref(), Some("alpha note"));
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_raw_query上限超過は既存検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(dir.path());
+        let client_a = state.begin_search_generation("client-a", None).unwrap();
+        let client_b = state.begin_search_generation("client-b", None).unwrap();
+
+        let error = api_search_handler(
+            State(Arc::clone(&state)),
+            raw_query_too_long_uri(),
+            search_client_headers("client-a"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが長すぎます"));
+        assert!(client_a.is_stale());
+        assert!(!client_b.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+        assert_eq!(state.current_search_generation("client-b"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_percent_encoding不正は既存検索をstale化する() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(dir.path());
+        let client_a = state.begin_search_generation("client-a", None).unwrap();
+        let client_b = state.begin_search_generation("client-b", None).unwrap();
+
+        let error = api_search_handler(
+            State(Arc::clone(&state)),
+            invalid_percent_encoding_uri(),
+            search_client_headers("client-a"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(api_error_message(&error), Some("検索クエリが不正です"));
+        assert!(client_a.is_stale());
+        assert!(!client_b.is_stale());
+        assert_eq!(state.current_search_generation("client-a"), 2);
+        assert_eq!(state.current_search_generation("client-b"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_api_search_handler_parse失敗は未登録clientを作成しない() {
+        for (uri, expected_message) in [
+            (raw_query_too_long_uri(), "検索クエリが長すぎます"),
+            (invalid_percent_encoding_uri(), "検索クエリが不正です"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = create_directory_state(dir.path());
+
+            let error = api_search_handler(
+                State(Arc::clone(&state)),
+                uri,
+                search_client_headers("client-new"),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert_eq!(api_error_message(&error), Some(expected_message));
+            assert_eq!(state.current_search_generation("client-new"), 0);
+        }
     }
 
     #[test]
@@ -202,13 +296,7 @@ mod tests {
     async fn test_api_search_handlerはvalid_client_idをserviceへ渡す() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let state = Arc::new(AppState::new_with_tokio_memo_fs(
-            AppMode::new_directory(dir.path()).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let state = create_directory_state(dir.path());
         let mut headers = HeaderMap::new();
         headers.insert(
             SEARCH_CLIENT_HEADER,
@@ -228,13 +316,7 @@ mod tests {
     async fn test_api_search_handlerは古いsequenceで検索世代を進めない() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let state = Arc::new(AppState::new_with_tokio_memo_fs(
-            AppMode::new_directory(dir.path()).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let state = create_directory_state(dir.path());
 
         let mut first_headers = HeaderMap::new();
         first_headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("client-a"));
@@ -260,13 +342,7 @@ mod tests {
     async fn test_api_search_handlerはinvalid_client_idを無視して検索する() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let state = Arc::new(AppState::new_with_tokio_memo_fs(
-            AppMode::new_directory(dir.path()).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let state = create_directory_state(dir.path());
         let mut headers = HeaderMap::new();
         headers.insert(SEARCH_CLIENT_HEADER, HeaderValue::from_static("invalid/id"));
         let uri: Uri = "/api/search?q=needle".parse().unwrap();
@@ -283,13 +359,7 @@ mod tests {
     async fn test_api_search_handlerは全client_activeの上限到達時に429を返す() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "needle").unwrap();
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let state = Arc::new(AppState::new_with_tokio_memo_fs(
-            AppMode::new_directory(dir.path()).unwrap(),
-            false,
-            None,
-            tx,
-        ));
+        let state = create_directory_state(dir.path());
         let active_handles = (0..crate::server::state::MAX_SEARCH_GENERATION_CLIENTS)
             .map(|index| {
                 state
@@ -486,8 +556,14 @@ async fn api_search_handler(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    let query = search_query_from_uri(&uri)?;
     let client_id = search_client_id_from_headers(&headers);
+    let query = match search_query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => {
+            state.advance_existing_search_generation(client_id);
+            return Err(error);
+        }
+    };
     let client_sequence = client_id.and_then(|_| search_client_sequence_from_headers(&headers));
     let response = service::search(
         &state,

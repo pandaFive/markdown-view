@@ -528,6 +528,125 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('notes.md');
 });
 
+test('ディレクトリ検索APIへタブ内クライアントIDを送る', async ({ page }) => {
+  const clientIds: string[] = [];
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    clientIds.push(route.request().headers()['x-markdown-view-search-client'] || '');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0,
+        truncated: false,
+        truncated_reasons: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha beta</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => clientIds.length).toBe(1);
+  await setDocumentSearchQuery(page, 'beta');
+  await expect.poll(() => clientIds.length).toBe(2);
+
+  expect(clientIds[0]).toMatch(/^tab-[a-z0-9]+-[a-z0-9]+$/);
+  expect(clientIds[1]).toBe(clientIds[0]);
+
+  await page.reload();
+  await stabilizeWebSocketHarness(page);
+  await loadSearchFixture(page);
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Gamma delta</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'gamma');
+  await expect.poll(() => clientIds.length).toBe(3);
+  expect(clientIds[2]).toBe(clientIds[0]);
+});
+
+test('ディレクトリ検索APIのクライアントIDは複製タブ相当では再発行する', async ({ page, context }) => {
+  const firstClientIds: string[] = [];
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    firstClientIds.push(route.request().headers()['x-markdown-view-search-client'] || '');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0,
+        truncated: false,
+        truncated_reasons: []
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+  });
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => firstClientIds.length).toBe(1);
+  const copiedClientId = await page.evaluate(() => {
+    return window.sessionStorage.getItem('markdown-view.directorySearchClientId');
+  });
+  expect(copiedClientId).toBe(firstClientIds[0]);
+  if (copiedClientId === null) {
+    throw new Error('directory search client ID was not stored');
+  }
+
+  const copiedPage = await context.newPage();
+  const copiedClientIds: string[] = [];
+  await copiedPage.addInitScript(installTestWebSocketHarness, { setE2EFlag: true });
+  await copiedPage.addInitScript((clientId) => {
+    window.sessionStorage.setItem('markdown-view.directorySearchClientId', clientId);
+  }, copiedClientId);
+  await copiedPage.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    copiedClientIds.push(route.request().headers()['x-markdown-view-search-client'] || '');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0,
+        truncated: false,
+        truncated_reasons: []
+      })
+    });
+  });
+
+  await copiedPage.goto('/');
+  await stabilizeWebSocketHarness(copiedPage);
+  await loadSearchFixture(copiedPage);
+  await copiedPage.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+  });
+  await setDocumentSearchQuery(copiedPage, 'alpha');
+
+  await expect.poll(() => copiedClientIds.length).toBe(1);
+  expect(copiedClientIds[0]).toMatch(/^tab-[a-z0-9]+-[a-z0-9]+$/);
+  expect(copiedClientIds[0]).not.toBe(firstClientIds[0]);
+});
+
 test('ディレクトリ検索の不正な成功応答は検索エラーとして表示する', async ({ page }) => {
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({

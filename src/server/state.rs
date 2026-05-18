@@ -452,6 +452,23 @@ impl AppState {
         Ok(SearchGeneration::new(generation, current))
     }
 
+    /// 既存クライアントの検索世代だけを進める。
+    pub(crate) fn advance_existing_search_generation(&self, client_id: Option<&str>) -> bool {
+        let Some(client_id) = client_id else {
+            return false;
+        };
+
+        let mut store = self.lock_search_generations();
+        let last_used = store.next_order();
+        let Some(entry) = store.entries.get_mut(client_id) else {
+            return false;
+        };
+
+        entry.last_used = last_used;
+        entry.current.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
     /// 指定クライアントの現在のディレクトリ検索世代を返す。
     #[cfg(test)]
     pub(crate) fn current_search_generation(&self, client_id: &str) -> u64 {
