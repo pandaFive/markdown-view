@@ -1,6 +1,6 @@
 # AppMode TOCTOU Backlog Completion Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
+> **Execution record:** This plan has already been executed. Do not re-run the steps in this document. If follow-up work is needed, inspect the current worktree, get explicit user approval for any git mutation, and create a new plan.
 
 **Goal:** 現行 `AppMode` の metadata 起点判定を検証し、stale になっている `docs/todo/BACKLOG.md` の P2 項目を Done へ移す。
 
@@ -30,7 +30,7 @@
 
 - [x] **Step 1: 作業ブランチを確認する**
 
-Run:
+Executed command:
 
 ```bash
 git status --short --branch
@@ -124,11 +124,11 @@ rg -n "TB[D]|TO[D]O|未[定]|要[確]認" docs/superpowers/specs/2026-05-19-appm
 
 Expected: 0 matches。既存文脈として意図的な hit がある場合は、今回追加した文言ではないことを確認して最終報告に残す。
 
-Result: 3 hits。いずれも既存 `docs/todo/BACKLOG.md` 冒頭の `TODO.md` 参照のみで、今回追加した文言ではない。
+Result: 5 hits。内訳は、既存 `docs/todo/BACKLOG.md` 冒頭の `TODO.md` 参照3件と、この実行記録内の `TODO.md` 参照2件。今回追加した未解決 marker ではない。
 
 - [x] **Step 9: repository 標準検証を実行する**
 
-Run:
+Executed command:
 
 ```bash
 ./verify.sh
@@ -138,9 +138,9 @@ Expected: PASS。失敗する場合は、今回の `BACKLOG.md` 更新と関係�
 
 Result: PASS。`./verify.sh` は正常完了した。
 
-- [x] **Step 10: 変更をコミットする**
+- [x] **Step 10: 変更をコミットした**
 
-Run:
+Executed command:
 
 ```bash
 git add docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-appmode-toctou-backlog-completion.md
@@ -154,6 +154,6 @@ Result: commit `2afbaeb` を作成済み。
 ## Self-Review
 
 - Spec coverage: 承認済み spec のゴール、非ゴール、受け入れ条件、検証、セキュリティ考慮、影響範囲、ロールバックは Task 1 の各 step で扱い、実行済みとしてチェック済み。
-- Placeholder scan: plan 内では unresolved placeholder を使わず、検出コマンド内の語は bracket pattern で自己一致を避けている。実行結果として 3 hits があったが、既存 `BACKLOG.md` 冒頭の `TODO.md` 参照のみで今回追加文ではないことを記録済み。
+- Placeholder scan: plan 内では unresolved placeholder を使わず、検出コマンド内の語は bracket pattern で自己一致を避けている。最終文書状態では 5 hits があり、既存 `BACKLOG.md` 冒頭の `TODO.md` 参照3件と、この実行記録内の `TODO.md` 参照2件であることを記録済み。
 - Type consistency: コード変更なし。参照する関数名とテスト名は現行 `src/server/state.rs` の名前に一致している。
 - Execution record: `cargo test --lib server::state`、根拠確認、placeholder scan、`./verify.sh`、commit 作成結果を各 step の `Result:` に記録済み。
