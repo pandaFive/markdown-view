@@ -18,13 +18,6 @@
   - 判断: キャンセル境界は実装済み。残件は効率化であり、計測なしのマイクロ最適化を避けるため BACKLOG P2 に残す
   - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界実装 (2026-05-18)
 
-- [ ] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
-  - ファイル: `src/server/state.rs` L18-24/L112/L132
-  - 現状: `CanonicalPath::try_from_path` で `canonicalize` した直後に `is_file()`/`is_dir()` で判定するが、両者の間に rename/unlink される race window がある。実害は起動時の `AppMode::new_*` のみで影響は小さい
-  - 対応: `metadata` を一度取得してから `is_file`/`is_dir` を判定し、race window を縮める。`AppModeBuildError` のメッセージも metadata 起点に整理
-  - 判断: path safety に関係するが起動時限定で影響が小さいため BACKLOG P2 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
-
 ## P3: 長期改善・低緊急
 
 - [ ] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
@@ -42,6 +35,9 @@
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
 ## Done
+
+- [x] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
+  - 完了根拠: `src/server/state.rs` は `CanonicalPath::try_from_path()` で canonicalize した後、`ensure_canonical_file()` / `ensure_canonical_directory()` が `metadata_for_mode()` 経由で取得した `Metadata` の `file_type()` から file / directory を判定している。canonicalize 後に対象が消えた場合も `NotFile` / `NotDirectory` へ集約することを unit test で固定済み。`.md` 拡張子チェック、canonical path 保持、base_dir / single_file / directory の公開契約、Host/Origin 検証、HTML sanitize、CSP、path validation は変更していない
 
 - [x] サイドバーの "Documents" fallback を日本語化
   - 完了根拠: `src/server/service.rs` の `sidebar_directory_name()` fallback を private 定数 `SIDEBAR_DIRECTORY_FALLBACK_NAME` 経由の `"ドキュメント"` に変更した。通常のディレクトリ名が取得できる場合は従来どおり実ディレクトリ名を使うことを unit test で固定した。i18n 基盤、UI 全体の文言、HTML sanitize、path validation は変更していない
