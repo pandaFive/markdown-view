@@ -116,7 +116,8 @@
 設計書自体は docs-only なので、TDD ではなく文書検証で確認する。
 
 ```bash
-rg -n "T[B]D|TO[D]O|未[定]" docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
+placeholder_matches="$(rg -n "T[B]D|TO[D]O|未[定]" docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md | rg -v 'T\[B\]D|TO\[D\]O|未\[定\]' || :)"
+test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 rg -n "目的|非目標|受け入れ基準|セキュリティ|影響範囲|ロールバック|見積もり" docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
 git diff -- docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
 ```

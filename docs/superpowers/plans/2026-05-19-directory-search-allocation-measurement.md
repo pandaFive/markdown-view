@@ -356,11 +356,15 @@ Run:
 rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
 placeholder_matches="$(rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]|rustc\[ \]version|cargo\[ \]version|OS\[ \]summary|elapsed\[ \]range|RSS\[ \]range' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
-rg -n "q=absentneedle|--fail-with-body|mktemp|RSS|git log --oneline -3|明示" docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md
-rg -n "Host|CSP|path validation|HTML sanitize|SearchResponse|検索キャンセル|検索上限" docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
+for pattern in 'q=absentneedle' '--fail-with-body' 'mktemp' 'RSS' 'git log --oneline -3' '明示'; do
+  rg -n --fixed-strings -- "$pattern" docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md >/dev/null
+done
+for pattern in 'Host' 'CSP' 'path validation' 'HTML sanitize' 'SearchResponse' '検索キャンセル' '検索上限'; do
+  rg -n --fixed-strings -- "$pattern" docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md >/dev/null
+done
 ```
 
-Expected: the first command may print known literal references such as `TODO.md` and the scan command itself. The second and third commands fail if any unknown placeholder remains after filtering known non-placeholder matches. The fourth command confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The fifth command confirms security boundaries remain documented.
+Expected: the first command may print known literal references such as `TODO.md` and the scan command itself. The second and third commands fail if any unknown placeholder remains after filtering known non-placeholder matches. The first loop confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The second loop confirms security boundaries remain documented. Either loop fails if any required item is missing.
 
 - [ ] **Step 3: Run docs-safe verification**
 
