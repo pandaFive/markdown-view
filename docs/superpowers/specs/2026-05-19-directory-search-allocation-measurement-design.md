@@ -2,7 +2,7 @@
 
 ## 背景
 
-`docs/todo/BACKLOG.md` の P2 には、ディレクトリ検索の allocation 削減を計測結果に基づいて検討する項目が残っている。
+`docs/todo/BACKLOG.md` の P2 には、ディレクトリ検索の allocation 削減を追加計測に基づいて再判断する項目が残っている。
 
 現状のディレクトリ検索は、`spawn_blocking` 隔離、検索結果数・対象ファイル数・総読込 byte 数・query 長の上限、クライアント単位の検索キャンセル境界、全体同時実行上限を持つ。安全境界と負荷上限は既に明示されているため、次に行うべきことは最適化そのものではなく、allocation 削減が実用上必要かどうかを測る判断材料を作ること。
 
@@ -32,32 +32,35 @@
 1. 検索コア寄りの傾向
    - `src/server/files/search.rs` の `extract_search_blocks()`、`find_matches_for_file()`、検索結果コンテキスト生成の影響を間接的に見る。
    - 関数は private のため、正式な bench harness は追加しない。
-   - 検索系 targeted tests を `/usr/bin/time -v` または shell の `time` で囲み、実行時間と最大 RSS の傾向を記録する。
+   - 検索系 targeted tests を `/usr/bin/time -v` で囲み、実行時間と最大 RSS の傾向を記録する。`/usr/bin/time -v` がない場合、shell の `time` は elapsed 補助に限定し、RSS は `ps` など別手段で記録する。
 2. HTTP 経由の実動作
    - 一時ディレクトリに小・中・大の Markdown fixture を作る。
    - `cargo run -- <dir> --port <port>` で localhost サーバを起動する。
-   - `curl /api/search?q=...` を複数回実行し、レスポンス時間、プロセス RSS、JSON の `searched_files`、`searched_bytes`、`truncated` を記録する。
+   - `curl --fail-with-body /api/search?q=...` を複数回実行し、HTTP status、レスポンス時間、サーバプロセス RSS 系列、JSON の `searched_files`、`searched_bytes`、`truncated`、`truncated_reasons` を記録する。
+   - `q=needle` の result-limit 経路と、`q=absentneedle` の full-scan 経路を分けて観測する。
 
-`hyperfine` が利用可能なら反復実行の補助として使ってよい。ただし必須ツールにはしない。`/usr/bin/time -v` がない環境では、shell の `time`、`ps`、`cargo test`、`cargo run`、`curl` に落とす。
+`hyperfine` が利用可能なら反復実行の補助として使ってよい。ただし必須ツールにはしない。`/usr/bin/time -v` がない環境では、shell の `time`、`ps`、`cargo test`、`cargo run`、`curl` に落とす。RSS を測れない場合は、elapsed だけで最適化不要とは判断せず、計測不十分として保留する。
 
 ## 判断基準
 
-現状の検索上限内で明確な悪化が見えない場合は、最適化しない判断にする。特に、100 件結果上限、1000 ファイル上限、64 MiB 総読込上限、10 MiB 単一ファイル上限の範囲でレスポンス時間と RSS が実用範囲に収まるなら、`Cow<str>` 化や処理単位変更は YAGNI とする。
+計測対象と完了基準は、測定前に明示する。代表 fixture だけを測った場合は、その範囲での所見として扱い、100 件結果上限、1000 ファイル上限、64 MiB 総読込上限、10 MiB 単一ファイル上限すべてを検証したとは書かない。
+
+現状の検索上限近傍を含む計測で明確な悪化が見えない場合だけ、最適化しない判断にする。特に、複数ファイルに分散した 100 件 result-limit、64 MiB 近傍 full-scan または byte-limit 近傍、10 MiB 単一ファイルの範囲でレスポンス時間と RSS 系列が実用範囲に収まり、RSS が継続増加せず plateau するなら、`Cow<str>` 化や処理単位変更は YAGNI とする。
 
 次のいずれかが観測された場合だけ、後続の最適化タスクを検討する。
 
 - 大きくない fixture でも `/api/search` のレスポンス時間が体感上問題になる。
-- `searched_bytes` に対して RSS 増加が不自然に大きい。
+- `searched_bytes` に対して RSS 増加が不自然に大きい、または反復実行で plateau せず増え続ける。
 - 結果数上限 100 件付近で `before/current/after` や `file` の重複文字列生成が支配的と判断できる。
 - 検索コア寄りの targeted tests と HTTP 経由の両方で同じボトルネック傾向が見える。
 
-判断を保留する場合は、保留理由と追加で必要な計測を `BACKLOG.md` に短く残す。
+判断を保留する場合は、保留理由と追加で必要な計測を `BACKLOG.md` に短く残す。HTTP status、JSON 形状、RSS 系列、result-limit / full-scan のどれかが欠けている場合も保留する。
 
 ## エラー処理
 
 計測補助ツールがない場合は代替コマンドへ落とす。利用できないツールを理由に作業を失敗扱いにしない。
 
-計測中に `/api/search` が 400、429、500 を返した場合は、まず query、Host、検索対象ディレクトリ、既存の検索上限到達を確認する。検索機能の実装変更は行わず、計測条件の問題として切り分ける。
+計測中に `/api/search` が 400、429、500 を返した場合、または必須 JSON field が欠ける場合は、まず query、Host、検索対象ディレクトリ、既存の検索上限到達を確認する。検索機能の実装変更は行わず、計測条件の問題として切り分け、判断は保留する。
 
 数値は環境依存として扱い、OS、ビルド種別、fixture 内容、実行コマンド、反復回数をセットで記録する。単一回の数値だけで構造変更を決めない。
 
@@ -74,6 +77,8 @@
 - 計測手順が依存追加なしで再実行できる形で文書化されている。
 - 検索コア寄りと HTTP 経由の両方について、何を観測するかが明確になっている。
 - fixture の規模と意図が文書化されている。
+- HTTP status、必須 JSON field、elapsed、サーバ RSS 系列の扱いが明確になっている。
+- RSS を測れない場合や上限近傍を測れていない場合に、最適化不要として Done 化しない方針が明確になっている。
 - 観測値をどう判断するかが明確になっている。
 - 最適化する、最適化しない、または保留する判断を `BACKLOG.md` または関連 docs に残す方針がある。
 - コード、API、UI、セキュリティ境界を変更しない。
