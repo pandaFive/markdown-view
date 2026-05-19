@@ -80,10 +80,10 @@ Run:
 ```bash
 rustc --version
 cargo --version
-uname -a
+uname -srmo
 ```
 
-Expected: each command prints one line. Copy the Rust version, Cargo version, OS/kernel summary, and date into the measurement note added in Task 4.
+Expected: each command prints one line. Copy the Rust version, Cargo version, OS/kernel summary, and date into the measurement note added in Task 4. Do not copy hostname, local username, or absolute local paths into docs.
 
 ### Task 2: Search-Test Measurement
 
@@ -180,7 +180,7 @@ In a second terminal/session, run:
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
-Expected: identify the `markdown-view` process whose args contain `--port 3019` and `SEARCH_FIXTURE_DIR`. Record its PID and RSS as the pre-search server RSS. If the process cannot be identified unambiguously, stop.
+Expected: identify the `markdown-view` process whose args contain `--port 3019` and the actual directory path printed as `SEARCH_FIXTURE_DIR` in Step 1. Record only its PID and RSS as the pre-search server RSS; do not paste full `ps` output or absolute local paths into docs. If the process cannot be identified unambiguously, stop.
 
 - [ ] **Step 4: Smoke-test result-limit `/api/search` and capture response contract**
 
@@ -197,20 +197,20 @@ Expected: `http_code=200`, JSON response includes `searched_files`, `searched_by
 Run:
 
 ```bash
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-result-limit-1.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-result-limit-2.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-result-limit-3.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-1.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-2.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-3.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
 ```
 
-Expected: all three commands exit successfully, each prints `http_code=200`, and each saved response contains `searched_files`, `searched_bytes`, `truncated`, and `truncated_reasons`. Record elapsed time and response size for each run. Ignore `curl` maximum RSS for server memory judgment because it measures the client process. If any HTTP status is not 200 or any required JSON field is absent, treat the measurement as inconclusive and keep the backlog item open.
+Expected: all three commands exit successfully, each prints `http_code=200`, and each saved response under `SEARCH_FIXTURE_DIR` contains `searched_files`, `searched_bytes`, `truncated`, and `truncated_reasons`. Record elapsed time and response size for each run. Ignore `curl` maximum RSS for server memory judgment because it measures the client process. If any HTTP status is not 200 or any required JSON field is absent, treat the measurement as inconclusive and keep the backlog item open.
 
 - [ ] **Step 6: Smoke-test full-scan `/api/search` and capture response contract**
 
 Run:
 
 ```bash
-curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-fullscan-smoke.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
-rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' /tmp/markdown-view-search-allocation-fullscan-smoke.json
+curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-smoke.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
+rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$SEARCH_FIXTURE_DIR/fullscan-smoke.json"
 ```
 
 Expected: `http_code=200`, `searched_files=260`, `truncated=false`, `truncated_reasons=[]`, and a nonzero `searched_bytes`. Record the response size and searched byte count.
@@ -220,15 +220,15 @@ Expected: `http_code=200`, `searched_files=260`, `truncated=false`, `truncated_r
 Run:
 
 ```bash
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-fullscan-1.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-1.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
 ps -o pid,rss,comm,args -C markdown-view
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-fullscan-2.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-2.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
 ps -o pid,rss,comm,args -C markdown-view
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o /tmp/markdown-view-search-allocation-fullscan-3.json -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
+/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-3.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
-Expected: all three timed commands exit successfully, each prints `http_code=200`, and each saved response contains `searched_files=260`, `truncated=false`, and `truncated_reasons=[]`. Record elapsed time, response size, and the `--port 3019` server RSS after each run. If server RSS keeps increasing and no plateau is observed, record the measurement as incomplete and leave a follow-up instead of Done.
+Expected: all three timed commands exit successfully, each prints `http_code=200`, and each saved response under `SEARCH_FIXTURE_DIR` contains `searched_files=260`, `truncated=false`, and `truncated_reasons=[]`. Record elapsed time, response size, and the `--port 3019` server RSS after each run. Record only PID/RSS from `ps`; do not paste full `args` or absolute local paths into docs. If server RSS keeps increasing and no plateau is observed, record the measurement as incomplete and leave a follow-up instead of Done.
 
 - [ ] **Step 8: Record final server RSS**
 
@@ -238,7 +238,7 @@ Run:
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
-Expected: identify the `--port 3019` process and record final RSS in KiB. If more than one `markdown-view` appears, do not touch pre-existing processes.
+Expected: identify the `--port 3019` process and record final RSS in KiB. Record only the PID/RSS needed for the measurement. If more than one `markdown-view` appears, do not touch pre-existing processes.
 
 - [ ] **Step 9: Stop the server and confirm the fixture is not tracked**
 
@@ -250,7 +250,7 @@ Run:
 git status --short
 ```
 
-Expected: no fixture files appear because they are under `/tmp`. If only docs files appear later after Task 4, that is expected. Remove the `SEARCH_FIXTURE_DIR` only after confirming it is the directory created by `mktemp -d` in this task.
+Expected: no fixture or response files appear because they are under `SEARCH_FIXTURE_DIR` in `/tmp`. If only docs files appear later after Task 4, that is expected. Remove the `SEARCH_FIXTURE_DIR` only after confirming it is the directory created by `mktemp -d` in this task.
 
 ### Task 4: Backlog Decision Update
 
@@ -339,11 +339,12 @@ Run:
 
 ```bash
 rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
+rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]|rustc\[ \]version|cargo\[ \]version|OS\[ \]summary|elapsed\[ \]range|RSS\[ \]range' || true
 rg -n "q=absentneedle|--fail-with-body|mktemp|RSS|git log --oneline -3|明示" docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md
 rg -n "Host|CSP|path validation|HTML sanitize|SearchResponse|検索キャンセル|検索上限" docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
 ```
 
-Expected: the first command prints no unresolved placeholders introduced by this work; existing literal links such as `TODO.md` are acceptable if they are not placeholders. The second command confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The third command confirms security boundaries remain documented.
+Expected: the first command may print known literal references such as `TODO.md` and the scan command itself. The second command filters those known non-placeholder matches and should print no output. The third command confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The fourth command confirms security boundaries remain documented.
 
 - [ ] **Step 3: Run docs-safe verification**
 
