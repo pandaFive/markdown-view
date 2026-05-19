@@ -60,7 +60,7 @@ Run:
 command -v /usr/bin/time
 command -v curl
 command -v ps
-command -v hyperfine
+command -v hyperfine || printf 'hyperfine unavailable\n'
 ```
 
 Expected:
@@ -71,7 +71,7 @@ Expected:
 /usr/bin/ps
 ```
 
-`hyperfine` may be absent. If absent, use repeated `/usr/bin/time -v` and shell loops.
+`hyperfine` may print either its path or `hyperfine unavailable`. If absent, use repeated `/usr/bin/time -v` and shell loops.
 
 - [ ] **Step 3: Record environment summary for the backlog note**
 
@@ -160,13 +160,15 @@ Expected:
 260
 ```
 
-`du -sh` prints the fixture size. Record `SEARCH_FIXTURE_DIR` and the size. Do not delete or overwrite a fixed `/tmp` path.
+`du -sh` prints the fixture size. Keep the exact `SEARCH_FIXTURE_DIR` local-only for later commands. In docs, record only the fixture pattern, file count, and size; if the path must be mentioned, redact it as `/tmp/markdown-view-search-allocation-fixture.***`. Do not delete or overwrite a fixed `/tmp` path.
 
 - [ ] **Step 2: Start the preview server on a local test port**
 
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 cargo run -- "$SEARCH_FIXTURE_DIR" --port 3019
 ```
 
@@ -177,6 +179,9 @@ Expected: server starts and listens on `127.0.0.1:3019`. Keep this process runni
 In a second terminal/session, run:
 
 ```bash
+export SEARCH_FIXTURE_DIR='<printed local path from Step 1>'
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
@@ -187,6 +192,8 @@ Expected: identify the `markdown-view` process whose args contain `--port 3019` 
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
 ```
 
@@ -197,6 +204,8 @@ Expected: `http_code=200`, JSON response includes `searched_files`, `searched_by
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 /usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-1.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
 /usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-2.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
 /usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/result-limit-3.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=needle'
@@ -209,6 +218,8 @@ Expected: all three commands exit successfully, each prints `http_code=200`, and
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-smoke.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
 rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$SEARCH_FIXTURE_DIR/fullscan-smoke.json"
 ```
@@ -220,6 +231,8 @@ Expected: `http_code=200`, `searched_files=260`, `truncated=false`, `truncated_r
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 /usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-1.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
 ps -o pid,rss,comm,args -C markdown-view
 /usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/fullscan-2.json" -H 'Host: 127.0.0.1:3019' 'http://127.0.0.1:3019/api/search?q=absentneedle'
@@ -235,6 +248,8 @@ Expected: all three timed commands exit successfully, each prints `http_code=200
 Run:
 
 ```bash
+test -n "${SEARCH_FIXTURE_DIR:-}"
+test -d "$SEARCH_FIXTURE_DIR"
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
@@ -250,7 +265,7 @@ Run:
 git status --short
 ```
 
-Expected: no fixture or response files appear because they are under `SEARCH_FIXTURE_DIR` in `/tmp`. If only docs files appear later after Task 4, that is expected. Remove the `SEARCH_FIXTURE_DIR` only after confirming it is the directory created by `mktemp -d` in this task.
+Expected: no fixture or response files appear because they are under `SEARCH_FIXTURE_DIR` in `/tmp`. If only docs files appear later after Task 4, that is expected. Remove the `SEARCH_FIXTURE_DIR` only after confirming it is the directory created by `mktemp -d` in this task. Do not record the exact local directory path in committed docs.
 
 ### Task 4: Backlog Decision Update
 
@@ -339,12 +354,13 @@ Run:
 
 ```bash
 rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
-rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]|rustc\[ \]version|cargo\[ \]version|OS\[ \]summary|elapsed\[ \]range|RSS\[ \]range' || true
+placeholder_matches="$(rg -n "T[B]D|TO[D]O|未[定]|rustc[ ]version|cargo[ ]version|OS[ ]summary|elapsed[ ]range|RSS[ ]range" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]|rustc\[ \]version|cargo\[ \]version|OS\[ \]summary|elapsed\[ \]range|RSS\[ \]range' || :)"
+test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 rg -n "q=absentneedle|--fail-with-body|mktemp|RSS|git log --oneline -3|明示" docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md
 rg -n "Host|CSP|path validation|HTML sanitize|SearchResponse|検索キャンセル|検索上限" docs/todo/BACKLOG.md docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md
 ```
 
-Expected: the first command may print known literal references such as `TODO.md` and the scan command itself. The second command filters those known non-placeholder matches and should print no output. The third command confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The fourth command confirms security boundaries remain documented.
+Expected: the first command may print known literal references such as `TODO.md` and the scan command itself. The second and third commands fail if any unknown placeholder remains after filtering known non-placeholder matches. The fourth command confirms the plan includes the full-scan path, HTTP failure handling, unique fixture directory, RSS handling, and explicit approval/commit status references. The fifth command confirms security boundaries remain documented.
 
 - [ ] **Step 3: Run docs-safe verification**
 
