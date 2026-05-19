@@ -11,6 +11,8 @@ use super::messages::{ApiError, BroadcastMessage};
 use super::state::{AppState, SearchConcurrencyLimitError, SearchGenerationLimitError};
 use crate::template::{MemoResponse, MemoUpdateMessage, UpdateMessage};
 
+const SIDEBAR_DIRECTORY_FALLBACK_NAME: &str = "ドキュメント";
+
 /// indexページ表示に必要な対象ファイル指定。
 pub(super) struct PageRequest<'a> {
     pub file: Option<&'a str>,
@@ -76,7 +78,7 @@ fn sidebar_directory_name(state: &AppState) -> &str {
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or("Documents")
+        .unwrap_or(SIDEBAR_DIRECTORY_FALLBACK_NAME)
 }
 
 fn title_for_path(path: &std::path::Path) -> String {
@@ -838,6 +840,30 @@ mod tests {
     #[test]
     fn test_sidebar_view_single_fileを作れる() {
         assert_eq!(SidebarView::single_file(), SidebarView::SingleFile);
+    }
+
+    #[test]
+    fn test_sidebar_directory_name_fallbackは日本語名を返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .ancestors()
+            .last()
+            .expect("root directory should exist");
+        let state = create_directory_state(root);
+
+        assert_eq!(sidebar_directory_name(&state), "ドキュメント");
+    }
+
+    #[test]
+    fn test_sidebar_directory_nameは通常ディレクトリ名を使う() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = create_directory_state(dir.path());
+
+        assert_eq!(
+            sidebar_directory_name(&state),
+            dir.path().file_name().unwrap().to_str().unwrap()
+        );
     }
 
     #[test]

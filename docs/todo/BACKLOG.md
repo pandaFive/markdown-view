@@ -4,7 +4,7 @@
 未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
 最終整理: 2026-05-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
-完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) に移動した。
+過去の完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) に移動した。
 レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
 ## P1: リスク低減・契約明文化
@@ -30,16 +30,9 @@
 - [ ] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
   - ファイル: `src/server/guards.rs`
   - 現状: PR #123 で Host middleware 後段に到達した Host 系 `WsOriginRejection` を `error!` ログとして観測できるようにした。個人向け localhost ツールとしてはログで十分だが、本格運用や継続監視を想定するなら、発生回数をメトリクスやカウンタとして扱う余地がある
-  - 対応: 実運用で bypass 兆候を集計する必要が出た場合のみ、軽量なカウンタや structured logging 連携を検討する。現時点では依存追加やメトリクス基盤導入は YAGNI とする
+  - 対応: 実運用で bypass 兆候を継続集計する必要が出た場合のみ、軽量なカウンタや structured logging 連携を検討する。現時点では既存の `error!` ログ、`ws_rejection_class`、`host_recheck_anomaly` field で異常兆候を確認でき、依存追加やメトリクス基盤導入は YAGNI とする
   - 判断: 既に error ログがあり、メトリクス基盤は実運用要求が出てからでよいため BACKLOG P3 に残す
   - 由来: PR #123 レビュー follow-up (2026-05-04)
-
-- [ ] サイドバーの "Documents" 文字列を i18n または日本語化
-  - ファイル: `src/server/routes.rs` L33-41 (`sidebar_directory_name`)
-  - 現状: `unwrap_or("Documents")` で英語固定。日本語 UI でも同名が出る
-  - 対応: 日本語デフォルト（"ドキュメント"）にするか、ディレクトリ名取得失敗時のフォールバック挙動をコメントで明示
-  - 判断: UI 文言の局所改善であり、安全性や後続設計への影響は小さいため BACKLOG P3 に残す
-  - 由来: アーキテクチャレビュー (2026-04-30)
 
 - [ ] インラインブラウザJS の TS 化
   - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`
@@ -48,13 +41,12 @@
   - 判断: 型安全性の長期改善だが、Node 依存追加の設計判断が必要なため BACKLOG P3 に残す
   - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
 
-- [ ] `catalog.rs` のパス構築での Vec アロケーション削減
-  - ファイル: `src/server/files/catalog.rs`
-  - 現状: 相対パス構築で `components().map(...).collect::<Vec<_>>().join("/")` を使っている。上限 1000 件だが呼出あたり Vec アロケーションが発生する
-  - 対応: 計測または必要性確認のうえ、イテレータ駆動で直接 String を構築する（`itertools::Itertools::join()` もしくは手書き fold）
-  - 判断: マイクロ最適化であり、実装前に効果確認が必要なため BACKLOG P3 に残す
-  - 由来: PR #59 探索 (2026-04-18)
-
 ## Done
 
-完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) へ移動した。
+- [x] サイドバーの "Documents" fallback を日本語化
+  - 完了根拠: `src/server/service.rs` の `sidebar_directory_name()` fallback を private 定数 `SIDEBAR_DIRECTORY_FALLBACK_NAME` 経由の `"ドキュメント"` に変更した。通常のディレクトリ名が取得できる場合は従来どおり実ディレクトリ名を使うことを unit test で固定した。i18n 基盤、UI 全体の文言、HTML sanitize、path validation は変更していない
+
+- [x] `catalog.rs` の相対パス構築で中間 Vec allocation を避ける
+  - 完了根拠: `src/server/files/catalog.rs` に `relative_path_to_slash_string()` を追加し、catalog.rs の相対パス構築で `components().map(...).collect::<Vec<_>>().join("/")` を使わずに `/` 区切り文字列を構築するようにした。ファイル列挙の sort、件数上限、除外ルール、canonicalize 再検証、symlink handling は変更していない。helper の単一 component とネスト path の出力を unit test で固定した
+
+過去の完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) へ移動した。

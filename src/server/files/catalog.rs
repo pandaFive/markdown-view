@@ -106,6 +106,17 @@ struct CatalogTraversal<'a> {
     is_cancelled: &'a dyn Fn() -> bool,
 }
 
+fn relative_path_to_slash_string(relative: &Path) -> String {
+    let mut output = String::new();
+    for component in relative.components() {
+        if !output.is_empty() {
+            output.push('/');
+        }
+        output.push_str(&component.as_os_str().to_string_lossy());
+    }
+    output
+}
+
 fn list_markdown_files_recursive(
     traversal: &CatalogTraversal<'_>,
     current_dir: &Path,
@@ -212,12 +223,7 @@ fn list_markdown_files_recursive(
         {
             match display_path.strip_prefix(traversal.log_base_dir) {
                 Ok(relative) => {
-                    let relative_str = relative
-                        .components()
-                        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    files.push(relative_str);
+                    files.push(relative_path_to_slash_string(relative));
                     if files.len() >= traversal.max_files {
                         return Ok(());
                     }
@@ -379,5 +385,45 @@ pub(super) fn canonicalize_dir_for_cycle(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_path_to_slash_string;
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_relative_path_to_slash_stringはネストしたpathをslash区切りにする() {
+        let relative = Path::new("docs").join("guide").join("setup.md");
+
+        assert_eq!(
+            relative_path_to_slash_string(&relative),
+            "docs/guide/setup.md"
+        );
+    }
+
+    #[test]
+    fn test_relative_path_to_slash_stringは単一componentをそのまま返す() {
+        assert_eq!(
+            relative_path_to_slash_string(Path::new("README.md")),
+            "README.md"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_relative_path_to_slash_stringは非utf8_componentをlossy変換する() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let relative = PathBuf::from("docs").join(OsString::from_vec(b"bad-\xff.md".to_vec()));
+
+        assert_eq!(
+            relative_path_to_slash_string(&relative),
+            "docs/bad-\u{fffd}.md"
+        );
     }
 }
