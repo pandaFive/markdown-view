@@ -186,14 +186,14 @@ The resulting push section should look like this:
                 context.current,
                 context.after,
             ));
+            file_match_index += 1;
             if results.len() >= remaining_results {
                 break 'blocks;
             }
-            file_match_index += 1;
             search_start = normalized_match_end;
 ```
 
-Keep `file_match_index += 1` after the budget check. The returned result indexes remain `0..remaining_results-1`, and no later result needs an index when the function exits.
+Keep `file_match_index += 1` immediately after pushing the result. The returned result indexes remain `0..remaining_results-1`, and the budget check exits before scanning any later match.
 
 - [ ] **Step 3: Update the caller to pass remaining result capacity**
 
@@ -234,7 +234,7 @@ Expected: `test_search_directory_結果数上限到達を明示する` passes an
 
 - [ ] **Step 6: Commit the unit-level implementation**
 
-Run:
+After user approval to commit, run:
 
 ```bash
 git add src/server/files/search.rs
@@ -287,7 +287,7 @@ If the existing test is missing any of the expected assertions, add this exact a
 
 - [ ] **Step 4: Commit integration test changes only if the file changed**
 
-Run this only when `tests/integration/search.rs` was modified:
+After user approval to commit, run this only when `tests/integration/search.rs` was modified:
 
 ```bash
 git add tests/integration/search.rs
@@ -373,7 +373,7 @@ Expected: server starts and binds to `127.0.0.1:3017`. Keep this process running
 Run in another terminal/session:
 
 ```bash
-ps -o pid,rss,comm,args -C markdown-view
+ps -o pid,rss,comm -C markdown-view
 ```
 
 Expected: one `markdown-view` process for port 3017 is visible. Record only PID and RSS in docs; do not record full args.
@@ -410,7 +410,7 @@ Record elapsed and server RSS snapshots. Compare with the previous observation i
 Stop the `cargo run` process with `Ctrl-C`. Then run:
 
 ```bash
-ps -o pid,rss,comm,args -C markdown-view
+ps -o pid,rss,comm -C markdown-view
 ```
 
 Expected: no port 3017 measurement server remains. If another project server is still running, leave it alone.
@@ -453,7 +453,7 @@ Replace `<real-worktree-path>` with the active worktree path before running. Exp
 
 - [ ] **Step 3: Commit the docs update**
 
-Run:
+After user approval to commit, run:
 
 ```bash
 git add docs/todo/TODO.md

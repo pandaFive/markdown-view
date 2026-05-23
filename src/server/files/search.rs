@@ -60,8 +60,13 @@ fn notify_search_progress_for_test(relative: &str, searched_files: usize) {
 fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
 
 #[cfg(test)]
+type SearchContextBuildHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
 std::thread_local! {
     static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -78,8 +83,39 @@ fn search_context_build_count_for_test() -> usize {
 }
 
 #[cfg(test)]
+struct SearchContextBuildHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchContextBuildHookGuard {
+    fn drop(&mut self) {
+        SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_context_build_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchContextBuildHookGuard {
+    SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchContextBuildHookGuard
+}
+
+#[cfg(test)]
 fn notify_search_context_build_for_test() {
-    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+    let next_count = SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| {
+        let next_count = count.get() + 1;
+        count.set(next_count);
+        next_count
+    });
+    SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(next_count);
+        }
+    });
 }
 
 #[cfg(not(test))]
@@ -410,6 +446,10 @@ fn search_directory_with_limits_blocking(
         if cancellation.is_cancelled_after_files(stats.searched_files) {
             break;
         }
+        if results.len() >= limits.max_results {
+            stats.mark_truncated(SearchTruncationReason::Result);
+            break;
+        }
 
         let file_path = match resolve_file(base_path, &relative) {
             Ok(file_path) => file_path,
@@ -452,9 +492,23 @@ fn search_directory_with_limits_blocking(
         if cancellation.is_cancelled() {
             break;
         }
-        let blocks = extract_search_blocks(&markdown);
         let remaining_results = limits.max_results.saturating_sub(results.len());
-        let file_results = find_matches_for_file(&relative, &blocks, &query, remaining_results);
+        if remaining_results == 0 {
+            stats.mark_truncated(SearchTruncationReason::Result);
+            break;
+        }
+        let Some(blocks) =
+            extract_search_blocks_until_cancelled(&markdown, &|| cancellation.is_cancelled())
+        else {
+            break;
+        };
+        let Some(file_results) =
+            find_matches_for_file(&relative, &blocks, &query, remaining_results, &|| {
+                cancellation.is_cancelled()
+            })
+        else {
+            break;
+        };
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -528,7 +582,16 @@ fn file_too_large_error() -> std::io::Error {
     )
 }
 
+#[cfg(test)]
 fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
+    extract_search_blocks_until_cancelled(markdown, &|| false)
+        .expect("キャンセルなしの検索ブロック抽出は常に完了する")
+}
+
+fn extract_search_blocks_until_cancelled(
+    markdown: &str,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchBlockEntry>> {
     let mut blocks = Vec::new();
     let mut current_block = String::new();
     let mut block_depth = 0usize;
@@ -539,6 +602,10 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     let mut inline_html_depth = 0usize;
 
     for event in Parser::new_ext(markdown, markdown_options(MarkdownProfile::Search)) {
+        if is_cancelled() {
+            return None;
+        }
+
         match event {
             Event::Start(tag) => {
                 if matches!(tag, Tag::Item) {
@@ -655,7 +722,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
         finalize_search_block(&mut blocks, &current_block);
     }
 
-    blocks
+    Some(blocks)
 }
 
 fn should_capture_text(
@@ -760,9 +827,10 @@ fn find_matches_for_file(
     blocks: &[SearchBlockEntry],
     query: &str,
     remaining_results: usize,
-) -> Vec<SearchResultItem> {
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchResultItem>> {
     if remaining_results == 0 {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let mut results = Vec::new();
@@ -770,6 +838,9 @@ fn find_matches_for_file(
     let mut file_match_index = 0usize;
 
     'blocks: for (block_index, block) in blocks.iter().enumerate() {
+        if is_cancelled() {
+            return None;
+        }
         if block.text.is_empty() {
             continue;
         }
@@ -778,6 +849,9 @@ fn find_matches_for_file(
         let mut search_start = 0usize;
 
         while search_start <= normalized.normalized_text.len() {
+            if is_cancelled() {
+                return None;
+            }
             let Some(relative_index) =
                 normalized.normalized_text[search_start..].find(&normalized_query)
             else {
@@ -796,6 +870,9 @@ fn find_matches_for_file(
                 context.after,
             ));
             file_match_index += 1;
+            if is_cancelled() {
+                return None;
+            }
             if results.len() >= remaining_results {
                 break 'blocks;
             }
@@ -803,7 +880,7 @@ fn find_matches_for_file(
         }
     }
 
-    results
+    Some(results)
 }
 
 #[derive(Debug, Clone)]
@@ -1148,7 +1225,9 @@ mod tests {
             },
         ];
 
-        let results = find_matches_for_file("README.md", &blocks, "alpha note", usize::MAX);
+        let results =
+            find_matches_for_file("README.md", &blocks, "alpha note", usize::MAX, &|| false)
+                .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
@@ -1163,7 +1242,8 @@ mod tests {
             sentences: split_text_into_sentence_ranges(text),
         }];
 
-        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX);
+        let results =
+            find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX, &|| false).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
@@ -1182,7 +1262,7 @@ mod tests {
         }];
 
         let before_context_builds = reset_search_context_build_count_for_test();
-        let results = find_matches_for_file("many.md", &blocks, "needle", 3);
+        let results = find_matches_for_file("many.md", &blocks, "needle", 3, &|| false).unwrap();
         let context_builds = search_context_build_count_for_test() - before_context_builds;
 
         assert_eq!(results.len(), 3);
@@ -1201,9 +1281,16 @@ mod tests {
             sentences: split_text_into_sentence_ranges(block_text),
         }];
 
-        let results = find_matches_for_file("many.md", &blocks, "needle", 0);
+        let results = find_matches_for_file("many.md", &blocks, "needle", 0, &|| false).unwrap();
 
         assert!(results.is_empty());
+    }
+
+    fn repeated_needles(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn canonical_of(path: &Path) -> CanonicalPath {
@@ -1337,6 +1424,44 @@ mod tests {
         assert!(response.results.is_empty());
     }
 
+    #[test]
+    fn test_search_directory_ファイル内探索中にstale化したら部分結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        reset_search_context_build_count_for_test();
+        let _guard = set_search_context_build_hook_for_test(move |count| {
+            if count == 3 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(search_context_build_count_for_test(), 3);
+        assert_eq!(response.searched_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+    }
+
     #[tokio::test]
     async fn test_search_directory_通常検索は打ち切りなしの統計を返す() {
         let dir = tempfile::tempdir().unwrap();
@@ -1390,11 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_directory_結果数上限到達を明示する() {
         let dir = tempfile::tempdir().unwrap();
-        let markdown = (0..120)
-            .map(|index| format!("needle sentence {index}."))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
 
         let canonical = canonical_of(dir.path());
         let response = search_directory(&canonical, "needle", SearchCancellation::none(), None)
@@ -1408,6 +1529,67 @@ mod tests {
         );
         assert_eq!(response.results.len(), 100);
         assert_eq!(response.searched_files, 1);
+    }
+
+    #[test]
+    fn test_search_directory_残り結果件数だけ次ファイルのcontextを生成する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), repeated_needles(95)).unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_context_build_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(response.results.len(), 100);
+        assert_eq!(search_context_build_count_for_test(), 100);
+        assert_eq!(response.results[94].file, "a.md");
+        assert_eq!(response.results[95].file, "b.md");
+    }
+
+    #[test]
+    fn test_search_directory_結果上限0なら読込と解析を行わず打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_context_build_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 0,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert_eq!(search_context_build_count_for_test(), 0);
     }
 
     #[tokio::test]
