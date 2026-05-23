@@ -65,9 +65,20 @@ fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
 type SearchContextBuildHook = Box<dyn FnMut(usize)>;
 
 #[cfg(test)]
+type SearchBlockExtractHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
+type SearchBeforeResponseHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
 std::thread_local! {
     static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBlockExtractHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBeforeResponseHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -122,6 +133,80 @@ fn notify_search_context_build_for_test() {
 
 #[cfg(not(test))]
 fn notify_search_context_build_for_test() {}
+
+#[cfg(test)]
+struct SearchBlockExtractHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchBlockExtractHookGuard {
+    fn drop(&mut self) {
+        SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_block_extract_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchBlockExtractHookGuard {
+    SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(|count| count.set(0));
+    SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchBlockExtractHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_block_extract_for_test() {
+    let next_count = SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(|count| {
+        let next_count = count.get() + 1;
+        count.set(next_count);
+        next_count
+    });
+    SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(next_count);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_block_extract_for_test() {}
+
+#[cfg(test)]
+struct SearchBeforeResponseHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchBeforeResponseHookGuard {
+    fn drop(&mut self) {
+        SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_before_response_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchBeforeResponseHookGuard {
+    SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchBeforeResponseHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_before_response_for_test() {
+    SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_before_response_for_test() {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -216,10 +301,6 @@ impl SearchCancellation {
     }
 
     fn is_cancelled_after_files(&self, searched_files: usize) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-
         #[cfg(test)]
         {
             self.cancel_after_files_for_test
@@ -234,10 +315,6 @@ impl SearchCancellation {
     }
 
     fn is_cancelled_after_read(&self, read_files: usize) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-
         #[cfg(test)]
         {
             self.cancel_after_reads_for_test
@@ -445,6 +522,10 @@ fn search_directory_with_limits_blocking(
     }
 
     for relative in files.into_iter().take(limits.max_files) {
+        if cancellation.is_cancelled() {
+            results.clear();
+            break;
+        }
         if cancellation.is_cancelled_after_files(stats.searched_files) {
             break;
         }
@@ -479,6 +560,10 @@ fn search_directory_with_limits_blocking(
             }
         };
         read_files += 1;
+        if cancellation.is_cancelled() {
+            results.clear();
+            break;
+        }
         if cancellation.is_cancelled_after_read(read_files) {
             break;
         }
@@ -492,6 +577,7 @@ fn search_directory_with_limits_blocking(
         stats.searched_bytes += markdown.len();
         notify_search_progress_for_test(&relative, stats.searched_files);
         if cancellation.is_cancelled() {
+            results.clear();
             break;
         }
         let remaining_results = limits.max_results.saturating_sub(results.len());
@@ -503,6 +589,7 @@ fn search_directory_with_limits_blocking(
             extract_search_blocks_until_cancelled(&markdown, &|| cancellation.is_cancelled())
         else {
             log_search_cancelled("extract_blocks", &stats, results.len());
+            results.clear();
             break;
         };
         let Some(file_results) =
@@ -511,6 +598,7 @@ fn search_directory_with_limits_blocking(
             })
         else {
             log_search_cancelled("find_matches", &stats, results.len());
+            results.clear();
             break;
         };
         for item in file_results {
@@ -522,12 +610,20 @@ fn search_directory_with_limits_blocking(
         }
 
         if cancellation.is_cancelled_after_files(stats.searched_files) {
+            if cancellation.is_cancelled() {
+                results.clear();
+            }
             break;
         }
 
         if results.len() >= limits.max_results {
             break;
         }
+    }
+
+    notify_search_before_response_for_test();
+    if cancellation.is_cancelled() {
+        results.clear();
     }
 
     Ok(SearchResponse::from_parts(query, results, limits, stats))
@@ -616,6 +712,10 @@ fn extract_search_blocks_until_cancelled(
     let mut inline_html_depth = 0usize;
 
     for event in Parser::new_ext(markdown, markdown_options(MarkdownProfile::Search)) {
+        if is_cancelled() {
+            return None;
+        }
+        notify_search_block_extract_for_test();
         if is_cancelled() {
             return None;
         }
@@ -1566,6 +1666,31 @@ mod tests {
     }
 
     #[test]
+    fn test_search_directory_test用ファイル数limitは結果を破棄しない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle second").unwrap();
+        let canonical = canonical_of(dir.path());
+        let cancellation = SearchCancellation::cancel_after_files_for_test(1);
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+    }
+
+    #[test]
     fn test_search_directory_読込直後にキャンセルされたら解析へ進まない() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
@@ -1587,6 +1712,40 @@ mod tests {
 
         assert_eq!(response.searched_files, 0);
         assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_directory_応答構築直前にstaleなら結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        let _guard = set_search_before_response_hook_for_test(move || {
+            current.store(2, Ordering::Release);
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
     }
 
     #[traced_test]
@@ -1635,6 +1794,92 @@ mod tests {
         assert!(!logs_contain("many.md"));
     }
 
+    #[traced_test]
+    #[test]
+    fn test_search_directory_前ファイル結果があってもファイル内探索中staleなら結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        reset_search_context_build_count_for_test();
+        let _guard = set_search_context_build_hook_for_test(move |count| {
+            if count == 3 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(search_context_build_count_for_test(), 3);
+        assert_eq!(response.searched_files, 2);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(logs_contain("phase=find_matches"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("a.md"));
+        assert!(!logs_contain("b.md"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_ブロック抽出中staleなら蓄積済み結果も返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        let _block_guard = set_search_block_extract_hook_for_test(move |count| {
+            if count > 20 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 2);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(logs_contain("phase=extract_blocks"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("a.md"));
+        assert!(!logs_contain("b.md"));
+    }
+
     #[test]
     fn test_search_directory_巨大単一文many_matchのjson応答サイズを抑える() {
         let dir = tempfile::tempdir().unwrap();
@@ -1661,6 +1906,34 @@ mod tests {
             .results
             .iter()
             .all(|item| item.current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6));
+    }
+
+    #[test]
+    fn test_search_directory_マルチバイト巨大単一文many_matchのjson応答サイズを抑える() {
+        let dir = tempfile::tempdir().unwrap();
+        let block_text = format!("{}{}", "針".repeat(120), "語😀".repeat(10_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "針",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(json.len() < 360_000);
+        assert!(response
+            .results
+            .iter()
+            .all(|item| item.current.chars().count() <= MAX_SEARCH_CONTEXT_CHARS + 6));
     }
 
     #[tokio::test]

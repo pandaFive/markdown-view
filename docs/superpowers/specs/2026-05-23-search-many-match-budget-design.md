@@ -32,7 +32,7 @@
 
 外側の `search_directory_with_limits_blocking()` は従来どおり、`results.len() >= limits.max_results` になった時点で `SearchTruncationReason::Result` を付与して検索を終了する。これにより `truncated=true` と `truncated_reasons=["result_limit"]` の公開契約は維持される。
 
-今回の変更では result-limit 到達前の通常検索について `extract_search_blocks()` は全ブロック抽出のまま残す。stale cancellation 時だけは block 抽出中と file 内 match loop 中にも cancellation を伝播し、古い検索の部分結果を返さず中断する。実装後の 10MiB many-match 計測で改善が不十分な場合は、次段として検索処理の逐次化を別設計で扱う。
+今回の変更では result-limit 到達前の通常検索について `extract_search_blocks()` は全ブロック抽出のまま残す。stale cancellation 時だけは block 抽出中と file 内 match loop 中にも cancellation を伝播し、蓄積済み結果も含めて古い検索の部分結果を返さず中断する。実装後の 10MiB many-match 計測で改善が不十分な場合は、次段として検索処理の逐次化を別設計で扱う。
 
 ## コンポーネント
 
@@ -56,7 +56,7 @@ query 正規化、長すぎる query の 400、読込失敗ファイルの skip�
 
 予算 0 で `find_matches_for_file()` が呼ばれた場合は空結果を返す。これは異常ではなく、呼び出し側がすでに `max_results` に達している状態として扱う。
 
-stale cancellation で block 抽出または file 内 match loop を中断した場合は、古い検索の部分結果を返さず、query や本文断片を含まない debug log で観測可能にする。公開 JSON には cancellation 専用 field を追加しない。
+stale cancellation で block 抽出または file 内 match loop を中断した場合は、蓄積済み結果を破棄して古い検索の部分結果を返さず、query や本文断片を含まない debug log で観測可能にする。公開 JSON には cancellation 専用 field を追加しない。
 
 ## テスト
 
