@@ -18,27 +18,27 @@
 ## 非目標
 
 - 検索インデックスの導入。
-- `extract_search_blocks()` の逐次化または途中停止。
-- Markdown parser profile、検索対象ブロック、隣接 context の仕様変更。
+- result-limit 用の `extract_search_blocks()` 逐次化。
+- Markdown parser profile、検索対象ブロックの仕様変更。
 - `SearchResponse` JSON 形状の変更。
-- Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限、検索キャンセル境界の変更。
+- Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限の変更。
 - elapsed や RSS の固定閾値を CI に入れること。
 
 ## 設計
 
 `search_directory_with_limits_blocking()` は、現在の `results.len()` と `limits.max_results` から残り件数を計算し、`find_matches_for_file()` に渡す。
 
-`find_matches_for_file()` は `remaining_results: usize` を受け取り、生成済み件数が予算に達したら現在の match ループとブロックループを終了する。`remaining_results == 0` の場合は追加結果を生成せず、空の `Vec<SearchResultItem>` を返す。
+`find_matches_for_file()` は `remaining_results: usize` を受け取り、生成済み件数が予算に達したら現在の match ループとブロックループを終了する。`remaining_results == 0` の場合は追加結果を生成せず、空の `Vec<SearchResultItem>` を返す。各 result の `before` / `current` / `after` は検索 UI 用 snippet として上限内に切り詰め、巨大単一文の重複 clone で JSON 応答が肥大化しないようにする。
 
 外側の `search_directory_with_limits_blocking()` は従来どおり、`results.len() >= limits.max_results` になった時点で `SearchTruncationReason::Result` を付与して検索を終了する。これにより `truncated=true` と `truncated_reasons=["result_limit"]` の公開契約は維持される。
 
-今回の変更では `extract_search_blocks()` は全ブロック抽出のまま残す。最初の抑制対象は、必要数を超えた match/context 生成である。実装後の 10MiB many-match 計測で改善が不十分な場合は、次段としてブロック抽出の途中停止または検索処理の逐次化を別設計で扱う。
+今回の変更では result-limit 到達前の通常検索について `extract_search_blocks()` は全ブロック抽出のまま残す。stale cancellation 時だけは block 抽出中と file 内 match loop 中にも cancellation を伝播し、古い検索の部分結果を返さず中断する。実装後の 10MiB many-match 計測で改善が不十分な場合は、次段として検索処理の逐次化を別設計で扱う。
 
 ## コンポーネント
 
 - `src/server/files/search.rs`
   - `search_directory_with_limits_blocking()` がファイル内検索へ残り結果予算を渡す。
-  - `find_matches_for_file()` が予算を超えた match/context 生成を止める。
+  - `find_matches_for_file()` が予算を超えた match/context 生成を止め、巨大 context を bounded snippet として返す。
   - 既存の `SearchLimits`、`SearchStats`、`SearchTruncationReason` は変更しない。
 
 ## データフロー
@@ -46,8 +46,8 @@
 1. `/api/search` が query を受け取り、既存どおり directory search を開始する。
 2. `search_directory_with_limits_blocking()` が Markdown ファイルを列挙し、ファイルを読み込む。
 3. 読込後、`results.len()` から残り件数を計算する。
-4. `extract_search_blocks()` が検索対象ブロックを抽出する。
-5. `find_matches_for_file()` が残り件数まで match/context を生成する。
+4. `extract_search_blocks_until_cancelled()` が検索対象ブロックを抽出し、stale 化された検索では中断する。
+5. `find_matches_for_file()` が残り件数まで match/context snippet を生成し、stale 化された検索では中断する。
 6. 外側が結果を `results` に追加し、上限到達時に `result_limit` を記録して終了する。
 
 ## エラー処理
@@ -56,12 +56,16 @@ query 正規化、長すぎる query の 400、読込失敗ファイルの skip�
 
 予算 0 で `find_matches_for_file()` が呼ばれた場合は空結果を返す。これは異常ではなく、呼び出し側がすでに `max_results` に達している状態として扱う。
 
+stale cancellation で block 抽出または file 内 match loop を中断した場合は、古い検索の部分結果を返さず、query や本文断片を含まない debug log で観測可能にする。公開 JSON には cancellation 専用 field を追加しない。
+
 ## テスト
 
 CI に入れるテストは性能閾値ではなく構造確認にする。
 
 - `find_matches_for_file()` が `remaining_results` を超えて `SearchResultItem` を生成しないことを unit test で固定する。
 - 1つの巨大ブロック、または多数文に大量の `needle` がある場合でも、指定した予算件数だけ返ることを確認する。
+- 巨大単一文でも `before` / `current` / `after` が bounded snippet になり、serialized JSON が肥大化しないことを確認する。
+- block 抽出中と file 内 match loop 中の stale cancellation が中断され、ログで観測できることを確認する。
 - `search_directory_with_limits_blocking()` は `max_results` 到達時に `SearchTruncationReason::Result` を付け、`results.len() == max_results` を維持することを既存テストの補強で確認する。
 - テスト名は既存方針どおり日本語にする。
 
@@ -82,13 +86,15 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 
 許可 Host からの `/api/search` で可用性低下を起こせる点を今回の主リスクとして扱う。localhost-only 前提でも、巨大 many-match Markdown が開かれた状態で検索すると preview server の応答性を落とせるため、result-limit 到達後の不要な work を抑える。
 
-`127.0.0.1` binding、Host/Origin 検証、path validation、hidden/生成物ディレクトリ除外、ファイルサイズ上限、HTML sanitize、CSP、検索キャンセル境界、`SearchResponse` JSON 形状は変更しない。
+`127.0.0.1` binding、Host/Origin 検証、path validation、hidden/生成物ディレクトリ除外、ファイルサイズ上限、HTML sanitize、CSP、`SearchResponse` JSON 形状は変更しない。検索キャンセルは既存の stale generation を維持しつつ、block 抽出と file 内 match loop に追加伝播する。
 
 計測 fixture は固定文字列で生成する。外部文書、Issue、検索結果、LLM 出力をそのまま shell、SQL、policy、コードとして実行しない。計測記録には絶対パス、本文断片、full process args を残さない。
 
 ## 受け入れ基準
 
 - `find_matches_for_file()` が残り結果予算を受け取り、予算到達時に同一ファイル内探索を止める。
+- 巨大単一文でも検索結果 context が上限内の snippet になり、100 件返っても JSON 応答サイズが bounded になる。
+- stale cancellation が block 抽出中と file 内 match loop 中に効き、本文や query を漏らさない log で観測できる。
 - `/api/search` の JSON 契約と result/file/byte limit の意味が変わらない。
 - result-limit 到達時の `truncated_reasons=["result_limit"]` が維持される。
 - 10MiB 近傍 many-match の手元計測で、現状の 36-38 秒、約 0.9-1.3GiB RSS と比べて改善傾向が確認できる。

@@ -14,6 +14,8 @@ use crate::server::{CanonicalPath, SearchGeneration};
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
 const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEARCH_CONTEXT_CHARS: usize = 800;
+const SEARCH_CONTEXT_ELLIPSIS: &str = "...";
 pub(in crate::server) const MAX_SEARCH_QUERY_CHARS: usize = 256;
 const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
@@ -500,6 +502,7 @@ fn search_directory_with_limits_blocking(
         let Some(blocks) =
             extract_search_blocks_until_cancelled(&markdown, &|| cancellation.is_cancelled())
         else {
+            log_search_cancelled("extract_blocks", &stats, results.len());
             break;
         };
         let Some(file_results) =
@@ -507,6 +510,7 @@ fn search_directory_with_limits_blocking(
                 cancellation.is_cancelled()
             })
         else {
+            log_search_cancelled("find_matches", &stats, results.len());
             break;
         };
         for item in file_results {
@@ -547,6 +551,16 @@ fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
 
 fn log_safe_search_relative(relative: &str) -> String {
     relative.escape_debug().to_string()
+}
+
+fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: usize) {
+    tracing::debug!(
+        "[markdown-view] ディレクトリ検索がstale化したため中断しました: phase={} searched_files={} searched_bytes={} result_count={}",
+        phase,
+        stats.searched_files,
+        stats.searched_bytes,
+        result_count
+    );
 }
 
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
@@ -929,9 +943,9 @@ fn build_search_context(
         .unwrap_or(if block.sentences.is_empty() { -1 } else { 0 });
     let current = if sentence_index >= 0 {
         let range = &block.sentences[sentence_index as usize];
-        block.text[range.start..range.end].to_string()
+        clip_match_context(&block.text, range, match_start, match_end)
     } else {
-        block.text.trim().to_string()
+        clip_text_around_match(&block.text, match_start, match_end)
     };
 
     SearchContext {
@@ -967,7 +981,12 @@ fn get_adjacent_sentence(
         let entry = &blocks[target_block_index as usize];
         if target_sentence_index >= 0 && (target_sentence_index as usize) < entry.sentences.len() {
             let range = &entry.sentences[target_sentence_index as usize];
-            return entry.text[range.start..range.end].to_string();
+            let sentence = &entry.text[range.start..range.end];
+            return if direction < 0 {
+                clip_text_tail(sentence)
+            } else {
+                clip_text_head(sentence)
+            };
         }
 
         target_block_index += direction;
@@ -982,6 +1001,95 @@ fn get_adjacent_sentence(
     }
 
     String::new()
+}
+
+fn clip_match_context(
+    text: &str,
+    sentence_range: &Range<usize>,
+    match_start: usize,
+    match_end: usize,
+) -> String {
+    let sentence = &text[sentence_range.start..sentence_range.end];
+    let relative_match_start = match_start.saturating_sub(sentence_range.start);
+    let relative_match_end = match_end.saturating_sub(sentence_range.start);
+    clip_text_around_match(sentence, relative_match_start, relative_match_end)
+}
+
+fn clip_text_around_match(text: &str, match_start: usize, match_end: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+        return text.to_string();
+    }
+
+    let match_start = match_start.min(text.len());
+    let match_end = match_end.min(text.len()).max(match_start);
+    let before_match_chars = text[..match_start].chars().count();
+    let match_chars = text[match_start..match_end].chars().count();
+    let target_match_chars = match_chars.min(MAX_SEARCH_CONTEXT_CHARS);
+    let before_budget = (MAX_SEARCH_CONTEXT_CHARS - target_match_chars) / 2;
+    let mut start_char = before_match_chars.saturating_sub(before_budget);
+    let mut end_char = (start_char + MAX_SEARCH_CONTEXT_CHARS).min(total_chars);
+    let match_end_char = before_match_chars + match_chars;
+
+    if end_char < match_end_char {
+        end_char = match_end_char.min(total_chars);
+        start_char = end_char.saturating_sub(MAX_SEARCH_CONTEXT_CHARS);
+    }
+
+    clip_text_chars(text, start_char, end_char)
+}
+
+fn clip_text_head(text: &str) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+        return text.to_string();
+    }
+
+    let mut snippet = char_slice_to_string(text, 0, MAX_SEARCH_CONTEXT_CHARS);
+    snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    snippet
+}
+
+fn clip_text_tail(text: &str) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+        return text.to_string();
+    }
+
+    let mut snippet = String::from(SEARCH_CONTEXT_ELLIPSIS);
+    snippet.push_str(&char_slice_to_string(
+        text,
+        total_chars - MAX_SEARCH_CONTEXT_CHARS,
+        total_chars,
+    ));
+    snippet
+}
+
+fn char_slice_to_string(text: &str, start_char: usize, end_char: usize) -> String {
+    let start_byte = char_index_to_byte(text, start_char);
+    let end_byte = char_index_to_byte(text, end_char);
+    text[start_byte..end_byte].to_string()
+}
+
+fn clip_text_chars(text: &str, start_char: usize, end_char: usize) -> String {
+    let start_byte = char_index_to_byte(text, start_char);
+    let end_byte = char_index_to_byte(text, end_char);
+    let mut snippet = String::new();
+    if start_char > 0 {
+        snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    }
+    snippet.push_str(&text[start_byte..end_byte]);
+    if end_byte < text.len() {
+        snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    }
+    snippet
+}
+
+fn char_index_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .map(|(byte_index, _)| byte_index)
+        .nth(char_index)
+        .unwrap_or(text.len())
 }
 
 fn split_text_into_sentence_ranges(text: &str) -> Vec<Range<usize>> {
@@ -1047,6 +1155,8 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use tracing_test::traced_test;
 
     #[test]
     fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
@@ -1213,6 +1323,22 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_search_blocks_until_cancelled_途中staleならnoneを返す() {
+        let checks = Cell::new(0usize);
+
+        let blocks = extract_search_blocks_until_cancelled(
+            "# title\n\nfirst paragraph\n\nsecond paragraph",
+            &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 3
+            },
+        );
+
+        assert!(blocks.is_none());
+    }
+
+    #[test]
     fn test_find_matches_for_file_ローカル一致番号を維持する() {
         let blocks = vec![
             SearchBlockEntry {
@@ -1284,6 +1410,45 @@ mod tests {
         let results = find_matches_for_file("many.md", &blocks, "needle", 0, &|| false).unwrap();
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大currentはmatch周辺へ切り詰める() {
+        let block_text = format!("{}needle{}", "a".repeat(2_000), "b".repeat(2_000));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: split_text_into_sentence_ranges(&block_text),
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].current.len() < block_text.len());
+        assert!(results[0].current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6);
+        assert!(results[0].current.contains("needle"));
+        assert!(results[0].current.starts_with("..."));
+        assert!(results[0].current.ends_with("..."));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大before_afterを切り詰める() {
+        let before = "a".repeat(2_000);
+        let after = "b".repeat(2_000);
+        let block_text = format!("{before}.\nneedle.\n{after}.");
+        let blocks = vec![SearchBlockEntry {
+            text: block_text,
+            sentences: vec![0..2001, 2002..2009, 2010..4011],
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].before.len() <= MAX_SEARCH_CONTEXT_CHARS + 3);
+        assert!(results[0].after.len() <= MAX_SEARCH_CONTEXT_CHARS + 3);
+        assert!(results[0].before.starts_with("..."));
+        assert!(results[0].before.ends_with('.'));
+        assert!(results[0].after.starts_with('b'));
+        assert!(results[0].after.ends_with("..."));
     }
 
     fn repeated_needles(count: usize) -> String {
@@ -1424,6 +1589,7 @@ mod tests {
         assert!(response.results.is_empty());
     }
 
+    #[traced_test]
     #[test]
     fn test_search_directory_ファイル内探索中にstale化したら部分結果を返さない() {
         use std::sync::{
@@ -1460,6 +1626,41 @@ mod tests {
         assert_eq!(response.searched_files, 1);
         assert!(response.results.is_empty());
         assert!(!response.truncated);
+        assert!(logs_contain(
+            "ディレクトリ検索がstale化したため中断しました"
+        ));
+        assert!(logs_contain("phase=find_matches"));
+        assert!(logs_contain("searched_files=1"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("many.md"));
+    }
+
+    #[test]
+    fn test_search_directory_巨大単一文many_matchのjson応答サイズを抑える() {
+        let dir = tempfile::tempdir().unwrap();
+        let block_text = format!("{}{}", "needle".repeat(120), "a".repeat(20_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(json.len() < 120_000);
+        assert!(response
+            .results
+            .iter()
+            .all(|item| item.current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6));
     }
 
     #[tokio::test]
