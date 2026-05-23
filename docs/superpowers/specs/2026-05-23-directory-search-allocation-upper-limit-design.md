@@ -44,9 +44,9 @@
 
 3. 64 MiB 近傍 full-scan または byte-limit
    - `MAX_SEARCH_BYTES = 64 MiB` 近傍まで Markdown を読む fixture を作る。
-   - `q=absentneedle` で full-scan または byte-limit 到達を確認する。
+   - `q=missingneedle` のような no-match query で full-scan または byte-limit 到達を確認する。
    - `searched_bytes` が上限近傍であること、`truncated` と `truncated_reasons` が期待どおりであること、反復後 server RSS が継続増加しないことを記録する。
-   - fixture が 64 MiB を超え、既存 byte-limit で打ち切られる場合は `truncated_reasons=["byte_limit"]` を期待する。上限内に収める場合は `truncated=false` を期待する。どちらを選んだかを `BACKLOG.md` に明記する。
+   - fixture 自体が 64 MiB を超え、既存 byte-limit で約 64 MiB 読込後に打ち切られる場合は `truncated_reasons=["byte_limit"]` を期待する。上限内に収める場合は `truncated=false` を期待する。どちらを選んだかを `BACKLOG.md` に明記する。
 
 4. 10 MiB 単一ファイル
    - `MAX_FILE_SIZE` 近傍だが超えない単一 Markdown ファイルを作る。
@@ -123,6 +123,7 @@ Done 化できるのは、次をすべて満たす場合だけである。
 ## 残余リスク
 
 - RSS や elapsed は OS、CPU、ディスクキャッシュ、ビルド種別、同時実行中の別 process の影響を受ける。
+- `ps` による server RSS は request 後 snapshot であり、server process のリクエスト中 peak RSS ではない。後続再計測で peak が必要な場合は、対象 PID の短周期 sampling または server process を `/usr/bin/time -v` 配下で起動する。
 - private 関数単位の allocation 分解は行わないため、問題が見えた場合も追加設計が必要になる。
 - JSON 直列化では最終的に所有データが必要なため、局所的な `Cow<str>` 化が体感改善に効くとは限らない。
 - 今回問題が見えなくても、検索上限や UI 要件を将来変える場合は再計測が必要になる。

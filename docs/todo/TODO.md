@@ -13,6 +13,13 @@
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
 
+- [ ] ディレクトリ検索の 10MiB 近傍 many-match 経路を早期停止・処理単位見直しで抑制する
+  - ファイル: `src/server/files/search.rs`
+  - 現状: 2026-05-23 の上限近傍計測で、10MiB 近傍単一ファイル（1 file / 10388017 bytes）の many-match 経路は HTTP `q=needle` で `searched_files=1`, `searched_bytes=10388017`, `truncated=true`, `truncated_reasons=["result_limit"]`, response 39512 bytes, elapsed 36.73-38.37s, server RSS 887312 → 1329640 → 1186668 KiB になった。no-match 経路は elapsed 1.39-1.47s のため、巨大単一ブロック内の match/context 生成と result-limit 到達前の処理単位が主な疑い
+  - 対応: `Cow<str>` 化だけで完了扱いにせず、巨大単一ブロックで全 match / context を作る前に result-limit へ到達できる処理単位、検索ブロック分割、file 内 match 列挙の早期停止を設計する。単一巨大ブロックだけに過適合せず、複数 paragraph / heading / list を含む 10MiB 近傍 many-match fixture でも result-limit 前提の処理量に収まることを受け入れ条件に含める
+  - セキュリティ: localhost-only でも、許可 Host の `/api/search` GET で可用性低下を起こせるため Medium に昇格する。Host/Origin 検証、path validation、HTML sanitize、CSP、`SearchResponse` JSON、検索キャンセル境界、検索上限契約は維持する
+  - 由来: ディレクトリ検索 allocation 上限近傍計測 (2026-05-23)、multi-review follow-up (2026-05-23)
+
 ## Done Summary
 
 - [x] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化

@@ -250,7 +250,7 @@ Run:
 
 ```bash
 test -n "${SEARCH_FIXTURE_DIR:-}"
-cargo run -- "$SEARCH_FIXTURE_DIR/result-limit" --port 3023
+cargo run -- "$SEARCH_FIXTURE_DIR/result-limit" --port 3023 --no-open
 ```
 
 Expected: server starts and listens on `127.0.0.1:3023`. Keep this process running until Task 4 Step 6 completes.
@@ -270,9 +270,18 @@ Expected: identify the process whose args contain `--port 3023`. Record only PID
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
-curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/result-limit-smoke.json" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle'
-rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$SEARCH_FIXTURE_DIR/responses/result-limit-smoke.json"
+response="$SEARCH_FIXTURE_DIR/responses/result-limit-smoke.json"
+http_code="$(curl --fail-with-body -sS -w '%{http_code}' -o "$response" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle')"
+test "$http_code" = "200"
+for pattern in '"query":' '"results":' '"searched_files":' '"skipped_files":' '"truncated":' '"truncated_reasons":' '"limits":' '"max_results":100' '"max_files":1000' '"max_bytes":67108864' '"searched_bytes":'; do
+  rg --fixed-strings -- "$pattern" "$response" >/dev/null
+done
+for pattern in '"truncated":true' '"truncated_reasons":["result_limit"]' '"file":' '"file_match_index":' '"before":' '"current":' '"after":'; do
+  rg --fixed-strings -- "$pattern" "$response" >/dev/null
+done
+rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$response"
 ```
 
 Expected: `http_code=200`, `truncated=true`, and `truncated_reasons=["result_limit"]`. Record `searched_files` and `searched_bytes`.
@@ -282,8 +291,11 @@ Expected: `http_code=200`, `truncated=true`, and `truncated_reasons=["result_lim
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/result-limit-1.json" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle'
+curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/result-limit-1.json" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle' 2>&1)"
+printf '%s\n' "$curl_output"
+printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
@@ -294,9 +306,12 @@ Expected: `http_code=200`; record elapsed, response size, and `--port 3023` serv
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
 for n in 2 3 4 5; do
-  /usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/result-limit-$n.json" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle'
+  curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/result-limit-$n.json" -H 'Host: 127.0.0.1:3023' 'http://127.0.0.1:3023/api/search?q=needle' 2>&1)"
+  printf '%s\n' "$curl_output"
+  printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
   ps -o pid,rss,comm,args -C markdown-view
 done
 ```
@@ -328,7 +343,7 @@ Run:
 
 ```bash
 test -n "${SEARCH_FIXTURE_DIR:-}"
-cargo run -- "$SEARCH_FIXTURE_DIR/near-64m" --port 3024
+cargo run -- "$SEARCH_FIXTURE_DIR/near-64m" --port 3024 --no-open
 ```
 
 Expected: server starts and listens on `127.0.0.1:3024`. Keep this process running until Task 5 Step 6 completes.
@@ -348,9 +363,15 @@ Expected: identify the `--port 3024` process and record only PID/RSS.
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
-curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/near-64m-smoke.json" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle'
-rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$SEARCH_FIXTURE_DIR/responses/near-64m-smoke.json"
+response="$SEARCH_FIXTURE_DIR/responses/near-64m-smoke.json"
+http_code="$(curl --fail-with-body -sS -w '%{http_code}' -o "$response" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle')"
+test "$http_code" = "200"
+for pattern in '"query":' '"results":' '"searched_files":' '"skipped_files":' '"truncated":' '"truncated_reasons":' '"limits":' '"max_results":100' '"max_files":1000' '"max_bytes":67108864' '"searched_bytes":'; do
+  rg --fixed-strings -- "$pattern" "$response" >/dev/null
+done
+rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$response"
 ```
 
 Expected: `http_code=200`. If fixture size exceeds the 64 MiB byte limit, expect `truncated=true` and `truncated_reasons=["byte_limit"]`. If fixture size remains under the limit, expect `truncated=false` and `truncated_reasons=[]`. Record which branch occurred, plus `searched_files` and `searched_bytes`.
@@ -360,8 +381,11 @@ Expected: `http_code=200`. If fixture size exceeds the 64 MiB byte limit, expect
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
-/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/near-64m-1.json" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle'
+curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w 'http_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/near-64m-1.json" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle' 2>&1)"
+printf '%s\n' "$curl_output"
+printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
 ps -o pid,rss,comm,args -C markdown-view
 ```
 
@@ -372,9 +396,12 @@ Expected: `http_code=200`; record elapsed, response size, and `--port 3024` serv
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
 for n in 2 3 4 5; do
-  /usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/near-64m-$n.json" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle'
+  curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/near-64m-$n.json" -H 'Host: 127.0.0.1:3024' 'http://127.0.0.1:3024/api/search?q=missingneedle' 2>&1)"
+  printf '%s\n' "$curl_output"
+  printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
   ps -o pid,rss,comm,args -C markdown-view
 done
 ```
@@ -417,7 +444,7 @@ Run:
 
 ```bash
 test -n "${SEARCH_FIXTURE_DIR:-}"
-cargo run -- "$SEARCH_FIXTURE_DIR/single-10m" --port 3025
+cargo run -- "$SEARCH_FIXTURE_DIR/single-10m" --port 3025 --no-open
 ```
 
 Expected: server starts and listens on `127.0.0.1:3025`. Keep this process running until Task 6 Step 7 completes.
@@ -437,9 +464,18 @@ Expected: identify the `--port 3025` process and record only PID/RSS.
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
-curl --fail-with-body -sS -w '\nhttp_code=%{http_code} size=%{size_download}\n' -o "$SEARCH_FIXTURE_DIR/responses/single-10m-match-smoke.json" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=needle'
-rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$SEARCH_FIXTURE_DIR/responses/single-10m-match-smoke.json"
+response="$SEARCH_FIXTURE_DIR/responses/single-10m-match-smoke.json"
+http_code="$(curl --fail-with-body -sS -w '%{http_code}' -o "$response" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=needle')"
+test "$http_code" = "200"
+for pattern in '"query":' '"results":' '"searched_files":' '"skipped_files":' '"truncated":' '"truncated_reasons":' '"limits":' '"max_results":100' '"max_files":1000' '"max_bytes":67108864' '"searched_bytes":'; do
+  rg --fixed-strings -- "$pattern" "$response" >/dev/null
+done
+for pattern in '"truncated":true' '"truncated_reasons":["result_limit"]' '"file":' '"file_match_index":' '"before":' '"current":' '"after":'; do
+  rg --fixed-strings -- "$pattern" "$response" >/dev/null
+done
+rg -o '"searched_files":[0-9]+|"searched_bytes":[0-9]+|"truncated":(true|false)|"truncated_reasons":\[[^]]*\]' "$response"
 ```
 
 Expected: `http_code=200`; likely `truncated=true` and `truncated_reasons=["result_limit"]` because the single file contains many matches. Record `searched_files`, `searched_bytes`, `truncated`, and `truncated_reasons`.
@@ -449,9 +485,12 @@ Expected: `http_code=200`; likely `truncated=true` and `truncated_reasons=["resu
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
 for n in 1 2 3; do
-  /usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/single-10m-match-$n.json" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=needle'
+  curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/single-10m-match-$n.json" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=needle' 2>&1)"
+  printf '%s\n' "$curl_output"
+  printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
   ps -o pid,rss,comm,args -C markdown-view
 done
 ```
@@ -463,9 +502,12 @@ Expected: all three requests return `http_code=200`. Record elapsed range, respo
 Run:
 
 ```bash
+set -euo pipefail
 test -n "${SEARCH_FIXTURE_DIR:-}"
 for n in 1 2 3; do
-  /usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/single-10m-nomatch-$n.json" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=missingneedle'
+  curl_output="$(/usr/bin/time -v curl --fail-with-body -sS -w "http_code=%{http_code} size=%{size_download}\n" -o "$SEARCH_FIXTURE_DIR/responses/single-10m-nomatch-$n.json" -H 'Host: 127.0.0.1:3025' 'http://127.0.0.1:3025/api/search?q=missingneedle' 2>&1)"
+  printf '%s\n' "$curl_output"
+  printf '%s\n' "$curl_output" | rg --fixed-strings 'http_code=200' >/dev/null
   ps -o pid,rss,comm,args -C markdown-view
 done
 ```
@@ -487,6 +529,7 @@ Expected: no `--port 3025` process remains. Do not stop unrelated processes.
 ### Task 7: Backlog Decision Update
 
 **Files:**
+- Modify if many-match availability risk is observed: `docs/todo/TODO.md`
 - Modify: `docs/todo/BACKLOG.md`
 - Reference: `docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md`
 
@@ -500,7 +543,8 @@ If all four required areas are measured and practical:
 If any required area is not measured:
   Keep the item unchecked and name the exact missing measurement.
 If any measurement shows concrete risk:
-  Keep or split the item into a specific follow-up naming the suspected hotspot.
+  Promote the concrete availability/security-relevant risk to TODO.md Medium,
+  and keep measurement-only residuals in BACKLOG.md.
 If measurement is inconclusive:
   Keep the item unchecked with the exact inconclusive condition.
 ```
@@ -531,6 +575,7 @@ Apply this structure if any Done condition was not satisfied:
 ```
 
 Before saving, replace the Task-name wording with the actual measured values and concrete missing conditions so the committed `BACKLOG.md` is self-contained.
+If the 10 MiB near-limit many-match path shows multi-second latency or server RSS above practical localhost limits, add a Medium Priority item to `docs/todo/TODO.md` for that concrete availability risk, and leave `docs/todo/BACKLOG.md` focused on the 64 MiB RSS plateau measurement uncertainty.
 
 - [ ] **Step 4: Confirm docs-only change**
 
@@ -543,6 +588,7 @@ git diff --name-only
 Expected:
 
 ```text
+docs/todo/TODO.md
 docs/todo/BACKLOG.md
 docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md
 ```
@@ -552,15 +598,17 @@ If the design file is still uncommitted in the current execution context, it may
 ### Task 8: Verification And Commit
 
 **Files:**
+- Modify: `docs/todo/TODO.md`
 - Modify: `docs/todo/BACKLOG.md`
 - Modify: `docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md`
+- Modify if still uncommitted in the execution context: `docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md`
 
 - [ ] **Step 1: Run unfinished-marker scan**
 
 Run:
 
 ```bash
-unfinished_matches="$(rg -n "T[B]D|TO[D]O|未[定]" docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]' || :)"
+unfinished_matches="$(rg -n "T[B]D|TO[D]O|未[定]" docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]' || :)"
 test -z "$unfinished_matches" || { printf '%s\n' "$unfinished_matches"; exit 1; }
 ```
 
@@ -572,11 +620,11 @@ Run:
 
 ```bash
 for pattern in 'SearchResponse' 'Host/Origin' 'path validation' 'HTML sanitize' 'CSP' '検索キャンセル' '検索上限'; do
-  rg -n --fixed-strings -- "$pattern" docs/todo/BACKLOG.md >/dev/null
+  rg -n --fixed-strings -- "$pattern" docs/todo/TODO.md docs/todo/BACKLOG.md >/dev/null
 done
 ```
 
-Expected: command exits successfully. If it fails, update `BACKLOG.md` so the unchanged security and API boundaries are explicit.
+Expected: command exits successfully. If it fails, update `TODO.md` or `BACKLOG.md` so the unchanged security and API boundaries are explicit.
 
 - [ ] **Step 3: Check whitespace and diff**
 
@@ -584,31 +632,31 @@ Run:
 
 ```bash
 git diff --check
-git diff -- docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md
+git diff -- docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md
 ```
 
-Expected: no whitespace errors. Diff should only contain the plan and the backlog decision update.
+Expected: no whitespace errors. Diff should only contain the Medium item addition, plan, design note if still uncommitted, and the backlog decision update.
 
 - [ ] **Step 4: Confirm no source changes**
 
 Run:
 
 ```bash
-git diff --name-only | rg '^(src|tests|Cargo\.toml|Cargo\.lock|package\.json|src/template/assets/generated-js)' || true
+git diff --name-only HEAD | rg '^(src|tests|Cargo\.toml|Cargo\.lock|package\.json|src/template/assets/generated-js)' || true
 ```
 
-Expected: no output. If output appears, stop and inspect before committing.
+Expected: no output. This checks staged and unstaged changes against `HEAD`. If output appears, stop and inspect before committing.
 
 - [ ] **Step 5: Commit docs update**
 
 Run:
 
 ```bash
-git add docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md
-git commit -m "docs: 検索allocation上限計測結果を記録"
+git add docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md
+git commit -m "docs: 検索allocationレビュー指摘を反映"
 ```
 
-Expected: one docs commit is created. Do not include temporary fixture files or source changes.
+Expected: one docs commit is created. If the design note was already committed in a prior commit and has no new diff, `git add` is a no-op for that path. Do not include temporary fixture files or source changes.
 
 - [ ] **Step 6: Final status**
 
