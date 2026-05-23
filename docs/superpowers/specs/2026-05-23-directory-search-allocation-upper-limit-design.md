@@ -143,7 +143,7 @@ Done 化できるのは、次をすべて満たす場合だけである。
 
 ```bash
 rg -n "目的|非目標|受け入れ基準|セキュリティ|影響範囲|ロールバック|見積もり" docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md
-placeholder_matches="$(rg -n "T[B]D|TO[D]O|未[定]" docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md | rg -v 'T\[B\]D|TO\[D\]O|未\[定\]' || :)"
+placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\.md| Issues)|未[定]' docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md | rg -v 'T\[B\]D|TO\[D\]O|未\[定\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 git diff --check
 ```

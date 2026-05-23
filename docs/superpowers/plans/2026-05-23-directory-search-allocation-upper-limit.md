@@ -90,7 +90,7 @@ Run:
 sed -n '1,80p' docs/todo/BACKLOG.md
 ```
 
-Expected: the P2 item `ディレクトリ検索の allocation 削減を追加計測に基づいて再判断する` is visible and still unchecked.
+Expected: before executing this plan, the P2 item `ディレクトリ検索の allocation 削減を追加計測に基づいて再判断する` is visible and still unchecked. After the measurement decision has already been recorded, the visible unchecked P2 item may instead be `ディレクトリ検索 64MiB byte-limit 反復時の RSS plateau を測定方法改善込みで再確認する`.
 
 ### Task 2: Focused Search Test Baseline
 
