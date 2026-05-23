@@ -53,7 +53,7 @@ Expected:
 docs/search-many-match-budget-design
 ```
 
-`pwd` should be `/tmp/markdown-view-search-many-match-budget-design`. `git status --short` may show only the plan file if this plan has not been committed yet. If source files are already modified, inspect them before continuing.
+`pwd` should be the active `<worktree>` path for this task. `git status --short` may show only the plan file if this plan has not been committed yet. If source files are already modified, inspect them before continuing.
 
 - [ ] **Step 2: Read the accepted design**
 
@@ -428,7 +428,7 @@ If measurement improved clearly, replace the item with a done summary under `## 
 
 ```markdown
 - [x] ディレクトリ検索の 10MiB 近傍 many-match 経路を早期停止・処理単位見直しで抑制する
-  - 完了根拠: `search_directory_with_limits_blocking()` が `limits.max_results` から残り結果予算を計算し、`find_matches_for_file()` が予算到達時に同一ファイル内の match/context 生成を停止する構成にした。`SearchResponse` JSON、`truncated_reasons=["result_limit"]`、`searched_files`、`searched_bytes`、Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限、検索キャンセル境界は変更していない。構造回帰は `find_matches_for_file()` の予算 test と既存 result-limit test で固定した。10MiB 近傍 many-match fixture の手元計測では、実装前の elapsed 約 36-38 秒、server RSS 約 0.9-1.3GiB と比べて改善傾向を確認した。計測 fixture は `/tmp/markdown-view-search-many-match-budget.***` に生成し、repo へ追加していない。
+  - 完了根拠: `search_directory_with_limits_blocking()` が `limits.max_results` から残り結果予算を計算し、`find_matches_for_file()` が予算到達時に同一ファイル内の match/context 生成を停止する構成にした。`SearchResponse` JSON、`truncated_reasons=["result_limit"]`、`searched_files`、`searched_bytes`、Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限、検索キャンセル境界は変更していない。構造回帰は `find_matches_for_file()` の予算 test、context 生成回数 test、既存 result-limit test で固定した。10MiB 近傍 many-match fixture の手元計測では、実装前の elapsed 約 36-38 秒、server RSS 約 0.9-1.3GiB と比べて改善傾向を確認した。計測 fixture は `/tmp/markdown-view-search-many-match-budget.***` に生成し、repo へ追加していない。
   - 残余リスク: `extract_search_blocks()` は全ブロック抽出のままなので、巨大 Markdown parsing と block allocation は残る。今回の抑制で不足が出る場合は、ブロック抽出の途中停止または逐次 search iterator 化を別設計で扱う。
 ```
 
@@ -446,10 +446,10 @@ If measurement does not improve enough, keep the item unchecked and update `現�
 Run:
 
 ```bash
-rg -n "/tmp/markdown-view-search-many-match-budget\\.[A-Za-z0-9]+|target/debug/markdown-view|--port 3017" docs/todo/TODO.md
+rg -P -n "<real-worktree-path>|/tmp/markdown-view-search-many-match-budget\\.(?!\\*\\*\\*|XXXXXX)[A-Za-z0-9]+|target/debug/markdown-view" docs/superpowers/plans/2026-05-23-search-many-match-budget.md docs/todo/TODO.md
 ```
 
-Expected: no output. `docs/todo/TODO.md` may mention `/tmp/markdown-view-search-many-match-budget.***`, but not the real temporary path or full process args.
+Replace `<real-worktree-path>` with the active worktree path before running. Expected: no output. `docs/todo/TODO.md` may mention `/tmp/markdown-view-search-many-match-budget.***`, and this plan may mention `/tmp/markdown-view-search-many-match-budget.XXXXXX`, but neither docs file should contain the real temporary path, real worktree path, or full process args.
 
 - [ ] **Step 3: Commit the docs update**
 

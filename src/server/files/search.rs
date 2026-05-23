@@ -59,6 +59,32 @@ fn notify_search_progress_for_test(relative: &str, searched_files: usize) {
 #[cfg(not(test))]
 fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
 
+#[cfg(test)]
+std::thread_local! {
+    static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_search_context_build_count_for_test() -> usize {
+    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_context_build_count_for_test() -> usize {
+    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_context_build_for_test() {
+    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_context_build_for_test() {}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
     pub(in crate::server) max_results: usize,
@@ -820,6 +846,7 @@ fn build_search_context(
     match_start: usize,
     match_end: usize,
 ) -> SearchContext {
+    notify_search_context_build_for_test();
     let block = &blocks[block_index];
     let sentence_index = get_sentence_for_match(&block.sentences, match_start, match_end)
         .unwrap_or(if block.sentences.is_empty() { -1 } else { 0 });
@@ -1154,9 +1181,12 @@ mod tests {
             sentences: split_text_into_sentence_ranges(&block_text),
         }];
 
+        let before_context_builds = reset_search_context_build_count_for_test();
         let results = find_matches_for_file("many.md", &blocks, "needle", 3);
+        let context_builds = search_context_build_count_for_test() - before_context_builds;
 
         assert_eq!(results.len(), 3);
+        assert_eq!(context_builds, 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
         assert_eq!(results[2].file_match_index, 2);
