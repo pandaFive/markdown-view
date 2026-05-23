@@ -1,29 +1,33 @@
-function setupFilterableList(options) {
-  var input = document.getElementById(options.inputId);
+function setupFilterableList<TItem extends HTMLElement>(options: FilterableListOptions<TItem>): void {
+  var input = document.getElementById(options.inputId) as HTMLInputElement | null;
   var root = document.getElementById(options.rootId);
   if (!input || !root) return;
 
-  var items = options.getItems(root);
-  var applyFilter = function() {
-    var query = input.value.trim().toLowerCase();
-    options.apply(items, query, input);
+  var inputEl = input;
+  var items = Array.from(options.getItems(root));
+  var applyFilter = function(): void {
+    var query = inputEl.value.trim().toLowerCase();
+    options.apply(items, query, inputEl);
   };
 
-  input.addEventListener('input', applyFilter);
+  inputEl.addEventListener('input', applyFilter);
   applyFilter();
 }
 
-function createContentEnhancements(ctx, deps) {
-  function setLiveStatus(state) {
+function createContentEnhancements(
+  ctx: MarkdownViewAppContext,
+  deps: ContentEnhancementsDeps
+): MarkdownViewContentEnhancementsController {
+  function setLiveStatus(state: LiveStatusState): void {
     if (!ctx.elements.liveStatusEl) return;
-    ctx.elements.liveStatusEl.textContent = ctx.labels.liveStatus[state] || state;
+    ctx.elements.liveStatusEl.textContent = ctx.labels.liveStatus[state as keyof MarkdownViewLabels['liveStatus']] || state;
     ctx.elements.liveStatusEl.dataset.state = state;
     if (state === 'live') {
       deps.clearMemoSyncPendingStatus();
     }
   }
 
-  function updateDocumentStats() {
+  function updateDocumentStats(): void {
     if (!ctx.elements.contentRoot) return;
     var headings = ctx.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6').length;
     var text = (ctx.elements.contentRoot.textContent || '').replace(/\s+/g, '');
@@ -35,7 +39,7 @@ function createContentEnhancements(ctx, deps) {
     }
   }
 
-  function updateReadingProgress() {
+  function updateReadingProgress(): void {
     var scrollTop = window.scrollY || window.pageYOffset;
     var maxScroll = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
     var progress = Math.min(100, Math.max(0, (scrollTop / maxScroll) * 100));
@@ -47,7 +51,7 @@ function createContentEnhancements(ctx, deps) {
     }
   }
 
-  function syncDocumentChrome(file) {
+  function syncDocumentChrome(file: string): void {
     var title = file ? file.split('/').pop() : (ctx.elements.contentRoot ? ctx.elements.contentRoot.getAttribute('data-title') : '');
     if (!title) title = 'markdown-view';
     if (ctx.elements.documentTitleEl) {
@@ -56,11 +60,11 @@ function createContentEnhancements(ctx, deps) {
     document.title = title + ' - markdown-view';
   }
 
-  function copyText(text) {
+  function copyText(text: string): Promise<void> {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       return navigator.clipboard.writeText(text);
     }
-    return new Promise(function(resolve, reject) {
+    return new Promise<void>(function(resolve, reject) {
       try {
         var input = document.createElement('textarea');
         input.value = text;
@@ -82,7 +86,7 @@ function createContentEnhancements(ctx, deps) {
     });
   }
 
-  function flashCopiedState(button, copiedLabel, baseLabel) {
+  function flashCopiedState(button: HTMLElement | null, copiedLabel: string, baseLabel: string): void {
     if (!button) return;
     button.classList.add('copied');
     button.textContent = copiedLabel;
@@ -92,7 +96,7 @@ function createContentEnhancements(ctx, deps) {
     }, 1200);
   }
 
-  function handleCopyClick(button, text, baseLabel) {
+  function handleCopyClick(button: HTMLElement, text: string, baseLabel: string): void {
     copyText(text).then(function() {
       flashCopiedState(button, 'Copied', baseLabel);
     }).catch(function(err) {
@@ -101,11 +105,11 @@ function createContentEnhancements(ctx, deps) {
     });
   }
 
-  function enhanceContentInteractions() {
+  function enhanceContentInteractions(): void {
     if (!ctx.elements.contentRoot) return;
 
-    var headings = ctx.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
-    headings.forEach(function(heading) {
+    var headings = ctx.elements.contentRoot.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6');
+    headings.forEach(function(heading: HTMLElement): void {
       if (!heading.id || heading.querySelector('.heading-anchor')) return;
       var button = document.createElement('button');
       button.type = 'button';
@@ -120,35 +124,36 @@ function createContentEnhancements(ctx, deps) {
       heading.appendChild(button);
     });
 
-    var blocks = ctx.elements.contentRoot.querySelectorAll('pre.code-block');
-    blocks.forEach(function(block) {
+    var blocks = ctx.elements.contentRoot.querySelectorAll<HTMLElement>('pre.code-block');
+    blocks.forEach(function(block: HTMLElement): void {
       if (block.querySelector('.code-copy')) return;
-      var code = block.querySelector('code');
+      var code = block.querySelector<HTMLElement>('code');
       if (!code) return;
+      var codeEl = code;
       var button = document.createElement('button');
       button.type = 'button';
       button.className = 'code-copy';
       button.textContent = 'Copy';
       button.setAttribute('aria-label', 'コードをコピー');
       button.addEventListener('click', function() {
-        handleCopyClick(button, code.innerText || code.textContent || '', 'Copy');
+        handleCopyClick(button, codeEl.innerText || codeEl.textContent || '', 'Copy');
       });
       block.appendChild(button);
     });
   }
 
-  function setupTocFilter() {
+  function setupTocFilter(): void {
     setupFilterableList({
       inputId: 'toc-filter',
       rootId: 'toc',
-      getItems: function(root) {
-        return root.querySelectorAll('li');
+      getItems: function(root: HTMLElement): NodeListOf<HTMLElement> {
+        return root.querySelectorAll<HTMLElement>('li');
       },
-      apply: function(items, query) {
-        items.forEach(function(item) {
-          var link = item.querySelector(':scope > a');
+      apply: function(items: HTMLElement[], query: string): void {
+        items.forEach(function(item: HTMLElement): void {
+          var link = item.querySelector<HTMLAnchorElement>(':scope > a');
           if (!link) return;
-          var matched = !query || link.textContent.toLowerCase().indexOf(query) !== -1;
+          var matched = !query || (link.textContent || '').toLowerCase().indexOf(query) !== -1;
           item.hidden = !matched;
         });
       }

@@ -2,6 +2,116 @@ type MemoState = 'ready' | 'degraded';
 type LiveStatusState = 'connected' | 'disconnected' | 'error' | 'live' | 'retry' | 'offline';
 
 type SearchTruncationReason = 'result_limit' | 'file_limit' | 'byte_limit';
+type MemoSaveState = 'dirty' | 'error' | 'loading' | 'saved' | 'saving' | string;
+type MemoRemoteUpdateBlockReason = 'none' | 'dirty' | 'focus' | 'loading' | 'saving' | string;
+type SearchContextVariant = 'before' | 'current' | 'after';
+
+interface MarkdownViewHttpError extends Error {
+  type?: 'http' | 'parse' | 'contract';
+  status?: number;
+  userMessage?: string;
+}
+
+interface ApiErrorPayload {
+  error: string;
+}
+
+interface LineRange {
+  start: number;
+  end: number;
+}
+
+interface ParsedLineHash {
+  headingId: string | null;
+  lineRange: LineRange | null;
+}
+
+interface MarkdownLinkTarget {
+  file: string;
+  hash: string;
+}
+
+interface SentenceRange {
+  start: number;
+  end: number;
+}
+
+interface DocumentSearchTextNodeEntry {
+  node: Text;
+  start: number;
+  end: number;
+}
+
+interface DocumentSearchTextBlock {
+  text: string;
+  nodes: DocumentSearchTextNodeEntry[];
+}
+
+interface DocumentSearchBlockEntry extends DocumentSearchTextBlock {
+  sentences: SentenceRange[];
+}
+
+interface DocumentSearchContext {
+  before: string;
+  current: string;
+  after: string;
+}
+
+interface DocumentSearchMatch {
+  marks: HTMLElement[];
+  context: DocumentSearchContext;
+}
+
+interface WrappedDocumentSearchSegment {
+  mark: HTMLElement;
+  tail: Text | null;
+}
+
+interface DirectorySearchSelection {
+  file: string;
+  fileMatchIndex: number | undefined;
+}
+
+interface PendingDirectoryNavigation {
+  file: string;
+  query: string;
+  fileMatchIndex: number;
+  resultIndex: number;
+  previousResultIndex: number;
+}
+
+interface TocTracking {
+  headings: HTMLElement[];
+  links: Map<string, HTMLAnchorElement>;
+  activationOffset: number;
+}
+
+interface MemoSelectionSnapshot {
+  start: number;
+  end: number;
+  isFocused: boolean;
+}
+
+interface QuoteSource {
+  label: string;
+  href: string;
+  lines: string;
+}
+
+interface MemoApplyOptions {
+  updateEditor?: boolean;
+  preserveSelection?: boolean;
+  preserveDegradedEditor?: boolean;
+}
+
+interface SelectFileOptions extends ContentUpdateOptions {}
+
+interface FilterableListOptions<TItem extends HTMLElement> {
+  inputId: string;
+  rootId: string;
+  getItems(root: HTMLElement): Iterable<TItem> | ArrayLike<TItem>;
+  apply(items: TItem[], query: string, input: HTMLInputElement): void;
+}
 
 interface SearchResult {
   file: string;
@@ -61,7 +171,7 @@ interface ContentUpdateResult {
 }
 
 interface ContentUpdateOptions {
-  scrollMode?: 'preserve' | 'reset';
+  scrollMode?: 'preserve' | 'reset' | 'none';
   anchorHash?: string;
   clearHashOnMiss?: boolean;
   requeryDirectorySearch?: boolean;
@@ -100,7 +210,7 @@ interface MarkdownViewMemoState {
 }
 
 interface MarkdownViewSearchState {
-  documentMatches: unknown[];
+  documentMatches: DocumentSearchMatch[];
   currentDocumentIndex: number;
   currentDocumentQuery: string;
   currentDirectoryResults: SearchResult[];
@@ -114,14 +224,11 @@ interface MarkdownViewSearchState {
   documentFetchGeneration: number;
   directorySearchClientId: string;
   directorySearchSequence: number;
-  pendingDirectoryNavigation: {
-    file: string;
-    previousResultIndex: number;
-  } | null;
+  pendingDirectoryNavigation: PendingDirectoryNavigation | null;
 }
 
 interface MarkdownViewSidebarState {
-  currentTocTracking: any | null;
+  currentTocTracking: TocTracking | null;
   tocTrackingFrame: number | null;
   currentActiveTocId: string;
   suppressTocTrackingUntil: number;
@@ -142,12 +249,12 @@ interface MarkdownViewLabels {
 }
 
 interface MarkdownViewTestState {
-  markPendingTocNavigationObserver: unknown | null;
+  markPendingTocNavigationObserver: ((id: string) => void) | null;
 }
 
 interface MarkdownViewContentController {
   setup(): void;
-  updateContent(data: ContentUpdatePayload, options?: ContentUpdateOptions): ContentUpdateResult;
+  updateContent(data: unknown, options?: ContentUpdateOptions): ContentUpdateResult;
   applyPendingUpdate(): void;
   restoreNavigationFromLocation(): void;
   openDocumentSearch(): void;
@@ -156,7 +263,7 @@ interface MarkdownViewContentController {
   clearDocumentSearchQuery(): void;
   renderDirectorySearchUi(): void;
   scheduleDirectorySearch(query: string): void;
-  augmentHashWithTrailingLineHint(link: string, hash: string): string;
+  augmentHashWithTrailingLineHint(link: Element, hash: string): string;
   setLiveStatus(state: LiveStatusState): void;
   updateDocumentStats(): void;
   updateReadingProgress(): void;
@@ -170,6 +277,113 @@ interface MarkdownViewWebSocketController {
   discardBufferedLiveUpdate(reason: string): void;
   rememberAppliedLiveUpdate(data: ContentUpdatePayload): void;
   scheduleBufferedLiveUpdate(data: ContentUpdatePayload): void;
+}
+
+interface MarkdownViewContentEnhancementsController {
+  setLiveStatus(state: LiveStatusState): void;
+  updateDocumentStats(): void;
+  updateReadingProgress(): void;
+  syncDocumentChrome(file: string): void;
+  enhanceContentInteractions(): void;
+  setupTocFilter(): void;
+}
+
+interface MarkdownViewContentNavigationController {
+  augmentHashWithTrailingLineHint(link: Element, hash: string): string;
+  applyContentAnchorNavigation(hash: string, replace: boolean): boolean;
+  restoreContentNavigationFromLocation(): void;
+  setupContentLinkNavigation(): void;
+  setupMemoLinkNavigation(): void;
+  setLocationHash(hash: string, replace: boolean): void;
+}
+
+interface MarkdownViewDocumentSearchController {
+  applyDocumentSearchHighlights(query: string): void;
+  applyDocumentSearchQuery(query: string): void;
+  clearDocumentSearchHighlights(): void;
+  clearDocumentSearchQuery(): void;
+  createDocumentSearchEmptyState(message: string): HTMLElement;
+  moveDocumentSearch(step: number): void;
+  openDocumentSearch(): void;
+  renderDocumentSearchResultContext(
+    container: HTMLElement,
+    text: string,
+    query: string,
+    variant: SearchContextVariant
+  ): void;
+  renderDocumentSearchResults(): void;
+  setCurrentDocumentSearchMatch(index: number, scrollIntoView?: boolean): void;
+  setupDocumentSearch(): void;
+  syncDocumentSearchAfterContentUpdate(options?: ContentUpdateOptions): void;
+  updateDocumentSearchSummary(): void;
+}
+
+interface MarkdownViewDirectorySearchController {
+  applyPendingDirectorySearchNavigation(): void;
+  cancelDirectorySearch(): void;
+  openDirectorySearchResult(index: number): void;
+  renderDirectorySearchResults(): void;
+  renderDirectorySearchUi(): void;
+  scheduleDirectorySearch(query: string): void;
+}
+
+interface ContentEnhancementsDeps {
+  clearMemoSyncPendingStatus(): void;
+}
+
+interface ContentNavigationDeps {
+  selectFile(file: string, pushHistory?: boolean, options?: SelectFileOptions): void;
+  setFileParam(file: string, replace: boolean, hash?: string): void;
+  markPendingTocNavigation(id: string): void;
+  clearPendingTocNavigation(): void;
+  restoreActiveTocHeading(preferredId: string): void;
+}
+
+interface DocumentSearchDeps {
+  activateSidebarTab(target: string): void;
+  applyPendingDirectorySearchNavigation(): void;
+  openDirectorySearchResult(index: number): void;
+  renderDirectorySearchResults(): void;
+  renderDirectorySearchUi(): void;
+  cancelDirectorySearch(): void;
+  scheduleDirectorySearch(query: string): void;
+}
+
+interface DirectorySearchDeps {
+  createHttpError(status: number): MarkdownViewHttpError;
+  createDocumentSearchEmptyState(message: string): HTMLElement;
+  getFileFetchErrorMessage(err: unknown): string;
+  openFileSearchResult(file: string, options?: SelectFileOptions): void;
+  renderDocumentSearchResultContext(
+    container: HTMLElement,
+    text: string,
+    query: string,
+    variant: SearchContextVariant
+  ): void;
+  setCurrentDocumentSearchMatch(index: number, scrollIntoView?: boolean): void;
+  updateDocumentSearchSummary(): void;
+}
+
+interface ContentControllerDeps extends ContentEnhancementsDeps, ContentNavigationDeps {
+  activateSidebarTab(target: string): void;
+  createHttpError(status: number): MarkdownViewHttpError;
+  getCurrentActiveTocId(): string;
+  getFileFetchErrorMessage(err: unknown): string;
+  hideFileFetchErrorBanner(): void;
+  hideQuoteSelectionAction(): void;
+  hideWsServerErrorBanner(): void;
+  showWsServerErrorBanner(message: string): void;
+  setupTocTracking(): void;
+  suppressTocTrackingFor(ms: number): void;
+}
+
+interface WebSocketDeps {
+  updateContent(data: unknown, options?: ContentUpdateOptions): ContentUpdateResult;
+  scheduleDirectorySearch(query: string): void;
+  setLiveStatus(state: LiveStatusState): void;
+  selectFile(file: string, pushHistory?: boolean, options?: SelectFileOptions): void;
+  applyRemoteMemoUpdate(data: ContentUpdatePayload): boolean;
+  queueRemoteMemoReload(data: ContentUpdatePayload): boolean;
 }
 
 interface MemoResponse {
@@ -220,7 +434,20 @@ interface MarkdownViewAppContext {
 }
 
 interface MarkdownViewTestHooks {
-  [key: string]: unknown;
+  activateSidebarTab(target: string): void;
+  applyDocumentSearchQuery(query: string): void;
+  augmentHashWithTrailingLineHint(link: Element, hash: string): string;
+  markPendingTocNavigation(id: string): void;
+  setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
+  moveDocumentSearch(direction: number): void;
+  scheduleBufferedLiveUpdate(data: ContentUpdatePayload): void;
+  selectFile(file: string, pushHistory?: boolean, options?: SelectFileOptions): void;
+  setCurrentFileForTest(file: string): void;
+  setDirModeForTest(value: boolean): void;
+  updateContent(data: unknown, options?: ContentUpdateOptions): ContentUpdateResult;
+  readonly isDirMode: boolean;
+  readonly currentFile: string;
+  readonly lastAppliedContent: string | null;
 }
 
 interface Window {

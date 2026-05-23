@@ -1,12 +1,12 @@
-function updateFileListActive(file) {
-  var items = document.querySelectorAll('.file-tree-file');
-  items.forEach(function(li) {
-    var link = li.querySelector('a');
+function updateFileListActive(file: string): void {
+  var items = document.querySelectorAll<HTMLElement>('.file-tree-file');
+  items.forEach(function(li: HTMLElement): void {
+    var link = li.querySelector<HTMLAnchorElement>('a');
     if (link && link.getAttribute('data-file') === file) {
       li.classList.add('active');
       var parent = li.parentElement;
       while (parent && parent.id !== 'sidebar') {
-        if (parent.tagName === 'DETAILS') {
+        if (parent instanceof HTMLDetailsElement) {
           parent.open = true;
         }
         parent = parent.parentElement;
@@ -17,42 +17,44 @@ function updateFileListActive(file) {
   });
 }
 
-function setupFileList() {
-  var fileLinks = document.querySelectorAll('.file-tree-file a[data-file]');
-  fileLinks.forEach(function(link) {
-    link.addEventListener('click', function(e) {
+function setupFileList(): void {
+  var fileLinks = document.querySelectorAll<HTMLAnchorElement>('.file-tree-file a[data-file]');
+  fileLinks.forEach(function(link: HTMLAnchorElement): void {
+    link.addEventListener('click', function(e: MouseEvent): void {
       e.preventDefault();
-      selectFile(link.getAttribute('data-file'));
+      selectFile(link.getAttribute('data-file')!);
     });
   });
 }
 
-function setupFileFilter() {
+function setupFileFilter(): void {
   var summary = document.getElementById('file-filter-summary');
   setupFilterableList({
     inputId: 'file-filter',
     rootId: 'panel-files',
-    getItems: function(root) {
-      return root.querySelectorAll('.file-tree-file');
+    getItems: function(root: HTMLElement): NodeListOf<HTMLElement> {
+      return root.querySelectorAll<HTMLElement>('.file-tree-file');
     },
-    apply: function(items, query, input) {
+    apply: function(items: HTMLElement[], query: string, input: HTMLInputElement): void {
       var total = items.length;
       var visible = 0;
 
-      items.forEach(function(item) {
-        var link = item.querySelector('a[data-file]');
-        var matched = !query || (link && link.getAttribute('data-file').toLowerCase().indexOf(query) !== -1);
+      items.forEach(function(item: HTMLElement): void {
+        var link = item.querySelector<HTMLAnchorElement>('a[data-file]');
+        var matched = !query || (link && (link.getAttribute('data-file') || '').toLowerCase().indexOf(query) !== -1);
         item.hidden = !matched;
         if (matched) visible++;
       });
 
-      var dirs = document.querySelectorAll('.file-tree-dir');
-      dirs.forEach(function(dir) {
-        var descendants = dir.querySelectorAll('.file-tree-file');
-        var hasVisibleChild = Array.prototype.some.call(descendants, function(item) {
+      var dirs = document.querySelectorAll<HTMLDetailsElement>('.file-tree-dir');
+      dirs.forEach(function(dir: HTMLDetailsElement): void {
+        var descendants = dir.querySelectorAll<HTMLElement>('.file-tree-file');
+        var hasVisibleChild = Array.prototype.some.call(descendants, function(item: HTMLElement): boolean {
           return !item.hidden;
         });
-        dir.parentElement.hidden = !hasVisibleChild;
+        if (dir.parentElement) {
+          dir.parentElement.hidden = !hasVisibleChild;
+        }
         if (query && hasVisibleChild) {
           dir.open = true;
         }
@@ -69,23 +71,23 @@ function setupFileFilter() {
   });
 }
 
-function setupTabs() {
-  var tabs = document.querySelectorAll('.sidebar-tab');
+function setupTabs(): void {
+  var tabs = document.querySelectorAll<HTMLElement>('.sidebar-tab');
   if (!tabs.length) return;
-  tabs.forEach(function(tab) {
-    tab.addEventListener('click', function() {
-      activateSidebarTab(tab.getAttribute('data-tab'));
+  tabs.forEach(function(tab: HTMLElement): void {
+    tab.addEventListener('click', function(): void {
+      activateSidebarTab(tab.getAttribute('data-tab') || '');
     });
   });
 }
 
-function activateSidebarTab(target) {
-  var tabs = document.querySelectorAll('.sidebar-tab');
-  tabs.forEach(function(tab) {
+function activateSidebarTab(target: string): void {
+  var tabs = document.querySelectorAll<HTMLElement>('.sidebar-tab');
+  tabs.forEach(function(tab: HTMLElement): void {
     tab.classList.toggle('active', tab.getAttribute('data-tab') === target);
   });
-  var panels = document.querySelectorAll('.sidebar-panel');
-  panels.forEach(function(panel) {
+  var panels = document.querySelectorAll<HTMLElement>('.sidebar-panel');
+  panels.forEach(function(panel: HTMLElement): void {
     panel.classList.toggle('active', panel.id === 'panel-' + target);
   });
 }
@@ -93,12 +95,12 @@ function activateSidebarTab(target) {
 // URL エンコード差を吸収して比較するためのヘルパー。location.hash と
 // appContext.sidebar.pendingTocNavigationId を両辺 decode して対称に扱うことで、renderer 側の href
 // 生成が encoded/raw どちらでもガード条件が一貫して成立する
-function tryDecodeHash(value) {
+function tryDecodeHash(value: string): string {
   if (!value) return value || '';
   try { return decodeURIComponent(value); } catch (e) { return value; }
 }
 
-function setupDirectoryHistoryNavigation() {
+function setupDirectoryHistoryNavigation(): void {
   if (!appContext.config.isDirMode) return;
   window.addEventListener('popstate', function() {
     var file = getFileParam();
@@ -132,14 +134,14 @@ function setupDirectoryHistoryNavigation() {
       return;
     }
 
-    appContext.content.restoreNavigationFromLocation();
+    appContext.content!.restoreNavigationFromLocation();
   });
 }
 
 var TOC_NAVIGATION_GRACE_MS = 400;
 var TOC_NAVIGATION_SLACK_PX = 24;
 
-function setActiveTocLink(activeId) {
+function setActiveTocLink(activeId: string): void {
   if (!appContext.sidebar.currentTocTracking) return;
   if (appContext.sidebar.currentActiveTocId === activeId) return;
   var nextLink = activeId ? appContext.sidebar.currentTocTracking.links.get(activeId) : null;
@@ -153,43 +155,44 @@ function setActiveTocLink(activeId) {
   }
 
   appContext.sidebar.currentActiveTocId = activeId;
-  appContext.sidebar.currentTocTracking.links.forEach(function(link, id) {
+  appContext.sidebar.currentTocTracking.links.forEach(function(link: HTMLAnchorElement, id: string): void {
     if (link !== nextLink && link !== currentLink) {
       link.classList.toggle('active', id === activeId);
     }
   });
 }
 
-function getTocActivationOffset(headings) {
+function getTocActivationOffset(headings: HTMLElement[]): number {
   if (!headings.length) return 112;
-  var scrollMarginTop = parseFloat(window.getComputedStyle(headings[0]).scrollMarginTop);
+  var scrollMarginTop = parseFloat(window.getComputedStyle(headings[0]!).scrollMarginTop);
   if (!Number.isFinite(scrollMarginTop) || scrollMarginTop < 0) {
     return 112;
   }
   return scrollMarginTop;
 }
 
-function updateActiveTocHeading() {
+function updateActiveTocHeading(): void {
   if (!appContext.sidebar.currentTocTracking) return;
   setActiveTocLink(getViewportActiveTocId());
 }
 
-function clearPendingTocNavigation() {
+function clearPendingTocNavigation(): void {
   appContext.sidebar.pendingTocNavigationId = '';
   appContext.sidebar.pendingTocNavigationUntil = 0;
 }
 
-function findTrackedHeading(id) {
+function findTrackedHeading(id: string): HTMLElement | null {
   if (!appContext.sidebar.currentTocTracking || !id) return null;
   for (var i = 0; i < appContext.sidebar.currentTocTracking.headings.length; i++) {
-    if (appContext.sidebar.currentTocTracking.headings[i].id === id) {
-      return appContext.sidebar.currentTocTracking.headings[i];
+    var heading = appContext.sidebar.currentTocTracking.headings[i];
+    if (heading && heading.id === id) {
+      return heading;
     }
   }
   return null;
 }
 
-function markPendingTocNavigation(id) {
+function markPendingTocNavigation(id: string): void {
   if (!findTrackedHeading(id)) return;
   if (appContext.test.markPendingTocNavigationObserver) {
     appContext.test.markPendingTocNavigationObserver(id);
@@ -199,7 +202,7 @@ function markPendingTocNavigation(id) {
   setActiveTocLink(id);
 }
 
-function getPendingTocNavigationId(activationOffset) {
+function getPendingTocNavigationId(activationOffset: number): string {
   if (!appContext.sidebar.pendingTocNavigationId) return '';
   var heading = findTrackedHeading(appContext.sidebar.pendingTocNavigationId);
   var navigationTop;
@@ -229,11 +232,11 @@ function getPendingTocNavigationId(activationOffset) {
   return '';
 }
 
-function getViewportActiveTocId() {
+function getViewportActiveTocId(): string {
   if (!appContext.sidebar.currentTocTracking) return '';
   var activationOffset = appContext.sidebar.currentTocTracking.activationOffset;
   var pendingActiveId = getPendingTocNavigationId(activationOffset);
-  var activeHeading = null;
+  var activeHeading: HTMLElement | null = null;
   var currentScrollTop = window.scrollY || window.pageYOffset;
   var maxScrollTop = Math.max(document.documentElement.scrollHeight - window.innerHeight, 0);
   var i;
@@ -242,37 +245,39 @@ function getViewportActiveTocId() {
     return pendingActiveId;
   }
 
-  appContext.sidebar.currentTocTracking.headings.forEach(function(heading) {
-    if (heading.getBoundingClientRect().top <= activationOffset) {
-      activeHeading = heading;
+  for (i = 0; i < appContext.sidebar.currentTocTracking.headings.length; i++) {
+    var candidate = appContext.sidebar.currentTocTracking.headings[i]!;
+    if (candidate.getBoundingClientRect().top <= activationOffset) {
+      activeHeading = candidate;
     }
-  });
+  }
 
   if (activeHeading && activeHeading.id !== appContext.sidebar.pendingTocNavigationId) {
     clearPendingTocNavigation();
   }
   if (maxScrollTop > 0 && currentScrollTop >= maxScrollTop - 1) {
     for (i = appContext.sidebar.currentTocTracking.headings.length - 1; i >= 0; i--) {
-      if (appContext.sidebar.currentTocTracking.headings[i].getBoundingClientRect().top < window.innerHeight) {
-        return appContext.sidebar.currentTocTracking.headings[i].id;
+      var heading = appContext.sidebar.currentTocTracking.headings[i];
+      if (heading && heading.getBoundingClientRect().top < window.innerHeight) {
+        return heading.id;
       }
     }
   }
   return activeHeading ? activeHeading.id : '';
 }
 
-function hasTrackedHeading(id) {
+function hasTrackedHeading(id: string): boolean {
   if (!appContext.sidebar.currentTocTracking || !id) return false;
-  return appContext.sidebar.currentTocTracking.headings.some(function(heading) {
+  return appContext.sidebar.currentTocTracking.headings.some(function(heading: HTMLElement): boolean {
     return heading.id === id;
   });
 }
 
-function getCurrentActiveTocId() {
+function getCurrentActiveTocId(): string {
   return appContext.sidebar.currentActiveTocId;
 }
 
-function restoreActiveTocHeading(preferredId) {
+function restoreActiveTocHeading(preferredId: string): void {
   if (!appContext.sidebar.currentTocTracking) return;
   var viewportActiveId = getViewportActiveTocId();
   if (hasTrackedHeading(preferredId) && preferredId === viewportActiveId) {
@@ -282,7 +287,7 @@ function restoreActiveTocHeading(preferredId) {
   setActiveTocLink(viewportActiveId);
 }
 
-function scheduleTocTrackingUpdate() {
+function scheduleTocTrackingUpdate(): void {
   if (!appContext.sidebar.currentTocTracking || appContext.sidebar.tocTrackingFrame !== null) return;
   if (Date.now() < appContext.sidebar.suppressTocTrackingUntil) {
     appContext.sidebar.pendingSuppressedTocTrackingUpdate = true;
@@ -295,7 +300,7 @@ function scheduleTocTrackingUpdate() {
   });
 }
 
-function ensureSuppressedTocTrackingResume() {
+function ensureSuppressedTocTrackingResume(): void {
   if (appContext.sidebar.suppressTocTrackingTimer !== null) return;
   var delay = Math.max(appContext.sidebar.suppressTocTrackingUntil - Date.now(), 0);
   appContext.sidebar.suppressTocTrackingTimer = window.setTimeout(function() {
@@ -306,7 +311,7 @@ function ensureSuppressedTocTrackingResume() {
   }, delay);
 }
 
-function suppressTocTrackingFor(ms) {
+function suppressTocTrackingFor(ms: number): void {
   appContext.sidebar.suppressTocTrackingUntil = Date.now() + ms;
   appContext.sidebar.pendingSuppressedTocTrackingUpdate = true;
   if (appContext.sidebar.suppressTocTrackingTimer !== null) {
@@ -316,7 +321,7 @@ function suppressTocTrackingFor(ms) {
   ensureSuppressedTocTrackingResume();
 }
 
-function setupTocTracking() {
+function setupTocTracking(): void {
   var previousActiveTocId = appContext.sidebar.currentActiveTocId;
   if (appContext.sidebar.tocTrackingFrame !== null) {
     window.cancelAnimationFrame(appContext.sidebar.tocTrackingFrame);
@@ -330,22 +335,22 @@ function setupTocTracking() {
   appContext.sidebar.currentActiveTocId = '';
   appContext.sidebar.pendingSuppressedTocTrackingUpdate = false;
 
-  var headings = document.querySelectorAll('#content h1, #content h2, #content h3, #content h4, #content h5, #content h6');
-  var tocLinks = document.querySelectorAll('#toc a');
+  var headings = document.querySelectorAll<HTMLElement>('#content h1, #content h2, #content h3, #content h4, #content h5, #content h6');
+  var tocLinks = document.querySelectorAll<HTMLAnchorElement>('#toc a');
 
   if (headings.length === 0 || tocLinks.length === 0) return;
 
-  var tocLinksById = new Map();
-  tocLinks.forEach(function(link) {
+  var tocLinksById = new Map<string, HTMLAnchorElement>();
+  tocLinks.forEach(function(link: HTMLAnchorElement): void {
     var href = link.getAttribute('href') || '';
     if (href.startsWith('#') && href.length > 1) {
       tocLinksById.set(href.slice(1), link);
     }
   });
 
-  var trackedHeadings = Array.prototype.filter.call(headings, function(heading) {
-    return heading.id && tocLinksById.has(heading.id);
-  });
+  var trackedHeadings = Array.prototype.filter.call(headings, function(heading: HTMLElement): boolean {
+    return Boolean(heading.id && tocLinksById.has(heading.id));
+  }) as HTMLElement[];
 
   if (trackedHeadings.length === 0) return;
 
@@ -360,20 +365,22 @@ function setupTocTracking() {
   }
 }
 
-function setupSidebarInteractions() {
+function setupSidebarInteractions(): void {
   var sidebarToggle = document.getElementById('sidebar-toggle');
   var sidebarOpen = document.getElementById('sidebar-open');
   var sidebar = document.getElementById('sidebar');
 
   if (sidebarToggle && sidebar) {
-    sidebarToggle.addEventListener('click', function() {
-      sidebar.classList.remove('open');
+    var sidebarEl = sidebar;
+    sidebarToggle.addEventListener('click', function(): void {
+      sidebarEl.classList.remove('open');
     });
   }
 
   if (sidebarOpen && sidebar) {
-    sidebarOpen.addEventListener('click', function() {
-      sidebar.classList.add('open');
+    var sidebarElForOpen = sidebar;
+    sidebarOpen.addEventListener('click', function(): void {
+      sidebarElForOpen.classList.add('open');
     });
   }
 
@@ -384,10 +391,12 @@ function setupSidebarInteractions() {
   }
 
   if (appContext.sidebar.tocRoot) {
-    appContext.sidebar.tocRoot.addEventListener('click', function(event) {
-      var link = event.target.closest('a[href^="#"]');
+    var tocRoot = appContext.sidebar.tocRoot;
+    tocRoot.addEventListener('click', function(event: MouseEvent): void {
+      var target = event.target instanceof Element ? event.target : null;
+      var link = target ? target.closest<HTMLAnchorElement>('a[href^="#"]') : null;
       var href;
-      if (!link || !appContext.sidebar.tocRoot.contains(link)) return;
+      if (!link || !tocRoot.contains(link)) return;
       href = link.getAttribute('href') || '';
       if (href.length <= 1) return;
       markPendingTocNavigation(href.slice(1));
@@ -395,16 +404,16 @@ function setupSidebarInteractions() {
   }
 
   window.addEventListener('scroll', function() {
-    appContext.content.updateReadingProgress();
+    appContext.content!.updateReadingProgress();
   }, { passive: true });
   window.addEventListener('scroll', scheduleTocTrackingUpdate, { passive: true });
   window.addEventListener('resize', function() {
-    appContext.content.updateReadingProgress();
+    appContext.content!.updateReadingProgress();
   });
   window.addEventListener('resize', scheduleTocTrackingUpdate);
 }
 
-function setupThemeToggle() {
+function setupThemeToggle(): void {
   var themeToggle = document.getElementById('theme-toggle');
   if (!themeToggle) return;
 
@@ -421,7 +430,7 @@ function setupThemeToggle() {
     }
     appContext.elements.htmlEl.setAttribute('data-theme', next);
     try { localStorage.setItem('mdview-theme', next); } catch(e) {
-      console.warn('[markdown-view] テーマ設定の保存に失敗:', e.message);
+      console.warn('[markdown-view] テーマ設定の保存に失敗:', e instanceof Error ? e.message : String(e));
     }
   });
 
@@ -431,48 +440,48 @@ function setupThemeToggle() {
       appContext.elements.htmlEl.setAttribute('data-theme', saved);
     }
   } catch(e) {
-    console.warn('[markdown-view] テーマ設定の読込に失敗:', e.message);
+    console.warn('[markdown-view] テーマ設定の読込に失敗:', e instanceof Error ? e.message : String(e));
   }
 }
 
-function installMarkdownViewTestHooks() {
+function installMarkdownViewTestHooks(): void {
   if (window.__MV_E2E__ !== true) return;
   window.markdownViewTestHooks = {
-    activateSidebarTab: function(target) {
+    activateSidebarTab: function(target: string): void {
       return activateSidebarTab(target);
     },
-    applyDocumentSearchQuery: function(query) {
-      return appContext.content.applyDocumentSearchQuery(query);
+    applyDocumentSearchQuery: function(query: string): void {
+      return appContext.content!.applyDocumentSearchQuery(query);
     },
-    augmentHashWithTrailingLineHint: function(link, hash) {
-      return appContext.content.augmentHashWithTrailingLineHint(link, hash);
+    augmentHashWithTrailingLineHint: function(link: Element, hash: string): string {
+      return appContext.content!.augmentHashWithTrailingLineHint(link, hash);
     },
-    markPendingTocNavigation: function(id) {
+    markPendingTocNavigation: function(id: string): void {
       return markPendingTocNavigation(id);
     },
-    setMarkPendingTocNavigationObserverForTest: function(callback) {
+    setMarkPendingTocNavigationObserverForTest: function(callback: ((id: string) => void) | null): void {
       appContext.test.markPendingTocNavigationObserver = typeof callback === 'function' ? callback : null;
     },
-    moveDocumentSearch: function(direction) {
-      return appContext.content.moveDocumentSearch(direction);
+    moveDocumentSearch: function(direction: number): void {
+      return appContext.content!.moveDocumentSearch(direction);
     },
-    scheduleBufferedLiveUpdate: function(data) {
+    scheduleBufferedLiveUpdate: function(data: ContentUpdatePayload): void {
       if (!appContext.websocket) {
         throw new Error('WebSocket controller is not initialized');
       }
       return appContext.websocket.scheduleBufferedLiveUpdate(data);
     },
-    selectFile: function(file, pushHistory, options) {
+    selectFile: function(file: string, pushHistory?: boolean, options?: SelectFileOptions): void {
       return selectFile(file, pushHistory, options);
     },
-    setCurrentFileForTest: function(file) {
+    setCurrentFileForTest: function(file: string): void {
       appContext.state.currentFile = file || '';
     },
-    setDirModeForTest: function(value) {
+    setDirModeForTest: function(value: boolean): void {
       appContext.config.isDirMode = !!value;
     },
-    updateContent: function(data, options) {
-      return appContext.content.updateContent(data, options);
+    updateContent: function(data: unknown, options?: ContentUpdateOptions): ContentUpdateResult {
+      return appContext.content!.updateContent(data, options);
     },
     get isDirMode() {
       return appContext.config.isDirMode;
@@ -486,7 +495,7 @@ function installMarkdownViewTestHooks() {
   };
 }
 
-function startMarkdownViewApp() {
+function startMarkdownViewApp(): void {
   appContext.content = createContentController(appContext, {
     activateSidebarTab: activateSidebarTab,
     clearMemoSyncPendingStatus: clearMemoSyncPendingStatus,
@@ -508,15 +517,15 @@ function startMarkdownViewApp() {
   setupSelectionDeferral();
   setupHistoryUrlSync();
   setupDirectoryHistoryNavigation();
-  appContext.content.setup();
+  appContext.content!.setup();
   setupMemoInteractions();
   setupSidebarInteractions();
   setupThemeToggle();
 
   appContext.websocket = createWebSocketController(appContext, {
-    updateContent: appContext.content.updateContent,
-    scheduleDirectorySearch: appContext.content.scheduleDirectorySearch,
-    setLiveStatus: appContext.content.setLiveStatus,
+    updateContent: appContext.content!.updateContent,
+    scheduleDirectorySearch: appContext.content!.scheduleDirectorySearch,
+    setLiveStatus: appContext.content!.setLiveStatus,
     selectFile: selectFile,
     applyRemoteMemoUpdate: applyRemoteMemoUpdate,
     queueRemoteMemoReload: queueRemoteMemoReload
@@ -525,11 +534,11 @@ function startMarkdownViewApp() {
 
   setupTocTracking();
   restoreActiveTocHeading('');
-  appContext.content.updateDocumentStats();
-  appContext.content.updateReadingProgress();
-  appContext.content.syncDocumentChrome(appContext.state.currentFile);
-  appContext.content.enhanceContentInteractions();
-  appContext.content.setupTocFilter();
+  appContext.content!.updateDocumentStats();
+  appContext.content!.updateReadingProgress();
+  appContext.content!.syncDocumentChrome(appContext.state.currentFile);
+  appContext.content!.enhanceContentInteractions();
+  appContext.content!.setupTocFilter();
   setupTabs();
   if (appContext.config.isDirMode) {
     setupFileList();

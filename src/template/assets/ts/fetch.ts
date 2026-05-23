@@ -1,9 +1,9 @@
-function getFileParam() {
+function getFileParam(): string {
   var params = new URLSearchParams(location.search);
   return params.get('file') || '';
 }
 
-function setFileParam(file, replace, hash) {
+function setFileParam(file: string, replace: boolean, hash?: string): void {
   var url = new URL(location.href);
   if (file) {
     url.searchParams.set('file', file);
@@ -24,26 +24,27 @@ function setFileParam(file, replace, hash) {
   }
 }
 
-function setupHistoryUrlSync() {
+function setupHistoryUrlSync(): void {
   if (!appContext.config.isDirMode) return;
   if (appContext.state.currentFile) {
     setFileParam(appContext.state.currentFile, true);
   }
 }
 
-function createHttpError(status) {
-  var err = new Error('HTTP ' + status);
+function createHttpError(status: number): MarkdownViewHttpError {
+  var err: MarkdownViewHttpError = new Error('HTTP ' + status);
   err.type = 'http';
   err.status = status;
   return err;
 }
 
-function getFileFetchErrorMessage(err) {
-  if (err && typeof err.userMessage === 'string' && err.userMessage) {
-    return err.userMessage;
+function getFileFetchErrorMessage(err: unknown): string {
+  var typedError = err as MarkdownViewHttpError | null;
+  if (typedError && typeof typedError.userMessage === 'string' && typedError.userMessage) {
+    return typedError.userMessage;
   }
-  if (err && err.type === 'http') {
-    switch (err.status) {
+  if (typedError && typedError.type === 'http') {
+    switch (typedError.status) {
       case 403:
         return 'このファイルにはアクセスできません。';
       case 404:
@@ -53,19 +54,19 @@ function getFileFetchErrorMessage(err) {
       case 500:
         return 'サーバー内部エラーが発生しました。';
       default:
-        return 'ファイルの読み込みに失敗しました（HTTP ' + err.status + '）。';
+        return 'ファイルの読み込みに失敗しました（HTTP ' + typedError.status + '）。';
     }
   }
-  if (err && err.type === 'parse') {
+  if (typedError && typedError.type === 'parse') {
     return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
   }
-  if (err && err.type === 'contract') {
+  if (typedError && typedError.type === 'contract') {
     return 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
   }
   return 'ネットワークエラーが発生しました。接続を確認して再度お試しください。';
 }
 
-function selectFile(file, pushHistory, options) {
+function selectFile(file: string, pushHistory?: boolean, options?: SelectFileOptions): void {
   if (pushHistory === undefined) pushHistory = true;
   options = options || {};
   var previousFile = appContext.state.currentFile;
@@ -93,42 +94,43 @@ function selectFile(file, pushHistory, options) {
   })
   .then(function(resp) {
     if (!resp.ok) throw createHttpError(resp.status);
-    return resp.json().catch(function(err) {
+    return resp.json().catch(function(err: MarkdownViewHttpError): Promise<never> {
       err.type = 'parse';
       throw err;
     });
   })
-  .then(function(data) {
+  .then(function(data: unknown): void {
     if (gen !== appContext.fetch.generation) return;
     hideFileFetchErrorBanner();
     if (!appContext.config.isDirMode && previousFile && previousFile !== file) {
-      appContext.content.clearDocumentSearchQuery();
+      appContext.content!.clearDocumentSearchQuery();
     }
     var scrollMode = options.scrollMode || (previousFile === file ? 'preserve' : 'reset');
-    var updateResult = appContext.content.updateContent(data, {
+    var updateResult = appContext.content!.updateContent(data, {
       scrollMode: scrollMode,
       requeryDirectorySearch: options.requeryDirectorySearch !== false,
       anchorHash: options.anchorHash || '',
       clearHashOnMiss: pushHistory
     });
     if (updateResult && updateResult.contractViolation) {
-      var err = new Error('content response contract violation');
+      var err: MarkdownViewHttpError = new Error('content response contract violation');
       err.type = 'contract';
       throw err;
     }
+    var payload = data as ContentUpdatePayload;
     if (appContext.config.isDirMode && !pushHistory) {
       setFileParam(appContext.state.currentFile, true, options.historyHash);
     }
-    if (data.file && data.file !== appContext.state.currentFile) {
-      appContext.state.currentFile = data.file;
+    if (payload.file && payload.file !== appContext.state.currentFile) {
+      appContext.state.currentFile = payload.file;
       setFileParam(appContext.state.currentFile, true, options.historyHash);
       updateFileListActive(appContext.state.currentFile);
     }
-    appContext.content.syncDocumentChrome(appContext.state.currentFile);
+    appContext.content!.syncDocumentChrome(appContext.state.currentFile);
     loadMemo(appContext.state.currentFile, gen);
-    appContext.content.setLiveStatus('live');
+    appContext.content!.setLiveStatus('live');
   })
-  .catch(function(err) {
+  .catch(function(err: unknown): void {
     console.error('[markdown-view] ファイル取得エラー:', err);
     if (gen !== appContext.fetch.generation) return;
     if (
@@ -138,7 +140,7 @@ function selectFile(file, pushHistory, options) {
     ) {
       appContext.search.currentDirectoryIndex = appContext.search.pendingDirectoryNavigation.previousResultIndex;
       appContext.search.pendingDirectoryNavigation = null;
-      appContext.content.renderDirectorySearchUi();
+      appContext.content!.renderDirectorySearchUi();
     }
     appContext.state.currentFile = previousFile;
     updateFileListActive(previousFile);
@@ -146,6 +148,6 @@ function selectFile(file, pushHistory, options) {
     // 失敗した遷移の generation で旧ファイルのメモを読み直し、後続遷移があれば loadMemo 側で破棄する。
     loadMemo(previousFile, gen);
     showFileFetchErrorBanner(getFileFetchErrorMessage(err));
-    appContext.content.setLiveStatus('error');
+    appContext.content!.setLiveStatus('error');
   });
 }
