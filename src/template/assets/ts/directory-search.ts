@@ -1,37 +1,41 @@
-function createDirectorySearchController(ctx, deps) {
-  function createDirectorySearchTruncatedState() {
+function createDirectorySearchController(
+  ctx: MarkdownViewAppContext,
+  deps: DirectorySearchDeps
+): MarkdownViewDirectorySearchController {
+  function createDirectorySearchTruncatedState(): HTMLElement {
     var item = document.createElement('div');
     item.className = 'document-search-empty';
     item.textContent = '上限により一部のみ表示しています。';
     return item;
   }
 
-  function renderDirectorySearchResults() {
-    var preservedScrollTop = ctx.elements.documentSearchResultsEl.scrollTop;
-    ctx.elements.documentSearchResultsEl.innerHTML = '';
+  function renderDirectorySearchResults(): void {
+    var resultsEl = ctx.elements.documentSearchResultsEl!;
+    var preservedScrollTop = resultsEl.scrollTop;
+    resultsEl.innerHTML = '';
 
     if (!ctx.search.currentDocumentQuery) return;
 
     if (ctx.search.currentDirectoryLoading) {
-      ctx.elements.documentSearchResultsEl.appendChild(deps.createDocumentSearchEmptyState('ディレクトリを検索しています。'));
+      resultsEl.appendChild(deps.createDocumentSearchEmptyState('ディレクトリを検索しています。'));
       return;
     }
 
     if (ctx.search.currentDirectoryError) {
-      ctx.elements.documentSearchResultsEl.appendChild(deps.createDocumentSearchEmptyState(ctx.search.currentDirectoryError));
+      resultsEl.appendChild(deps.createDocumentSearchEmptyState(ctx.search.currentDirectoryError));
       return;
     }
 
     if (ctx.search.currentDirectoryTruncated) {
-      ctx.elements.documentSearchResultsEl.appendChild(createDirectorySearchTruncatedState());
+      resultsEl.appendChild(createDirectorySearchTruncatedState());
     }
 
     if (!ctx.search.currentDirectoryResults.length) {
-      ctx.elements.documentSearchResultsEl.appendChild(deps.createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
+      resultsEl.appendChild(deps.createDocumentSearchEmptyState('ディレクトリ内に一致が見つかりません。'));
       return;
     }
 
-    ctx.search.currentDirectoryResults.forEach(function(result, index) {
+    ctx.search.currentDirectoryResults.forEach(function(result: SearchResult, index: number): void {
       var button = document.createElement('button');
       var indexBadge = document.createElement('span');
       var body = document.createElement('span');
@@ -59,18 +63,18 @@ function createDirectorySearchController(ctx, deps) {
 
       button.appendChild(indexBadge);
       button.appendChild(body);
-      ctx.elements.documentSearchResultsEl.appendChild(button);
+      resultsEl.appendChild(button);
     });
 
-    ctx.elements.documentSearchResultsEl.scrollTop = preservedScrollTop;
+    resultsEl.scrollTop = preservedScrollTop;
   }
 
-  function renderDirectorySearchUi() {
+  function renderDirectorySearchUi(): void {
     deps.updateDocumentSearchSummary();
     renderDirectorySearchResults();
   }
 
-  function applyPendingDirectorySearchNavigation() {
+  function applyPendingDirectorySearchNavigation(): void {
     if (!ctx.config.isDirMode || !ctx.search.pendingDirectoryNavigation) return;
     if (ctx.search.pendingDirectoryNavigation.file !== ctx.state.currentFile) return;
     if (ctx.search.pendingDirectoryNavigation.query !== ctx.search.currentDocumentQuery) {
@@ -86,7 +90,7 @@ function createDirectorySearchController(ctx, deps) {
     ctx.search.pendingDirectoryNavigation = null;
   }
 
-  function scheduleDirectorySearch(query) {
+  function scheduleDirectorySearch(query: string): void {
     if (ctx.search.documentDebounceTimer) {
       clearTimeout(ctx.search.documentDebounceTimer);
     }
@@ -96,12 +100,12 @@ function createDirectorySearchController(ctx, deps) {
     }, 300);
   }
 
-  function nextDirectorySearchSequence() {
+  function nextDirectorySearchSequence(): number {
     ctx.search.directorySearchSequence += 1;
     return ctx.search.directorySearchSequence;
   }
 
-  function directorySearchHeaders(sequence) {
+  function directorySearchHeaders(sequence: number): Record<string, string> {
     return {
       'Accept': 'application/json',
       'X-Markdown-View-Search-Client': ctx.search.directorySearchClientId,
@@ -109,7 +113,7 @@ function createDirectorySearchController(ctx, deps) {
     };
   }
 
-  function cancelDirectorySearch() {
+  function cancelDirectorySearch(): void {
     if (ctx.search.documentDebounceTimer) {
       clearTimeout(ctx.search.documentDebounceTimer);
       ctx.search.documentDebounceTimer = null;
@@ -119,12 +123,12 @@ function createDirectorySearchController(ctx, deps) {
 
     fetch('/api/search?q=', {
       headers: directorySearchHeaders(sequence)
-    }).catch(function(err) {
+    }).catch(function(err: unknown): void {
       console.debug('[markdown-view] ディレクトリ検索キャンセル通知に失敗しました:', err);
     });
   }
 
-  function getPreferredDirectorySearchSelection() {
+  function getPreferredDirectorySearchSelection(): DirectorySearchSelection | null {
     if (ctx.search.pendingDirectoryNavigation) {
       return {
         file: ctx.search.pendingDirectoryNavigation.file,
@@ -135,9 +139,10 @@ function createDirectorySearchController(ctx, deps) {
       ctx.search.currentDirectoryIndex >= 0 &&
       ctx.search.currentDirectoryIndex < ctx.search.currentDirectoryResults.length
     ) {
+      var currentResult = ctx.search.currentDirectoryResults[ctx.search.currentDirectoryIndex]!;
       return {
-        file: ctx.search.currentDirectoryResults[ctx.search.currentDirectoryIndex].file,
-        fileMatchIndex: ctx.search.currentDirectoryResults[ctx.search.currentDirectoryIndex].file_match_index
+        file: currentResult.file,
+        fileMatchIndex: currentResult.file_match_index
       };
     }
     if (
@@ -153,11 +158,14 @@ function createDirectorySearchController(ctx, deps) {
     return null;
   }
 
-  function resolveDirectorySearchIndex(results, preferredSelection) {
+  function resolveDirectorySearchIndex(
+    results: SearchResult[],
+    preferredSelection: DirectorySearchSelection | null
+  ): number {
     var index;
     if (!results.length) return -1;
     if (preferredSelection) {
-      index = results.findIndex(function(result) {
+      index = results.findIndex(function(result: SearchResult): boolean {
         return (
           result.file === preferredSelection.file &&
           result.file_match_index === preferredSelection.fileMatchIndex
@@ -170,7 +178,7 @@ function createDirectorySearchController(ctx, deps) {
       ctx.search.currentDocumentIndex >= 0 &&
       ctx.search.currentDocumentIndex < ctx.search.documentMatches.length
     ) {
-      index = results.findIndex(function(result) {
+      index = results.findIndex(function(result: SearchResult): boolean {
         return (
           result.file === ctx.state.currentFile &&
           result.file_match_index === ctx.search.currentDocumentIndex
@@ -181,23 +189,51 @@ function createDirectorySearchController(ctx, deps) {
     return -1;
   }
 
-  function isDirectorySearchResultItem(result) {
+  function isDirectorySearchResultItem(result: unknown): result is SearchResult {
     return Boolean(
       result &&
       typeof result === 'object' &&
       !Array.isArray(result) &&
-      typeof result.file === 'string' &&
-      result.file.length > 0 &&
-      Number.isFinite(result.file_match_index) &&
-      result.file_match_index >= 0 &&
-      Math.floor(result.file_match_index) === result.file_match_index &&
-      typeof result.before === 'string' &&
-      typeof result.current === 'string' &&
-      typeof result.after === 'string'
+      typeof (result as SearchResult).file === 'string' &&
+      (result as SearchResult).file.length > 0 &&
+      Number.isFinite((result as SearchResult).file_match_index) &&
+      (result as SearchResult).file_match_index! >= 0 &&
+      Math.floor((result as SearchResult).file_match_index!) === (result as SearchResult).file_match_index &&
+      typeof (result as SearchResult).before === 'string' &&
+      typeof (result as SearchResult).current === 'string' &&
+      typeof (result as SearchResult).after === 'string'
     );
   }
 
-  function applyDirectorySearchContractViolation(data) {
+  function isSearchTruncationReason(value: unknown): value is SearchTruncationReason {
+    return value === 'result_limit' || value === 'file_limit' || value === 'byte_limit';
+  }
+
+  function isSearchResponse(data: unknown, query: string): data is SearchResponse {
+    return Boolean(
+      data &&
+      typeof data === 'object' &&
+      !Array.isArray(data) &&
+      (data as SearchResponse).query === query &&
+      Array.isArray((data as SearchResponse).results) &&
+      (data as SearchResponse).results.every(isDirectorySearchResultItem) &&
+      Number.isFinite((data as SearchResponse).searched_files) &&
+      Number.isFinite((data as SearchResponse).skipped_files) &&
+      Number.isFinite((data as SearchResponse).searched_bytes) &&
+      typeof (data as SearchResponse).truncated === 'boolean' &&
+      Array.isArray((data as SearchResponse).truncated_reasons) &&
+      (data as SearchResponse).truncated_reasons.every(isSearchTruncationReason) &&
+      Boolean(
+        (data as SearchResponse).limits &&
+        typeof (data as SearchResponse).limits === 'object' &&
+        Number.isFinite((data as SearchResponse).limits.max_results) &&
+        Number.isFinite((data as SearchResponse).limits.max_files) &&
+        Number.isFinite((data as SearchResponse).limits.max_bytes)
+      )
+    );
+  }
+
+  function applyDirectorySearchContractViolation(data: unknown): void {
     ctx.search.currentDirectoryLoading = false;
     ctx.search.currentDirectoryResults = [];
     ctx.search.currentDirectoryIndex = -1;
@@ -207,23 +243,23 @@ function createDirectorySearchController(ctx, deps) {
     ctx.search.currentDirectoryError = 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
     console.warn('[markdown-view] ディレクトリ検索応答の契約違反', {
       expectedQuery: ctx.search.currentDocumentQuery,
-      actualQuery: data && typeof data === 'object' && !Array.isArray(data) ? data.query : null,
-      hasResults: Boolean(data && typeof data === 'object' && Array.isArray(data.results))
+      actualQuery: data && typeof data === 'object' && !Array.isArray(data) ? (data as SearchResponse).query : null,
+      hasResults: Boolean(data && typeof data === 'object' && Array.isArray((data as SearchResponse).results))
     });
     renderDirectorySearchUi();
   }
 
-  function isApiErrorPayload(value) {
-    return value && typeof value === 'object' && !Array.isArray(value) &&
-      typeof value.error === 'string' && value.error;
+  function isApiErrorPayload(value: unknown): value is ApiErrorPayload {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value) &&
+      typeof (value as ApiErrorPayload).error === 'string' && (value as ApiErrorPayload).error);
   }
 
-  function throwDirectorySearchHttpError(resp) {
-    return resp.text().then(function(body) {
+  function throwDirectorySearchHttpError(resp: Response): Promise<never> {
+    return resp.text().then(function(body: string): never {
       var err = deps.createHttpError(resp.status);
       if (body) {
         try {
-          var payload = JSON.parse(body);
+          var payload: unknown = JSON.parse(body);
           if (isApiErrorPayload(payload)) {
             err.userMessage = payload.error;
           }
@@ -235,7 +271,7 @@ function createDirectorySearchController(ctx, deps) {
     });
   }
 
-  function runDirectorySearch(query) {
+  function runDirectorySearch(query: string): void {
     var generation = ++ctx.search.documentFetchGeneration;
     var sequence = nextDirectorySearchSequence();
     var preferredSelection = getPreferredDirectorySearchSelection();
@@ -251,40 +287,35 @@ function createDirectorySearchController(ctx, deps) {
     fetch('/api/search?q=' + encodeURIComponent(query), {
       headers: directorySearchHeaders(sequence)
     })
-    .then(function(resp) {
+    .then(function(resp: Response): Promise<unknown> {
       if (!resp.ok) return throwDirectorySearchHttpError(resp);
-      return resp.json().catch(function(err) {
+      return resp.json().catch(function(err: MarkdownViewHttpError) {
         err.type = 'parse';
         throw err;
       });
     })
-    .then(function(data) {
+    .then(function(data: unknown): void {
       if (generation !== ctx.search.documentFetchGeneration) return;
       if (query !== ctx.search.currentDocumentQuery) return;
-      if (!data || typeof data !== 'object' || Array.isArray(data) ||
-        data.query !== ctx.search.currentDocumentQuery ||
-        !Array.isArray(data.results) ||
-        !data.results.every(isDirectorySearchResultItem)
-      ) {
+      if (!isSearchResponse(data, ctx.search.currentDocumentQuery)) {
         applyDirectorySearchContractViolation(data);
         return;
       }
+      var response = data;
       ctx.search.currentDirectoryLoading = false;
       ctx.search.currentDirectoryError = '';
-      ctx.search.currentDirectoryResults = data.results;
-      ctx.search.currentDirectorySkippedFiles = Number(data.skipped_files || 0);
-      ctx.search.currentDirectoryTruncated = data.truncated === true ||
-        (Array.isArray(data.truncated_reasons) && data.truncated_reasons.length > 0);
-      ctx.search.currentDirectoryTruncatedReasons = Array.isArray(data.truncated_reasons)
-        ? data.truncated_reasons.slice()
-        : [];
+      ctx.search.currentDirectoryResults = response.results;
+      ctx.search.currentDirectorySkippedFiles = response.skipped_files;
+      ctx.search.currentDirectoryTruncated = response.truncated === true ||
+        response.truncated_reasons.length > 0;
+      ctx.search.currentDirectoryTruncatedReasons = response.truncated_reasons.slice();
       ctx.search.currentDirectoryIndex = resolveDirectorySearchIndex(
         ctx.search.currentDirectoryResults,
         preferredSelection
       );
       renderDirectorySearchUi();
     })
-    .catch(function(err) {
+    .catch(function(err: unknown): void {
       if (generation !== ctx.search.documentFetchGeneration) return;
       if (query !== ctx.search.currentDocumentQuery) return;
       ctx.search.currentDirectoryLoading = false;
@@ -299,16 +330,16 @@ function createDirectorySearchController(ctx, deps) {
     });
   }
 
-  function openDirectorySearchResult(index) {
+  function openDirectorySearchResult(index: number): void {
     if (!ctx.search.currentDirectoryResults.length) return;
     var normalizedIndex = (index + ctx.search.currentDirectoryResults.length) % ctx.search.currentDirectoryResults.length;
-    var result = ctx.search.currentDirectoryResults[normalizedIndex];
+    var result = ctx.search.currentDirectoryResults[normalizedIndex]!;
     var previousResultIndex = ctx.search.currentDirectoryIndex;
     ctx.search.currentDirectoryIndex = normalizedIndex;
     ctx.search.pendingDirectoryNavigation = {
       file: result.file,
       query: ctx.search.currentDocumentQuery,
-      fileMatchIndex: result.file_match_index,
+      fileMatchIndex: result.file_match_index!,
       resultIndex: normalizedIndex,
       previousResultIndex: previousResultIndex
     };

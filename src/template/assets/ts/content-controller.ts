@@ -1,6 +1,7 @@
-function createContentController(ctx, deps) {
-  deps = deps || {};
-
+function createContentController(
+  ctx: MarkdownViewAppContext,
+  deps: ContentControllerDeps
+): MarkdownViewContentController {
   var enhancements = createContentEnhancements(ctx, {
     clearMemoSyncPendingStatus: deps.clearMemoSyncPendingStatus
   });
@@ -13,8 +14,8 @@ function createContentController(ctx, deps) {
     restoreActiveTocHeading: deps.restoreActiveTocHeading
   });
 
-  var directorySearch;
-  function requireDirectorySearch() {
+  var directorySearch: MarkdownViewDirectorySearchController | null = null;
+  function requireDirectorySearch(): MarkdownViewDirectorySearchController {
     if (!directorySearch) {
       throw new Error('directory search controller is not initialized');
     }
@@ -23,53 +24,58 @@ function createContentController(ctx, deps) {
 
   var documentSearch = createDocumentSearchController(ctx, {
     activateSidebarTab: deps.activateSidebarTab,
-    applyPendingDirectorySearchNavigation: function() {
+    applyPendingDirectorySearchNavigation: function(): void {
       return requireDirectorySearch().applyPendingDirectorySearchNavigation();
     },
-    openDirectorySearchResult: function(index) {
+    openDirectorySearchResult: function(index: number): void {
       return requireDirectorySearch().openDirectorySearchResult(index);
     },
-    renderDirectorySearchResults: function() {
+    renderDirectorySearchResults: function(): void {
       return requireDirectorySearch().renderDirectorySearchResults();
     },
-    renderDirectorySearchUi: function() {
+    renderDirectorySearchUi: function(): void {
       return requireDirectorySearch().renderDirectorySearchUi();
     },
-    cancelDirectorySearch: function() {
+    cancelDirectorySearch: function(): void {
       return requireDirectorySearch().cancelDirectorySearch();
     },
-    scheduleDirectorySearch: function(query) {
+    scheduleDirectorySearch: function(query: string): void {
       return requireDirectorySearch().scheduleDirectorySearch(query);
     }
   });
 
   directorySearch = createDirectorySearchController(ctx, {
     createHttpError: deps.createHttpError,
-    createDocumentSearchEmptyState: function(message) {
+    createDocumentSearchEmptyState: function(message: string): HTMLElement {
       return documentSearch.createDocumentSearchEmptyState(message);
     },
     getFileFetchErrorMessage: deps.getFileFetchErrorMessage,
-    openFileSearchResult: function(file, options) {
+    openFileSearchResult: function(file: string, options?: SelectFileOptions): void {
       return deps.selectFile(file, false, options);
     },
-    renderDocumentSearchResultContext: function(container, text, query, variant) {
+    renderDocumentSearchResultContext: function(
+      container: HTMLElement,
+      text: string,
+      query: string,
+      variant: SearchContextVariant
+    ): void {
       return documentSearch.renderDocumentSearchResultContext(container, text, query, variant);
     },
-    setCurrentDocumentSearchMatch: function(index, scrollIntoView) {
+    setCurrentDocumentSearchMatch: function(index: number, scrollIntoView?: boolean): void {
       return documentSearch.setCurrentDocumentSearchMatch(index, scrollIntoView);
     },
-    updateDocumentSearchSummary: function() {
+    updateDocumentSearchSummary: function(): void {
       return documentSearch.updateDocumentSearchSummary();
     }
   });
 
-  function setup() {
+  function setup(): void {
     documentSearch.setupDocumentSearch();
     navigation.setupContentLinkNavigation();
     navigation.setupMemoLinkNavigation();
   }
 
-  function applyPendingUpdate() {
+  function applyPendingUpdate(): void {
     if (!ctx.state.pendingUpdate) return;
     if (ctx.state.pendingUpdateTimer) {
       clearTimeout(ctx.state.pendingUpdateTimer);
@@ -114,7 +120,7 @@ function createContentController(ctx, deps) {
 
   // サーバーサイドでサニタイズ済みのHTMLを反映する
   // XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み
-  function updateContent(data, options) {
+  function updateContent(data: unknown, options?: ContentUpdateOptions): ContentUpdateResult {
     options = options || {};
     var validation = validateUpdatePayload(data);
     var safeData = validation.safeData;

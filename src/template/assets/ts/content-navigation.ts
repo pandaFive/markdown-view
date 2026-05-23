@@ -1,5 +1,8 @@
-function createContentNavigation(ctx, deps) {
-  function updateLocationHash(url, hash) {
+function createContentNavigation(
+  ctx: MarkdownViewAppContext,
+  deps: ContentNavigationDeps
+): MarkdownViewContentNavigationController {
+  function updateLocationHash(url: URL, hash?: string): void {
     if (hash === undefined) return;
     if (!hash) {
       url.hash = '';
@@ -8,7 +11,7 @@ function createContentNavigation(ctx, deps) {
     url.hash = hash.charAt(0) === '#' ? hash : '#' + hash;
   }
 
-  function setLocationHash(hash, replace) {
+  function setLocationHash(hash: string, replace: boolean): void {
     var url = new URL(location.href);
     updateLocationHash(url, hash || '');
     if (replace) {
@@ -18,18 +21,18 @@ function createContentNavigation(ctx, deps) {
     }
   }
 
-  function isModifiedClick(event) {
+  function isModifiedClick(event: MouseEvent): boolean {
     return event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
   }
 
-  function isExternalSchemeHref(href) {
+  function isExternalSchemeHref(href: string): boolean {
     return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href);
   }
 
   /// `?file=foo.md#hash` 形式や単一ファイルモードの同一path+hash形式を解決する。
   /// メモプレビュー内の出典リンクは memo.js の buildQuoteSource() がこの形式で生成する。
   /// resolveMarkdownLinkTarget は `?` 開始 href を拒否するため、こちらで補完する。
-  function resolveFileQueryHref(href) {
+  function resolveFileQueryHref(href: string): MarkdownLinkTarget | null {
     if (!href) return null;
     var url;
     try {
@@ -55,7 +58,7 @@ function createContentNavigation(ctx, deps) {
     return null;
   }
 
-  function resolveMarkdownLinkTarget(href) {
+  function resolveMarkdownLinkTarget(href: string): MarkdownLinkTarget | null {
     if (!ctx.config.isDirMode || !href || href.startsWith('#') || href.startsWith('/') || href.startsWith('?')) {
       return null;
     }
@@ -97,7 +100,7 @@ function createContentNavigation(ctx, deps) {
     };
   }
 
-  function parseLineHash(hash) {
+  function parseLineHash(hash: string): ParsedLineHash {
     var empty = { headingId: null, lineRange: null };
     if (!hash || hash.charAt(0) !== '#') return empty;
     var raw = hash.slice(1);
@@ -107,7 +110,7 @@ function createContentNavigation(ctx, deps) {
     } catch (error) {
       console.warn('[markdown-view] hash のデコードに失敗したため raw fragment を使用します。', {
         hash: hash,
-        error: error && error.message ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error)
       });
       decoded = raw;
     }
@@ -118,7 +121,7 @@ function createContentNavigation(ctx, deps) {
     // slugify 仕様が変わる場合はここの分割戦略を見直すこと
     var combined = decoded.match(/^(.*):L(\d+)(?:-L(\d+))?$/);
     if (combined) {
-      var start = parseInt(combined[2], 10);
+      var start = parseInt(combined[2]!, 10);
       var end = combined[3] ? parseInt(combined[3], 10) : start;
       return {
         headingId: combined[1] || null,
@@ -129,7 +132,7 @@ function createContentNavigation(ctx, deps) {
     // `L5` または `L5-L7` 単独
     var lineOnly = decoded.match(/^L(\d+)(?:-L(\d+))?$/);
     if (lineOnly) {
-      var s = parseInt(lineOnly[1], 10);
+      var s = parseInt(lineOnly[1]!, 10);
       var e = lineOnly[2] ? parseInt(lineOnly[2], 10) : s;
       return { headingId: null, lineRange: { start: s, end: e } };
     }
@@ -146,7 +149,7 @@ function createContentNavigation(ctx, deps) {
   /// 新形式（行範囲を既に含む hash）や行範囲情報が無い場合は hash をそのまま返す。
   /// renderer がソース行トラッキング用に text を `<span>` でラップするケースに対応するため、
   /// TEXT_NODE と ELEMENT_NODE の双方で `textContent` を見る。
-  function augmentHashWithTrailingLineHint(link, hash) {
+  function augmentHashWithTrailingLineHint(link: Element, hash: string): string {
     if (!link || !link.closest || !link.closest('#memo-preview')) return hash;
     var sibling = link.nextSibling;
     if (!sibling) return hash;
@@ -154,9 +157,9 @@ function createContentNavigation(ctx, deps) {
     if (parseLineHash(hash).lineRange) return hash;
     // 両端アンカー `^\s*...\s*$` で sibling textContent 全体が行番号トークンのみで構成されることを要求。
     // これにより `L10 onwards...` の散文や `L5abc` の別トークン連続を augment 対象から除外する
-    var match = sibling.textContent.match(/^\s*L(\d+)(?:-L(\d+))?\s*$/);
+    var match = (sibling.textContent || '').match(/^\s*L(\d+)(?:-L(\d+))?\s*$/);
     if (!match) return hash;
-    var start = parseInt(match[1], 10);
+    var start = parseInt(match[1]!, 10);
     var end = match[2] ? parseInt(match[2], 10) : start;
     // end < start（逆転）および end == start（単一行）はどちらも start 1 行として扱う
     var suffix = end > start ? 'L' + start + '-L' + end : 'L' + start;
@@ -164,7 +167,7 @@ function createContentNavigation(ctx, deps) {
     return hash + ':' + suffix;
   }
 
-  function scrollToLineRange(targetLine, behavior) {
+  function scrollToLineRange(targetLine: number, behavior?: ScrollBehavior): boolean {
     // 行番号は renderer 側で 1-indexed。0 以下や非数値は無効として早期return
     if (!ctx.elements.contentRoot || typeof targetLine !== 'number' || targetLine < 1) return false;
     var blocks = ctx.elements.contentRoot.querySelectorAll('[data-line-block]');
@@ -172,10 +175,11 @@ function createContentNavigation(ctx, deps) {
     // <ul>(L5-L20) と <li>(L7-L7) が共に line 7 を含むとき、最狭の <li> を選ぶ。
     // 広いコンテナを選ぶと対象行ではなくコンテナ先頭へスクロールしてしまうため。
     // 同値スパン（ネストblockquote内の単独<p>など）では `<=` 比較で DOM 深い側を優先する
-    var best = null;
+    var best: HTMLElement | null = null;
     var bestSpan = Infinity;
     for (var i = 0; i < blocks.length; i++) {
-      var block = blocks[i];
+      var block = blocks[i] as HTMLElement | undefined;
+      if (!block) continue;
       // block コンテナは data-line-block-start/end、heading/code-block は data-source-* から範囲を読む
       var startAttr = block.getAttribute('data-line-block-start');
       if (startAttr === null) startAttr = block.getAttribute('data-source-start-line');
@@ -199,7 +203,7 @@ function createContentNavigation(ctx, deps) {
     return true;
   }
 
-  function triggerJumpHighlight(el) {
+  function triggerJumpHighlight(el: HTMLElement | null): void {
     if (!el) return;
     el.classList.remove('jump-highlight');
     // CSS animationを再起動するための強制reflow（class再付与前にlayoutをflushする定番技法）
@@ -211,12 +215,12 @@ function createContentNavigation(ctx, deps) {
     }, { once: true });
   }
 
-  function applyContentAnchorNavigation(hash, replace) {
+  function applyContentAnchorNavigation(hash: string, replace: boolean): boolean {
     if (!hash || hash.charAt(0) !== '#') return false;
 
     var parsed = parseLineHash(hash);
     // ユーザクリック由来 (replace=false) は smooth、履歴復元 (replace=true) は auto で即着地
-    var scrollBehavior = replace ? 'auto' : 'smooth';
+    var scrollBehavior: ScrollBehavior = replace ? 'auto' : 'smooth';
 
     // 行範囲があれば優先（より詳細な位置へジャンプ）
     if (parsed.lineRange && scrollToLineRange(parsed.lineRange.start, scrollBehavior)) {
@@ -240,7 +244,7 @@ function createContentNavigation(ctx, deps) {
     return false;
   }
 
-  function restoreContentNavigationFromLocation() {
+  function restoreContentNavigationFromLocation(): void {
     var hash = location.hash || '';
 
     requestAnimationFrame(function() {
@@ -259,26 +263,27 @@ function createContentNavigation(ctx, deps) {
 
   /// 内部リンク（相対 .md / `?file=foo.md#hash` / 同一path+hash）のクリックを処理する共通ハンドラ。
   /// `#content` と `#memo-preview` の両方からの delegation で使う。
-  function handleInternalLinkClick(event) {
-    var link = event.target.closest('a[href]');
+  function handleInternalLinkClick(event: MouseEvent): void {
+    var eventTarget = event.target instanceof Element ? event.target : null;
+    var link = eventTarget ? eventTarget.closest<HTMLAnchorElement>('a[href]') : null;
     if (!link || isModifiedClick(event)) return;
     if (link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
 
     var href = link.getAttribute('href') || '';
     // 既存relative resolverを優先、ヒットしなければ `?file=` / 同一path系で再試行
-    var target = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
-    if (!target) return;
+    var linkTarget = resolveMarkdownLinkTarget(href) || resolveFileQueryHref(href);
+    if (!linkTarget) return;
 
     // 旧形式メモ互換（リンク外 `L5-L7` を hash fragment に取り込む）
-    target.hash = augmentHashWithTrailingLineHint(link, target.hash);
+    linkTarget.hash = augmentHashWithTrailingLineHint(link, linkTarget.hash);
 
-    if (target.file === ctx.state.currentFile) {
+    if (linkTarget.file === ctx.state.currentFile) {
       event.preventDefault();
-      if (target.hash) {
-        if (applyContentAnchorNavigation(target.hash, false)) {
+      if (linkTarget.hash) {
+        if (applyContentAnchorNavigation(linkTarget.hash, false)) {
           return;
         }
-        console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', target.hash);
+        console.warn('[markdown-view] 同一ファイル内の見出しが見つかりません:', linkTarget.hash);
       }
       deps.setFileParam(ctx.state.currentFile, false, '');
       restoreContentNavigationFromLocation();
@@ -287,19 +292,19 @@ function createContentNavigation(ctx, deps) {
 
     event.preventDefault();
 
-    deps.selectFile(target.file, true, {
-      scrollMode: target.hash ? 'none' : 'reset',
-      anchorHash: target.hash,
-      historyHash: target.hash || ''
+    deps.selectFile(linkTarget.file, true, {
+      scrollMode: linkTarget.hash ? 'none' : 'reset',
+      anchorHash: linkTarget.hash,
+      historyHash: linkTarget.hash || ''
     });
   }
 
-  function setupContentLinkNavigation() {
+  function setupContentLinkNavigation(): void {
     if (!ctx.elements.contentRoot) return;
     ctx.elements.contentRoot.addEventListener('click', handleInternalLinkClick);
   }
 
-  function setupMemoLinkNavigation() {
+  function setupMemoLinkNavigation(): void {
     if (!ctx.elements.memoPreviewEl) return;
     ctx.elements.memoPreviewEl.addEventListener('click', handleInternalLinkClick);
   }

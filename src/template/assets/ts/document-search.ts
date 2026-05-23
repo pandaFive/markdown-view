@@ -1,14 +1,17 @@
-function createDocumentSearchController(ctx, deps) {
+function createDocumentSearchController(
+  ctx: MarkdownViewAppContext,
+  deps: DocumentSearchDeps
+): MarkdownViewDocumentSearchController {
   var DOCUMENT_SEARCH_BLOCK_SELECTOR = 'p, li, blockquote, th, td, h1, h2, h3, h4, h5, h6';
 
-  function createDocumentSearchEmptyState(message) {
+  function createDocumentSearchEmptyState(message: string): HTMLElement {
     var empty = document.createElement('p');
     empty.className = 'document-search-empty';
     empty.textContent = message;
     return empty;
   }
 
-  function formatDirectorySearchSummary() {
+  function formatDirectorySearchSummary(): string {
     var baseText;
     if (!ctx.search.currentDocumentQuery) {
       baseText = '0 件';
@@ -30,7 +33,7 @@ function createDocumentSearchController(ctx, deps) {
     return baseText;
   }
 
-  function updateDocumentSearchSummary() {
+  function updateDocumentSearchSummary(): void {
     if (!ctx.elements.documentSearchSummaryEl) return;
     if (ctx.config.isDirMode) {
       ctx.elements.documentSearchSummaryEl.textContent = formatDirectorySearchSummary();
@@ -43,9 +46,9 @@ function createDocumentSearchController(ctx, deps) {
     ctx.elements.documentSearchSummaryEl.textContent = (ctx.search.currentDocumentIndex + 1) + ' / ' + ctx.search.documentMatches.length + ' 件';
   }
 
-  function clearDocumentSearchHighlights() {
+  function clearDocumentSearchHighlights(): void {
     if (!ctx.elements.contentRoot) return;
-    ctx.elements.contentRoot.querySelectorAll('mark.document-search-match').forEach(function(mark) {
+    ctx.elements.contentRoot.querySelectorAll<HTMLElement>('mark.document-search-match').forEach(function(mark: HTMLElement): void {
       var parent = mark.parentNode;
       if (!parent) return;
       parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
@@ -57,7 +60,7 @@ function createDocumentSearchController(ctx, deps) {
     renderDocumentSearchResults();
   }
 
-  function shouldSkipDocumentSearchNode(node) {
+  function shouldSkipDocumentSearchNode(node: Text): boolean {
     var parent = node.parentElement;
     if (!parent) return true;
     return Boolean(parent.closest(
@@ -65,7 +68,7 @@ function createDocumentSearchController(ctx, deps) {
     ));
   }
 
-  function createDocumentSearchMark(text, matchId) {
+  function createDocumentSearchMark(text: string | null, matchId: number): HTMLElement {
     var mark = document.createElement('mark');
     mark.className = 'document-search-match';
     mark.dataset.matchId = String(matchId);
@@ -73,11 +76,11 @@ function createDocumentSearchController(ctx, deps) {
     return mark;
   }
 
-  function escapeRegExp(value) {
+  function escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  function trimSentenceRange(text, start, end) {
+  function trimSentenceRange(text: string, start: number, end: number): SentenceRange {
     var nextStart = start;
     var nextEnd = end;
     while (nextStart < nextEnd && /\s/.test(text.charAt(nextStart))) {
@@ -89,8 +92,8 @@ function createDocumentSearchController(ctx, deps) {
     return { start: nextStart, end: nextEnd };
   }
 
-  function splitTextIntoSentenceRanges(text) {
-    var ranges = [];
+  function splitTextIntoSentenceRanges(text: string): SentenceRange[] {
+    var ranges: SentenceRange[] = [];
     var sentenceStart = 0;
     var i;
 
@@ -121,35 +124,48 @@ function createDocumentSearchController(ctx, deps) {
     return ranges;
   }
 
-  function getSentenceForMatch(sentenceRanges, matchStart, matchEnd) {
+  function getSentenceForMatch(sentenceRanges: SentenceRange[], matchStart: number, matchEnd: number): number {
     var i;
     for (i = 0; i < sentenceRanges.length; i++) {
-      if (matchStart < sentenceRanges[i].end && matchEnd > sentenceRanges[i].start) {
+      var range = sentenceRanges[i]!;
+      if (matchStart < range.end && matchEnd > range.start) {
         return i;
       }
     }
     return sentenceRanges.length ? 0 : -1;
   }
 
-  function getAdjacentSentence(blockEntries, blockIndex, sentenceIndex, direction) {
+  function getAdjacentSentence(
+    blockEntries: DocumentSearchBlockEntry[],
+    blockIndex: number,
+    sentenceIndex: number,
+    direction: number
+  ): string {
     var targetBlockIndex = blockIndex;
     var targetSentenceIndex = sentenceIndex + direction;
 
     while (targetBlockIndex >= 0 && targetBlockIndex < blockEntries.length) {
       var entry = blockEntries[targetBlockIndex];
+      if (!entry) break;
       if (targetSentenceIndex >= 0 && targetSentenceIndex < entry.sentences.length) {
-        return entry.text.slice(entry.sentences[targetSentenceIndex].start, entry.sentences[targetSentenceIndex].end);
+        var sentence = entry.sentences[targetSentenceIndex]!;
+        return entry.text.slice(sentence.start, sentence.end);
       }
       targetBlockIndex += direction;
       if (targetBlockIndex < 0 || targetBlockIndex >= blockEntries.length) break;
-      targetSentenceIndex = direction > 0 ? 0 : blockEntries[targetBlockIndex].sentences.length - 1;
+      targetSentenceIndex = direction > 0 ? 0 : blockEntries[targetBlockIndex]!.sentences.length - 1;
     }
 
     return '';
   }
 
-  function buildDocumentSearchContext(blockEntries, blockIndex, matchStart, matchEnd) {
-    var entry = blockEntries[blockIndex];
+  function buildDocumentSearchContext(
+    blockEntries: DocumentSearchBlockEntry[],
+    blockIndex: number,
+    matchStart: number,
+    matchEnd: number
+  ): DocumentSearchContext {
+    var entry = blockEntries[blockIndex]!;
     var sentenceIndex = getSentenceForMatch(entry.sentences, matchStart, matchEnd);
     var currentSentenceRange = sentenceIndex >= 0 ? entry.sentences[sentenceIndex] : null;
     var currentSentence = currentSentenceRange
@@ -163,53 +179,65 @@ function createDocumentSearchController(ctx, deps) {
     };
   }
 
-  function getDocumentSearchBlocks() {
+  function getDocumentSearchBlocks(): HTMLElement[] {
     if (!ctx.elements.contentRoot) return [];
     return Array.prototype.filter.call(
       ctx.elements.contentRoot.querySelectorAll(DOCUMENT_SEARCH_BLOCK_SELECTOR),
-      function(block) {
+      function(block: HTMLElement): boolean {
         return !block.parentElement || !block.parentElement.closest(DOCUMENT_SEARCH_BLOCK_SELECTOR);
       }
     );
   }
 
-  function collectDocumentSearchTextNodes(block) {
+  function collectDocumentSearchTextNodes(block: HTMLElement): DocumentSearchTextBlock {
     var walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
-    var textNodes = [];
-    var node;
+    var textNodes: DocumentSearchTextNodeEntry[] = [];
+    var node: Node | null;
     var offset = 0;
 
     while ((node = walker.nextNode())) {
-      if (!node.nodeValue || !node.nodeValue.trim()) continue;
-      if (shouldSkipDocumentSearchNode(node)) continue;
+      var textNode = node as Text;
+      if (!textNode.nodeValue || !textNode.nodeValue.trim()) continue;
+      if (shouldSkipDocumentSearchNode(textNode)) continue;
       textNodes.push({
-        node: node,
+        node: textNode,
         start: offset,
-        end: offset + node.nodeValue.length
+        end: offset + textNode.nodeValue.length
       });
-      offset += node.nodeValue.length;
+      offset += textNode.nodeValue.length;
     }
 
     return {
-      text: textNodes.map(function(entry) { return entry.node.nodeValue; }).join(''),
+      text: textNodes.map(function(entry: DocumentSearchTextNodeEntry): string { return entry.node.nodeValue || ''; }).join(''),
       nodes: textNodes
     };
   }
 
-  function wrapDocumentSearchSegment(textNode, start, end, matchId) {
-    var tail = end < textNode.nodeValue.length ? textNode.splitText(end) : null;
+  function wrapDocumentSearchSegment(
+    textNode: Text,
+    start: number,
+    end: number,
+    matchId: number
+  ): WrappedDocumentSearchSegment {
+    var nodeValue = textNode.nodeValue || '';
+    var tail = end < nodeValue.length ? textNode.splitText(end) : null;
     var matchNode = start > 0 ? textNode.splitText(start) : textNode;
     var mark = createDocumentSearchMark(matchNode.nodeValue, matchId);
-    matchNode.parentNode.replaceChild(mark, matchNode);
+    matchNode.parentNode!.replaceChild(mark, matchNode);
     return { mark: mark, tail: tail };
   }
 
-  function wrapDocumentSearchMatch(nodes, matchStart, matchEnd, matchId) {
-    var marks = [];
+  function wrapDocumentSearchMatch(
+    nodes: DocumentSearchTextNodeEntry[],
+    matchStart: number,
+    matchEnd: number,
+    matchId: number
+  ): HTMLElement[] {
+    var marks: HTMLElement[] = [];
     var i;
 
     for (i = nodes.length - 1; i >= 0; i--) {
-      var entry = nodes[i];
+      var entry = nodes[i]!;
       var localStart = Math.max(0, matchStart - entry.start);
       var localEnd = Math.min(entry.end - entry.start, matchEnd - entry.start);
       if (localStart >= localEnd) continue;
@@ -219,7 +247,12 @@ function createDocumentSearchController(ctx, deps) {
     return marks;
   }
 
-  function renderDocumentSearchResultContext(container, text, query, variant) {
+  function renderDocumentSearchResultContext(
+    container: HTMLElement,
+    text: string,
+    query: string,
+    variant: SearchContextVariant
+  ): void {
     if (!text) return;
     var span = document.createElement('span');
     var normalizedText = text.replace(/\s+/g, ' ').trim();
@@ -230,7 +263,7 @@ function createDocumentSearchController(ctx, deps) {
     if (container.childNodes.length > 0) {
       container.appendChild(document.createTextNode(' '));
     }
-    parts.forEach(function(part) {
+    parts.forEach(function(part: string): void {
       if (!part) return;
       if (escapedQuery && new RegExp('^' + escapedQuery + '$', 'i').test(part)) {
         var mark = document.createElement('mark');
@@ -244,23 +277,24 @@ function createDocumentSearchController(ctx, deps) {
     container.appendChild(span);
   }
 
-  function renderDocumentSearchResults() {
+  function renderDocumentSearchResults(): void {
     if (!ctx.elements.documentSearchResultsEl) return;
+    var resultsEl = ctx.elements.documentSearchResultsEl;
     if (ctx.config.isDirMode) {
       deps.renderDirectorySearchResults();
       return;
     }
-    var preservedScrollTop = ctx.elements.documentSearchResultsEl.scrollTop;
-    ctx.elements.documentSearchResultsEl.innerHTML = '';
+    var preservedScrollTop = resultsEl.scrollTop;
+    resultsEl.innerHTML = '';
 
     if (!ctx.search.currentDocumentQuery) return;
 
     if (!ctx.search.documentMatches.length) {
-      ctx.elements.documentSearchResultsEl.appendChild(createDocumentSearchEmptyState('一致する文が見つかりません。'));
+      resultsEl.appendChild(createDocumentSearchEmptyState('一致する文が見つかりません。'));
       return;
     }
 
-    ctx.search.documentMatches.forEach(function(match, index) {
+    ctx.search.documentMatches.forEach(function(match: DocumentSearchMatch, index: number): void {
       var button = document.createElement('button');
       var indexBadge = document.createElement('span');
       var body = document.createElement('span');
@@ -284,19 +318,19 @@ function createDocumentSearchController(ctx, deps) {
 
       button.appendChild(indexBadge);
       button.appendChild(body);
-      ctx.elements.documentSearchResultsEl.appendChild(button);
+      resultsEl.appendChild(button);
     });
 
-    ctx.elements.documentSearchResultsEl.scrollTop = preservedScrollTop;
+    resultsEl.scrollTop = preservedScrollTop;
   }
 
-  function applyDocumentSearchHighlights(query) {
+  function applyDocumentSearchHighlights(query: string): void {
     if (!ctx.elements.contentRoot) return;
     clearDocumentSearchHighlights();
     if (!query) return;
 
     var normalizedQuery = query.toLowerCase();
-    var blockEntries = getDocumentSearchBlocks().map(function(block) {
+    var blockEntries = getDocumentSearchBlocks().map(function(block: HTMLElement): DocumentSearchBlockEntry {
       var blockText = collectDocumentSearchTextNodes(block);
       return {
         text: blockText.text,
@@ -305,7 +339,7 @@ function createDocumentSearchController(ctx, deps) {
       };
     });
 
-    blockEntries.forEach(function(blockText, blockIndex) {
+    blockEntries.forEach(function(blockText: DocumentSearchBlockEntry, blockIndex: number): void {
       var matchIndex;
       var searchIndex = 0;
 
@@ -343,23 +377,24 @@ function createDocumentSearchController(ctx, deps) {
     }
   }
 
-  function setCurrentDocumentSearchMatch(index, scrollIntoView) {
+  function setCurrentDocumentSearchMatch(index: number, scrollIntoView?: boolean): void {
     if (!ctx.search.documentMatches.length) {
       ctx.search.currentDocumentIndex = -1;
       updateDocumentSearchSummary();
       return;
     }
     if (ctx.search.currentDocumentIndex >= 0 && ctx.search.documentMatches[ctx.search.currentDocumentIndex]) {
-      ctx.search.documentMatches[ctx.search.currentDocumentIndex].marks.forEach(function(mark) {
+      ctx.search.documentMatches[ctx.search.currentDocumentIndex]!.marks.forEach(function(mark: HTMLElement): void {
         mark.classList.remove('current');
       });
     }
     ctx.search.currentDocumentIndex = (index + ctx.search.documentMatches.length) % ctx.search.documentMatches.length;
-    ctx.search.documentMatches[ctx.search.currentDocumentIndex].marks.forEach(function(mark) {
+    var currentMatch = ctx.search.documentMatches[ctx.search.currentDocumentIndex]!;
+    currentMatch.marks.forEach(function(mark: HTMLElement): void {
       mark.classList.add('current');
     });
     if (scrollIntoView !== false) {
-      ctx.search.documentMatches[ctx.search.currentDocumentIndex].marks[0].scrollIntoView({
+      currentMatch.marks[0]!.scrollIntoView({
         block: 'center',
         behavior: 'smooth'
       });
@@ -368,7 +403,7 @@ function createDocumentSearchController(ctx, deps) {
     renderDocumentSearchResults();
   }
 
-  function moveDocumentSearch(step) {
+  function moveDocumentSearch(step: number): void {
     if (ctx.config.isDirMode) {
       if (!ctx.search.currentDirectoryResults.length) return;
       if (ctx.search.currentDirectoryIndex < 0) {
@@ -382,7 +417,7 @@ function createDocumentSearchController(ctx, deps) {
     setCurrentDocumentSearchMatch(ctx.search.currentDocumentIndex + step);
   }
 
-  function applyDocumentSearchQuery(query) {
+  function applyDocumentSearchQuery(query: string): void {
     ctx.search.currentDocumentQuery = (query || '').trim();
     if (ctx.config.isDirMode) {
       applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
@@ -421,7 +456,7 @@ function createDocumentSearchController(ctx, deps) {
     applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
   }
 
-  function clearDocumentSearchQuery() {
+  function clearDocumentSearchQuery(): void {
     if (ctx.elements.documentSearchInputEl) {
       ctx.elements.documentSearchInputEl.value = '';
     }
@@ -449,7 +484,7 @@ function createDocumentSearchController(ctx, deps) {
     }
   }
 
-  function syncDocumentSearchAfterContentUpdate(options) {
+  function syncDocumentSearchAfterContentUpdate(options?: ContentUpdateOptions): void {
     options = options || {};
     if (!ctx.elements.documentSearchInputEl) return;
     if (ctx.config.isDirMode) {
@@ -465,7 +500,7 @@ function createDocumentSearchController(ctx, deps) {
     applyDocumentSearchQuery(ctx.elements.documentSearchInputEl.value);
   }
 
-  function openDocumentSearch() {
+  function openDocumentSearch(): void {
     deps.activateSidebarTab('toc');
     var sidebarEl = document.getElementById('sidebar');
     if (sidebarEl) {
@@ -477,14 +512,15 @@ function createDocumentSearchController(ctx, deps) {
     }
   }
 
-  function setupDocumentSearch() {
+  function setupDocumentSearch(): void {
     if (!ctx.elements.documentSearchInputEl) return;
+    var inputEl = ctx.elements.documentSearchInputEl;
 
-    ctx.elements.documentSearchInputEl.addEventListener('input', function() {
-      applyDocumentSearchQuery(ctx.elements.documentSearchInputEl.value);
+    inputEl.addEventListener('input', function(): void {
+      applyDocumentSearchQuery(inputEl.value);
     });
 
-    ctx.elements.documentSearchInputEl.addEventListener('keydown', function(event) {
+    inputEl.addEventListener('keydown', function(event: KeyboardEvent): void {
       if (event.key === 'Enter') {
         event.preventDefault();
         moveDocumentSearch(event.shiftKey ? -1 : 1);
@@ -492,10 +528,10 @@ function createDocumentSearchController(ctx, deps) {
       }
       if (event.key === 'Escape') {
         event.preventDefault();
-        if (ctx.elements.documentSearchInputEl.value) {
+        if (inputEl.value) {
           clearDocumentSearchQuery();
         } else {
-          ctx.elements.documentSearchInputEl.blur();
+          inputEl.blur();
         }
       }
     });
@@ -513,7 +549,7 @@ function createDocumentSearchController(ctx, deps) {
     if (ctx.elements.documentSearchClearEl) {
       ctx.elements.documentSearchClearEl.addEventListener('click', function() {
         clearDocumentSearchQuery();
-        ctx.elements.documentSearchInputEl.focus();
+        inputEl.focus();
       });
     }
 

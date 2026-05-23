@@ -1,22 +1,75 @@
 'use strict';
 
-function createDirectorySearchClientId() {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return window.crypto.randomUUID();
-  }
-  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
-    var bytes = new Uint8Array(16);
-    window.crypto.getRandomValues(bytes);
-    return Array.prototype.map.call(bytes, function(byte) {
-      return byte.toString(16).padStart(2, '0');
-    }).join('');
-  }
-  return String(Date.now()) + '-' + String(Math.random()).slice(2);
+var DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY = 'markdown-view.directorySearchClientId';
+
+function isValidDirectorySearchClientId(clientId: unknown): clientId is string {
+  return typeof clientId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(clientId);
 }
 
-function createAppContext(doc) {
+function createDirectorySearchClientId(): string {
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    var randomParts = new Uint32Array(2);
+    var randomPartA: number;
+    var randomPartB: number;
+    window.crypto.getRandomValues(randomParts);
+    randomPartA = randomParts[0] || 0;
+    randomPartB = randomParts[1] || 0;
+    return 'tab-' + Date.now().toString(36) + '-' +
+      randomPartA.toString(36) + randomPartB.toString(36);
+  }
+  return 'tab-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 12);
+}
+
+function isReloadNavigation(): boolean {
+  var entries: PerformanceEntryList;
+  var navigation: PerformanceEntry | undefined;
+
+  if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
+    return false;
+  }
+
+  entries = window.performance.getEntriesByType('navigation');
+  navigation = entries[0];
+  return typeof navigation !== 'undefined' &&
+    'type' in navigation &&
+    (navigation as PerformanceNavigationTiming).type === 'reload';
+}
+
+function getDirectorySearchClientId(): string {
+  var storage: Storage | null;
+  var storedClientId: string | null;
+  var generatedClientId: string;
+
+  try {
+    storage = window.sessionStorage;
+    storedClientId = storage && isReloadNavigation()
+      ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY)
+      : null;
+    if (isValidDirectorySearchClientId(storedClientId)) {
+      return storedClientId;
+    }
+  } catch (_storageReadError) {
+    storage = null;
+  }
+
+  generatedClientId = createDirectorySearchClientId();
+  if (storage) {
+    try {
+      storage.setItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY, generatedClientId);
+    } catch (_storageWriteError) {
+      // sessionStorage が使えない環境では今回生成したIDだけを使う。
+    }
+  }
+
+  return generatedClientId;
+}
+
+function createAppContext(doc: Document): MarkdownViewAppContext {
   var html = doc.documentElement;
-  var memoEditor = doc.getElementById('memo-editor');
+  var memoEditor = doc.getElementById('memo-editor') as HTMLTextAreaElement | null;
+  var contentEl = doc.getElementById('content');
+  var tocEl = doc.getElementById('toc');
   var memoCaret = memoEditor ? memoEditor.value.length : 0;
 
   return {
@@ -45,13 +98,16 @@ function createAppContext(doc) {
       liveStatusEl: doc.getElementById('live-status'),
       readingProgressBar: doc.getElementById('reading-progress-bar'),
       backToTop: doc.getElementById('back-to-top'),
-      contentRoot: doc.getElementById('content'),
-      documentSearchInputEl: doc.getElementById('document-search-input'),
+      contentEl: contentEl,
+      contentRoot: contentEl,
+      tocEl: tocEl,
+      tocRoot: tocEl,
+      documentSearchInputEl: doc.getElementById('document-search-input') as HTMLInputElement | null,
       documentSearchSummaryEl: doc.getElementById('document-search-summary'),
       documentSearchResultsEl: doc.getElementById('document-search-results'),
-      documentSearchPrevEl: doc.getElementById('document-search-prev'),
-      documentSearchNextEl: doc.getElementById('document-search-next'),
-      documentSearchClearEl: doc.getElementById('document-search-clear'),
+      documentSearchPrevEl: doc.getElementById('document-search-prev') as HTMLButtonElement | null,
+      documentSearchNextEl: doc.getElementById('document-search-next') as HTMLButtonElement | null,
+      documentSearchClearEl: doc.getElementById('document-search-clear') as HTMLButtonElement | null,
       memoEditorEl: memoEditor,
       memoPreviewEl: doc.getElementById('memo-preview'),
       memoSaveStatusEl: doc.getElementById('memo-save-status'),
@@ -83,7 +139,7 @@ function createAppContext(doc) {
       currentDirectoryError: '',
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
-      directorySearchClientId: createDirectorySearchClientId(),
+      directorySearchClientId: getDirectorySearchClientId(),
       directorySearchSequence: 0,
       pendingDirectoryNavigation: null
     },
@@ -96,7 +152,7 @@ function createAppContext(doc) {
       pendingSuppressedTocTrackingUpdate: false,
       pendingTocNavigationId: '',
       pendingTocNavigationUntil: 0,
-      tocRoot: doc.getElementById('toc')
+      tocRoot: tocEl
     },
     labels: {
       liveStatus: {
@@ -114,4 +170,4 @@ function createAppContext(doc) {
   };
 }
 
-var appContext = createAppContext(document);
+var appContext: MarkdownViewAppContext = createAppContext(document);

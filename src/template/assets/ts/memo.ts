@@ -1,34 +1,35 @@
 var MEMO_DEGRADED_MESSAGE = 'メモを読み込めませんでした。内容を保護するため編集を無効化しています。本文の閲覧は継続できます。';
 
-function getMemoRequestUrl(file) {
+function getMemoRequestUrl(file?: string | null): string {
   if (appContext.config.isDirMode && file) {
     return '/api/memo?file=' + encodeURIComponent(file);
   }
   return '/api/memo';
 }
 
-function getMemoTargetFile(file) {
+function getMemoTargetFile(file?: string | null): string {
   if (appContext.config.isDirMode) {
     return file || appContext.state.currentFile || '';
   }
   return '';
 }
 
-function setMemoSaveStatus(state, text) {
+function setMemoSaveStatus(state: MemoSaveState, text: string): void {
   if (!appContext.elements.memoSaveStatusEl) return;
   appContext.elements.memoSaveStatusEl.dataset.state = state;
   appContext.elements.memoSaveStatusEl.textContent = text;
 }
 
-function isMemoDegraded(data) {
-  return !!data && (data.memo_state === 'degraded' || !!data.load_error);
+function isMemoDegraded(data: unknown): boolean {
+  var payload = data as MemoResponse | null;
+  return !!payload && (payload.memo_state === 'degraded' || !!payload.load_error);
 }
 
-function getMemoDegradedMessage(data) {
+function getMemoDegradedMessage(_data: unknown): string {
   return MEMO_DEGRADED_MESSAGE;
 }
 
-function setMemoDegradedBanner(message) {
+function setMemoDegradedBanner(message: string): void {
   if (!appContext.elements.memoEditorEl) return;
   var layout = appContext.elements.memoEditorEl.closest('.memo-layout');
   if (!layout) return;
@@ -54,7 +55,7 @@ function setMemoDegradedBanner(message) {
   existing.textContent = message;
 }
 
-function setMemoSavedStatus() {
+function setMemoSavedStatus(): void {
   if (isLiveSyncDisconnected()) {
     setMemoSaveStatus('error', '保存済み（同期待ち）');
     return;
@@ -62,7 +63,7 @@ function setMemoSavedStatus() {
   setMemoSaveStatus('saved', '保存済み');
 }
 
-function clearMemoSyncPendingStatus() {
+function clearMemoSyncPendingStatus(): void {
   if (!appContext.elements.memoSaveStatusEl) return;
   if (
     appContext.elements.memoSaveStatusEl.dataset.state === 'error' &&
@@ -72,13 +73,13 @@ function clearMemoSyncPendingStatus() {
   }
 }
 
-function isLiveSyncDisconnected() {
+function isLiveSyncDisconnected(): boolean {
   if (!appContext.elements.liveStatusEl) return false;
   var state = appContext.elements.liveStatusEl.dataset.state;
   return state === 'retry' || state === 'offline' || state === 'error';
 }
 
-function setMemoEditorDisabled(disabled) {
+function setMemoEditorDisabled(disabled: boolean): void {
   if (!appContext.elements.memoEditorEl) return;
   appContext.elements.memoEditorEl.disabled = !!disabled;
   if (disabled) {
@@ -88,16 +89,16 @@ function setMemoEditorDisabled(disabled) {
   }
 }
 
-function isMemoEditorDisabled() {
+function isMemoEditorDisabled(): boolean {
   return !!(appContext.elements.memoEditorEl && appContext.elements.memoEditorEl.disabled);
 }
 
-function prepareMemoFileLoad() {
+function prepareMemoFileLoad(): void {
   cancelMemoAutosave();
   setMemoEditorDisabled(true);
 }
 
-function rememberMemoCaret() {
+function rememberMemoCaret(): void {
   if (!appContext.elements.memoEditorEl) return;
   appContext.memo.caretStart = typeof appContext.elements.memoEditorEl.selectionStart === 'number'
     ? appContext.elements.memoEditorEl.selectionStart
@@ -107,7 +108,7 @@ function rememberMemoCaret() {
     : appContext.memo.caretStart;
 }
 
-function snapshotMemoSelection() {
+function snapshotMemoSelection(): MemoSelectionSnapshot | null {
   if (!appContext.elements.memoEditorEl) return null;
   return {
     start: typeof appContext.elements.memoEditorEl.selectionStart === 'number' ? appContext.elements.memoEditorEl.selectionStart : 0,
@@ -116,7 +117,7 @@ function snapshotMemoSelection() {
   };
 }
 
-function restoreMemoSelection(selection) {
+function restoreMemoSelection(selection: MemoSelectionSnapshot | null): void {
   if (!appContext.elements.memoEditorEl || !selection || !selection.isFocused) return;
   var valueLength = appContext.elements.memoEditorEl.value.length;
   var start = Math.min(selection.start, valueLength);
@@ -125,7 +126,7 @@ function restoreMemoSelection(selection) {
   appContext.elements.memoEditorEl.setSelectionRange(start, end);
 }
 
-function updateMemoEditor(raw, preserveSelection) {
+function updateMemoEditor(raw: string, preserveSelection: boolean): void {
   if (!appContext.elements.memoEditorEl) return;
   var selection = preserveSelection ? snapshotMemoSelection() : null;
   appContext.elements.memoEditorEl.value = raw || '';
@@ -133,25 +134,27 @@ function updateMemoEditor(raw, preserveSelection) {
   rememberMemoCaret();
 }
 
-function updateMemoPreview(data) {
+function updateMemoPreview(data: unknown): boolean | undefined {
   if (!appContext.elements.memoPreviewEl || !data) return;
-  if (typeof data.html !== 'string') {
+  var payload = data as MemoResponse;
+  if (typeof payload.html !== 'string') {
     console.warn('[markdown-view] html を含まないメモ応答のためプレビューを維持しました。', {
-      receivedKeys: Object.keys(data)
+      receivedKeys: typeof data === 'object' && data !== null ? Object.keys(data) : []
     });
     return false;
   }
-  appContext.elements.memoPreviewEl.innerHTML = data.html;
+  appContext.elements.memoPreviewEl.innerHTML = payload.html;
   return true;
 }
 
-function clearMemoPreview() {
+function clearMemoPreview(): void {
   if (!appContext.elements.memoPreviewEl) return;
   appContext.elements.memoPreviewEl.innerHTML = '';
 }
 
-function applyMemoData(data, options) {
+function applyMemoData(data: unknown, options?: MemoApplyOptions): boolean {
   if (!appContext.elements.memoEditorEl || !appContext.elements.memoPreviewEl || !data) return true;
+  var payload = data as MemoResponse;
   var shouldUpdateEditor = !options || options.updateEditor !== false;
   var shouldPreserveDegradedEditor = !!(options && options.preserveDegradedEditor);
   if (isMemoDegraded(data)) {
@@ -169,17 +172,17 @@ function applyMemoData(data, options) {
     return false;
   }
   setMemoDegradedBanner('');
-  if (typeof data.html !== 'string') {
+  if (typeof payload.html !== 'string') {
     updateMemoPreview(data);
     setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
     return false;
   }
   if (shouldUpdateEditor) {
-    if (typeof data.raw === 'string') {
-      updateMemoEditor(data.raw, !!(options && options.preserveSelection));
+    if (typeof payload.raw === 'string') {
+      updateMemoEditor(payload.raw, !!(options && options.preserveSelection));
     } else {
       console.warn('[markdown-view] raw を含まないメモ応答のためエディタ内容を維持しました。', {
-        receivedKeys: Object.keys(data)
+        receivedKeys: typeof data === 'object' && data !== null ? Object.keys(data) : []
       });
     }
   }
@@ -188,18 +191,20 @@ function applyMemoData(data, options) {
   return true;
 }
 
-function isMemoUpdateMessage(data) {
-  return !!data
-    && data.type === 'memo_update'
-    && typeof data.file === 'string'
-    && data.file.length > 0;
+function isMemoUpdateMessage(data: unknown): data is ContentUpdatePayload & { type: 'memo_update'; file: string } {
+  var payload = data as ContentUpdatePayload | null;
+  return !!payload
+    && payload.type === 'memo_update'
+    && typeof payload.file === 'string'
+    && payload.file.length > 0;
 }
 
-function isMemoRefreshMessage(data) {
-  return !!data && data.memo_refresh === true;
+function isMemoRefreshMessage(data: unknown): data is ContentUpdatePayload {
+  var payload = data as ContentUpdatePayload | null;
+  return !!payload && payload.memo_refresh === true;
 }
 
-function getMemoRemoteUpdateBlockReason() {
+function getMemoRemoteUpdateBlockReason(): MemoRemoteUpdateBlockReason {
   if (!appContext.elements.memoEditorEl) return 'none';
   if (appContext.memo.saveTimer) return 'dirty';
   if (appContext.elements.memoSaveStatusEl) {
@@ -210,11 +215,11 @@ function getMemoRemoteUpdateBlockReason() {
   return 'none';
 }
 
-function isMemoRemoteUpdateBlocked() {
+function isMemoRemoteUpdateBlocked(): boolean {
   return getMemoRemoteUpdateBlockReason() !== 'none';
 }
 
-function flushPendingMemoReloadIfSafe() {
+function flushPendingMemoReloadIfSafe(): boolean {
   if (appContext.memo.pendingReload === null) return false;
   if (appContext.config.isDirMode && appContext.memo.pendingReload !== appContext.state.currentFile) {
     appContext.memo.pendingReload = null;
@@ -230,7 +235,7 @@ function flushPendingMemoReloadIfSafe() {
   return true;
 }
 
-function applyRemoteMemoUpdate(data) {
+function applyRemoteMemoUpdate(data: unknown): boolean {
   if (!isMemoUpdateMessage(data)) return false;
   if (appContext.config.isDirMode && data.file !== appContext.state.currentFile) return false;
 
@@ -238,7 +243,7 @@ function applyRemoteMemoUpdate(data) {
   return flushPendingMemoReloadIfSafe();
 }
 
-function queueRemoteMemoReload(data) {
+function queueRemoteMemoReload(data: unknown): boolean {
   if (!appContext.elements.memoEditorEl || !isMemoRefreshMessage(data)) return false;
   var file = data.memo_file || data.file || getMemoTargetFile();
   if (appContext.config.isDirMode && file !== appContext.state.currentFile) return false;
@@ -246,15 +251,15 @@ function queueRemoteMemoReload(data) {
   return flushPendingMemoReloadIfSafe();
 }
 
-function parseJsonResponse(resp) {
+function parseJsonResponse(resp: Response): Promise<unknown> {
   if (!resp.ok) throw createHttpError(resp.status);
-  return resp.json().catch(function(err) {
+  return resp.json().catch(function(err: MarkdownViewHttpError) {
     err.type = 'parse';
     throw err;
   });
 }
 
-function rememberMemoLoadingStatus() {
+function rememberMemoLoadingStatus(): void {
   if (!appContext.elements.memoSaveStatusEl) return;
   if (appContext.elements.memoSaveStatusEl.dataset.state === 'loading') return;
   appContext.memo.previousLoadStatus = {
@@ -263,13 +268,14 @@ function rememberMemoLoadingStatus() {
   };
 }
 
-function clearMemoLoadingStatusSnapshot() {
+function clearMemoLoadingStatusSnapshot(): void {
   appContext.memo.previousLoadStatus = null;
 }
 
-function getMemoErrorMessage(err) {
-  if (err && err.type === 'http') {
-    switch (err.status) {
+function getMemoErrorMessage(err: unknown): string {
+  var typedError = err as MarkdownViewHttpError | null;
+  if (typedError && typedError.type === 'http') {
+    switch (typedError.status) {
       case 403:
         return 'このメモにはアクセスできません。';
       case 404:
@@ -281,22 +287,22 @@ function getMemoErrorMessage(err) {
       case 500:
         return 'メモの保存または取得に失敗しました。';
       default:
-        return 'メモ操作に失敗しました（HTTP ' + err.status + '）。';
+        return 'メモ操作に失敗しました（HTTP ' + typedError.status + '）。';
     }
   }
-  if (err && err.type === 'parse') {
+  if (typedError && typedError.type === 'parse') {
     return 'メモAPI応答の解析に失敗しました。';
   }
-  if (err && err.name === 'AbortError') {
+  if (typedError && typedError.name === 'AbortError') {
     return 'メモ通信が中断されました。再度お試しください。';
   }
-  if (err && err.name === 'TypeError') {
+  if (typedError && typedError.name === 'TypeError') {
     return 'メモ通信に失敗しました。サーバー接続やブラウザのセキュリティ設定を確認してください。';
   }
   return 'メモ通信に失敗しました。';
 }
 
-function loadMemo(file, ownerGeneration) {
+function loadMemo(file?: string | null, ownerGeneration?: number): Promise<void> {
   if (!appContext.elements.memoEditorEl) return Promise.resolve();
   var requestGeneration = ++appContext.memo.loadGeneration;
   rememberMemoLoadingStatus();
@@ -305,7 +311,7 @@ function loadMemo(file, ownerGeneration) {
     headers: { 'Accept': 'application/json' }
   })
   .then(parseJsonResponse)
-  .then(function(data) {
+  .then(function(data: unknown): void {
     if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) {
       console.warn('[markdown-view] 古いメモ読込レスポンスを破棄しました。', {
         ownerGeneration: ownerGeneration,
@@ -328,7 +334,7 @@ function loadMemo(file, ownerGeneration) {
     clearMemoLoadingStatusSnapshot();
     flushPendingMemoReloadIfSafe();
   })
-  .catch(function(err) {
+  .catch(function(err: unknown): void {
     console.error('[markdown-view] メモ取得エラー:', err);
     if (ownerGeneration !== undefined && ownerGeneration !== appContext.fetch.generation) {
       console.warn('[markdown-view] 古いメモ読込エラーを破棄しました。', {
@@ -358,7 +364,7 @@ function loadMemo(file, ownerGeneration) {
   });
 }
 
-function clearStaleMemoLoadingStatus(requestGeneration) {
+function clearStaleMemoLoadingStatus(requestGeneration: number): void {
   // ファイル遷移などで現在の文書世代だけが変わった場合、loadGeneration はまだこのリクエストを指す。
   // その状態で古い読込を破棄すると後続の読込完了が来ないため、表示だけを安全な既定状態へ戻す。
   if (requestGeneration !== appContext.memo.loadGeneration) return;
@@ -372,43 +378,44 @@ function clearStaleMemoLoadingStatus(requestGeneration) {
   clearMemoLoadingStatusSnapshot();
 }
 
-function rememberPendingMemoSave(requestGeneration) {
+function rememberPendingMemoSave(requestGeneration: number): void {
   appContext.memo.pendingSaveGenerations.push(requestGeneration);
 }
 
-function finishPendingMemoSave(requestGeneration) {
-  appContext.memo.pendingSaveGenerations = appContext.memo.pendingSaveGenerations.filter(function(generation) {
+function finishPendingMemoSave(requestGeneration: number): void {
+  appContext.memo.pendingSaveGenerations = appContext.memo.pendingSaveGenerations.filter(function(generation: number): boolean {
     return generation !== requestGeneration;
   });
 }
 
-function clearStaleMemoSavingStatus() {
+function clearStaleMemoSavingStatus(): void {
   if (appContext.memo.pendingSaveGenerations.length > 0) return;
   if (!appContext.elements.memoSaveStatusEl || appContext.elements.memoSaveStatusEl.dataset.state !== 'saving') return;
   setMemoSavedStatus();
 }
 
-function shouldSurfaceStaleMemoSaveError(err) {
-  if (!err) return false;
-  if (err.type === 'parse') return true;
-  if (err.type !== 'http') return false;
-  return err.status === 403 || err.status === 404 || err.status === 413 || err.status === 422;
+function shouldSurfaceStaleMemoSaveError(err: unknown): boolean {
+  var typedError = err as MarkdownViewHttpError | null;
+  if (!typedError) return false;
+  if (typedError.type === 'parse') return true;
+  if (typedError.type !== 'http') return false;
+  return typedError.status === 403 || typedError.status === 404 || typedError.status === 413 || typedError.status === 422;
 }
 
-function surfaceStaleMemoSaveError(err) {
+function surfaceStaleMemoSaveError(err: unknown): boolean {
   if (appContext.memo.pendingSaveGenerations.length > 0 || !shouldSurfaceStaleMemoSaveError(err)) return false;
   setMemoSaveStatus('error', '以前のメモ保存に失敗しました。' + getMemoErrorMessage(err));
   return true;
 }
 
-function cancelMemoAutosave() {
+function cancelMemoAutosave(): void {
   if (appContext.memo.saveTimer) {
     clearTimeout(appContext.memo.saveTimer);
     appContext.memo.saveTimer = null;
   }
 }
 
-function scheduleMemoSave(immediate) {
+function scheduleMemoSave(immediate: boolean): void {
   if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) return;
   cancelMemoAutosave();
   setMemoSaveStatus('dirty', '未保存');
@@ -419,7 +426,7 @@ function scheduleMemoSave(immediate) {
   appContext.memo.saveTimer = setTimeout(saveMemoNow, 500);
 }
 
-function saveMemoNow(targetFileOverride, rawOverride) {
+function saveMemoNow(targetFileOverride?: string, rawOverride?: string): void {
   if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) {
     cancelMemoAutosave();
     return;
@@ -445,7 +452,7 @@ function saveMemoNow(targetFileOverride, rawOverride) {
     })
   })
   .then(parseJsonResponse)
-  .then(function(data) {
+  .then(function(data: unknown): void {
     finishPendingMemoSave(requestGeneration);
     if (requestGeneration !== appContext.memo.saveGeneration) {
       console.warn('[markdown-view] 後続のメモ保存があるため古いレスポンスを破棄しました。', {
@@ -469,7 +476,8 @@ function saveMemoNow(targetFileOverride, rawOverride) {
         return;
       }
     } else if (targetFileOverride === undefined) {
-      if ((data.raw || '') === raw) {
+      var payload = data as MemoResponse;
+      if ((payload.raw || '') === raw) {
         if (updateMemoPreview(data) === false) {
           setMemoSaveStatus('error', 'メモ応答が不正です。プレビューを更新できません。');
           return;
@@ -483,7 +491,7 @@ function saveMemoNow(targetFileOverride, rawOverride) {
     setMemoSavedStatus();
     flushPendingMemoReloadIfSafe();
   })
-  .catch(function(err) {
+  .catch(function(err: unknown): void {
     console.error('[markdown-view] メモ保存エラー:', err);
     finishPendingMemoSave(requestGeneration);
     if (requestGeneration !== appContext.memo.saveGeneration) {
@@ -502,27 +510,27 @@ function saveMemoNow(targetFileOverride, rawOverride) {
   });
 }
 
-function flushPendingMemoSave() {
+function flushPendingMemoSave(): void {
   if (!appContext.elements.memoEditorEl || isMemoEditorDisabled() || !appContext.memo.saveTimer) return;
   saveMemoNow(getMemoTargetFile(), appContext.elements.memoEditorEl.value);
 }
 
-function escapeMarkdownLinkLabel(text) {
+function escapeMarkdownLinkLabel(text: string): string {
   return String(text || '')
     .replace(/\\/g, '\\\\')
     .replace(/\[/g, '\\[')
     .replace(/\]/g, '\\]');
 }
 
-function toBlockQuote(text) {
+function toBlockQuote(text: string): string {
   return String(text || '')
     .trim()
     .split(/\r?\n/)
-    .map(function(line) { return '> ' + line; })
+    .map(function(line: string): string { return '> ' + line; })
     .join('\n');
 }
 
-function formatLineLabel(range) {
+function formatLineLabel(range: LineRange | null): string {
   if (!range) return '';
   if (range.start === range.end) {
     return 'L' + range.start;
@@ -530,21 +538,21 @@ function formatLineLabel(range) {
   return 'L' + range.start + '-L' + range.end;
 }
 
-function getHeadingForRange(range) {
+function getHeadingForRange(range: Range | null): HTMLElement | null {
   if (!appContext.elements.contentRoot || !range) return null;
   var startNode = range.startContainer.nodeType === Node.ELEMENT_NODE
-    ? range.startContainer
+    ? range.startContainer as Element
     : range.startContainer.parentElement;
   if (!startNode) return null;
-  var headings = appContext.elements.contentRoot.querySelectorAll('h1, h2, h3, h4, h5, h6');
-  var lastHeading = null;
-  headings.forEach(function(heading) {
+  var headings = appContext.elements.contentRoot.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6');
+  var lastHeading: HTMLElement | null = null;
+  headings.forEach(function(heading: HTMLElement): void {
     if (!heading.id) return;
     if (heading === startNode || heading.contains(startNode)) {
       lastHeading = heading;
       return;
     }
-    var position = heading.compareDocumentPosition(startNode);
+    var position = heading.compareDocumentPosition(startNode!);
     if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
       lastHeading = heading;
     }
@@ -552,19 +560,19 @@ function getHeadingForRange(range) {
   return lastHeading;
 }
 
-function getSelectionLineRange(range) {
+function getSelectionLineRange(range: Range | null): LineRange | null {
   if (!appContext.elements.contentRoot || !range) return null;
-  var nodes = appContext.elements.contentRoot.querySelectorAll('[data-source-start-line]');
-  var start = null;
-  var end = null;
-  nodes.forEach(function(node) {
+  var nodes = appContext.elements.contentRoot.querySelectorAll<HTMLElement>('[data-source-start-line]');
+  var start: number | null = null;
+  var end: number | null = null;
+  nodes.forEach(function(node: HTMLElement): void {
     try {
       if (!range.intersectsNode(node)) return;
     } catch (err) {
       return;
     }
-    var nodeStart = parseInt(node.getAttribute('data-source-start-line'), 10);
-    var nodeEnd = parseInt(node.getAttribute('data-source-end-line'), 10);
+    var nodeStart = parseInt(node.getAttribute('data-source-start-line') || '', 10);
+    var nodeEnd = parseInt(node.getAttribute('data-source-end-line') || '', 10);
     if (!isNaN(nodeStart) && (start === null || nodeStart < start)) {
       start = nodeStart;
     }
@@ -576,10 +584,12 @@ function getSelectionLineRange(range) {
   return { start: start, end: end };
 }
 
-function buildQuoteSource(range) {
+function buildQuoteSource(range: Range): QuoteSource {
   var heading = getHeadingForRange(range);
   var lineRange = getSelectionLineRange(range);
-  var fileLabel = appContext.state.currentFile || (appContext.elements.contentRoot ? appContext.elements.contentRoot.getAttribute('data-title') : 'document');
+  var fileLabel = appContext.state.currentFile ||
+    (appContext.elements.contentRoot ? appContext.elements.contentRoot.getAttribute('data-title') : null) ||
+    'document';
   var sourceLabel = fileLabel;
   var href = appContext.config.isDirMode && appContext.state.currentFile
     ? '?file=' + encodeURIComponent(appContext.state.currentFile)
@@ -605,17 +615,17 @@ function buildQuoteSource(range) {
   };
 }
 
-function getHeadingLabel(heading) {
+function getHeadingLabel(heading: HTMLElement | null): string {
   if (!heading) return '';
-  var clone = heading.cloneNode(true);
+  var clone = heading.cloneNode(true) as HTMLElement;
   var anchorButton = clone.querySelector('.heading-anchor');
   if (anchorButton) {
     anchorButton.remove();
   }
-  return clone.textContent.trim().replace(/\s+/g, ' ');
+  return (clone.textContent || '').trim().replace(/\s+/g, ' ');
 }
 
-function buildQuoteMarkdownFromSelection() {
+function buildQuoteMarkdownFromSelection(): string {
   var selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return '';
   var range = selection.getRangeAt(0);
@@ -630,7 +640,7 @@ function buildQuoteMarkdownFromSelection() {
   return quote + '\n\n' + citation + '\n';
 }
 
-function insertTextIntoMemo(text) {
+function insertTextIntoMemo(text: string): boolean {
   if (!appContext.elements.memoEditorEl || isMemoEditorDisabled()) return false;
   var currentValue = appContext.elements.memoEditorEl.value;
   var start = typeof appContext.memo.caretStart === 'number' ? appContext.memo.caretStart : currentValue.length;
@@ -646,16 +656,16 @@ function insertTextIntoMemo(text) {
   return true;
 }
 
-function isSelectionInsideContent(selection) {
+function isSelectionInsideContent(selection: Selection | null): boolean {
   if (!selection || selection.rangeCount === 0 || !appContext.elements.contentRoot) return false;
   var range = selection.getRangeAt(0);
   var ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-    ? range.commonAncestorContainer
+    ? range.commonAncestorContainer as Element
     : range.commonAncestorContainer.parentElement;
   return !!ancestor && appContext.elements.contentRoot.contains(ancestor);
 }
 
-function positionQuoteSelectionAction(range) {
+function positionQuoteSelectionAction(range: Range | null): void {
   if (!appContext.elements.quoteSelectionActionEl || !range) return;
   var rect = range.getBoundingClientRect();
   if (!rect || (!rect.width && !rect.height)) {
@@ -667,12 +677,12 @@ function positionQuoteSelectionAction(range) {
   appContext.elements.quoteSelectionActionEl.style.left = (window.scrollX + rect.left + Math.max(rect.width / 2, 16)) + 'px';
 }
 
-function hideQuoteSelectionAction() {
+function hideQuoteSelectionAction(): void {
   if (!appContext.elements.quoteSelectionActionEl) return;
   appContext.elements.quoteSelectionActionEl.hidden = true;
 }
 
-function refreshQuoteSelectionAction() {
+function refreshQuoteSelectionAction(): void {
   if (!appContext.elements.quoteSelectionActionEl) return;
   var selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !isSelectionInsideContent(selection)) {
@@ -686,25 +696,26 @@ function refreshQuoteSelectionAction() {
   positionQuoteSelectionAction(selection.getRangeAt(0));
 }
 
-function setupMemoInteractions() {
+function setupMemoInteractions(): void {
   if (appContext.elements.memoEditorEl) {
-    ['click', 'keyup', 'select'].forEach(function(eventName) {
-      appContext.elements.memoEditorEl.addEventListener(eventName, rememberMemoCaret);
+    var memoEditorEl = appContext.elements.memoEditorEl;
+    ['click', 'keyup', 'select'].forEach(function(eventName: string): void {
+      memoEditorEl.addEventListener(eventName, rememberMemoCaret);
     });
-    appContext.elements.memoEditorEl.addEventListener('blur', function() {
+    memoEditorEl.addEventListener('blur', function(): void {
       flushPendingMemoReloadIfSafe();
     });
-    appContext.elements.memoEditorEl.addEventListener('input', function() {
+    memoEditorEl.addEventListener('input', function(): void {
       rememberMemoCaret();
       scheduleMemoSave(false);
     });
   }
 
   if (appContext.elements.quoteSelectionActionEl) {
-    appContext.elements.quoteSelectionActionEl.addEventListener('mousedown', function(event) {
+    appContext.elements.quoteSelectionActionEl.addEventListener('mousedown', function(event: MouseEvent): void {
       event.preventDefault();
     });
-    appContext.elements.quoteSelectionActionEl.addEventListener('click', function() {
+    appContext.elements.quoteSelectionActionEl.addEventListener('click', function(): void {
       var markdown = buildQuoteMarkdownFromSelection();
       if (!markdown) {
         hideQuoteSelectionAction();
@@ -720,7 +731,7 @@ function setupMemoInteractions() {
     });
   }
 
-  document.addEventListener('selectionchange', function() {
+  document.addEventListener('selectionchange', function(): void {
     requestAnimationFrame(refreshQuoteSelectionAction);
   });
   window.addEventListener('scroll', hideQuoteSelectionAction, { passive: true });

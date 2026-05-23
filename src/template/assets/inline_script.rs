@@ -1,35 +1,21 @@
-const TEMPLATE: &str = concat!(
-    "(function() {\n",
-    include_str!("js/bootstrap.js"),
-    "\n",
-    include_str!("js/selection.js"),
-    "\n",
-    include_str!("js/content-renderer.js"),
-    "\n",
-    include_str!("js/content-enhancements.js"),
-    "\n",
-    include_str!("js/content-navigation.js"),
-    "\n",
-    include_str!("js/document-search.js"),
-    "\n",
-    include_str!("js/directory-search.js"),
-    "\n",
-    include_str!("js/content-controller.js"),
-    "\n",
-    include_str!("js/memo.js"),
-    "\n",
-    include_str!("js/fetch.js"),
-    "\n",
-    include_str!("js/websocket.js"),
-    "\n",
-    include_str!("js/sidebar.js"),
-    "\n",
-    "startMarkdownViewApp();\n",
-    "}());\n",
-);
+include!(concat!(env!("OUT_DIR"), "/inline_script_manifest.rs"));
 
 pub(super) fn inline_js(max_file_size: u64) -> String {
-    TEMPLATE.replace("__MAX_FILE_SIZE_MB__", &file_size_display_mb(max_file_size))
+    template().replace("__MAX_FILE_SIZE_MB__", &file_size_display_mb(max_file_size))
+}
+
+fn template() -> String {
+    let mut template = String::with_capacity(
+        "(function() {\n".len()
+            + GENERATED_TEMPLATE.len()
+            + "startMarkdownViewApp();\n".len()
+            + "}());\n".len(),
+    );
+    template.push_str("(function() {\n");
+    template.push_str(GENERATED_TEMPLATE);
+    template.push_str("startMarkdownViewApp();\n");
+    template.push_str("}());\n");
+    template
 }
 
 fn file_size_display_mb(max_file_size: u64) -> String {
@@ -41,10 +27,11 @@ fn file_size_display_mb(max_file_size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_size_display_mb, inline_js, TEMPLATE};
+    use super::{file_size_display_mb, inline_js, template, GENERATED_TEMPLATE};
     use tree_sitter::{Node, Parser};
 
     const MAX_FILE_SIZE_SENTINEL: &str = "__MAX_FILE_SIZE_MB__";
+    const START_MARKDOWN_VIEW_APP_CALL: &str = "startMarkdownViewApp();";
 
     fn count_occurrences(source: &str, needle: &str) -> usize {
         source.matches(needle).count()
@@ -923,62 +910,25 @@ mod tests {
     }
 
     #[test]
-    fn test_max_file_size_sentinelはbootstrap_jsだけに存在する() {
-        let allowed_bootstrap_js = include_str!("js/bootstrap.js");
-        let expected_sentinel_count =
-            count_occurrences(allowed_bootstrap_js, MAX_FILE_SIZE_SENTINEL);
-        // 違反時にファイル名を出すため、bootstrap.js以外のTEMPLATE includeと同期する。
-        let disallowed_sources = [
-            ("js/selection.js", include_str!("js/selection.js")),
-            (
-                "js/content-renderer.js",
-                include_str!("js/content-renderer.js"),
-            ),
-            (
-                "js/content-enhancements.js",
-                include_str!("js/content-enhancements.js"),
-            ),
-            (
-                "js/content-navigation.js",
-                include_str!("js/content-navigation.js"),
-            ),
-            (
-                "js/document-search.js",
-                include_str!("js/document-search.js"),
-            ),
-            (
-                "js/directory-search.js",
-                include_str!("js/directory-search.js"),
-            ),
-            (
-                "js/content-controller.js",
-                include_str!("js/content-controller.js"),
-            ),
-            ("js/memo.js", include_str!("js/memo.js")),
-            ("js/fetch.js", include_str!("js/fetch.js")),
-            ("js/websocket.js", include_str!("js/websocket.js")),
-            ("js/sidebar.js", include_str!("js/sidebar.js")),
-        ];
-
+    fn test_max_file_size_sentinelは生成済みtemplateに1件だけ存在する() {
         assert_eq!(
-            expected_sentinel_count, 1,
-            "bootstrap.js の max file size sentinel 出現回数が変わった"
+            count_occurrences(GENERATED_TEMPLATE, MAX_FILE_SIZE_SENTINEL),
+            1,
+            "生成済み JS template の max file size sentinel 出現回数が変わった"
         );
-
-        let mut listed_sentinel_count = expected_sentinel_count;
-        for (path, source) in disallowed_sources {
-            let source_sentinel_count = count_occurrences(source, MAX_FILE_SIZE_SENTINEL);
-            listed_sentinel_count += source_sentinel_count;
-            assert!(
-                source_sentinel_count == 0,
-                "{path} に max file size sentinel が混入している"
-            );
-        }
-
         assert_eq!(
-            count_occurrences(TEMPLATE, MAX_FILE_SIZE_SENTINEL),
-            listed_sentinel_count,
-            "JS template include一覧とsentinel契約テストの一覧が同期していない"
+            count_occurrences(&template(), MAX_FILE_SIZE_SENTINEL),
+            count_occurrences(GENERATED_TEMPLATE, MAX_FILE_SIZE_SENTINEL),
+            "Rust側TEMPLATEと生成済みJS templateのsentinel契約が同期していない"
+        );
+    }
+
+    #[test]
+    fn test_inline_jsは起動呼び出しを1回だけ含む() {
+        assert_eq!(
+            count_occurrences(&template(), START_MARKDOWN_VIEW_APP_CALL),
+            1,
+            "生成済み manifest と Rust wrapper の重複で startMarkdownViewApp が二重実行されている"
         );
     }
 
@@ -1045,9 +995,9 @@ mod tests {
             vec![
                 "contentEl.innerHTML = content",
                 "tocEl.innerHTML = toc",
-                "ctx.elements.documentSearchResultsEl.innerHTML = ''",
-                "ctx.elements.documentSearchResultsEl.innerHTML = ''",
-                "appContext.elements.memoPreviewEl.innerHTML = data.html",
+                "resultsEl.innerHTML = ''",
+                "resultsEl.innerHTML = ''",
+                "appContext.elements.memoPreviewEl.innerHTML = payload.html",
                 "appContext.elements.memoPreviewEl.innerHTML = ''",
             ]
         );

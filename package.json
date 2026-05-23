@@ -5,7 +5,11 @@
   },
   "scripts": {
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "build:inline-js": "node scripts/build-inline-js.mjs",
+    "check:inline-js-generated": "node scripts/check-inline-js-generated.mjs",
+    "typecheck:e2e": "tsc --noEmit",
+    "typecheck:inline-js": "tsc -p tsconfig.inline-js.json --noEmit",
+    "typecheck": "npm run typecheck:e2e && npm run typecheck:inline-js"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

@@ -2,7 +2,7 @@ var WS_RECONNECT_BASE = 1000;
 var WS_RECONNECT_MAX_DELAY = 30000;
 var WS_RECONNECT_MAX_ATTEMPTS = 20;
 var WS_UPDATE_COALESCE_MS = 120;
-function buildUpdateSignature(data) {
+function buildUpdateSignature(data: ContentUpdatePayload): string {
   return JSON.stringify({
     content: data.content !== undefined ? data.content : null,
     toc: data.toc !== undefined ? data.toc : null,
@@ -11,7 +11,12 @@ function buildUpdateSignature(data) {
   });
 }
 
-function summarizeBufferedUpdateForLog(data) {
+function summarizeBufferedUpdateForLog(data: ContentUpdatePayload): {
+  file: string;
+  refresh: boolean;
+  contentLength: number | null;
+  tocLength: number | null;
+} {
   return {
     file: typeof data.file === 'string' ? data.file : '',
     refresh: Boolean(data.refresh),
@@ -20,27 +25,30 @@ function summarizeBufferedUpdateForLog(data) {
   };
 }
 
-function isObjectWebSocketMessage(data) {
-  return data && typeof data === 'object' && !Array.isArray(data);
+function isObjectWebSocketMessage(data: unknown): data is Record<string, unknown> {
+  return Boolean(data && typeof data === 'object' && !Array.isArray(data));
 }
 
-function describeInvalidWebSocketPayload(data) {
+function describeInvalidWebSocketPayload(data: unknown): string {
   if (data === null) return 'null';
   if (Array.isArray(data)) return 'array';
   return typeof data;
 }
 
 // WebSocket の再接続・buffer 状態は closure に閉じ、他機能は controller API 経由で操作する。
-function createWebSocketController(ctx, deps) {
-  var socket = null;
+function createWebSocketController(
+  ctx: MarkdownViewAppContext,
+  deps: WebSocketDeps
+): MarkdownViewWebSocketController {
+  var socket: WebSocket | null = null;
   var socketReconnectAttempts = 0;
-  var pendingWsUpdate = null;
+  var pendingWsUpdate: ContentUpdatePayload | null = null;
   var pendingWsUpdateSignature = '';
-  var pendingWsUpdateTimer = null;
+  var pendingWsUpdateTimer: number | null = null;
   var lastAppliedUpdateSignature = '';
   var suppressNextReconnect = false;
 
-  function discardBufferedLiveUpdate(reason) {
+  function discardBufferedLiveUpdate(reason: string): void {
     if (pendingWsUpdateTimer) {
       window.clearTimeout(pendingWsUpdateTimer);
       pendingWsUpdateTimer = null;
@@ -55,11 +63,11 @@ function createWebSocketController(ctx, deps) {
     pendingWsUpdateSignature = '';
   }
 
-  function rememberAppliedLiveUpdate(data) {
+  function rememberAppliedLiveUpdate(data: ContentUpdatePayload): void {
     lastAppliedUpdateSignature = buildUpdateSignature(data);
   }
 
-  function flushBufferedLiveUpdate() {
+  function flushBufferedLiveUpdate(): void {
     pendingWsUpdateTimer = null;
     var data = pendingWsUpdate;
     pendingWsUpdate = null;
@@ -89,7 +97,7 @@ function createWebSocketController(ctx, deps) {
     deps.setLiveStatus('live');
   }
 
-  function scheduleBufferedLiveUpdate(data) {
+  function scheduleBufferedLiveUpdate(data: ContentUpdatePayload): void {
     var signature = buildUpdateSignature(data);
     if (signature === lastAppliedUpdateSignature || signature === pendingWsUpdateSignature) {
       return;
@@ -104,11 +112,11 @@ function createWebSocketController(ctx, deps) {
     }, WS_UPDATE_COALESCE_MS);
   }
 
-  function connect() {
+  function connect(): void {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     socket = new WebSocket(protocol + '//' + location.host + '/ws');
 
-    socket.onopen = function() {
+    socket.onopen = function(): void {
       socketReconnectAttempts = 0;
       // 接続成功は WebSocket 経路の一時エラーからの復旧点なので、WS バナーだけを解除する。
       hideWsParseErrorBanner();
@@ -116,8 +124,8 @@ function createWebSocketController(ctx, deps) {
       deps.setLiveStatus('live');
     };
 
-    socket.onmessage = function(event) {
-      var data;
+    socket.onmessage = function(event: MessageEvent): void {
+      var data: unknown;
       try {
         data = JSON.parse(event.data);
       } catch (e) {
@@ -125,7 +133,7 @@ function createWebSocketController(ctx, deps) {
         showWsParseErrorBanner('サーバーから不正なJSONを受信しました。ページを再読み込みしてください。');
         deps.setLiveStatus('error');
         suppressNextReconnect = true;
-        socket.close();
+        socket!.close();
         return;
       }
       if (!isObjectWebSocketMessage(data)) {
@@ -135,47 +143,48 @@ function createWebSocketController(ctx, deps) {
         showWsParseErrorBanner('サーバーから形式が不正なWebSocketメッセージを受信しました。ページを再読み込みしてください。');
         deps.setLiveStatus('error');
         suppressNextReconnect = true;
-        socket.close();
+        socket!.close();
         return;
       }
       hideWsParseErrorBanner();
-      if (data.error) {
-        console.error('[markdown-view] サーバーエラー:', data.error);
-        showWsServerErrorBanner(data.error);
+      var payload = data as ContentUpdatePayload;
+      if (payload.error) {
+        console.error('[markdown-view] サーバーエラー:', payload.error);
+        showWsServerErrorBanner(payload.error);
         deps.setLiveStatus('error');
         return;
       }
-      if (isMemoUpdateMessage(data)) {
-        if (deps.applyRemoteMemoUpdate(data)) {
+      if (isMemoUpdateMessage(payload)) {
+        if (deps.applyRemoteMemoUpdate(payload)) {
           hideWsServerErrorBanner();
           hideFileFetchErrorBanner();
         }
         deps.setLiveStatus('live');
         return;
       }
-      if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {
-        if (deps.queueRemoteMemoReload(data)) {
+      if (isMemoRefreshMessage(payload) && !(payload.refresh && ctx.config.isDirMode)) {
+        if (deps.queueRemoteMemoReload(payload)) {
           hideWsServerErrorBanner();
           hideFileFetchErrorBanner();
         }
       }
-      if (data.refresh && ctx.config.isDirMode) {
+      if (payload.refresh && ctx.config.isDirMode) {
         if (!ctx.state.currentFile) {
           console.warn('[markdown-view] 現在ファイルが未設定のため refresh 通知を無視しました。', {
-            messageFile: data.file || ''
+            messageFile: payload.file || ''
           });
           return;
         }
-        if (!data.file) {
+        if (!payload.file) {
           console.warn('[markdown-view] file を含まない refresh 通知を現在ファイルへ適用します。', {
             currentFile: ctx.state.currentFile
           });
         }
-        if (data.file && data.file !== ctx.state.currentFile) {
+        if (payload.file && payload.file !== ctx.state.currentFile) {
           // ディレクトリモードでは他ファイルの変更通知も同じWSへ届くため、現在表示中でない refresh は無視する。
           console.warn('[markdown-view] 現在のファイルと異なる refresh 通知を無視しました。', {
             currentFile: ctx.state.currentFile,
-            messageFile: data.file
+            messageFile: payload.file
           });
           return;
         }
@@ -188,18 +197,18 @@ function createWebSocketController(ctx, deps) {
         deps.selectFile(ctx.state.currentFile, false);
         return;
       }
-      if (ctx.config.isDirMode && data.file) {
-        if (data.file !== ctx.state.currentFile) {
+      if (ctx.config.isDirMode && payload.file) {
+        if (payload.file !== ctx.state.currentFile) {
           if (ctx.search.currentDocumentQuery) {
             deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
           }
           return;
         }
       }
-      scheduleBufferedLiveUpdate(data);
+      scheduleBufferedLiveUpdate(payload);
     };
 
-    socket.onclose = function() {
+    socket.onclose = function(): void {
       if (suppressNextReconnect) {
         suppressNextReconnect = false;
         return;
@@ -210,14 +219,14 @@ function createWebSocketController(ctx, deps) {
       scheduleReconnect();
     };
 
-    socket.onerror = function(event) {
+    socket.onerror = function(event: Event): void {
       console.error('[markdown-view] WebSocketエラー:', event);
       deps.setLiveStatus('error');
-      socket.close();
+      socket!.close();
     };
   }
 
-  function scheduleReconnect() {
+  function scheduleReconnect(): void {
     if (socketReconnectAttempts >= WS_RECONNECT_MAX_ATTEMPTS) {
       console.error('[markdown-view] 再接続上限に達しました。ページをリロードしてください');
       showDisconnectBanner(deps);
@@ -236,7 +245,7 @@ function createWebSocketController(ctx, deps) {
   };
 }
 
-function showDisconnectBanner(deps) {
+function showDisconnectBanner(deps: Pick<WebSocketDeps, 'setLiveStatus'>): void {
   if (document.getElementById('ws-disconnect-banner')) return;
   deps.setLiveStatus('offline');
   var banner = document.createElement('div');
@@ -246,7 +255,7 @@ function showDisconnectBanner(deps) {
   document.body.appendChild(banner);
 }
 
-function showWsParseErrorBanner(message) {
+function showWsParseErrorBanner(message: string): void {
   if (document.getElementById('ws-disconnect-banner')) return;
   var banner = document.getElementById('ws-parse-error-banner');
   if (!banner) {
@@ -263,17 +272,17 @@ function showWsParseErrorBanner(message) {
     banner.appendChild(msg);
     document.body.appendChild(banner);
   }
-  banner.querySelector('.error-msg').textContent = message;
+  banner.querySelector<HTMLElement>('.error-msg')!.textContent = message;
 }
 
-function hideWsParseErrorBanner() {
+function hideWsParseErrorBanner(): void {
   var banner = document.getElementById('ws-parse-error-banner');
   if (banner) {
     banner.remove();
   }
 }
 
-function showWsServerErrorBanner(message) {
+function showWsServerErrorBanner(message: string): void {
   if (document.getElementById('ws-disconnect-banner')) return;
   var banner = document.getElementById('ws-server-error-banner');
   if (!banner) {
@@ -290,17 +299,17 @@ function showWsServerErrorBanner(message) {
     banner.appendChild(msg);
     document.body.appendChild(banner);
   }
-  banner.querySelector('.error-msg').textContent = message;
+  banner.querySelector<HTMLElement>('.error-msg')!.textContent = message;
 }
 
-function hideWsServerErrorBanner() {
+function hideWsServerErrorBanner(): void {
   var banner = document.getElementById('ws-server-error-banner');
   if (banner) {
     banner.remove();
   }
 }
 
-function showFileFetchErrorBanner(message) {
+function showFileFetchErrorBanner(message: string): void {
   if (document.getElementById('ws-disconnect-banner')) return;
   var banner = document.getElementById('file-fetch-error-banner');
   if (!banner) {
@@ -317,10 +326,10 @@ function showFileFetchErrorBanner(message) {
     banner.appendChild(msg);
     document.body.appendChild(banner);
   }
-  banner.querySelector('.error-msg').textContent = message;
+  banner.querySelector<HTMLElement>('.error-msg')!.textContent = message;
 }
 
-function hideFileFetchErrorBanner() {
+function hideFileFetchErrorBanner(): void {
   var banner = document.getElementById('file-fetch-error-banner');
   if (banner) {
     banner.remove();

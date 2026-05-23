@@ -1,6 +1,6 @@
-function validateUpdatePayload(data) {
-  var safeData = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
-  var missing = [];
+function validateUpdatePayload(data: unknown): ContentUpdateValidation {
+  var safeData: ContentUpdatePayload = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  var missing: string[] = [];
 
   if (typeof safeData.content !== 'string') missing.push('content');
   if (typeof safeData.toc !== 'string') missing.push('toc');
@@ -12,7 +12,7 @@ function validateUpdatePayload(data) {
   };
 }
 
-function logUpdatePayloadContractViolation(validation) {
+function logUpdatePayloadContractViolation(validation: ContentUpdateValidation): void {
   var safeData = validation.safeData;
   console.warn('[markdown-view] updateContent: ' + validation.missing.join(', ') + ' が欠落または不正 (契約違反)', {
     missing: validation.missing.slice(),
@@ -22,11 +22,11 @@ function logUpdatePayloadContractViolation(validation) {
   });
 }
 
-function normalizeTocHtml(html) {
+function normalizeTocHtml(html: string): string {
   return (html || '').replace(/>\s+</g, '><').trim();
 }
 
-function requireUpdateTarget(element, selector) {
+function requireUpdateTarget(element: HTMLElement | null, selector: string): asserts element is HTMLElement {
   if (!element) {
     throw new Error('updateContent target missing: ' + selector);
   }
@@ -34,7 +34,7 @@ function requireUpdateTarget(element, selector) {
 
 // サーバーサイドでサニタイズ済みのHTMLだけを #content に反映する境界。
 // XSS防止: src/renderer/render.rs で raw/inline HTML event を破棄済み。
-function applySanitizedContentHtml(ctx, contentEl, content) {
+function applySanitizedContentHtml(ctx: MarkdownViewAppContext, contentEl: HTMLElement | null, content: unknown): boolean {
   requireUpdateTarget(contentEl, '#content');
   if (typeof content !== 'string') {
     return false;
@@ -48,7 +48,7 @@ function applySanitizedContentHtml(ctx, contentEl, content) {
 }
 
 // サーバー生成済みTOC HTMLだけを #toc に反映する境界。
-function applySanitizedTocHtml(tocEl, toc) {
+function applySanitizedTocHtml(tocEl: HTMLElement | null, toc: unknown): boolean {
   requireUpdateTarget(tocEl, '#toc');
   if (typeof toc !== 'string') {
     return false;
@@ -60,7 +60,10 @@ function applySanitizedTocHtml(tocEl, toc) {
   return true;
 }
 
-function applyValidatedUpdateHtml(ctx, targets, validation) {
+function applyValidatedUpdateHtml(ctx: MarkdownViewAppContext, targets: ContentUpdateTargets, validation: ContentUpdateValidation): {
+  contentChanged: boolean;
+  tocChanged: boolean;
+} {
   requireUpdateTarget(targets.contentEl, '#content');
   requireUpdateTarget(targets.tocEl, '#toc');
   var safeData = validation.safeData;
