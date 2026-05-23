@@ -115,23 +115,21 @@ interface FilterableListOptions<TItem extends HTMLElement> {
 
 interface SearchResult {
   file: string;
-  line?: number;
-  snippet?: string;
-  file_match_index?: number;
-  before?: string;
-  current?: string;
-  after?: string;
+  file_match_index: number;
+  before: string;
+  current: string;
+  after: string;
 }
 
 interface SearchResponse {
-  query?: string;
+  query: string;
   results: SearchResult[];
   searched_files: number;
-  skipped_files?: number;
+  skipped_files: number;
   searched_bytes: number;
   truncated: boolean;
   truncated_reasons: SearchTruncationReason[];
-  limits?: {
+  limits: {
     max_results: number;
     max_files: number;
     max_bytes: number;

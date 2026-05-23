@@ -1,35 +1,21 @@
 include!(concat!(env!("OUT_DIR"), "/inline_script_manifest.rs"));
 
-const GENERATED_TEMPLATE_PREFIX: &str = "(function() {\n";
-const GENERATED_TEMPLATE_SUFFIX: &str = "startMarkdownViewApp();\n}());\n";
-
 pub(super) fn inline_js(max_file_size: u64) -> String {
     template().replace("__MAX_FILE_SIZE_MB__", &file_size_display_mb(max_file_size))
 }
 
 fn template() -> String {
-    let generated_template_body = generated_template_body();
     let mut template = String::with_capacity(
         "(function() {\n".len()
-            + generated_template_body.len()
+            + GENERATED_TEMPLATE.len()
             + "startMarkdownViewApp();\n".len()
             + "}());\n".len(),
     );
     template.push_str("(function() {\n");
-    template.push_str(generated_template_body);
+    template.push_str(GENERATED_TEMPLATE);
     template.push_str("startMarkdownViewApp();\n");
     template.push_str("}());\n");
     template
-}
-
-fn generated_template_body() -> &'static str {
-    let Some(without_prefix) = GENERATED_TEMPLATE.strip_prefix(GENERATED_TEMPLATE_PREFIX) else {
-        return GENERATED_TEMPLATE;
-    };
-    let Some(body) = without_prefix.strip_suffix(GENERATED_TEMPLATE_SUFFIX) else {
-        return GENERATED_TEMPLATE;
-    };
-    body
 }
 
 fn file_size_display_mb(max_file_size: u64) -> String {

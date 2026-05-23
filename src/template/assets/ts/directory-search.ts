@@ -205,6 +205,34 @@ function createDirectorySearchController(
     );
   }
 
+  function isSearchTruncationReason(value: unknown): value is SearchTruncationReason {
+    return value === 'result_limit' || value === 'file_limit' || value === 'byte_limit';
+  }
+
+  function isSearchResponse(data: unknown, query: string): data is SearchResponse {
+    return Boolean(
+      data &&
+      typeof data === 'object' &&
+      !Array.isArray(data) &&
+      (data as SearchResponse).query === query &&
+      Array.isArray((data as SearchResponse).results) &&
+      (data as SearchResponse).results.every(isDirectorySearchResultItem) &&
+      Number.isFinite((data as SearchResponse).searched_files) &&
+      Number.isFinite((data as SearchResponse).skipped_files) &&
+      Number.isFinite((data as SearchResponse).searched_bytes) &&
+      typeof (data as SearchResponse).truncated === 'boolean' &&
+      Array.isArray((data as SearchResponse).truncated_reasons) &&
+      (data as SearchResponse).truncated_reasons.every(isSearchTruncationReason) &&
+      Boolean(
+        (data as SearchResponse).limits &&
+        typeof (data as SearchResponse).limits === 'object' &&
+        Number.isFinite((data as SearchResponse).limits.max_results) &&
+        Number.isFinite((data as SearchResponse).limits.max_files) &&
+        Number.isFinite((data as SearchResponse).limits.max_bytes)
+      )
+    );
+  }
+
   function applyDirectorySearchContractViolation(data: unknown): void {
     ctx.search.currentDirectoryLoading = false;
     ctx.search.currentDirectoryResults = [];
@@ -269,24 +297,18 @@ function createDirectorySearchController(
     .then(function(data: unknown): void {
       if (generation !== ctx.search.documentFetchGeneration) return;
       if (query !== ctx.search.currentDocumentQuery) return;
-      if (!data || typeof data !== 'object' || Array.isArray(data) ||
-        (data as SearchResponse).query !== ctx.search.currentDocumentQuery ||
-        !Array.isArray((data as SearchResponse).results) ||
-        !(data as SearchResponse).results.every(isDirectorySearchResultItem)
-      ) {
+      if (!isSearchResponse(data, ctx.search.currentDocumentQuery)) {
         applyDirectorySearchContractViolation(data);
         return;
       }
-      var response = data as SearchResponse;
+      var response = data;
       ctx.search.currentDirectoryLoading = false;
       ctx.search.currentDirectoryError = '';
       ctx.search.currentDirectoryResults = response.results;
-      ctx.search.currentDirectorySkippedFiles = Number(response.skipped_files || 0);
+      ctx.search.currentDirectorySkippedFiles = response.skipped_files;
       ctx.search.currentDirectoryTruncated = response.truncated === true ||
-        (Array.isArray(response.truncated_reasons) && response.truncated_reasons.length > 0);
-      ctx.search.currentDirectoryTruncatedReasons = Array.isArray(response.truncated_reasons)
-        ? response.truncated_reasons.slice()
-        : [];
+        response.truncated_reasons.length > 0;
+      ctx.search.currentDirectoryTruncatedReasons = response.truncated_reasons.slice();
       ctx.search.currentDirectoryIndex = resolveDirectorySearchIndex(
         ctx.search.currentDirectoryResults,
         preferredSelection

@@ -112,6 +112,7 @@ check_appmode_toctou_regression() {
   fi
 }
 
+run_step "Node依存確認" require_node_modules
 run_step "フォーマットチェック" cargo fmt --all -- --check
 run_step "Lint (clippy)" cargo clippy --all-targets --all-features -- -D warnings
 run_step "AppMode TOCTOU回帰チェック" check_appmode_toctou_regression

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -34,6 +35,14 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set by Cargo"));
     let inline_js_dir = out_dir.join("inline-js");
+    if inline_js_dir.exists() {
+        fs::remove_dir_all(&inline_js_dir).unwrap_or_else(|error| {
+            panic!(
+                "failed to remove stale inline JS output directory {}: {error}",
+                inline_js_dir.display()
+            )
+        });
+    }
     fs::create_dir_all(&inline_js_dir).unwrap_or_else(|error| {
         panic!(
             "failed to create inline JS output directory {}: {error}",
@@ -48,6 +57,8 @@ fn main() {
 }
 
 fn run_inline_js_build(inline_js_dir: &Path) {
+    ensure_typescript_compiler();
+
     let status = Command::new(npm_command())
         .args(["run", "build:inline-js"])
         .env("MV_INLINE_JS_OUT_DIR", inline_js_dir)
@@ -65,6 +76,19 @@ fn run_inline_js_build(inline_js_dir: &Path) {
     }
 }
 
+fn ensure_typescript_compiler() {
+    let tsc_path = Path::new("node_modules")
+        .join("typescript")
+        .join("bin")
+        .join("tsc");
+    if !tsc_path.is_file() {
+        panic!(
+            "TypeScript compiler was not found at {}. Run `npm ci` before running Cargo.",
+            tsc_path.display()
+        );
+    }
+}
+
 fn npm_command() -> &'static str {
     if cfg!(windows) {
         "npm.cmd"
@@ -74,6 +98,18 @@ fn npm_command() -> &'static str {
 }
 
 fn validate_generated_assets(inline_js_dir: &Path) -> Vec<PathBuf> {
+    let expected: BTreeSet<String> = ASSETS.iter().map(|asset| format!("{asset}.js")).collect();
+    let actual = generated_js_file_names(inline_js_dir);
+    if actual != expected {
+        let missing: Vec<_> = expected.difference(&actual).cloned().collect();
+        let extra: Vec<_> = actual.difference(&expected).cloned().collect();
+        panic!(
+            "generated inline JS assets do not match ASSETS. missing: [{}], extra: [{}]",
+            missing.join(", "),
+            extra.join(", ")
+        );
+    }
+
     ASSETS
         .iter()
         .map(|asset| {
@@ -89,9 +125,42 @@ fn validate_generated_assets(inline_js_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn generated_js_file_names(inline_js_dir: &Path) -> BTreeSet<String> {
+    fs::read_dir(inline_js_dir)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to read generated inline JS output directory {}: {error}",
+                inline_js_dir.display()
+            )
+        })
+        .filter_map(|entry| {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!(
+                    "failed to read generated inline JS output entry in {}: {error}",
+                    inline_js_dir.display()
+                )
+            });
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("js") {
+                return None;
+            }
+            Some(
+                path.file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "generated inline JS asset path is not valid UTF-8: {}",
+                            path.display()
+                        )
+                    })
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
 fn write_manifest(out_dir: &Path, generated_assets: &[PathBuf]) {
     let mut manifest = String::from("const GENERATED_TEMPLATE: &str = concat!(\n");
-    manifest.push_str("    \"(function() {\\n\",\n");
 
     for path in generated_assets {
         manifest.push_str("    include_str!(r#\"");
@@ -100,8 +169,6 @@ fn write_manifest(out_dir: &Path, generated_assets: &[PathBuf]) {
         manifest.push_str("    \"\\n\",\n");
     }
 
-    manifest.push_str("    \"startMarkdownViewApp();\\n\",\n");
-    manifest.push_str("    \"}());\\n\",\n");
     manifest.push_str(");\n");
 
     let manifest_path = out_dir.join("inline_script_manifest.rs");

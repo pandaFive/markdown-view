@@ -2,6 +2,48 @@ import { test, expect, type Page } from '@playwright/test';
 import { installTestWebSocketHarness } from './browser/test-websocket';
 import { stabilizeWebSocketHarness, updateContent, updateContentAndActivateToc } from './helpers';
 
+type DirectorySearchStubResult = {
+  file: string;
+  file_match_index: number;
+  before: string;
+  current: string;
+  after: string;
+  line?: number;
+};
+
+type DirectorySearchStubResponse = {
+  query: string;
+  results?: DirectorySearchStubResult[];
+  searched_files?: number;
+  skipped_files?: number;
+  searched_bytes?: number;
+  truncated?: boolean;
+  truncated_reasons?: string[];
+  limits?: {
+    max_results?: number;
+    max_files?: number;
+    max_bytes?: number;
+  };
+};
+
+function directorySearchResponse(response: DirectorySearchStubResponse) {
+  return {
+    results: [],
+    searched_files: response.results?.length ?? 0,
+    skipped_files: 0,
+    searched_bytes: 0,
+    truncated: false,
+    truncated_reasons: [],
+    ...response,
+    limits: {
+      max_results: 100,
+      max_files: 1000,
+      max_bytes: 67108864,
+      ...response.limits
+    }
+  };
+}
+
 function searchFixtureContent(): string {
   return (
     '<h1 id="readme">README</h1>' +
@@ -421,7 +463,7 @@ test('ディレクトリ検索結果はHTMLとして解釈されない', async (
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: injected,
         results: [
           {
@@ -434,7 +476,7 @@ test('ディレクトリ検索結果はHTMLとして解釈されない', async (
         ],
         searched_files: 1,
         skipped_files: 0
-      })
+      }))
     });
   });
 
@@ -486,7 +528,7 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'note',
         results: [
           {
@@ -506,7 +548,7 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
         ],
         searched_files: 2,
         skipped_files: 0
-      })
+      }))
     });
   });
 
@@ -536,14 +578,14 @@ test('ディレクトリ検索APIへタブ内クライアントIDを送る', asy
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: url.searchParams.get('q') || '',
         results: [],
         searched_files: 0,
         skipped_files: 0,
         truncated: false,
         truncated_reasons: []
-      })
+      }))
     });
   });
 
@@ -587,14 +629,14 @@ test('ディレクトリ検索APIのクライアントIDは複製タブ相当で
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: url.searchParams.get('q') || '',
         results: [],
         searched_files: 0,
         skipped_files: 0,
         truncated: false,
         truncated_reasons: []
-      })
+      }))
     });
   });
 
@@ -623,14 +665,14 @@ test('ディレクトリ検索APIのクライアントIDは複製タブ相当で
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: url.searchParams.get('q') || '',
         results: [],
         searched_files: 0,
         skipped_files: 0,
         truncated: false,
         truncated_reasons: []
-      })
+      }))
     });
   });
 
@@ -734,7 +776,7 @@ test('ディレクトリモードでは検索打ち切り警告を結果一覧�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha',
         results: [
           {
@@ -755,7 +797,7 @@ test('ディレクトリモードでは検索打ち切り警告を結果一覧�
           max_bytes: 67108864
         },
         searched_bytes: 1024
-      })
+      }))
     });
   });
 
@@ -781,7 +823,7 @@ test('ディレクトリモードでは検索結果0件でも検索打ち切り�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha',
         results: [],
         searched_files: 0,
@@ -794,7 +836,7 @@ test('ディレクトリモードでは検索結果0件でも検索打ち切り�
           max_bytes: 67108864
         },
         searched_bytes: 0
-      })
+      }))
     });
   });
 
@@ -819,7 +861,7 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha note',
         results: [
           {
@@ -839,7 +881,7 @@ test('ディレクトリモードでは現在ファイルの本文ヒットを�
         ],
         searched_files: 1,
         skipped_files: 0
-      })
+      }))
     });
   });
 
@@ -868,7 +910,7 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha note',
         results: searchCallCount === 1 ? [
           {
@@ -896,7 +938,7 @@ test('ディレクトリモードでは他ファイルのlive updateでも検索
         ],
         searched_files: 2,
         skipped_files: 0
-      })
+      }))
     });
   });
 
@@ -936,7 +978,7 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'note',
         results: [
           {
@@ -956,7 +998,7 @@ test('ディレクトリモードの初回キーボード移動は先頭の検�
         ],
         searched_files: 2,
         skipped_files: 0
-      })
+      }))
     });
   });
   await page.route('**/api/content?file=README.md', async (route) => {
@@ -1006,7 +1048,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'notes body',
         results: searchCallCount === 1 ? [
           {
@@ -1041,7 +1083,7 @@ test('ディレクトリ検索結果をクリックすると対象ファイル�
         ],
         searched_files: 2,
         skipped_files: 0
-      })
+      }))
     });
   });
   await page.route('**/api/content?file=notes.md', async (route) => {
@@ -1084,7 +1126,7 @@ test('ディレクトリ検索結果のオープン失敗時は以前の選択�
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha note',
         results: [
           {
@@ -1104,7 +1146,7 @@ test('ディレクトリ検索結果のオープン失敗時は以前の選択�
         ],
         searched_files: 2,
         skipped_files: 0
-      })
+      }))
     });
   });
   await page.route('**/api/content?file=missing.md', async (route) => {
@@ -1146,7 +1188,7 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
+      body: JSON.stringify(directorySearchResponse({
         query: 'alpha note',
         results: searchCallCount === 1 ? [
           {
@@ -1174,7 +1216,7 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
         ],
         searched_files: 1,
         skipped_files: 0
-      })
+      }))
     });
   });
 
@@ -1223,7 +1265,7 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(directorySearchResponse({
           query: 'beta',
           results: [
             {
@@ -1236,7 +1278,7 @@ test('ディレクトリモードでは古い検索失敗で新しいクエリ�
           ],
           searched_files: 1,
           skipped_files: 0
-        })
+        }))
       });
       return;
     }
@@ -1286,13 +1328,13 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
       });
       await route.fulfill({
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(directorySearchResponse({
           query: 'alpha',
           results: [{ file: 'notes.md', line: 1, before: '', current: 'alpha old', after: '', file_match_index: 0 }],
           skipped_files: 0,
           truncated: false,
           truncated_reasons: []
-        })
+        }))
       });
       return;
     }
@@ -1300,13 +1342,13 @@ test('ディレクトリ検索の古い応答は現在queryへ適用されない
     if (query === 'beta') {
       await route.fulfill({
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(directorySearchResponse({
           query: 'beta',
           results: [{ file: 'README.md', line: 1, before: '', current: 'beta current', after: '', file_match_index: 0 }],
           skipped_files: 0,
           truncated: false,
           truncated_reasons: []
-        })
+        }))
       });
       return;
     }
@@ -1366,13 +1408,13 @@ test('ディレクトリ検索クリア時は同じclientで空検索を送り�
       });
       await route.fulfill({
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(directorySearchResponse({
           query: 'alpha',
           results: [{ file: 'README.md', before: '', current: 'alpha old', after: '', file_match_index: 0 }],
           skipped_files: 0,
           truncated: false,
           truncated_reasons: []
-        })
+        }))
       });
       return;
     }
@@ -1380,13 +1422,13 @@ test('ディレクトリ検索クリア時は同じclientで空検索を送り�
     if (query === '') {
       await route.fulfill({
         contentType: 'application/json',
-        body: JSON.stringify({
+        body: JSON.stringify(directorySearchResponse({
           query: '',
           results: [],
           skipped_files: 0,
           truncated: false,
           truncated_reasons: []
-        })
+        }))
       });
       return;
     }
