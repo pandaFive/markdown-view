@@ -264,7 +264,7 @@ Expected: `test_ディレクトリモード_api_searchは結果数打ち切り�
 Run:
 
 ```bash
-cargo test --test integration search::test_ディレクトリモード_api_searchは結果数打ち切りをjsonで返す -- --nocapture
+cargo test --test integration_test search::test_ディレクトリモード_api_searchは結果数打ち切りをjsonで返す -- --nocapture
 ```
 
 Expected: the test passes.
