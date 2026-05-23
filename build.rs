@@ -22,6 +22,7 @@ const ASSETS: &[&str] = &[
 
 const RERUN_PATHS: &[&str] = &[
     "src/template/assets/ts",
+    "src/template/assets/generated-js",
     "tsconfig.inline-js.json",
     "package.json",
     "package-lock.json",
@@ -50,15 +51,17 @@ fn main() {
         )
     });
 
-    run_inline_js_build(&inline_js_dir);
+    if typescript_compiler_available() {
+        run_inline_js_build(&inline_js_dir);
+    } else {
+        copy_distributed_inline_js(&inline_js_dir);
+    }
 
     let generated_assets = validate_generated_assets(&inline_js_dir);
     write_manifest(&out_dir, &generated_assets);
 }
 
 fn run_inline_js_build(inline_js_dir: &Path) {
-    ensure_typescript_compiler();
-
     let status = Command::new(npm_command())
         .args(["run", "build:inline-js"])
         .env("MV_INLINE_JS_OUT_DIR", inline_js_dir)
@@ -76,16 +79,39 @@ fn run_inline_js_build(inline_js_dir: &Path) {
     }
 }
 
-fn ensure_typescript_compiler() {
-    let tsc_path = Path::new("node_modules")
+fn typescript_compiler_path() -> PathBuf {
+    Path::new("node_modules")
         .join("typescript")
         .join("bin")
-        .join("tsc");
-    if !tsc_path.is_file() {
-        panic!(
-            "TypeScript compiler was not found at {}. Run `npm ci` before running Cargo.",
-            tsc_path.display()
-        );
+        .join("tsc")
+}
+
+fn typescript_compiler_available() -> bool {
+    typescript_compiler_path().is_file()
+}
+
+fn copy_distributed_inline_js(inline_js_dir: &Path) {
+    let tsc_path = typescript_compiler_path();
+    println!(
+        "cargo:warning=TypeScript compiler was not found at {}. Using distributed inline JS fallback. Run `npm ci` and `npm run check:inline-js-generated` before editing inline TypeScript.",
+        tsc_path.display()
+    );
+
+    let distributed_dir = Path::new("src")
+        .join("template")
+        .join("assets")
+        .join("generated-js");
+    for asset in ASSETS {
+        let file_name = format!("{asset}.js");
+        let source = distributed_dir.join(&file_name);
+        let destination = inline_js_dir.join(&file_name);
+        fs::copy(&source, &destination).unwrap_or_else(|error| {
+            panic!(
+                "failed to copy distributed inline JS asset {} to {}: {error}. Run `npm ci` and `npm run check:inline-js-generated`.",
+                source.display(),
+                destination.display()
+            )
+        });
     }
 }
 

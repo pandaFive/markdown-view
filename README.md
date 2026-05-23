@@ -103,15 +103,15 @@ markdown-view README.md --port 4000 --dark --theme "base16-mocha.dark"
 ### 必要環境
 
 - Rust 1.70+
-- Node.js 20.11+ （Cargo ビルド時の inline JS 生成、型チェック、E2E テストに必要）
+- Node.js 20.11+ （開発時の inline JS 生成、型チェック、E2E テストに必要）
 
 ### セットアップ
 
 ```bash
-npm ci   # inline JS ビルド、型チェック、E2E 依存を取得。Cargo build/test/run/install 前に一度だけ必要
+npm ci   # inline JS ビルド、型チェック、E2E 依存を取得
 ```
 
-`node_modules/` が無い状態で Cargo build/test/run/install や `./verify.sh` を実行すると inline JS 生成前の依存確認で停止する（対応: 上記 `npm ci` を実行）。Rust のみを扱う場合も Cargo ビルドがブラウザ側 TypeScript 生成を含むため、初回セットアップ時に必須。
+`node_modules/` がある開発環境では Cargo build/test/run/install がブラウザ側 TypeScript から inline JS を生成する。`node_modules/` がない配布ビルドでは、コミット済みの配布用 fallback JS を使う。`src/template/assets/ts/` を変更した場合は `npm ci` 後に同期チェックを通し、fallback JS も同じ変更としてコミットする。
 
 ### ビルド・テスト
 
@@ -125,6 +125,7 @@ cargo fmt --all -- --check       # フォーマットチェック
 cargo clippy --all-targets --all-features -- -D warnings  # リント
 cargo test --all-targets --all-features   # 全テスト実行
 npm run typecheck                # E2E + inline JS の型チェック
+npm run check:inline-js-generated # inline JS fallback が TypeScript 生成結果と一致するか確認
 npm run test:e2e                 # E2E テスト実行（Playwright、ブラウザ自動起動）
 ```
 
@@ -162,7 +163,8 @@ src/
     highlight.rs     syntect によるコードハイライト
     toc.rs           Markdown -> 目次 HTML
   template/          HTML ページ、UpdateMessage、ファイルツリー、埋め込み assets
-    assets/ts/       ブラウザ側 TypeScript の正ソース（Cargo build時にOUT_DIRへJS生成）
+    assets/ts/       ブラウザ側 TypeScript の正ソース（開発時にOUT_DIRへJS生成）
+    assets/generated-js/  配布ビルド用の生成済み fallback JS
     assets/css/      ページ / サイドバー / メモ / オーバーレイの CSS
 ```
 

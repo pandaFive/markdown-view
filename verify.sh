@@ -64,6 +64,11 @@ typecheck_e2e() {
   npx --no-install tsc --noEmit
 }
 
+check_inline_js_generated() {
+  require_node_modules || return $?
+  npm run check:inline-js-generated
+}
+
 run_playwright_e2e() {
   require_node_modules || return $?
   npm run test:e2e
@@ -119,6 +124,7 @@ run_step "AppMode TOCTOU回帰チェック" check_appmode_toctou_regression
 run_step "テスト実行" cargo test --all-targets --all-features
 run_step "リリースビルドテスト実行" cargo test --all-targets --all-features --release
 run_step "E2E型チェック (tsc)" typecheck_e2e
+run_step "inline JS fallback同期チェック" check_inline_js_generated
 
 if [[ "$run_e2e" == true ]]; then
   run_step "E2E実行 (Playwright)" run_playwright_e2e
