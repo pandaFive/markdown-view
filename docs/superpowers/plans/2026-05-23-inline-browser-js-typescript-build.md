@@ -767,7 +767,7 @@ Move the BACKLOG item `インラインブラウザJS の TS 化` to Done with th
 
 ```markdown
 - [x] インラインブラウザJS の TS 化
-  - 完了根拠: `src/template/assets/ts/*.ts` を正ソースにし、`build.rs` が `npm run build:inline-js` 経由で Cargo `OUT_DIR` 配下へ生成した JS を `inline_script.rs` へ埋め込む構成にした。生成 `.js` はリポジトリに保持せず、`npm run typecheck` で E2E とインライン JS の両方を検査する。既存の結合順序、`__MAX_FILE_SIZE_MB__` sentinel 置換、CSP hash、`innerHTML` sink allowlist、E2E hook production 非公開契約は維持し、`./verify.sh` と `./verify.sh --e2e` で確認した
+  - 完了根拠: `src/template/assets/ts/*.ts` を正ソースにし、`build.rs` が `MV_INLINE_JS_OUT_DIR` 付きの `npm run build:inline-js` 経由で Cargo `OUT_DIR` 配下へ生成した JS を `inline_script.rs` へ埋め込む構成にした。生成 `.js` はリポジトリに保持せず、`npm run typecheck` で E2E とインライン JS の両方を検査する。既存の結合順序、`__MAX_FILE_SIZE_MB__` sentinel 置換、CSP hash、`innerHTML` sink allowlist、E2E hook production 非公開契約は維持し、`MV_INLINE_JS_OUT_DIR="$(mktemp -d)" npm run build:inline-js`、`./verify.sh`、`./verify.sh --e2e` で確認した
 ```
 
 - [ ] **Step 6: Commit docs update**
@@ -783,17 +783,19 @@ If `README.md` is unchanged, omit it from `git add`.
 
 ## Final Review Checklist
 
-- [ ] `src/template/assets/ts/*.ts` exists and is the source of truth.
-- [ ] `src/template/assets/js/*.js` no longer exists.
-- [ ] No generated `.js` is tracked.
-- [ ] `build.rs` invokes only the fixed npm script via `Command`.
-- [ ] `MV_INLINE_JS_OUT_DIR` points under Cargo `OUT_DIR`.
-- [ ] `inline_script.rs` still wraps assets in the IIFE and calls `startMarkdownViewApp();`.
-- [ ] `innerHTML` allowlist did not gain new sinks.
-- [ ] `window.markdownViewTestHooks` remains guarded by `window.__MV_E2E__ === true`.
-- [ ] `npm run typecheck` passes.
-- [ ] `./verify.sh` passes.
-- [ ] `./verify.sh --e2e` passes or residual risk is reported with the exact failure.
+Status note: This plan has been executed. The checklist below records the completed final review state; `docs/todo/BACKLOG.md` is the source of truth for the Done entry.
+
+- [x] `src/template/assets/ts/*.ts` exists and is the source of truth.
+- [x] `src/template/assets/js/*.js` no longer exists.
+- [x] No generated `.js` is tracked.
+- [x] `build.rs` invokes only the fixed npm script via `Command`.
+- [x] `MV_INLINE_JS_OUT_DIR` points under Cargo `OUT_DIR`.
+- [x] `inline_script.rs` still wraps assets in the IIFE and calls `startMarkdownViewApp();`.
+- [x] `innerHTML` allowlist did not gain new sinks.
+- [x] `window.markdownViewTestHooks` remains guarded by `window.__MV_E2E__ === true`.
+- [x] `npm run typecheck` passes.
+- [x] `./verify.sh` passes.
+- [x] `./verify.sh --e2e` passes or residual risk is reported with the exact failure.
 
 ## Self-Review Notes
 

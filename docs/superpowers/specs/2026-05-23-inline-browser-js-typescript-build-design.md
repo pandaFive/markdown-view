@@ -73,7 +73,7 @@ cargo:rerun-if-changed=scripts/build-inline-js.mjs
 }
 ```
 
-`scripts/build-inline-js.mjs` は `MV_INLINE_JS_OUT_DIR` がない場合に失敗し、`npx --no-install tsc -p tsconfig.inline-js.json --outDir "$MV_INLINE_JS_OUT_DIR"` 相当を実行する。TypeScript API や bundler は導入せず、既存 dev dependency の `typescript` を使う。
+`scripts/build-inline-js.mjs` は `MV_INLINE_JS_OUT_DIR` がない場合に失敗し、`npx --no-install tsc -p tsconfig.inline-js.json --outDir "$MV_INLINE_JS_OUT_DIR"` 相当を実行する。Cargo build 経路では `build.rs` が `MV_INLINE_JS_OUT_DIR=$OUT_DIR/inline-js` を渡す。npm script を単体実行する場合は、呼び出し側が安全な一時出力先を明示する。TypeScript API や bundler は導入せず、既存 dev dependency の `typescript` を使う。
 
 `npm`、`node_modules`、`tsc` がない場合は、`build.rs` が Cargo のエラーログに `npm ci` を先に実行する必要があることを明示する。今回の方針では Rust 単体ビルドを Node なしで維持しないため、この失敗は想定された開発環境エラーとして扱う。
 
@@ -142,7 +142,7 @@ TS 型はセキュリティ保証そのものではない。未信頼入力は�
 
 `innerHTML` sink の許可範囲は増やさない。既存の tree-sitter scanner を生成 JS に対して走らせ、許可済み sink を維持する。生成後 JS の書式差により scanner の期待文字列更新が必要になっても、許可対象の意味は変えない。
 
-`build.rs` は固定の npm script だけを `Command` で実行し、shell 文字列合成は使わない。外部から取得したテキスト、検索結果、Issue、LLM 出力を script 名、path、policy として実行しない。`MV_INLINE_JS_OUT_DIR` は Cargo の `OUT_DIR` 配下だけにし、任意 path への生成を許さない。
+`build.rs` は固定の npm script だけを `Command` で実行し、shell 文字列合成は使わない。外部から取得したテキスト、検索結果、Issue、LLM 出力を script 名、path、policy として実行しない。Cargo build 経路では `build.rs` が `MV_INLINE_JS_OUT_DIR` として Cargo の `OUT_DIR/inline-js` を渡し、生成物をソースツリーへ置かない。
 
 Host/Origin 検証、`127.0.0.1` binding、path validation、HTML sanitize、CSP hash、検索上限、ファイルサイズ上限、E2E hook の production 非公開契約は変更しない。
 
@@ -163,7 +163,7 @@ Host/Origin 検証、`127.0.0.1` binding、path validation、HTML sanitize、CSP
 実装後の検証コマンドは次を想定する。
 
 ```bash
-npm run build:inline-js
+MV_INLINE_JS_OUT_DIR="$(mktemp -d)" npm run build:inline-js
 npm run typecheck
 cargo test --lib template::assets::inline_script
 cargo test --test update_content_exposure
