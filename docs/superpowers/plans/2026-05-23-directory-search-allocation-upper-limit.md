@@ -4,7 +4,7 @@
 
 **Goal:** ディレクトリ検索の allocation 削減が今すぐ必要かを、上限近傍の追加計測に基づいて判断し、`docs/todo/BACKLOG.md` に結論を残す。
 
-**Architecture:** コードは変更せず、`/tmp` 配下の deterministic fixture と HTTP `/api/search` を使って result-limit 100 件、64 MiB 近傍、10 MiB 単一ファイル、RSS plateau を観測する。永続変更は `BACKLOG.md` の判断記録に限定し、測定中の JSON や Markdown fixture はリポジトリ外に置く。
+**Architecture:** コードは変更せず、`/tmp` 配下の deterministic fixture と HTTP `/api/search` を使って result-limit 100 件、64 MiB 近傍、10 MiB 単一ファイル、RSS plateau を観測する。永続変更は計測設計、計測計画、`BACKLOG.md` の判断記録を基本とし、具体的な可用性リスクが観測された場合は `TODO.md` Medium への昇格も含める。測定中の JSON や Markdown fixture はリポジトリ外に置く。
 
 **Tech Stack:** Rust, Cargo, existing markdown-view server, `curl`, `/usr/bin/time`, `ps`, `rg`, Markdown docs.
 
@@ -12,10 +12,14 @@
 
 ## File Structure
 
+- Modify when concrete availability risk is observed: `docs/todo/TODO.md`
+  - High / Medium 優先度で実装すべき具体リスクを昇格して記録する。
 - Modify: `docs/todo/BACKLOG.md`
   - 上限近傍の実測値、Done 化判断、残余リスク、セキュリティ境界を記録する。
-- Reference: `docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md`
-  - Done 化条件、非目標、セキュリティ境界を確認する。
+- Modify: `docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md`
+  - Done 化条件、非目標、セキュリティ境界、Medium 昇格条件を記録する。
+- Modify: `docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md`
+  - 実行中に判明した測定手順と検証コマンドの補正を反映する。
 - Reference: `docs/todo/BACKLOG.md`
   - 現在の P2 項目と前回計測結果を確認する。
 - Temporary only: `/tmp/markdown-view-search-allocation-upper-limit.XXXXXX`
@@ -25,7 +29,7 @@
 
 ## Scope Check
 
-この plan は単一サブシステム、ディレクトリ検索 allocation 再判断だけを扱う。検索ロジック、API、UI、依存関係、セキュリティ境界は変更しない。計測でリスクが見つかった場合も、この plan では最適化を実装せず、Backlog に具体的な後続候補として残す。
+この plan は単一サブシステム、ディレクトリ検索 allocation 再判断だけを扱う。検索ロジック、API、UI、依存関係、セキュリティ境界は変更しない。計測でリスクが見つかった場合も、この plan では最適化を実装せず、測定方法の不確実性は Backlog に残し、実装が必要な可用性リスクは Medium Priority に昇格する。
 
 ### Task 1: Preflight And Environment Snapshot
 
@@ -608,11 +612,11 @@ If the design file is still uncommitted in the current execution context, it may
 Run:
 
 ```bash
-unfinished_matches="$(rg -n "T[B]D|TO[D]O|未[定]" docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md | rg -v 'TODO\.md|T\[B\]D|TO\[D\]O|未\[定\]' || :)"
+unfinished_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\.md| Issues)|未[定]' docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/plans/2026-05-23-directory-search-allocation-upper-limit.md docs/superpowers/specs/2026-05-23-directory-search-allocation-upper-limit-design.md | rg -v 'T\[B\]D|TO\[D\]O|未\[定\]' || :)"
 test -z "$unfinished_matches" || { printf '%s\n' "$unfinished_matches"; exit 1; }
 ```
 
-Expected: command exits successfully. Literal references to `TODO.md` are filtered because they are existing document titles, not unfinished work markers.
+Expected: command exits successfully. Literal references to `TODO.md`, `# TODO Issues`, and escaped scan patterns are ignored, but ordinary unfinished markers inside `docs/todo/TODO.md` still fail the scan.
 
 - [ ] **Step 2: Confirm required security boundary language remains**
 

@@ -26,7 +26,7 @@
 
 ## 設計
 
-この作業は docs-only の計測調査として扱う。計測 fixture は `/tmp` 配下の一意ディレクトリに生成し、リポジトリには追加しない。永続変更は原則 `docs/todo/BACKLOG.md` の判断記録だけに限定する。
+この作業は docs-only の計測調査として扱う。計測 fixture は `/tmp` 配下の一意ディレクトリに生成し、リポジトリには追加しない。永続変更は計測設計、計測計画、`docs/todo/BACKLOG.md` の判断記録を基本とし、具体的な可用性リスクが観測された場合は `docs/todo/TODO.md` Medium への昇格も含める。
 
 既存の `docs/superpowers/specs/2026-05-19-directory-search-allocation-measurement-design.md` と `docs/superpowers/plans/2026-05-19-directory-search-allocation-measurement.md` は代表 fixture 計測の前提として残す。今回の設計は、その続きとして上限近傍の Done 判定条件を明文化する。
 
@@ -109,6 +109,8 @@ Done 化できるのは、次をすべて満たす場合だけである。
   - 今回の上限近傍計測設計を追加する。
 - `docs/todo/BACKLOG.md`
   - 後続計測後に、P2 項目を Done 化するか、未達条件付きで残す。
+- `docs/todo/TODO.md`
+  - 10 MiB 近傍 many-match のように実装対応が必要な可用性リスクが観測された場合、Medium Priority 項目として昇格する。
 - 一時 fixture
   - `/tmp` 配下に生成し、作業後に削除する。
 
