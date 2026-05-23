@@ -8,7 +8,8 @@
     "declaration": false,
     "sourceMap": false,
     "removeComments": false,
-    "noEmitOnError": true
+    "noEmitOnError": true,
+    "types": []
   },
   "include": ["src/template/assets/ts/**/*.ts"]
 }
