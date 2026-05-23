@@ -166,7 +166,7 @@ Host/Origin 検証、`127.0.0.1` binding、path validation、HTML sanitize、CSP
 MV_INLINE_JS_OUT_DIR="$(mktemp -d)" npm run build:inline-js
 npm run typecheck
 cargo test --lib template::assets::inline_script
-cargo test --test update_content_exposure
+npx playwright test tests/e2e/update_content_exposure.spec.ts
 ./verify.sh
 ./verify.sh --e2e
 ```

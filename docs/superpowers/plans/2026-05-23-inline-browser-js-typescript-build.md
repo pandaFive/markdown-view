@@ -1,6 +1,8 @@
 # Inline Browser JS TypeScript Build Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical record:** This plan has been executed. Do not re-run the embedded commands, task steps, or commit instructions unless a new explicit user request reopens this work.
+>
+> **Original agentic workflow note:** For a fresh implementation of this plan, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans as advisory workflow guidance. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Convert the embedded browser JavaScript assets to TypeScript sources generated through Cargo build, without committing generated JavaScript.
 
@@ -725,7 +727,7 @@ inline_js_out_dir="$(mktemp -d)"
 MV_INLINE_JS_OUT_DIR="$inline_js_out_dir" npm run build:inline-js
 npm run typecheck
 cargo test --lib template::assets::inline_script
-cargo test --test update_content_exposure
+npx playwright test tests/e2e/update_content_exposure.spec.ts
 ```
 
 Expected: PASS.
