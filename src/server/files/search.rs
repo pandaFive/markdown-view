@@ -16,6 +16,7 @@ const MAX_SEARCH_FILES: usize = 1000;
 const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEARCH_CONTEXT_CHARS: usize = 800;
 const SEARCH_CONTEXT_ELLIPSIS: &str = "...";
+const CASE_FOLD_CANCEL_CHECK_CHARS: usize = 1024;
 pub(in crate::server) const MAX_SEARCH_QUERY_CHARS: usize = 256;
 const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
@@ -959,7 +960,7 @@ fn find_matches_for_file(
             continue;
         }
 
-        let normalized = build_case_fold_index(&block.text);
+        let normalized = build_case_fold_index(&block.text, is_cancelled)?;
         let mut search_start = 0usize;
 
         while search_start <= normalized.normalized_text.len() {
@@ -1012,11 +1013,14 @@ impl CaseFoldIndex {
     }
 }
 
-fn build_case_fold_index(text: &str) -> CaseFoldIndex {
+fn build_case_fold_index(text: &str, is_cancelled: &impl Fn() -> bool) -> Option<CaseFoldIndex> {
     let mut normalized_text = String::new();
     let mut original_offsets = vec![0];
 
-    for (char_index, ch) in text.char_indices() {
+    for (chars_seen, (char_index, ch)) in text.char_indices().enumerate() {
+        if chars_seen % CASE_FOLD_CANCEL_CHECK_CHARS == 0 && is_cancelled() {
+            return None;
+        }
         let char_end = char_index + ch.len_utf8();
         let folded = ch.to_lowercase().collect::<String>();
         normalized_text.push_str(&folded);
@@ -1025,10 +1029,10 @@ fn build_case_fold_index(text: &str) -> CaseFoldIndex {
         }
     }
 
-    CaseFoldIndex {
+    Some(CaseFoldIndex {
         normalized_text,
         original_offsets,
-    }
+    })
 }
 
 fn build_search_context(
@@ -1497,6 +1501,28 @@ mod tests {
         assert_eq!(results[1].file_match_index, 1);
         assert_eq!(results[2].file_match_index, 2);
         assert!(results.iter().all(|item| item.file == "many.md"));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロック正規化中にstaleならcontextを生成しない() {
+        use std::cell::Cell;
+
+        let block_text = format!("{}needle", "a".repeat(16 * 1024));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: split_text_into_sentence_ranges(&block_text),
+        }];
+        let cancel_checks = Cell::new(0usize);
+        reset_search_context_build_count_for_test();
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| {
+            let next = cancel_checks.get() + 1;
+            cancel_checks.set(next);
+            next >= 3
+        });
+
+        assert!(results.is_none());
+        assert_eq!(search_context_build_count_for_test(), 0);
     }
 
     #[test]
