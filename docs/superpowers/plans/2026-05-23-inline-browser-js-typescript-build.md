@@ -2,7 +2,7 @@
 
 > **Historical record:** This plan has been executed. Do not re-run the embedded commands, task steps, or commit instructions unless a new explicit user request reopens this work.
 >
-> **Original agentic workflow note:** For a fresh implementation of this plan, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans as advisory workflow guidance. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Original agentic workflow note:** For a fresh implementation of this plan, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans as advisory workflow guidance. The historical steps below are archived records, not an active task list.
 
 **Goal:** Convert the embedded browser JavaScript assets to TypeScript sources generated through Cargo build, without committing generated JavaScript.
 
@@ -42,7 +42,7 @@
 - Inspect: `tests/e2e/update_content_exposure.spec.ts`
 - Inspect: `tests/e2e/globals.d.ts`
 
-- [ ] **Step 1: Run the current inline script contract tests**
+- **Historical step 1: Run the current inline script contract tests**
 
 Run:
 
@@ -52,7 +52,7 @@ cargo test --lib template::assets::inline_script
 
 Expected: PASS. If this fails before changes, stop and fix the pre-existing failure separately.
 
-- [ ] **Step 2: Run the current hook exposure E2E subset**
+- **Historical step 2: Run the current hook exposure E2E subset**
 
 Run:
 
@@ -63,7 +63,7 @@ npx playwright test tests/e2e/update_content_exposure.spec.ts
 
 Expected: PASS. This confirms production hook hiding and E2E hook exposure before migration.
 
-- [ ] **Step 3: Record no code changes**
+- **Historical step 3: Record no code changes**
 
 Run:
 
@@ -80,7 +80,7 @@ Expected: Only existing docs branch commits are present; no new unstaged code ch
 - Modify: `package.json`
 - Create: `scripts/build-inline-js.mjs`
 
-- [ ] **Step 1: Add browser TypeScript config**
+- **Historical step 1: Add browser TypeScript config**
 
 Create `tsconfig.inline-js.json`:
 
@@ -101,7 +101,7 @@ Create `tsconfig.inline-js.json`:
 }
 ```
 
-- [ ] **Step 2: Add npm scripts**
+- **Historical step 2: Add npm scripts**
 
 Modify `package.json` scripts to:
 
@@ -119,7 +119,7 @@ Modify `package.json` scripts to:
 
 Keep existing `engines` and `devDependencies` unchanged.
 
-- [ ] **Step 3: Add Node build wrapper**
+- **Historical step 3: Add Node build wrapper**
 
 Create `scripts/build-inline-js.mjs`:
 
@@ -150,7 +150,7 @@ if (result.error) {
 process.exit(result.status ?? 1);
 ```
 
-- [ ] **Step 4: Verify missing env failure is explicit**
+- **Historical step 4: Verify missing env failure is explicit**
 
 Run:
 
@@ -160,7 +160,7 @@ npm run build:inline-js
 
 Expected: FAIL with `MV_INLINE_JS_OUT_DIR is required.`
 
-- [ ] **Step 5: Commit config scaffold**
+- **Historical step 5: Commit config scaffold**
 
 Run:
 
@@ -174,7 +174,7 @@ git commit -m "chore: インラインJSのTypeScriptビルド設定を追加"
 **Files:**
 - Create: `build.rs`
 
-- [ ] **Step 1: Add build script with fixed asset order**
+- **Historical step 1: Add build script with fixed asset order**
 
 Create `build.rs`:
 
@@ -251,7 +251,7 @@ fn write_manifest(out_dir: &Path, inline_js_dir: &Path) {
 }
 ```
 
-- [ ] **Step 2: Run Cargo build to confirm expected failure**
+- **Historical step 2: Run Cargo build to confirm expected failure**
 
 Run:
 
@@ -261,7 +261,7 @@ cargo test --lib template::assets::inline_script
 
 Expected: FAIL because `src/template/assets/ts/**/*.ts` does not exist yet or `tsc` has no inputs. This failure proves `build.rs` is active.
 
-- [ ] **Step 3: Commit build script**
+- **Historical step 3: Commit build script**
 
 Run:
 
@@ -287,7 +287,7 @@ git commit -m "chore: CargoビルドでインラインJS生成を実行"
 - Create: `src/template/assets/ts/sidebar.ts`
 - Create: `src/template/assets/ts/types.d.ts`
 
-- [ ] **Step 1: Copy existing JS files to TS paths**
+- **Historical step 1: Copy existing JS files to TS paths**
 
 Run:
 
@@ -307,7 +307,7 @@ cp src/template/assets/js/websocket.js src/template/assets/ts/websocket.ts
 cp src/template/assets/js/sidebar.js src/template/assets/ts/sidebar.ts
 ```
 
-- [ ] **Step 2: Add shared declaration scaffold**
+- **Historical step 2: Add shared declaration scaffold**
 
 Create `src/template/assets/ts/types.d.ts`:
 
@@ -322,7 +322,7 @@ interface MarkdownViewTestHooks {
 }
 ```
 
-- [ ] **Step 3: Run inline typecheck to collect errors**
+- **Historical step 3: Run inline typecheck to collect errors**
 
 Run:
 
@@ -332,7 +332,7 @@ npm run typecheck:inline-js
 
 Expected: FAIL with implicit `any`, nullability, and shared-global errors. Use this as the migration checklist.
 
-- [ ] **Step 4: Commit skeleton**
+- **Historical step 4: Commit skeleton**
 
 Run:
 
@@ -349,7 +349,7 @@ git commit -m "refactor: インラインJSをTypeScriptソースへ複製"
 - Reference: `src/server/files/search.rs`
 - Reference: `src/template/message.rs`
 
-- [ ] **Step 1: Replace declaration scaffold with runtime contracts**
+- **Historical step 1: Replace declaration scaffold with runtime contracts**
 
 Replace `src/template/assets/ts/types.d.ts` with:
 
@@ -414,7 +414,7 @@ interface Window {
 }
 ```
 
-- [ ] **Step 2: Run typecheck and keep errors focused**
+- **Historical step 2: Run typecheck and keep errors focused**
 
 Run:
 
@@ -424,7 +424,7 @@ npm run typecheck:inline-js
 
 Expected: FAIL, but errors should now point to concrete function parameters and DOM nullability rather than missing top-level shared types.
 
-- [ ] **Step 3: Commit shared types**
+- **Historical step 3: Commit shared types**
 
 Run:
 
@@ -440,7 +440,7 @@ git commit -m "refactor: インラインJSの共有型を定義"
 - Modify: `src/template/assets/ts/content-renderer.ts`
 - Modify: `src/template/assets/ts/bootstrap.ts`
 
-- [ ] **Step 1: Type event and DOM boundaries in `selection.ts`**
+- **Historical step 1: Type event and DOM boundaries in `selection.ts`**
 
 Apply these patterns in `selection.ts`:
 
@@ -456,7 +456,7 @@ function getSelectionText(): string {
 
 Keep existing behavior and names; only add parameter and return types and null-safe DOM handling.
 
-- [ ] **Step 2: Type sanitized HTML renderer boundaries**
+- **Historical step 2: Type sanitized HTML renderer boundaries**
 
 In `content-renderer.ts`, keep the existing allowed sinks and add explicit string parameters:
 
@@ -476,7 +476,7 @@ function applyRenderedContent(contentEl: HTMLElement, tocEl: HTMLElement, conten
 
 Use the existing local function names if they differ; do not add new `innerHTML` write sites.
 
-- [ ] **Step 3: Type app context creation in `bootstrap.ts`**
+- **Historical step 3: Type app context creation in `bootstrap.ts`**
 
 Ensure the app context object is typed:
 
@@ -503,7 +503,7 @@ function createAppContext(): MarkdownViewAppContext {
 
 If the existing context has more fields, type them in `MarkdownViewAppContext` rather than deleting them.
 
-- [ ] **Step 4: Run focused typecheck**
+- **Historical step 4: Run focused typecheck**
 
 Run:
 
@@ -513,7 +513,7 @@ npm run typecheck:inline-js
 
 Expected: FAIL remains until larger files are typed, but these three files should no longer produce errors.
 
-- [ ] **Step 5: Commit small typed assets**
+- **Historical step 5: Commit small typed assets**
 
 Run:
 
@@ -536,7 +536,7 @@ git commit -m "refactor: 小規模インラインJSに型を追加"
 - Modify: `src/template/assets/ts/sidebar.ts`
 - Modify: `src/template/assets/ts/types.d.ts`
 
-- [ ] **Step 1: Type shared helper signatures**
+- **Historical step 1: Type shared helper signatures**
 
 For each top-level function, add parameter and return types using existing behavior. Use these patterns:
 
@@ -556,7 +556,7 @@ function optionalInput(id: string): HTMLInputElement | null {
 
 Only introduce helpers where the current file already assumes the element is mandatory. Keep optional UI paths optional.
 
-- [ ] **Step 2: Type fetch responses**
+- **Historical step 2: Type fetch responses**
 
 Use explicit guards before consuming JSON:
 
@@ -568,7 +568,7 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
 
 Apply `SearchResponse`, `MemoResponse`, and `ContentUpdatePayload` to the current fetch/update call sites.
 
-- [ ] **Step 3: Type WebSocket messages conservatively**
+- **Historical step 3: Type WebSocket messages conservatively**
 
 Use `unknown` at parse boundaries, then narrow:
 
@@ -584,7 +584,7 @@ function parseWsMessage(raw: string): ContentUpdatePayload | null {
 
 Do not trust network payloads because TypeScript assertions are not runtime validation.
 
-- [ ] **Step 4: Type E2E hooks without broadening exposure**
+- **Historical step 4: Type E2E hooks without broadening exposure**
 
 Keep the existing guard:
 
@@ -597,7 +597,7 @@ window.markdownViewTestHooks = {
 
 Update `MarkdownViewTestHooks` with the actual hook names present in `sidebar.ts` and other files. Do not expose hooks outside this guard.
 
-- [ ] **Step 5: Run inline typecheck to completion**
+- **Historical step 5: Run inline typecheck to completion**
 
 Run:
 
@@ -607,7 +607,7 @@ npm run typecheck:inline-js
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit full TypeScript typing**
+- **Historical step 6: Commit full TypeScript typing**
 
 Run:
 
@@ -621,7 +621,7 @@ git commit -m "refactor: インラインブラウザJSをTypeScript化"
 **Files:**
 - Modify: `src/template/assets/inline_script.rs`
 
-- [ ] **Step 1: Replace static template source**
+- **Historical step 1: Replace static template source**
 
 Change the top of `src/template/assets/inline_script.rs` from direct `include_str!("js/*.js")` concat to:
 
@@ -638,7 +638,7 @@ const TEMPLATE: &str = concat!(
 
 Keep `inline_js(max_file_size)`, `file_size_display_mb`, and all scanner tests in the same file.
 
-- [ ] **Step 2: Run focused Rust test**
+- **Historical step 2: Run focused Rust test**
 
 Run:
 
@@ -648,7 +648,7 @@ cargo test --lib template::assets::inline_script
 
 Expected: PASS. If sink allowlist assertions fail only because generated JS formatting changed, update the expected source strings to the generated JS while keeping the same allowed sink meanings.
 
-- [ ] **Step 3: Commit Rust include switch**
+- **Historical step 3: Commit Rust include switch**
 
 Run:
 
@@ -673,7 +673,7 @@ git commit -m "refactor: 生成済みインラインJSをRustへ埋め込む"
 - Delete: `src/template/assets/js/websocket.js`
 - Delete: `src/template/assets/js/sidebar.js`
 
-- [ ] **Step 1: Delete old JS files**
+- **Historical step 1: Delete old JS files**
 
 Run:
 
@@ -692,7 +692,7 @@ git rm src/template/assets/js/bootstrap.js \
   src/template/assets/js/sidebar.js
 ```
 
-- [ ] **Step 2: Verify no Rust source includes old path**
+- **Historical step 2: Verify no Rust source includes old path**
 
 Run:
 
@@ -702,7 +702,7 @@ rg -n 'assets/js|include_str!\("js/' src tests docs
 
 Expected: No production references to `src/template/assets/js/*.js`. Historical docs may mention the old path; update only active docs if they now contradict the build.
 
-- [ ] **Step 3: Commit deletion**
+- **Historical step 3: Commit deletion**
 
 Run:
 
@@ -718,7 +718,7 @@ git commit -m "refactor: 生成対象の旧JavaScript資産を削除"
 - Modify if needed: `README.md`
 - Modify if needed: `AGENTS.md` is not expected
 
-- [ ] **Step 1: Run full typecheck and build path**
+- **Historical step 1: Run full typecheck and build path**
 
 Run:
 
@@ -732,7 +732,7 @@ npx playwright test tests/e2e/update_content_exposure.spec.ts
 
 Expected: PASS.
 
-- [ ] **Step 2: Run required repository verification**
+- **Historical step 2: Run required repository verification**
 
 Run:
 
@@ -742,7 +742,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 3: Run E2E verification**
+- **Historical step 3: Run E2E verification**
 
 Run:
 
@@ -752,18 +752,19 @@ Run:
 
 Expected: PASS. If browser dependencies are missing, install them through the project’s existing Playwright setup and rerun, or report the missing system dependency as residual risk.
 
-- [ ] **Step 4: Ensure generated JS is not tracked**
+- **Historical step 4: Ensure generated JS is not tracked**
 
 Run:
 
 ```bash
 git status --short
-rg -n 'src/template/assets/js/.*\.js' .gitignore docs/todo/BACKLOG.md docs/superpowers/specs docs/superpowers/plans
+git ls-files 'src/template/assets/js/*.js'
+git status --short -- src/template/assets/js
 ```
 
-Expected: No generated `.js` under `src/template/assets/js/` is present. `OUT_DIR` generated files should not appear in `git status`.
+Expected: No tracked or locally generated `.js` under `src/template/assets/js/` is present. `OUT_DIR` generated files should not appear in `git status`.
 
-- [ ] **Step 5: Update BACKLOG completion entry**
+- **Historical step 5: Update BACKLOG completion entry**
 
 Move the BACKLOG item `インラインブラウザJS の TS 化` to Done with this wording:
 
@@ -772,7 +773,7 @@ Move the BACKLOG item `インラインブラウザJS の TS 化` to Done with th
   - 完了根拠: `src/template/assets/ts/*.ts` を正ソースにし、`build.rs` が `MV_INLINE_JS_OUT_DIR` 付きの `npm run build:inline-js` 経由で Cargo `OUT_DIR` 配下へ生成した JS を `inline_script.rs` へ埋め込む構成にした。生成 `.js` はリポジトリに保持せず、`npm run typecheck` で E2E とインライン JS の両方を検査する。既存の結合順序、`__MAX_FILE_SIZE_MB__` sentinel 置換、CSP hash、`innerHTML` sink allowlist、E2E hook production 非公開契約は維持し、`MV_INLINE_JS_OUT_DIR="$(mktemp -d)" npm run build:inline-js`、`./verify.sh`、`./verify.sh --e2e` で確認した
 ```
 
-- [ ] **Step 6: Commit docs update**
+- **Historical step 6: Commit docs update**
 
 Run:
 
