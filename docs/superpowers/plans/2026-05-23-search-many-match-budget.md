@@ -446,7 +446,7 @@ If measurement does not improve enough, keep the item unchecked and update `ÁèæÁ
 Run:
 
 ```bash
-rg -P -n "<real-worktree-path>|/tmp/markdown-view-search-many-match-budget\\.(?!\\*\\*\\*|XXXXXX)[A-Za-z0-9]+|target/debug/markdown-view" docs/superpowers/plans/2026-05-23-search-many-match-budget.md docs/todo/TODO.md
+rg -P -n "<real-worktree-path>|/tmp/markdown-view-search-many-match-budget\\.(?!\\*\\*\\*|XXXXXX)[A-Za-z0-9]+|target/debug/[m]arkdown-view" docs/superpowers/plans/2026-05-23-search-many-match-budget.md docs/todo/TODO.md
 ```
 
 Replace `<real-worktree-path>` with the active worktree path before running. Expected: no output. `docs/todo/TODO.md` may mention `/tmp/markdown-view-search-many-match-budget.***`, and this plan may mention `/tmp/markdown-view-search-many-match-budget.XXXXXX`, but neither docs file should contain the real temporary path, real worktree path, or full process args.
