@@ -28,14 +28,10 @@
   - 判断: 既に error ログがあり、メトリクス基盤は実運用要求が出てからでよいため BACKLOG P3 に残す
   - 由来: PR #123 レビュー follow-up (2026-05-04)
 
-- [ ] インラインブラウザJS の TS 化
-  - ファイル: `src/template/assets/js/{bootstrap,content,fetch,memo,selection,sidebar,websocket}.js`
-  - 内容: Rust の `include_str!` でコンパイル時に埋め込まれる JS を TS で記述し、事前 tsc でビルドして `.js` 出力を `include_str!` 対象にする
-  - 理由: ブラウザ側 JS は現在無型。ただし Rust ビルドパイプラインへの Node 依存追加が必要で、「Rust 単体ビルド」の明快さが崩れる
-  - 判断: 型安全性の長期改善だが、Node 依存追加の設計判断が必要なため BACKLOG P3 に残す
-  - 由来: E2E TypeScript 移行 PR レビュー (2026-04-20)
-
 ## Done
+
+- [x] インラインブラウザJS の TS 化
+  - 完了根拠: `src/template/assets/ts/*.ts` を正ソースにし、`build.rs` が `npm run build:inline-js` 経由で Cargo `OUT_DIR` 配下へ生成した JS を `inline_script.rs` へ埋め込む構成にした。生成 `.js` はリポジトリに保持せず、`npm run typecheck` で E2E とインライン JS の両方を検査する。既存の結合順序、`__MAX_FILE_SIZE_MB__` sentinel 置換、CSP hash、`innerHTML` sink allowlist、E2E hook production 非公開契約は維持している。検証では `npm run build:inline-js`、`npm run typecheck`、`cargo test --lib template::assets::inline_script` は通過したが、指定の `cargo test --test update_content_exposure` は該当 Cargo test target が存在せず失敗した。`./verify.sh` と `./verify.sh --e2e` は `template::page` の既存 HTML 内 JS 文字列アサーション 4 件で停止し、E2E 実行段階までは到達していない
 
 - [x] `AppMode` 構築時の `is_file()`/`is_dir()` 判定の TOCTOU を緩和する
   - 完了根拠: `src/server/state.rs` は `CanonicalPath::try_from_path()` で canonicalize した後、`ensure_canonical_file()` / `ensure_canonical_directory()` が `metadata_for_mode()` 経由で取得した `Metadata` の `file_type()` から file / directory を判定している。canonicalize 後に対象が消えた場合も `NotFile` / `NotDirectory` へ集約することを unit test で固定済み。`.md` 拡張子チェック、canonical path 保持、base_dir / single_file / directory の公開契約、Host/Origin 検証、HTML sanitize、CSP、path validation は変更していない
