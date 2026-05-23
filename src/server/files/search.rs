@@ -427,7 +427,8 @@ fn search_directory_with_limits_blocking(
             break;
         }
         let blocks = extract_search_blocks(&markdown);
-        let file_results = find_matches_for_file(&relative, &blocks, &query);
+        let remaining_results = limits.max_results.saturating_sub(results.len());
+        let file_results = find_matches_for_file(&relative, &blocks, &query, remaining_results);
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -732,12 +733,17 @@ fn find_matches_for_file(
     file: &str,
     blocks: &[SearchBlockEntry],
     query: &str,
+    remaining_results: usize,
 ) -> Vec<SearchResultItem> {
+    if remaining_results == 0 {
+        return Vec::new();
+    }
+
     let mut results = Vec::new();
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
-    for (block_index, block) in blocks.iter().enumerate() {
+    'blocks: for (block_index, block) in blocks.iter().enumerate() {
         if block.text.is_empty() {
             continue;
         }
@@ -764,6 +770,9 @@ fn find_matches_for_file(
                 context.after,
             ));
             file_match_index += 1;
+            if results.len() >= remaining_results {
+                break 'blocks;
+            }
             search_start = normalized_match_end;
         }
     }
@@ -1112,7 +1121,7 @@ mod tests {
             },
         ];
 
-        let results = find_matches_for_file("README.md", &blocks, "alpha note");
+        let results = find_matches_for_file("README.md", &blocks, "alpha note", usize::MAX);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
@@ -1127,11 +1136,44 @@ mod tests {
             sentences: split_text_into_sentence_ranges(text),
         }];
 
-        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul");
+        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[0].current, "İstanbul is here.");
+    }
+
+    #[test]
+    fn test_find_matches_for_file_残り件数で同一ファイル内探索を停止する() {
+        let block_text = (0..120)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: split_text_into_sentence_ranges(&block_text),
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 3);
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].file_match_index, 0);
+        assert_eq!(results[1].file_match_index, 1);
+        assert_eq!(results[2].file_match_index, 2);
+        assert!(results.iter().all(|item| item.file == "many.md"));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_残り件数0なら結果を生成しない() {
+        let block_text = "needle first. needle second.";
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.to_string(),
+            sentences: split_text_into_sentence_ranges(block_text),
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 0);
+
+        assert!(results.is_empty());
     }
 
     fn canonical_of(path: &Path) -> CanonicalPath {
