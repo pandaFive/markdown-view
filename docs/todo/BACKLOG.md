@@ -11,13 +11,13 @@
 
 ## P2: 保守性・局所回帰検知
 
-- [ ] ディレクトリ検索の allocation 削減を追加計測に基づいて再判断する
+- [ ] ディレクトリ検索 64MiB byte-limit 反復時の RSS plateau を測定方法改善込みで再確認する
   - ファイル: `src/server/files/search.rs`
   - 現状: ディレクトリ検索は `spawn_blocking` に隔離され、結果数・ファイル数・総読込 byte 数・query 長の打ち切りが明示されている。連続検索時の古い検索処理はクライアント単位のサーバ側検索世代と `SearchCancellation` により、ファイル単位の安全な区切りで協調的に早期終了できる。検索クライアント ID がない互換呼び出しも、全体同時実行上限により blocking 検索の増加を抑える
-  - 計測済み: 依存追加なしで検索系 targeted tests と HTTP `/api/search` 経由の代表 fixture 計測を行った。環境は `rustc 1.93.1 (01f6ddf75 2026-02-11)`, `cargo 1.93.1 (083ac5135 2025-12-15)`, Linux WSL2 `5.15.133.1-microsoft-standard-WSL2`。検索系 test elapsed は 0.52-0.68s、最大 RSS は 74620-74776 KiB。HTTP result-limit 経路（`q=needle`）は `searched_files=1`, `searched_bytes=158411`, `truncated=true`, `truncated_reasons=["result_limit"]`, elapsed 0.03s x3, response 47778 bytes, 対象 server RSS 47988 KiB。HTTP full-scan 経路（`q=absentneedle`）は `searched_files=260`, `searched_bytes=7604305`, `truncated=false`, `truncated_reasons=[]`, elapsed 1.18-1.21s, response 209 bytes。対象 server RSS は起動直後 16156 KiB、初回 full-scan 後 33764 KiB、複数回 full-scan 後 51324 KiB。fixture は `/tmp` に生成し、repo へ追加していない。別の既存 `markdown-view .` process は計測対象外として触らなかった
-  - 残件: 今回の 260 files / 7.8M 代表 fixture は追加計測範囲を絞る材料に留まり、対象 server RSS の plateau 未確認を含むため、不要判断も最適化判断も保留する。複数ファイルに分散した 100 件 result-limit、64 MiB 近傍 full-scan または byte-limit 近傍、10 MiB 単一ファイル、RSS plateau の追加確認を行ったうえで、`Cow<str>` 化や検索ブロック処理単位変更の要否を再判断する
-  - 判断: 検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は変更していない。現時点では完了扱いにせず、追加計測が必要な P2 残件として残す
-  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界実装 (2026-05-18)、ディレクトリ検索 allocation 代表 fixture 計測 (2026-05-19)
+  - 計測済み: 2026-05-23 に依存追加なしで追加計測した。環境は `rustc 1.93.1 (01f6ddf75 2026-02-11)`, `cargo 1.93.1 (083ac5135 2025-12-15)`, Linux WSL2 `5.15.133.1-microsoft-standard-WSL2`。検索系 targeted tests は sandbox 内 warm run が pass、`/usr/bin/time -v` 付き計測は loopback bind のため sandbox 外で 3 回実行し pass、elapsed は 0.50-0.60s、最大 RSS は 74528-74868 KiB。複数ファイル分散 result-limit fixture は 120 files / 484 KiB、HTTP `q=needle` で `searched_files=100`, `searched_bytes=13200`, `truncated=true`, `truncated_reasons=["result_limit"]`, elapsed 0.01s x5, response 20526 bytes, server RSS は pre-search 16148 KiB、同一 server process の run1-run5 後も 16148 KiB。64 MiB 近傍 byte-limit fixture は fixture 自体が 70 files / 102 MiB で、既存 byte-limit により約 64 MiB で打ち切られた。HTTP `q=missingneedle` は `searched_files=44`, `searched_bytes=66924836`, `truncated=true`, `truncated_reasons=["byte_limit"]`, elapsed 8.96-11.36s, response 221 bytes。server RSS は 1 回目の server process で pre-search 18120 KiB → run1 147844 → run2 206976 → run3 201132 → run4 210640 → run5 226696 KiB。追加 8 回は server restart 後の別 process で pre-search 16196 KiB → run1 107568 → run2 196004 → run3 210024 → run4 232952 → run5 213636 → run6 225812 → run7 215236 → run8 249120 KiB となり plateau 判定には不足した。10 MiB 近傍 many-match 経路は可用性リスクとして `TODO.md` Medium へ昇格した。fixture は `/tmp/markdown-view-search-allocation-upper-limit.***` に生成し、repo へ追加していない
+  - 残件: 64 MiB 近傍 byte-limit の server RSS は、request 後 snapshot では plateau と判断できなかった。server process peak RSS は未測定のため、後続再計測では対象 PID の短周期 sampling、または server process を `/usr/bin/time -v` 配下で起動する方法で peak / after / plateau を分けて記録する
+  - 判断: allocation 削減不要とは判断せず、Done 化しない。検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は変更していない。今回の BACKLOG P2 では実装最適化ではなく、64 MiB 近傍 byte-limit 反復時の RSS plateau 再測定と原因切り分けに絞る
+  - 由来: ディレクトリ検索 blocking 隔離の残余リスク (2026-05-04)、ディレクトリ検索キャンセル境界実装 (2026-05-18)、ディレクトリ検索 allocation 代表 fixture 計測 (2026-05-19)、ディレクトリ検索 allocation 上限近傍計測 (2026-05-23)
 
 ## P3: 長期改善・低緊急
 
