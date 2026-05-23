@@ -13,14 +13,11 @@
 
 すぐ重大事故ではないが、後続改修の前提、設計負債、検証基盤として効く項目。
 
-- [ ] ディレクトリ検索の 10MiB 近傍 many-match 経路を早期停止・処理単位見直しで抑制する
-  - ファイル: `src/server/files/search.rs`
-  - 現状: 2026-05-23 の上限近傍計測で、10MiB 近傍単一ファイル（1 file / 10388017 bytes）の many-match 経路は HTTP `q=needle` で `searched_files=1`, `searched_bytes=10388017`, `truncated=true`, `truncated_reasons=["result_limit"]`, response 39512 bytes, elapsed 36.73-38.37s, server RSS 887312 → 1329640 → 1186668 KiB になった。no-match 経路は elapsed 1.39-1.47s のため、巨大単一ブロック内の match/context 生成と result-limit 到達前の処理単位が主な疑い
-  - 対応: `Cow<str>` 化だけで完了扱いにせず、巨大単一ブロックで全 match / context を作る前に result-limit へ到達できる処理単位、検索ブロック分割、file 内 match 列挙の早期停止を設計する。単一巨大ブロックだけに過適合せず、複数 paragraph / heading / list を含む 10MiB 近傍 many-match fixture でも result-limit 前提の処理量に収まることを受け入れ条件に含める
-  - セキュリティ: localhost-only でも、許可 Host の `/api/search` GET で可用性低下を起こせるため Medium に昇格する。Host/Origin 検証、path validation、HTML sanitize、CSP、`SearchResponse` JSON、検索キャンセル境界、検索上限契約は維持する
-  - 由来: ディレクトリ検索 allocation 上限近傍計測 (2026-05-23)、multi-review follow-up (2026-05-23)
-
 ## Done Summary
+
+- [x] ディレクトリ検索の 10MiB 近傍 many-match 経路を早期停止・処理単位見直しで抑制する
+  - 完了根拠: `search_directory_with_limits_blocking()` が `limits.max_results` から残り結果予算を計算し、`find_matches_for_file()` が予算到達時に同一ファイル内の match/context 生成を停止する構成にした。`SearchResponse` JSON、`truncated_reasons=["result_limit"]`、`searched_files`、`searched_bytes`、Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限、検索キャンセル境界は変更していない。構造回帰は `find_matches_for_file()` の予算 test と既存 result-limit test で固定した。計測環境は `date +%F` が 2026-05-24、`rustc 1.93.1 (01f6ddf75 2026-02-11)`, `cargo 1.93.1 (083ac5135 2025-12-15)`, Linux WSL2 `5.15.133.1-microsoft-standard-WSL2`。10MiB 近傍 many-match fixture は 1 file / 10388028 bytes、HTTP `q=needle` で `searched_files=1`, `searched_bytes=10388028`, `truncated=true`, `truncated_reasons=["result_limit"]`, `results=100`, response 39523 bytes。dev build の初回 cold run は elapsed 2:54.45、server RSS 15588 → 137412 KiB だったが、同一 server process の warm run は run2-run5 elapsed 1.54-3.74s、run6-run10 elapsed 1.54-1.63s。server RSS は run2-run5 後 217920 → 368532 → 427156 → 512712 KiB、run6-run10 後 721216 → 742224 → 730672 → 742816 → 628636 KiB。実装前の elapsed 36.73-38.37s、server RSS 887312 → 1329640 → 1186668 KiB と比べ、warm 経路の elapsed と RSS 上限は改善した。計測 fixture は `/tmp/markdown-view-search-many-match-budget.***` に生成し、repo へ追加していない。
+  - 残余リスク: `extract_search_blocks()` は全ブロック抽出のままなので、巨大 Markdown parsing と block allocation は残る。dev build の cold run は初回だけ大きく、server RSS も warm run で完全な低 plateau とは断定しない。今回の抑制で不足が出る場合は、ブロック抽出の途中停止、または block 抽出と match 生成を逐次化する search iterator を別設計で扱う。
 
 - [x] CSP/syntax_theme_css フォールバック CSS の副作用設計判断を doc 化
   - 完了根拠: `syntax_theme_css` のテーマ解決失敗時と syntect CSS 生成失敗時は warn log を残して空文字を返す契約に整理し、画面上の fallback 通知 CSS は注入しない方針にした。これにより `combined_css("")` の既存契約に合流し、ページへ埋め込まれる CSS はベース CSS のみになる。既存 `base.css` の `body::before` 背景レイヤーを fallback CSS で上書きしないことを、無効テーマ時の unit test で固定した。CSP hash は実際に埋め込まれる CSS から計算する既存方式を維持している。
