@@ -1,17 +1,68 @@
 'use strict';
 
+var DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY = 'markdown-view.directorySearchClientId';
+
+function isValidDirectorySearchClientId(clientId: unknown): clientId is string {
+  return typeof clientId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(clientId);
+}
+
 function createDirectorySearchClientId(): string {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return window.crypto.randomUUID();
-  }
   if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
-    var bytes = new Uint8Array(16);
-    window.crypto.getRandomValues(bytes);
-    return Array.prototype.map.call(bytes, function(byte: number): string {
-      return byte.toString(16).padStart(2, '0');
-    }).join('');
+    var randomParts = new Uint32Array(2);
+    var randomPartA: number;
+    var randomPartB: number;
+    window.crypto.getRandomValues(randomParts);
+    randomPartA = randomParts[0] || 0;
+    randomPartB = randomParts[1] || 0;
+    return 'tab-' + Date.now().toString(36) + '-' +
+      randomPartA.toString(36) + randomPartB.toString(36);
   }
-  return String(Date.now()) + '-' + String(Math.random()).slice(2);
+  return 'tab-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 12);
+}
+
+function isReloadNavigation(): boolean {
+  var entries: PerformanceEntryList;
+  var navigation: PerformanceEntry | undefined;
+
+  if (!window.performance || typeof window.performance.getEntriesByType !== 'function') {
+    return false;
+  }
+
+  entries = window.performance.getEntriesByType('navigation');
+  navigation = entries[0];
+  return typeof navigation !== 'undefined' &&
+    'type' in navigation &&
+    (navigation as PerformanceNavigationTiming).type === 'reload';
+}
+
+function getDirectorySearchClientId(): string {
+  var storage: Storage | null;
+  var storedClientId: string | null;
+  var generatedClientId: string;
+
+  try {
+    storage = window.sessionStorage;
+    storedClientId = storage && isReloadNavigation()
+      ? storage.getItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY)
+      : null;
+    if (isValidDirectorySearchClientId(storedClientId)) {
+      return storedClientId;
+    }
+  } catch (_storageReadError) {
+    storage = null;
+  }
+
+  generatedClientId = createDirectorySearchClientId();
+  if (storage) {
+    try {
+      storage.setItem(DIRECTORY_SEARCH_CLIENT_ID_STORAGE_KEY, generatedClientId);
+    } catch (_storageWriteError) {
+      // sessionStorage が使えない環境では今回生成したIDだけを使う。
+    }
+  }
+
+  return generatedClientId;
 }
 
 function createAppContext(doc: Document): MarkdownViewAppContext {
@@ -88,7 +139,7 @@ function createAppContext(doc: Document): MarkdownViewAppContext {
       currentDirectoryError: '',
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
-      directorySearchClientId: createDirectorySearchClientId(),
+      directorySearchClientId: getDirectorySearchClientId(),
       directorySearchSequence: 0,
       pendingDirectoryNavigation: null
     },

@@ -573,7 +573,7 @@ mod tests {
         assert!(html.contains("className = 'error-banner disconnect'"));
         assert!(html.contains("closeBtn.onclick = hideWsServerErrorBanner"));
         assert!(html.contains("getElementById('ws-disconnect-banner')"));
-        assert!(html.contains("showWsServerErrorBanner(data.error);"));
+        assert!(html.contains("showWsServerErrorBanner(payload.error);"));
     }
 
     #[test]
@@ -598,7 +598,7 @@ mod tests {
         let html = render_directory_page(&files, &memo);
 
         assert!(html.contains("function ensurePendingUpdateTimer()"));
-        assert!(html.contains("if (data.refresh && ctx.config.isDirMode) {"));
+        assert!(html.contains("if (payload.refresh && ctx.config.isDirMode) {"));
         assert!(html.contains("現在ファイルが未設定のため refresh 通知を無視しました。"));
         assert!(html.contains("file を含まない refresh 通知を現在ファイルへ適用します。"));
         assert!(html.contains("if (isTextSelected()) {"));
@@ -622,13 +622,13 @@ mod tests {
         assert!(html.contains("function queueRemoteMemoReload(data)"));
         assert!(html.contains("pendingReload: null"));
         assert!(html.contains("function flushPendingMemoReloadIfSafe()"));
-        assert!(html.contains("if (appContext.memo.pendingReload === null) return false;"));
-        assert!(html.contains("if (isMemoUpdateMessage(data)) {"));
-        assert!(html.contains("if (deps.applyRemoteMemoUpdate(data)) {"));
+        assert!(html.contains("if (appContext.memo.pendingReload === null)"));
+        assert!(html.contains("if (isMemoUpdateMessage(payload)) {"));
+        assert!(html.contains("if (deps.applyRemoteMemoUpdate(payload)) {"));
         assert!(html.contains(
-            "if (isMemoRefreshMessage(data) && !(data.refresh && ctx.config.isDirMode)) {"
+            "if (isMemoRefreshMessage(payload) && !(payload.refresh && ctx.config.isDirMode)) {"
         ));
-        assert!(html.contains("if (deps.queueRemoteMemoReload(data)) {"));
+        assert!(html.contains("if (deps.queueRemoteMemoReload(payload)) {"));
         assert!(html.contains("loadMemo(file, appContext.fetch.generation);"));
     }
 
@@ -651,7 +651,7 @@ mod tests {
         assert!(html.contains("function handleCopyClick(button, text, baseLabel)"));
         assert!(html.contains("handleCopyClick(button, url.toString(), '#');"));
         assert!(html.contains(
-            "handleCopyClick(button, code.innerText || code.textContent || '', 'Copy');"
+            "handleCopyClick(button, codeEl.innerText || codeEl.textContent || '', 'Copy');"
         ));
     }
 

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const jsAssetDir = path.join(__dirname, '..', '..', 'src', 'template', 'assets', 'js');
+const tsAssetDir = path.join(__dirname, '..', '..', 'src', 'template', 'assets', 'ts');
 function extractInternalGlobalNames(source: string) {
   return Array.from(source.matchAll(/^(?:(?:async\s+)?function\*?\s+|class\s+|(?:var|let|const)\s+)([A-Za-z_$][\w$]*)/gm))
     .map((match) => match[1])
@@ -10,10 +10,10 @@ function extractInternalGlobalNames(source: string) {
 }
 
 const internalGlobalNames = Array.from(new Set(
-  fs.readdirSync(jsAssetDir)
-    .filter((fileName) => fileName.endsWith('.js'))
+  fs.readdirSync(tsAssetDir)
+    .filter((fileName) => fileName.endsWith('.ts') && !fileName.endsWith('.d.ts'))
     .flatMap((fileName) => {
-      const source = fs.readFileSync(path.join(jsAssetDir, fileName), 'utf8');
+      const source = fs.readFileSync(path.join(tsAssetDir, fileName), 'utf8');
       return extractInternalGlobalNames(source);
     })
 )).sort();
