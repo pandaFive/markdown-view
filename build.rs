@@ -163,9 +163,15 @@ fn write_manifest(out_dir: &Path, generated_assets: &[PathBuf]) {
     let mut manifest = String::from("const GENERATED_TEMPLATE: &str = concat!(\n");
 
     for path in generated_assets {
-        manifest.push_str("    include_str!(r#\"");
-        manifest.push_str(&path.display().to_string());
-        manifest.push_str("\"#),\n");
+        let path_str = path.to_str().unwrap_or_else(|| {
+            panic!(
+                "generated inline JS asset path is not valid UTF-8: {}",
+                path.display()
+            )
+        });
+        manifest.push_str("    include_str!(");
+        manifest.push_str(&format!("{path_str:?}"));
+        manifest.push_str("),\n");
         manifest.push_str("    \"\\n\",\n");
     }
 

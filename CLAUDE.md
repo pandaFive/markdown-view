@@ -10,7 +10,7 @@ Markdown ファイルの閲覧、横断検索、引用メモ、ファイルツ�
 ## ビルド・テスト・検証コマンド
 
 ```bash
-# 初回セットアップ（`./verify.sh` と E2E 実行に必要、node_modules を作る）
+# 初回セットアップ（Cargo build/test/run/install、`./verify.sh`、E2E 実行に必要）
 npm ci                                    # Node 20.11+ が前提（package.json engines で宣言）
 
 # 一括検証（フォーマット・リント・テスト・E2E型チェック）
@@ -21,7 +21,7 @@ npm ci                                    # Node 20.11+ が前提（package.json
 cargo fmt --all -- --check       # フォーマットチェック
 cargo clippy --all-targets --all-features -- -D warnings  # リント
 cargo test --all-targets --all-features   # 全テスト実行
-npm run typecheck                        # E2Eテストの型チェック (tsc --noEmit)
+npm run typecheck                        # E2E + inline JS の型チェック
 npm run test:e2e                          # E2Eテスト実行 (Playwright)
 
 # 単一テスト実行

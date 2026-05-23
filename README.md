@@ -162,7 +162,7 @@ src/
     highlight.rs     syntect によるコードハイライト
     toc.rs           Markdown -> 目次 HTML
   template/          HTML ページ、UpdateMessage、ファイルツリー、埋め込み assets
-    assets/js/       ブラウザ側の更新、選択、メモ、サイドバー、WebSocket
+    assets/ts/       ブラウザ側 TypeScript の正ソース（Cargo build時にOUT_DIRへJS生成）
     assets/css/      ページ / サイドバー / メモ / オーバーレイの CSS
 ```
 
