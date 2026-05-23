@@ -43,6 +43,135 @@ interface ContentUpdatePayload {
   memo_state?: MemoState;
 }
 
+interface ContentUpdateValidation {
+  safeData: ContentUpdatePayload;
+  missing: string[];
+  hasContractViolation: boolean;
+}
+
+interface ContentUpdateTargets {
+  contentEl: HTMLElement | null;
+  tocEl: HTMLElement | null;
+}
+
+interface ContentUpdateResult {
+  ok: boolean;
+  contractViolation: boolean;
+  missing: string[];
+}
+
+interface ContentUpdateOptions {
+  scrollMode?: 'preserve' | 'reset';
+  anchorHash?: string;
+  clearHashOnMiss?: boolean;
+  requeryDirectorySearch?: boolean;
+  historyHash?: string;
+}
+
+interface MarkdownViewConfig {
+  maxFileSizeMb: number;
+  isDirMode: boolean;
+}
+
+interface MarkdownViewState {
+  currentFile: string;
+  lastAppliedContent: string | null;
+  pendingUpdate: ContentUpdatePayload | null;
+  pendingUpdateTimer: number | null;
+  isMouseSelecting: boolean;
+}
+
+interface MarkdownViewFetchState {
+  generation: number;
+}
+
+interface MarkdownViewMemoState {
+  loadGeneration: number;
+  saveGeneration: number;
+  pendingSaveGenerations: number[];
+  saveTimer: number | null;
+  caretStart: number;
+  caretEnd: number;
+  previousLoadStatus: {
+    state: string;
+    text: string;
+  } | null;
+  pendingReload: string | null;
+}
+
+interface MarkdownViewSearchState {
+  documentMatches: unknown[];
+  currentDocumentIndex: number;
+  currentDocumentQuery: string;
+  currentDirectoryResults: SearchResult[];
+  currentDirectoryIndex: number;
+  currentDirectorySkippedFiles: number;
+  currentDirectoryTruncated: boolean;
+  currentDirectoryTruncatedReasons: SearchTruncationReason[];
+  currentDirectoryLoading: boolean;
+  currentDirectoryError: string;
+  documentDebounceTimer: number | null;
+  documentFetchGeneration: number;
+  directorySearchClientId: string;
+  directorySearchSequence: number;
+  pendingDirectoryNavigation: {
+    file: string;
+    previousResultIndex: number;
+  } | null;
+}
+
+interface MarkdownViewSidebarState {
+  currentTocTracking: any | null;
+  tocTrackingFrame: number | null;
+  currentActiveTocId: string;
+  suppressTocTrackingUntil: number;
+  suppressTocTrackingTimer: number | null;
+  pendingSuppressedTocTrackingUpdate: boolean;
+  pendingTocNavigationId: string;
+  pendingTocNavigationUntil: number;
+  tocRoot: HTMLElement | null;
+}
+
+interface MarkdownViewLabels {
+  liveStatus: {
+    live: string;
+    retry: string;
+    error: string;
+    offline: string;
+  };
+}
+
+interface MarkdownViewTestState {
+  markPendingTocNavigationObserver: unknown | null;
+}
+
+interface MarkdownViewContentController {
+  setup(): void;
+  updateContent(data: ContentUpdatePayload, options?: ContentUpdateOptions): ContentUpdateResult;
+  applyPendingUpdate(): void;
+  restoreNavigationFromLocation(): void;
+  openDocumentSearch(): void;
+  moveDocumentSearch(step: number): void;
+  applyDocumentSearchQuery(query: string): void;
+  clearDocumentSearchQuery(): void;
+  renderDirectorySearchUi(): void;
+  scheduleDirectorySearch(query: string): void;
+  augmentHashWithTrailingLineHint(link: string, hash: string): string;
+  setLiveStatus(state: LiveStatusState): void;
+  updateDocumentStats(): void;
+  updateReadingProgress(): void;
+  syncDocumentChrome(file: string): void;
+  enhanceContentInteractions(): void;
+  setupTocFilter(): void;
+}
+
+interface MarkdownViewWebSocketController {
+  connect(): void;
+  discardBufferedLiveUpdate(reason: string): void;
+  rememberAppliedLiveUpdate(data: ContentUpdatePayload): void;
+  scheduleBufferedLiveUpdate(data: ContentUpdatePayload): void;
+}
+
 interface MemoResponse {
   raw?: string;
   content?: string;
@@ -77,20 +206,17 @@ interface MarkdownViewElements {
 }
 
 interface MarkdownViewAppContext {
-  currentFile: string | null;
-  isDirectoryMode: boolean;
-  maxFileSizeMb: number;
-  config: Record<string, unknown>;
-  state: Record<string, unknown>;
+  config: MarkdownViewConfig;
+  state: MarkdownViewState;
   elements: MarkdownViewElements;
-  fetch: Record<string, unknown>;
-  sidebar: Record<string, unknown>;
-  memo: Record<string, unknown>;
-  search: Record<string, unknown>;
-  labels: Record<string, unknown>;
-  test: Record<string, unknown>;
-  websocket: Record<string, unknown> | null;
-  content: Record<string, unknown> | null;
+  fetch: MarkdownViewFetchState;
+  sidebar: MarkdownViewSidebarState;
+  memo: MarkdownViewMemoState;
+  search: MarkdownViewSearchState;
+  labels: MarkdownViewLabels;
+  test: MarkdownViewTestState;
+  websocket: MarkdownViewWebSocketController | null;
+  content: MarkdownViewContentController | null;
 }
 
 interface MarkdownViewTestHooks {

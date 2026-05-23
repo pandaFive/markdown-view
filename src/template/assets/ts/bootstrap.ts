@@ -1,22 +1,24 @@
 'use strict';
 
-function createDirectorySearchClientId() {
+function createDirectorySearchClientId(): string {
   if (window.crypto && typeof window.crypto.randomUUID === 'function') {
     return window.crypto.randomUUID();
   }
   if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
     var bytes = new Uint8Array(16);
     window.crypto.getRandomValues(bytes);
-    return Array.prototype.map.call(bytes, function(byte) {
+    return Array.prototype.map.call(bytes, function(byte: number): string {
       return byte.toString(16).padStart(2, '0');
     }).join('');
   }
   return String(Date.now()) + '-' + String(Math.random()).slice(2);
 }
 
-function createAppContext(doc) {
+function createAppContext(doc: Document): MarkdownViewAppContext {
   var html = doc.documentElement;
-  var memoEditor = doc.getElementById('memo-editor');
+  var memoEditor = doc.getElementById('memo-editor') as HTMLTextAreaElement | null;
+  var contentEl = doc.getElementById('content');
+  var tocEl = doc.getElementById('toc');
   var memoCaret = memoEditor ? memoEditor.value.length : 0;
 
   return {
@@ -45,13 +47,16 @@ function createAppContext(doc) {
       liveStatusEl: doc.getElementById('live-status'),
       readingProgressBar: doc.getElementById('reading-progress-bar'),
       backToTop: doc.getElementById('back-to-top'),
-      contentRoot: doc.getElementById('content'),
-      documentSearchInputEl: doc.getElementById('document-search-input'),
+      contentEl: contentEl,
+      contentRoot: contentEl,
+      tocEl: tocEl,
+      tocRoot: tocEl,
+      documentSearchInputEl: doc.getElementById('document-search-input') as HTMLInputElement | null,
       documentSearchSummaryEl: doc.getElementById('document-search-summary'),
       documentSearchResultsEl: doc.getElementById('document-search-results'),
-      documentSearchPrevEl: doc.getElementById('document-search-prev'),
-      documentSearchNextEl: doc.getElementById('document-search-next'),
-      documentSearchClearEl: doc.getElementById('document-search-clear'),
+      documentSearchPrevEl: doc.getElementById('document-search-prev') as HTMLButtonElement | null,
+      documentSearchNextEl: doc.getElementById('document-search-next') as HTMLButtonElement | null,
+      documentSearchClearEl: doc.getElementById('document-search-clear') as HTMLButtonElement | null,
       memoEditorEl: memoEditor,
       memoPreviewEl: doc.getElementById('memo-preview'),
       memoSaveStatusEl: doc.getElementById('memo-save-status'),
@@ -96,7 +101,7 @@ function createAppContext(doc) {
       pendingSuppressedTocTrackingUpdate: false,
       pendingTocNavigationId: '',
       pendingTocNavigationUntil: 0,
-      tocRoot: doc.getElementById('toc')
+      tocRoot: tocEl
     },
     labels: {
       liveStatus: {
@@ -114,4 +119,4 @@ function createAppContext(doc) {
   };
 }
 
-var appContext = createAppContext(document);
+var appContext: MarkdownViewAppContext = createAppContext(document);
