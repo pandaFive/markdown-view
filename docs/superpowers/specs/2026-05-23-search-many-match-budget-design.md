@@ -122,7 +122,7 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 ## 残余リスク
 
 - `extract_search_blocks()` は今回も全ブロックを作るため、巨大 Markdown の parsing と block allocation は残る。
-- 検索 context 生成は result 100 件分残るため、1 context が極端に大きい入力では別の抑制が必要になる可能性がある。
+- 検索 context は bounded snippet 化済みだが、result 100 件分の snippet 生成では巨大文に対する走査コストが残る可能性がある。
 - elapsed と RSS は環境差が大きく、手元計測だけで全環境の性能を保証できない。
 - 今回の変更で改善が不十分な場合は、ブロック抽出の途中停止または逐次 search iterator 化を別設計で検討する。
 
