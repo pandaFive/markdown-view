@@ -1686,8 +1686,11 @@ mod tests {
         }];
         let scanned_bytes = Rc::new(Cell::new(0usize));
         let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let hook_calls = Rc::new(Cell::new(0usize));
+        let hook_calls_for_hook = Rc::clone(&hook_calls);
         let max_scanned_bytes = block_text.len() * 32;
         let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            hook_calls_for_hook.set(hook_calls_for_hook.get() + 1);
             let next = scanned_bytes_for_hook.get() + search_bytes;
             assert!(
                 next <= max_scanned_bytes,
@@ -1700,6 +1703,8 @@ mod tests {
             find_matches_for_file("many.md", &blocks, "needle", usize::MAX, &|| false).unwrap();
 
         assert!(results.is_empty());
+        assert!(hook_calls.get() > 0);
+        assert!(scanned_bytes.get() > 0);
         assert!(scanned_bytes.get() <= max_scanned_bytes);
     }
 
@@ -1715,8 +1720,11 @@ mod tests {
         }];
         let scanned_bytes = Rc::new(Cell::new(0usize));
         let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let hook_calls = Rc::new(Cell::new(0usize));
+        let hook_calls_for_hook = Rc::clone(&hook_calls);
         let max_scanned_bytes = block_text.len() * 32;
         let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            hook_calls_for_hook.set(hook_calls_for_hook.get() + 1);
             let next = scanned_bytes_for_hook.get() + search_bytes;
             assert!(
                 next <= max_scanned_bytes,
@@ -1730,6 +1738,8 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].current.contains("needle"));
+        assert!(hook_calls.get() > 0);
+        assert!(scanned_bytes.get() > 0);
         assert!(scanned_bytes.get() <= max_scanned_bytes);
     }
 
@@ -1920,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_directory_1ファイル後にキャンセルされたら後続ファイルへ進まない() {
+    fn test_search_directory_test用ファイル数limitは結果を破棄せず後続ファイルへ進まない() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
         std::fs::write(dir.path().join("b.md"), "needle second").unwrap();
@@ -1942,31 +1952,8 @@ mod tests {
         assert_eq!(response.searched_files, 1);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");
-    }
-
-    #[test]
-    fn test_search_directory_test用ファイル数limitは結果を破棄しない() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
-        std::fs::write(dir.path().join("b.md"), "needle second").unwrap();
-        let canonical = canonical_of(dir.path());
-        let cancellation = SearchCancellation::cancel_after_files_for_test(1);
-
-        let response = search_directory_with_limits_blocking(
-            &canonical,
-            "needle",
-            SearchLimits {
-                max_results: 100,
-                max_files: 1000,
-                max_bytes: 64 * 1024 * 1024,
-            },
-            cancellation,
-        )
-        .unwrap();
-
-        assert_eq!(response.searched_files, 1);
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(response.results[0].file, "a.md");
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
     }
 
     #[test]
