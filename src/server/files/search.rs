@@ -17,6 +17,7 @@ const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEARCH_CONTEXT_CHARS: usize = 800;
 const SEARCH_CONTEXT_ELLIPSIS: &str = "...";
 const CASE_FOLD_CANCEL_CHECK_CHARS: usize = 1024;
+const LARGE_SEARCH_BLOCK_BYTES: usize = 64 * 1024;
 pub(in crate::server) const MAX_SEARCH_QUERY_CHARS: usize = 256;
 const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
@@ -81,6 +82,7 @@ std::thread_local! {
         const { std::cell::RefCell::new(None) };
     static SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBeforeResponseHook>> =
         const { std::cell::RefCell::new(None) };
+    static SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -208,6 +210,24 @@ fn notify_search_before_response_for_test() {
 
 #[cfg(not(test))]
 fn notify_search_before_response_for_test() {}
+
+#[cfg(test)]
+fn reset_search_case_fold_char_count_for_test() {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn search_case_fold_char_count_for_test() -> usize {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_case_fold_char_for_test() {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_case_fold_char_for_test() {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -933,7 +953,11 @@ fn finalize_search_block(blocks: &mut Vec<SearchBlockEntry>, text: &str) {
     }
     blocks.push(SearchBlockEntry {
         text: trimmed.to_string(),
-        sentences: split_text_into_sentence_ranges(trimmed),
+        sentences: if is_large_search_block(trimmed) {
+            Vec::new()
+        } else {
+            split_text_into_sentence_ranges(trimmed)
+        },
     });
 }
 
@@ -957,6 +981,23 @@ fn find_matches_for_file(
             return None;
         }
         if block.text.is_empty() {
+            continue;
+        }
+
+        if is_large_search_block(&block.text) {
+            let file_results = find_matches_for_large_block(
+                file,
+                &block.text,
+                query,
+                file_match_index,
+                remaining_results.saturating_sub(results.len()),
+                is_cancelled,
+            )?;
+            file_match_index += file_results.len();
+            results.extend(file_results);
+            if results.len() >= remaining_results {
+                break 'blocks;
+            }
             continue;
         }
 
@@ -998,6 +1039,80 @@ fn find_matches_for_file(
     Some(results)
 }
 
+fn is_large_search_block(text: &str) -> bool {
+    text.len() > LARGE_SEARCH_BLOCK_BYTES
+}
+
+fn find_matches_for_large_block(
+    file: &str,
+    text: &str,
+    query: &str,
+    file_match_index_start: usize,
+    remaining_results: usize,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchResultItem>> {
+    if remaining_results == 0 {
+        return Some(Vec::new());
+    }
+
+    let normalized_query = query.to_lowercase();
+    let mut normalized_text = String::new();
+    let mut original_offsets = vec![0usize];
+    let mut search_start = 0usize;
+    let mut results = Vec::new();
+
+    for (chars_seen, (char_index, ch)) in text.char_indices().enumerate() {
+        if chars_seen % CASE_FOLD_CANCEL_CHECK_CHARS == 0 && is_cancelled() {
+            return None;
+        }
+        notify_search_case_fold_char_for_test();
+        let char_end = char_index + ch.len_utf8();
+        let folded = ch.to_lowercase().collect::<String>();
+        normalized_text.push_str(&folded);
+        for _ in 0..folded.len() {
+            original_offsets.push(char_end);
+        }
+
+        while search_start <= normalized_text.len() {
+            let Some(relative_index) = normalized_text[search_start..].find(&normalized_query)
+            else {
+                break;
+            };
+            let normalized_match_start = search_start + relative_index;
+            let normalized_match_end = normalized_match_start + normalized_query.len();
+            if normalized_match_end > normalized_text.len() {
+                break;
+            }
+
+            let match_start = original_offsets
+                .get(normalized_match_start)
+                .copied()
+                .unwrap_or(0);
+            let match_end = original_offsets
+                .get(normalized_match_end)
+                .copied()
+                .unwrap_or_else(|| original_offsets.last().copied().unwrap_or(0));
+            let current = clip_text_around_match(text, match_start, match_end);
+            results.push(SearchResultItem::new(
+                file.to_string(),
+                file_match_index_start + results.len(),
+                String::new(),
+                current,
+                String::new(),
+            ));
+            if is_cancelled() {
+                return None;
+            }
+            if results.len() >= remaining_results {
+                return Some(results);
+            }
+            search_start = normalized_match_end;
+        }
+    }
+
+    Some(results)
+}
+
 #[derive(Debug, Clone)]
 struct CaseFoldIndex {
     normalized_text: String,
@@ -1021,6 +1136,7 @@ fn build_case_fold_index(text: &str, is_cancelled: &impl Fn() -> bool) -> Option
         if chars_seen % CASE_FOLD_CANCEL_CHECK_CHARS == 0 && is_cancelled() {
             return None;
         }
+        notify_search_case_fold_char_for_test();
         let char_end = char_index + ch.len_utf8();
         let folded = ch.to_lowercase().collect::<String>();
         normalized_text.push_str(&folded);
@@ -1932,6 +2048,43 @@ mod tests {
             .results
             .iter()
             .all(|item| item.current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6));
+    }
+
+    #[test]
+    fn test_search_directory_巨大単一ブロックmany_matchはresult_limit後に全文正規化しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = (0..120)
+            .map(|index| format!("needle {index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let block_text = format!("{prefix} {}", "a".repeat(200_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_case_fold_char_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert!(
+            search_case_fold_char_count_for_test() < 64 * 1024,
+            "巨大tailまでcase-foldしている: {} chars",
+            search_case_fold_char_count_for_test()
+        );
     }
 
     #[test]

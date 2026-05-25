@@ -28,7 +28,7 @@
 
 `search_directory_with_limits_blocking()` は、現在の `results.len()` と `limits.max_results` から残り件数を計算し、`find_matches_for_file()` に渡す。
 
-`find_matches_for_file()` は `remaining_results: usize` を受け取り、生成済み件数が予算に達したら現在の match ループとブロックループを終了する。`remaining_results == 0` の場合は追加結果を生成せず、空の `Vec<SearchResultItem>` を返す。各 result の `before` / `current` / `after` は検索 UI 用 snippet として上限内に切り詰め、巨大単一文の重複 clone で JSON 応答が肥大化しないようにする。
+`find_matches_for_file()` は `remaining_results: usize` を受け取り、生成済み件数が予算に達したら現在の match ループとブロックループを終了する。`remaining_results == 0` の場合は追加結果を生成せず、空の `Vec<SearchResultItem>` を返す。各 result の `before` / `current` / `after` は検索 UI 用 snippet として上限内に切り詰め、巨大単一文の重複 clone で JSON 応答が肥大化しないようにする。巨大ブロックでは sentence range の全構築と全文 case-fold index 化を避け、残り結果予算に達した時点で direct search を停止する。
 
 外側の `search_directory_with_limits_blocking()` は従来どおり、`results.len() >= limits.max_results` になった時点で `SearchTruncationReason::Result` を付与して検索を終了する。これにより `truncated=true` と `truncated_reasons=["result_limit"]` の公開契約は維持される。
 
@@ -39,6 +39,7 @@
 - `src/server/files/search.rs`
   - `search_directory_with_limits_blocking()` がファイル内検索へ残り結果予算を渡す。
   - `find_matches_for_file()` が予算を超えた match/context 生成を止め、巨大 context を bounded snippet として返す。
+  - 巨大ブロックは sentence range の全構築と全文 case-fold index 化を避け、direct search で result-limit 到達後の tail 処理を抑制する。
   - 既存の `SearchLimits`、`SearchStats`、`SearchTruncationReason` は変更しない。
 
 ## データフロー
@@ -64,6 +65,7 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 
 - `find_matches_for_file()` が `remaining_results` を超えて `SearchResultItem` を生成しないことを unit test で固定する。
 - 1つの巨大ブロック、または多数文に大量の `needle` がある場合でも、指定した予算件数だけ返ることを確認する。
+- 巨大単一ブロックで result-limit 到達後に tail まで全文 case-fold しないことを確認する。
 - 巨大単一文でも `before` / `current` / `after` が bounded snippet になり、serialized JSON が肥大化しないことを確認する。
 - block 抽出中、巨大ブロック正規化中、file 内 match loop 中の stale cancellation が中断され、ログで観測できることを確認する。
 - `search_directory_with_limits_blocking()` は `max_results` 到達時に `SearchTruncationReason::Result` を付け、`results.len() == max_results` を維持することを既存テストの補強で確認する。
@@ -121,7 +123,7 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 
 ## 残余リスク
 
-- `extract_search_blocks()` は今回も全ブロックを作るため、巨大 Markdown の parsing と block allocation は残る。
+- 巨大ブロックは direct search で全文 sentence 分割と全文 case-fold index 化を避けるが、Markdown parser が `Event::Text` として本文を供給するまでの parsing cost と、通常ブロックの allocation は残る。
 - 検索 context は bounded snippet 化済みだが、result 100 件分の snippet 生成では巨大文に対する走査コストが残る可能性がある。
 - elapsed と RSS は環境差が大きく、手元計測だけで全環境の性能を保証できない。
 - 今回の変更で改善が不十分な場合は、ブロック抽出の途中停止または逐次 search iterator 化を別設計で検討する。
