@@ -73,6 +73,9 @@ type SearchBlockExtractHook = Box<dyn FnMut(usize)>;
 type SearchBeforeResponseHook = Box<dyn FnMut()>;
 
 #[cfg(test)]
+type SearchLargeBlockFindHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
 std::thread_local! {
     static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
@@ -83,6 +86,8 @@ std::thread_local! {
     static SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBeforeResponseHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchLargeBlockFindHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -228,6 +233,40 @@ fn notify_search_case_fold_char_for_test() {
 
 #[cfg(not(test))]
 fn notify_search_case_fold_char_for_test() {}
+
+#[cfg(test)]
+struct SearchLargeBlockFindHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchLargeBlockFindHookGuard {
+    fn drop(&mut self) {
+        SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_large_block_find_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchLargeBlockFindHookGuard {
+    SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchLargeBlockFindHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_large_block_find_for_test(search_bytes: usize) {
+    SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(search_bytes);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_large_block_find_for_test(_search_bytes: usize) {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -1043,6 +1082,19 @@ fn is_large_search_block(text: &str) -> bool {
     text.len() > LARGE_SEARCH_BLOCK_BYTES
 }
 
+fn next_large_block_search_start(
+    normalized_text: &str,
+    current_search_start: usize,
+    normalized_query_len: usize,
+) -> usize {
+    let overlap_bytes = normalized_query_len.saturating_sub(1);
+    let mut next_start = normalized_text.len().saturating_sub(overlap_bytes);
+    while next_start > current_search_start && !normalized_text.is_char_boundary(next_start) {
+        next_start -= 1;
+    }
+    next_start.max(current_search_start)
+}
+
 fn find_matches_for_large_block(
     file: &str,
     text: &str,
@@ -1074,8 +1126,14 @@ fn find_matches_for_large_block(
         }
 
         while search_start <= normalized_text.len() {
+            notify_search_large_block_find_for_test(normalized_text.len() - search_start);
             let Some(relative_index) = normalized_text[search_start..].find(&normalized_query)
             else {
+                search_start = next_large_block_search_start(
+                    &normalized_text,
+                    search_start,
+                    normalized_query.len(),
+                );
                 break;
             };
             let normalized_match_start = search_start + relative_index;
@@ -1597,6 +1655,85 @@ mod tests {
     }
 
     #[test]
+    fn test_find_matches_for_file_巨大ブロックunicode小文字化でバイト長が変わっても安全に一致する()
+    {
+        let block_text = format!(
+            "{}İstanbul is here.",
+            "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1)
+        );
+        let blocks = vec![SearchBlockEntry {
+            text: block_text,
+            sentences: Vec::new(),
+        }];
+
+        let results =
+            find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_match_index, 0);
+        assert!(results[0].current.contains("İstanbul is here."));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックno_matchはprefix全体を繰り返し検索しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let block_text = "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000);
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let max_scanned_bytes = block_text.len() * 32;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロックno-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, "needle", usize::MAX, &|| false).unwrap();
+
+        assert!(results.is_empty());
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックlate_matchはprefix全体を繰り返し検索しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let max_scanned_bytes = block_text.len() * 32;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロックlate-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, "needle", usize::MAX, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].current.contains("needle"));
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
     fn test_find_matches_for_file_残り件数で同一ファイル内探索を停止する() {
         let block_text = (0..120)
             .map(|index| format!("needle sentence {index}."))
@@ -1623,10 +1760,10 @@ mod tests {
     fn test_find_matches_for_file_巨大ブロック正規化中にstaleならcontextを生成しない() {
         use std::cell::Cell;
 
-        let block_text = format!("{}needle", "a".repeat(16 * 1024));
+        let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1));
         let blocks = vec![SearchBlockEntry {
             text: block_text.clone(),
-            sentences: split_text_into_sentence_ranges(&block_text),
+            sentences: Vec::new(),
         }];
         let cancel_checks = Cell::new(0usize);
         reset_search_context_build_count_for_test();

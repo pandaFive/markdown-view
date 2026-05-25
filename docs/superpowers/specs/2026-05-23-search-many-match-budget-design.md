@@ -66,6 +66,8 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 - `find_matches_for_file()` が `remaining_results` を超えて `SearchResultItem` を生成しないことを unit test で固定する。
 - 1つの巨大ブロック、または多数文に大量の `needle` がある場合でも、指定した予算件数だけ返ることを確認する。
 - 巨大単一ブロックで result-limit 到達後に tail まで全文 case-fold しないことを確認する。
+- 巨大単一ブロックの no-match / late-match で prefix 全体を繰り返し再検索しないことを確認する。
+- 巨大単一ブロックの direct search 側でも stale cancellation と Unicode case-fold offset を確認する。
 - 巨大単一文でも `before` / `current` / `after` が bounded snippet になり、serialized JSON が肥大化しないことを確認する。
 - block 抽出中、巨大ブロック正規化中、file 内 match loop 中の stale cancellation が中断され、ログで観測できることを確認する。
 - `search_directory_with_limits_blocking()` は `max_results` 到達時に `SearchTruncationReason::Result` を付け、`results.len() == max_results` を維持することを既存テストの補強で確認する。
@@ -123,7 +125,7 @@ CI に入れるテストは性能閾値ではなく構造確認にする。
 
 ## 残余リスク
 
-- 巨大ブロックは direct search で全文 sentence 分割と全文 case-fold index 化を避けるが、Markdown parser が `Event::Text` として本文を供給するまでの parsing cost と、通常ブロックの allocation は残る。
+- 巨大ブロックは direct search で全文 sentence 分割と全文 case-fold index 化を避けるが、Markdown parser が `Event::Text` として本文を供給するまでの parsing cost と、通常ブロックの allocation は残る。no-match / late-match の direct search 再走査は構造テストで抑制する。
 - 検索 context は bounded snippet 化済みだが、result 100 件分の snippet 生成では巨大文に対する走査コストが残る可能性がある。
 - elapsed と RSS は環境差が大きく、手元計測だけで全環境の性能を保証できない。
 - 今回の変更で改善が不十分な場合は、ブロック抽出の途中停止または逐次 search iterator 化を別設計で検討する。
