@@ -88,6 +88,7 @@ std::thread_local! {
     static SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchLargeBlockFindHook>> =
         const { std::cell::RefCell::new(None) };
+    static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -267,6 +268,29 @@ fn notify_search_large_block_find_for_test(search_bytes: usize) {
 
 #[cfg(not(test))]
 fn notify_search_large_block_find_for_test(_search_bytes: usize) {}
+
+#[cfg(test)]
+fn reset_search_clip_scan_bytes_for_test() -> usize {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(|bytes| {
+        bytes.set(0);
+        bytes.get()
+    })
+}
+
+#[cfg(test)]
+fn search_clip_scan_bytes_for_test() -> usize {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_clip_scan_for_test(bytes: usize) {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(|scanned| {
+        scanned.set(scanned.get() + bytes);
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_clip_scan_for_test(_bytes: usize) {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -1294,27 +1318,91 @@ fn clip_match_context(
 }
 
 fn clip_text_around_match(text: &str, match_start: usize, match_end: usize) -> String {
-    let total_chars = text.chars().count();
-    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+    if !has_more_than_context_chars(text) {
         return text.to_string();
     }
 
-    let match_start = match_start.min(text.len());
-    let match_end = match_end.min(text.len()).max(match_start);
-    let before_match_chars = text[..match_start].chars().count();
-    let match_chars = text[match_start..match_end].chars().count();
+    let match_start = previous_char_boundary(text, match_start.min(text.len()));
+    let match_end = previous_char_boundary(text, match_end.min(text.len()).max(match_start));
+    let match_chars = counted_chars_in_range(text, match_start, match_end);
     let target_match_chars = match_chars.min(MAX_SEARCH_CONTEXT_CHARS);
     let before_budget = (MAX_SEARCH_CONTEXT_CHARS - target_match_chars) / 2;
-    let mut start_char = before_match_chars.saturating_sub(before_budget);
-    let mut end_char = (start_char + MAX_SEARCH_CONTEXT_CHARS).min(total_chars);
-    let match_end_char = before_match_chars + match_chars;
+    let after_budget = MAX_SEARCH_CONTEXT_CHARS - target_match_chars - before_budget;
 
-    if end_char < match_end_char {
-        end_char = match_end_char.min(total_chars);
-        start_char = end_char.saturating_sub(MAX_SEARCH_CONTEXT_CHARS);
+    let (mut start_byte, before_chars) = start_byte_before_chars(text, match_start, before_budget);
+    let after_target = after_budget + before_budget.saturating_sub(before_chars);
+    let (end_byte, after_chars) = end_byte_after_chars(text, match_end, after_target);
+    let after_shortage = after_target.saturating_sub(after_chars);
+    if after_shortage > 0 {
+        start_byte = start_byte_before_chars(text, match_start, before_budget + after_shortage).0;
     }
 
-    clip_text_chars(text, start_char, end_char)
+    clip_text_bytes(text, start_byte, end_byte)
+}
+
+fn has_more_than_context_chars(text: &str) -> bool {
+    let mut chars_seen = 0usize;
+    for (_, ch) in text.char_indices() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        chars_seen += 1;
+        if chars_seen > MAX_SEARCH_CONTEXT_CHARS {
+            return true;
+        }
+    }
+    false
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn counted_chars_in_range(text: &str, start_byte: usize, end_byte: usize) -> usize {
+    let mut count = 0usize;
+    for ch in text[start_byte..end_byte].chars() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        count += 1;
+    }
+    count
+}
+
+fn start_byte_before_chars(text: &str, end_byte: usize, char_budget: usize) -> (usize, usize) {
+    if char_budget == 0 {
+        return (end_byte, 0);
+    }
+
+    let mut start_byte = end_byte;
+    let mut chars_seen = 0usize;
+    for (byte_index, ch) in text[..end_byte].char_indices().rev() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        start_byte = byte_index;
+        chars_seen += 1;
+        if chars_seen >= char_budget {
+            break;
+        }
+    }
+    (start_byte, chars_seen)
+}
+
+fn end_byte_after_chars(text: &str, start_byte: usize, char_budget: usize) -> (usize, usize) {
+    if char_budget == 0 {
+        return (start_byte, 0);
+    }
+
+    let mut end_byte = start_byte;
+    let mut chars_seen = 0usize;
+    for (relative_byte, ch) in text[start_byte..].char_indices() {
+        if chars_seen >= char_budget {
+            break;
+        }
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        end_byte = start_byte + relative_byte + ch.len_utf8();
+        chars_seen += 1;
+    }
+    (end_byte, chars_seen)
 }
 
 fn clip_text_head(text: &str) -> String {
@@ -1349,11 +1437,9 @@ fn char_slice_to_string(text: &str, start_char: usize, end_char: usize) -> Strin
     text[start_byte..end_byte].to_string()
 }
 
-fn clip_text_chars(text: &str, start_char: usize, end_char: usize) -> String {
-    let start_byte = char_index_to_byte(text, start_char);
-    let end_byte = char_index_to_byte(text, end_char);
+fn clip_text_bytes(text: &str, start_byte: usize, end_byte: usize) -> String {
     let mut snippet = String::new();
-    if start_char > 0 {
+    if start_byte > 0 {
         snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
     }
     snippet.push_str(&text[start_byte..end_byte]);
@@ -1741,6 +1827,31 @@ mod tests {
         assert!(hook_calls.get() > 0);
         assert!(scanned_bytes.get() > 0);
         assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックsnippet生成は全文を結果件数分走査しない() {
+        let block_text = format!(
+            "{}{}",
+            "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000),
+            (0..10).map(|_| " needle").collect::<Vec<_>>().join("")
+        );
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+
+        reset_search_clip_scan_bytes_for_test();
+        let results = find_matches_for_file("many.md", &blocks, "needle", 3, &|| false).unwrap();
+        let scanned_bytes = search_clip_scan_bytes_for_test();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|item| item.current.contains("needle")));
+        assert!(scanned_bytes > 0);
+        assert!(
+            scanned_bytes < block_text.len(),
+            "巨大ブロックsnippet生成で本文全体を繰り返し走査している: {scanned_bytes} bytes"
+        );
     }
 
     #[test]

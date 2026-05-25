@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status:** Completed historical execution log. Do not re-run these steps as the current implementation plan. The final implementation uses `find_matches_for_file(file, blocks, query, remaining_results, is_cancelled) -> Option<Vec<SearchResultItem>>` so stale cancellation can abort file-local matching safely.
+
 **Goal:** ディレクトリ検索で result-limit 到達後も同一ファイル内の match/context 生成が続く経路を止め、10MiB 近傍 many-match の可用性リスクを下げる。
 
 **Architecture:** `search_directory_with_limits_blocking()` が残り結果予算を計算し、`find_matches_for_file()` に渡す。`find_matches_for_file()` は予算件数までだけ `SearchResultItem` を生成し、予算到達時にブロック探索と match 探索を終了する。`SearchResponse` JSON、truncation reason、Host/Origin/path/sanitize/CSP のセキュリティ境界は変更しない。
