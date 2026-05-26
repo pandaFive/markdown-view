@@ -891,7 +891,6 @@ fn read_search_markdown_with_byte_budget(
 
     let file_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
     if searched_bytes.saturating_add(file_len) > max_bytes {
-        validate_utf8_with_limit(file)?;
         return Ok(SearchMarkdownRead::ByteLimit);
     }
 
@@ -960,59 +959,6 @@ fn read_markdown_from_open_file(file: impl Read) -> std::io::Result<String> {
             "ファイルがUTF-8テキストではありません",
         )
     })
-}
-
-fn validate_utf8_with_limit(mut file: CapFile) -> std::io::Result<()> {
-    let mut total_bytes = 0u64;
-    let mut buffer = [0u8; 8192];
-    let mut pending = Vec::new();
-
-    loop {
-        let read_bytes = file.read(&mut buffer)?;
-        if read_bytes == 0 {
-            break;
-        }
-        total_bytes = total_bytes.saturating_add(read_bytes as u64);
-        if total_bytes > MAX_FILE_SIZE {
-            return Err(file_too_large_error());
-        }
-
-        let mut chunk = Vec::with_capacity(pending.len() + read_bytes);
-        chunk.extend_from_slice(&pending);
-        chunk.extend_from_slice(&buffer[..read_bytes]);
-
-        match std::str::from_utf8(&chunk) {
-            Ok(_) => pending.clear(),
-            Err(error) if error.error_len().is_none() => {
-                let valid_up_to = error.valid_up_to();
-                pending.clear();
-                pending.extend_from_slice(&chunk[valid_up_to..]);
-                if pending.len() > 3 {
-                    return Err(not_utf8_error(valid_up_to));
-                }
-            }
-            Err(error) => return Err(not_utf8_error(error.valid_up_to())),
-        }
-    }
-
-    if pending.is_empty() {
-        Ok(())
-    } else {
-        Err(not_utf8_error(
-            total_bytes.saturating_sub(pending.len() as u64) as usize,
-        ))
-    }
-}
-
-fn not_utf8_error(valid_up_to: usize) -> std::io::Error {
-    tracing::warn!(
-        "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
-        valid_up_to
-    );
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "ファイルがUTF-8テキストではありません",
-    )
 }
 
 fn file_too_large_error() -> std::io::Error {
@@ -2993,7 +2939,7 @@ mod tests {
             vec![SearchTruncationReason::Byte]
         );
         assert_eq!(response.searched_files, 1);
-        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.skipped_files, 0);
         assert_eq!(response.searched_bytes, "needle".len());
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");

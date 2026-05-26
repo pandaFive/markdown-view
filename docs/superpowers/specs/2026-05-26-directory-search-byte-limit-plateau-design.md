@@ -75,7 +75,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 3. `read_markdown_with_limit_blocking()` 相当の本文読込で本文を `String` に読み切る。
 4. `stats.searched_bytes + markdown.len() > limits.max_bytes` の場合、`byte_limit` で終了する。
 
-改善候補では、ambient path を再度 open せず、base directory capability から対象を開く。対象ファイルが `MAX_FILE_SIZE` を超える場合、open / metadata / UTF-8 検証に失敗する場合は従来どおり skip する。`stats.searched_bytes + metadata.len()` が `limits.max_bytes` を超え、対象が読める UTF-8 ファイルであることを確認できる場合は、本文 `String` を構築せずに `SearchTruncationReason::Byte` を付けて終了する。
+改善候補では、ambient path を再度 open せず、base directory capability から対象を開く。対象ファイルが `MAX_FILE_SIZE` を超える場合、open / metadata に失敗する場合は従来どおり skip する。`stats.searched_bytes + metadata.len()` が `limits.max_bytes` を超える場合は、不正 UTF-8 かどうかを判定するための本文 I/O も行わず、本文 `String` を構築せずに `SearchTruncationReason::Byte` を付けて終了する。
 
 本文読込後の既存 `markdown.len()` ベース確認は残す。metadata と本文読込の間の TOCTOU、UTF-8 decode 後の実 byte 長、特殊ファイルシステム差異に備えるためである。
 
@@ -98,7 +98,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 - 測定結果として、dev / release、cold / warm、peak / after / settled RSS、HTTP JSON 契約を記録する。
 - 測定だけで plateau が許容できる場合は、コード変更せず、その根拠と残余リスクを `BACKLOG.md` に残す。
 - plateau しない、または byte-limit 超過候補ファイル読込の peak が明確に大きい場合は、本文読込前 byte-budget 判定を実装する。
-- 実装する場合は、「byte-limit 超過候補を本文 `String` 化しない」「読めない/不正UTF-8の超過候補は従来どおり skip」「`searched_bytes` は検索したファイル分だけ」「`truncated_reasons` は `byte_limit`」をテストで固定する。
+- 実装する場合は、「byte-limit 超過候補を本文 `String` 化しない」「byte-limit 超過候補は不正 UTF-8 でも skip より `byte_limit` 到達を優先する」「`searched_bytes` は検索したファイル分だけ」「`truncated_reasons` は `byte_limit`」をテストで固定する。
 - `./verify.sh` を通す。
 - 必要に応じて検索 targeted test と release / dev の手動測定結果を記録する。
 

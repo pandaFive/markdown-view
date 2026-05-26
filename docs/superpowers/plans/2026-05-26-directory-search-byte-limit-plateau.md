@@ -541,8 +541,8 @@ In `src/server/files/search.rs`, add a helper after `log_search_cancelled()` tha
 
 - Opens the candidate from the canonical base directory capability instead of re-opening an ambient absolute path.
 - Uses metadata from the opened handle for `MAX_FILE_SIZE` and byte-budget checks.
-- Returns a byte-limit outcome only when the candidate can be read and validated as UTF-8.
-- Returns an error for open/read/UTF-8 failure so the caller keeps the existing `skipped_files` contract.
+- Returns a byte-limit outcome as soon as the opened handle metadata would exceed the remaining byte budget.
+- Returns an error for open/metadata failure so the caller keeps the existing `skipped_files` contract for files that cannot be inspected.
 
 - [ ] **Step 4: Use the helper before building the Markdown String**
 
@@ -569,7 +569,7 @@ Expected: PASS.
 
 - [ ] **Step 6: Add helper edge tests**
 
-Add tests near the byte-limit search tests in `src/server/files/search.rs` for: budget-in-range reads, over-budget valid UTF-8 returns byte-limit before `String` construction, metadata/open failure returns an error for skip handling, and `MAX_FILE_SIZE + 1` returns an error for skip handling.
+Add tests near the byte-limit search tests in `src/server/files/search.rs` for: budget-in-range reads, over-budget files return byte-limit before `String` construction even when their contents are invalid UTF-8, metadata/open failure returns an error for skip handling, and `MAX_FILE_SIZE + 1` returns an error for skip handling.
 
 - [ ] **Step 7: Run focused search tests**
 
