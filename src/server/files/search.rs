@@ -2618,9 +2618,8 @@ mod tests {
         let path = dir.path().join("b.md");
         std::fs::write(&path, "needle should not be searched").unwrap();
 
-        let stop =
-            should_stop_before_reading_for_byte_limit(&path, "needle".len(), "needle".len())
-                .unwrap();
+        let stop = should_stop_before_reading_for_byte_limit(&path, "needle".len(), "needle".len())
+            .unwrap();
 
         assert!(stop);
     }
