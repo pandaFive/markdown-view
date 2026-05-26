@@ -704,6 +704,8 @@ fn search_directory_with_limits_blocking(
         ));
     }
 
+    validate_search_base_identity(base_dir)?;
+
     let files = list_markdown_files_from_canonical_base_until_cancelled(
         base_dir,
         limits.max_files.saturating_add(1),
@@ -837,6 +839,18 @@ fn search_directory_with_limits_blocking(
     }
 
     Ok(SearchResponse::from_parts(query, results, limits, stats))
+}
+
+fn validate_search_base_identity(base_dir: &CanonicalPath) -> std::io::Result<()> {
+    if base_dir.has_current_identity()? {
+        return Ok(());
+    }
+
+    tracing::warn!("[markdown-view] 検索base directoryの実体差し替えを検出しました");
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "検索base directoryが起動時と異なります",
+    ))
 }
 
 fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
@@ -2230,6 +2244,36 @@ mod tests {
         assert_eq!(response.skipped_files, 0);
         assert!(!response.truncated);
         assert!(response.results.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_base実体差し替えを拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("a.md"), "old needle").unwrap();
+        let canonical = canonical_of(&base);
+
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("a.md"), "new needle").unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+        std::fs::rename(&replacement, &base).unwrap();
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("base directoryの実体差し替えは拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]

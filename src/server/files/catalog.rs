@@ -58,7 +58,7 @@ fn notify_catalog_progress_for_test(_display_path: &Path) {}
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
-        CanonicalPathError::Canonicalize(error) => error,
+        CanonicalPathError::Canonicalize(error) | CanonicalPathError::Metadata(error) => error,
     })?;
     list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST)
 }

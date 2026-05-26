@@ -16,9 +16,63 @@ use crate::renderer::syntax_theme_css;
 pub(crate) const MAX_SEARCH_GENERATION_CLIENTS: usize = 128;
 pub(crate) const MAX_CONCURRENT_DIRECTORY_SEARCHES: usize = 4;
 
-/// canonicalize済みの絶対パス
+/// canonicalize済みの絶対パスと生成時のファイルシステム実体
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct CanonicalPath(PathBuf);
+pub(crate) struct CanonicalPath {
+    path: PathBuf,
+    identity: PathIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PathIdentity {
+    Known {
+        device: u64,
+        file: u64,
+    },
+    #[allow(dead_code)]
+    Unknown,
+}
+
+impl PathIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        identity_from_metadata(metadata)
+    }
+
+    fn matches_metadata(&self, metadata: &std::fs::Metadata) -> bool {
+        match self {
+            PathIdentity::Known { .. } => self == &Self::from_metadata(metadata),
+            PathIdentity::Unknown => true,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    PathIdentity::Known {
+        device: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
+    use std::os::windows::fs::MetadataExt;
+
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => PathIdentity::Known {
+            device: u64::from(volume),
+            file: index,
+        },
+        _ => PathIdentity::Unknown,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity_from_metadata(_: &std::fs::Metadata) -> PathIdentity {
+    PathIdentity::Unknown
+}
 
 impl CanonicalPath {
     /// パスをcanonicalizeして`CanonicalPath`を生成する
@@ -27,12 +81,22 @@ impl CanonicalPath {
             .as_ref()
             .canonicalize()
             .map_err(CanonicalPathError::Canonicalize)?;
-        Ok(Self(canonical))
+        let metadata = std::fs::metadata(&canonical).map_err(CanonicalPathError::Metadata)?;
+        Ok(Self {
+            path: canonical,
+            identity: PathIdentity::from_metadata(&metadata),
+        })
     }
 
     /// `Path`として参照する
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// 現在のパスが生成時と同じファイルシステム実体を指しているか確認する
+    pub(crate) fn has_current_identity(&self) -> std::io::Result<bool> {
+        let metadata = std::fs::metadata(&self.path)?;
+        Ok(self.identity.matches_metadata(&metadata))
     }
 }
 
@@ -47,6 +111,8 @@ impl AsRef<Path> for CanonicalPath {
 pub enum CanonicalPathError {
     /// canonicalize失敗
     Canonicalize(std::io::Error),
+    /// メタデータ取得失敗
+    Metadata(std::io::Error),
 }
 
 impl std::fmt::Display for CanonicalPathError {
@@ -55,11 +121,22 @@ impl std::fmt::Display for CanonicalPathError {
             CanonicalPathError::Canonicalize(e) => {
                 write!(f, "パスの正規化に失敗しました: {}", e)
             }
+            CanonicalPathError::Metadata(e) => {
+                write!(f, "パスのメタデータ取得に失敗しました: {}", e)
+            }
         }
     }
 }
 
-impl std::error::Error for CanonicalPathError {}
+impl std::error::Error for CanonicalPathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CanonicalPathError::Canonicalize(error) | CanonicalPathError::Metadata(error) => {
+                Some(error)
+            }
+        }
+    }
+}
 
 /// `AppMode` 構築エラー
 #[derive(Debug)]
@@ -570,7 +647,7 @@ mod tests {
     fn test_ensure_canonical_file_metadata失敗はnotfileへ集約する() {
         let (_dir, file_path) = create_markdown_fixture("vanish.md", "# vanish");
         let canonical = file_path.canonicalize().unwrap();
-        let canonical_path = CanonicalPath(canonical.clone());
+        let canonical_path = CanonicalPath::try_from_path(&canonical).unwrap();
         std::fs::remove_file(&file_path).unwrap();
 
         let result = ensure_canonical_file(&canonical_path);
@@ -585,7 +662,7 @@ mod tests {
     fn test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する() {
         let dir = tempfile::tempdir().unwrap();
         let canonical = dir.path().canonicalize().unwrap();
-        let canonical_path = CanonicalPath(canonical.clone());
+        let canonical_path = CanonicalPath::try_from_path(&canonical).unwrap();
         std::fs::remove_dir(dir.path()).unwrap();
 
         let result = ensure_canonical_directory(&canonical_path);
