@@ -22,7 +22,7 @@
 - 検索結果の意味変更。
 - 検索インデックス導入。
 - UI 変更。
-- メトリクス基盤や依存 crate の追加。
+- メトリクス基盤の追加。ファイル open 境界を capability-based API に寄せるための最小依存追加は許容する。
 - `pulldown-cmark` parser の全面逐次化。
 - Host/Origin 検証、path validation、HTML sanitization、CSP の変更。
 
@@ -66,15 +66,16 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 
 ## 実装候補
 
-測定で必要と判断した場合の最小実装は、`src/server/files/search.rs` の `search_directory_with_limits_blocking()` で、本文読込前に残り byte 予算と対象ファイルの metadata size を比較することである。
+測定で必要と判断した場合の実装は、`src/server/files/search.rs` の `search_directory_with_limits_blocking()` で、base directory capability から検索対象を開き、open 済み handle の metadata size と残り byte 予算を本文 `String` 構築前に比較することである。
 
 現状の流れは次の通りである。
 
-1. `resolve_file()` で対象ファイルを解決する。
-2. `read_markdown_with_limit_blocking()` で本文を `String` に読み切る。
-3. `stats.searched_bytes + markdown.len() > limits.max_bytes` の場合、`byte_limit` で終了する。
+1. `resolve_file()` で対象ファイルの相対パス契約を検証する。
+2. base directory capability から対象を開き、open 済み handle の metadata を確認する。
+3. `read_markdown_with_limit_blocking()` 相当の本文読込で本文を `String` に読み切る。
+4. `stats.searched_bytes + markdown.len() > limits.max_bytes` の場合、`byte_limit` で終了する。
 
-改善候補では、`resolve_file()` 後に metadata を確認する。対象ファイルが `MAX_FILE_SIZE` を超える場合は従来どおり skip する。`stats.searched_bytes + metadata.len()` が `limits.max_bytes` を超える場合は、本文を読まずに `SearchTruncationReason::Byte` を付けて終了する。
+改善候補では、ambient path を再度 open せず、base directory capability から対象を開く。対象ファイルが `MAX_FILE_SIZE` を超える場合、open / metadata / UTF-8 検証に失敗する場合は従来どおり skip する。`stats.searched_bytes + metadata.len()` が `limits.max_bytes` を超え、対象が読める UTF-8 ファイルであることを確認できる場合は、本文 `String` を構築せずに `SearchTruncationReason::Byte` を付けて終了する。
 
 本文読込後の既存 `markdown.len()` ベース確認は残す。metadata と本文読込の間の TOCTOU、UTF-8 decode 後の実 byte 長、特殊ファイルシステム差異に備えるためである。
 
@@ -97,7 +98,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 - 測定結果として、dev / release、cold / warm、peak / after / settled RSS、HTTP JSON 契約を記録する。
 - 測定だけで plateau が許容できる場合は、コード変更せず、その根拠と残余リスクを `BACKLOG.md` に残す。
 - plateau しない、または byte-limit 超過候補ファイル読込の peak が明確に大きい場合は、本文読込前 byte-budget 判定を実装する。
-- 実装する場合は、「byte-limit 超過候補を本文読込しない」「`searched_bytes` は読んだファイル分だけ」「`truncated_reasons` は `byte_limit`」をテストで固定する。
+- 実装する場合は、「byte-limit 超過候補を本文 `String` 化しない」「読めない/不正UTF-8の超過候補は従来どおり skip」「`searched_bytes` は検索したファイル分だけ」「`truncated_reasons` は `byte_limit`」をテストで固定する。
 - `./verify.sh` を通す。
 - 必要に応じて検索 targeted test と release / dev の手動測定結果を記録する。
 
@@ -131,7 +132,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 
 検索クエリ、Host/Origin、path、fixture 本文は未信頼入力として扱う。fixture は固定文字列で生成し、取得済みテキストや LLM 出力を shell、SQL、policy、コードとして実行しない。
 
-今回の実装候補は検索対象ファイルの読み込み量を減らす方向であり、既存の path validation、localhost binding、Host/Origin 検証、CSP、HTML sanitization を弱めない。metadata と本文読込の間に TOCTOU は残るが、本文読込後の既存 byte-limit 再確認を残すため、上限回避にはしない。
+今回の実装候補は検索対象ファイルの読み込み量を減らす方向であり、既存の path validation、localhost binding、Host/Origin 検証、CSP、HTML sanitization を弱めない。本文読込は base directory capability から開いた handle に寄せ、metadata と本文読込の対象差し替え、および capability 外 symlink への差し替えに備える。本文読込後の既存 byte-limit 再確認も残し、特殊ファイルシステム差異に備える。
 
 ログや docs には、ローカルユーザー名、絶対パス、本文断片、full `ps args` を残さない。必要な情報は fixture 規模、検索統計、elapsed、RSS 系列に限定する。
 

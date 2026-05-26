@@ -102,7 +102,7 @@ markdown-view README.md --port 4000 --dark --theme "base16-mocha.dark"
 
 ### 必要環境
 
-- Rust 1.70+
+- Rust 1.88+
 - Node.js 20.11+ （開発時の inline JS 生成、型チェック、E2E テストに必要）
 
 ### セットアップ

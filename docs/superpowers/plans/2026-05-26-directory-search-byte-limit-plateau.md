@@ -203,7 +203,7 @@ measure_search_run() {
   local label="$2"
   local run="$3"
   local server_pid
-  server_pid="$(ps -o pid=,args= -C markdown-view | awk -v port="--port ${port}" 'index($0, port) {print $1; exit}')"
+  server_pid="${MARKDOWN_VIEW_SERVER_PID:?set MARKDOWN_VIEW_SERVER_PID from the server shell before measuring}"
   test -n "$server_pid"
   printf 'SERVER_PID=%s label=%s run=%s\n' "$server_pid" "$label" "$run"
   ps -o pid=,rss=,comm= -p "$server_pid"
@@ -242,10 +242,11 @@ Run:
 
 ```bash
 test -n "${SEARCH_FIXTURE_DIR:-}"
-cargo run -- "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3026
+cargo run -- "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3026 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
-Expected: server starts and binds to `127.0.0.1:3026`. Keep this command running in its terminal/session until Task 3 Step 7.
+Expected: server starts and binds to `127.0.0.1:3026`. Keep this shell open until Task 3 Step 7 so `MARKDOWN_VIEW_SERVER_PID` remains available.
 
 - [ ] **Step 4: Run near-64m debug cold request with RSS sampling**
 
@@ -282,12 +283,17 @@ Expected: four successful runs. Record the elapsed and RSS series, not a single 
 
 - [ ] **Step 7: Stop debug server**
 
-Stop the `cargo run -- "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3026` server with Ctrl-C.
+Stop the debug server:
+
+```bash
+kill "$MARKDOWN_VIEW_SERVER_PID"
+wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true
+```
 
 Expected: server exits. Confirm:
 
 ```bash
-ps -o pid=,args= -C markdown-view | awk '/--port 3026/ {print}'
+ps -o pid=,rss=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
 
 Expected: no output.
@@ -297,7 +303,8 @@ Expected: no output.
 Start:
 
 ```bash
-cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3027
+cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3027 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
 Run in the measuring shell:
@@ -311,12 +318,12 @@ measure_search_run 3027 overshoot-debug 5
 rg -n '"searched_files"|"searched_bytes"|"truncated"|"truncated_reasons"|"byte_limit"' "$SEARCH_FIXTURE_DIR/responses/overshoot-debug-run1.json"
 ```
 
-Stop the `cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3027` server with Ctrl-C.
+Stop the debug server with `kill "$MARKDOWN_VIEW_SERVER_PID"` and `wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true`.
 
 Confirm:
 
 ```bash
-ps -o pid=,args= -C markdown-view | awk '/--port 3027/ {print}'
+ps -o pid=,rss=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
 
 Expected: response includes `"truncated":true` and `"byte_limit"`. The final `ps` command prints no output.
@@ -334,7 +341,8 @@ Expected: exits successfully.
 Start:
 
 ```bash
-target/release/markdown-view "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3028
+target/release/markdown-view "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3028 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
 Run in the measuring shell:
@@ -348,12 +356,12 @@ measure_search_run 3028 near-release 5
 rg -n '"searched_files"|"searched_bytes"|"truncated"|"truncated_reasons"|"byte_limit"' "$SEARCH_FIXTURE_DIR/responses/near-release-run1.json"
 ```
 
-Stop the `target/release/markdown-view "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3028` server with Ctrl-C.
+Stop the release server with `kill "$MARKDOWN_VIEW_SERVER_PID"` and `wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true`.
 
 Confirm:
 
 ```bash
-ps -o pid=,args= -C markdown-view | awk '/--port 3028/ {print}'
+ps -o pid=,rss=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
 
 Expected: release near-64m cold and warm series are recorded. The final `ps` command prints no output.
@@ -363,7 +371,8 @@ Expected: release near-64m cold and warm series are recorded. The final `ps` com
 Start:
 
 ```bash
-target/release/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3029
+target/release/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3029 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
 Run in the measuring shell:
@@ -377,12 +386,12 @@ measure_search_run 3029 overshoot-release 5
 rg -n '"searched_files"|"searched_bytes"|"truncated"|"truncated_reasons"|"byte_limit"' "$SEARCH_FIXTURE_DIR/responses/overshoot-release-run1.json"
 ```
 
-Stop the `target/release/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3029` server with Ctrl-C.
+Stop the release server with `kill "$MARKDOWN_VIEW_SERVER_PID"` and `wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true`.
 
 Confirm:
 
 ```bash
-ps -o pid=,args= -C markdown-view | awk '/--port 3029/ {print}'
+ps -o pid=,rss=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
 
 Expected: release overshoot cold and warm series are recorded. The final `ps` command prints no output.
@@ -526,52 +535,18 @@ cargo test server::files::search::tests::test_search_directory_総読込バイ�
 
 Expected: FAIL because current code reads both `a.md` and `b.md`, so `search_markdown_read_count_for_test()` is `2`.
 
-- [ ] **Step 3: Add metadata byte-budget helper**
+- [ ] **Step 3: Add capability-based byte-budget helper**
 
-In `src/server/files/search.rs`, add this helper after `log_search_cancelled()`:
+In `src/server/files/search.rs`, add a helper after `log_search_cancelled()` that:
 
-```rust
-fn should_stop_before_reading_for_byte_limit(
-    file_path: &Path,
-    searched_bytes: usize,
-    max_bytes: usize,
-) -> std::io::Result<bool> {
-    let metadata = std::fs::metadata(file_path)?;
-    if metadata.len() > MAX_FILE_SIZE {
-        return Ok(false);
-    }
+- Opens the candidate from the canonical base directory capability instead of re-opening an ambient absolute path.
+- Uses metadata from the opened handle for `MAX_FILE_SIZE` and byte-budget checks.
+- Returns a byte-limit outcome only when the candidate can be read and validated as UTF-8.
+- Returns an error for open/read/UTF-8 failure so the caller keeps the existing `skipped_files` contract.
 
-    let file_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-    Ok(searched_bytes.saturating_add(file_len) > max_bytes)
-}
-```
+- [ ] **Step 4: Use the helper before building the Markdown String**
 
-- [ ] **Step 4: Use the helper before reading file contents**
-
-In `search_directory_with_limits_blocking()`, insert this block immediately after the `file_path` resolution block and before `let markdown = match read_markdown_with_limit_blocking(&file_path) {`:
-
-```rust
-        match should_stop_before_reading_for_byte_limit(
-            &file_path,
-            stats.searched_bytes,
-            limits.max_bytes,
-        ) {
-            Ok(true) => {
-                stats.mark_truncated(SearchTruncationReason::Byte);
-                break;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] 検索対象ファイルmetadata取得失敗（スキップ）: {} ({})",
-                    log_safe_search_relative(&relative),
-                    error
-                );
-                stats.skipped_files += 1;
-                continue;
-            }
-        }
-```
+In `search_directory_with_limits_blocking()`, keep `resolve_file()` as the relative-path validation step, then call the capability-based helper. If it returns byte-limit, re-check cancellation before marking `SearchTruncationReason::Byte`; if it returns a Markdown `String`, continue through the existing search flow; if it returns an error, log and increment `skipped_files`.
 
 Keep the existing post-read check:
 
@@ -592,35 +567,9 @@ cargo test server::files::search::tests::test_search_directory_総読込バイ�
 
 Expected: PASS.
 
-- [ ] **Step 6: Add metadata helper edge tests**
+- [ ] **Step 6: Add helper edge tests**
 
-Add these tests near the byte-limit search tests in `src/server/files/search.rs`:
-
-```rust
-    #[test]
-    fn test_should_stop_before_reading_for_byte_limit_予算内なら読込を許可する() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.md");
-        std::fs::write(&path, "needle").unwrap();
-
-        let stop = should_stop_before_reading_for_byte_limit(&path, 0, "needle".len()).unwrap();
-
-        assert!(!stop);
-    }
-
-    #[test]
-    fn test_should_stop_before_reading_for_byte_limit_予算超過なら読込前に停止する() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("b.md");
-        std::fs::write(&path, "needle should not be searched").unwrap();
-
-        let stop =
-            should_stop_before_reading_for_byte_limit(&path, "needle".len(), "needle".len())
-                .unwrap();
-
-        assert!(stop);
-    }
-```
+Add tests near the byte-limit search tests in `src/server/files/search.rs` for: budget-in-range reads, over-budget valid UTF-8 returns byte-limit before `String` construction, metadata/open failure returns an error for skip handling, and `MAX_FILE_SIZE + 1` returns an error for skip handling.
 
 - [ ] **Step 7: Run focused search tests**
 
@@ -632,17 +581,16 @@ cargo test search --all-targets --all-features
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit implementation**
+- [ ] **Step 8: Review implementation diff**
 
 Run:
 
 ```bash
 git status --short
-git add src/server/files/search.rs
-git commit -m "fix: byte-limit超過候補の本文読込を避ける"
+git diff -- src/server/files/search.rs
 ```
 
-Expected: commit succeeds. Only `src/server/files/search.rs` is included.
+Expected: only the intended search implementation is changed. Commit only after explicit user approval and a final clean verification pass.
 
 ### Task 6: Re-Measure And Update Backlog
 
@@ -657,7 +605,8 @@ If Task 5 was executed, run these commands for the overshoot fixture after rebui
 
 ```bash
 cargo build
-cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3030
+cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3030 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
 In the measuring shell:
@@ -671,11 +620,12 @@ measure_search_run 3030 overshoot-debug-after 5
 rg -n '"searched_files"|"searched_bytes"|"truncated"|"truncated_reasons"|"byte_limit"' "$SEARCH_FIXTURE_DIR/responses/overshoot-debug-after-run1.json"
 ```
 
-Stop the debug server with Ctrl-C, then run:
+Stop the debug server with `kill "$MARKDOWN_VIEW_SERVER_PID"` and `wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true`, then run:
 
 ```bash
 cargo build --release
-target/release/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3031
+target/release/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3031 &
+export MARKDOWN_VIEW_SERVER_PID=$!
 ```
 
 In the measuring shell:
@@ -689,7 +639,7 @@ measure_search_run 3031 overshoot-release-after 5
 rg -n '"searched_files"|"searched_bytes"|"truncated"|"truncated_reasons"|"byte_limit"' "$SEARCH_FIXTURE_DIR/responses/overshoot-release-after-run1.json"
 ```
 
-Stop the release server with Ctrl-C.
+Stop the release server with `kill "$MARKDOWN_VIEW_SERVER_PID"` and `wait "$MARKDOWN_VIEW_SERVER_PID" 2>/dev/null || true`.
 
 Expected: response still includes `"byte_limit"`, and `searched_bytes` does not include the overshoot file. Record before/after peak and settled RSS series.
 
@@ -703,7 +653,7 @@ If Task 5 was executed, update the P2 item with:
 
 ```markdown
   - 計測済み: 2026-05-26 に `/tmp/markdown-view-search-byte-limit-plateau.***` の near-64m-many-files と overshoot-file fixture で、dev/release、cold/warm、request 中 peak RSS、request 後 after RSS、5秒待機後 settled RSS を分けて測定した。HTTP response は `searched_files`、`searched_bytes`、`truncated=true`、`truncated_reasons=["byte_limit"]` を維持した。実パス、full process args、本文断片は記録していない
-  - 対応: 測定で byte-limit 超過候補ファイルの本文読込が peak RSS に寄与し得ることを確認したため、`src/server/files/search.rs` で metadata size と残り byte 予算を本文読込前に比較し、超過する通常ファイルは読まずに `byte_limit` で打ち切る構成にした。本文読込後の既存 `markdown.len()` チェックは残し、TOCTOU と特殊ファイルシステム差異に備えている
+  - 対応: 測定で byte-limit 超過候補ファイルの本文読込が peak RSS に寄与し得ることを確認したため、`src/server/files/search.rs` で base directory capability から検索対象を開き、open 済み handle の metadata size と残り byte 予算を本文 `String` 構築前に比較する構成にした。本文読込後の既存 `markdown.len()` チェックは残し、capability 外 symlink 差し替え、TOCTOU、特殊ファイルシステム差異に備えている
   - 検証: `cargo test search --all-targets --all-features`、`./verify.sh` が通過した。再測定では overshoot-file の `searched_bytes` が読込済みファイル分に留まり、超過候補ファイルは検索対象に含めないことを確認した
   - 判断: byte-limit 超過候補ファイルの不要な本文読込は解消した。RSS plateau の最終判断は再測定結果に基づき、許容範囲なら Done 化し、settled RSS が継続増加する場合は allocator / parser / JSON 直列化の追加切り分けとして別項目化する
 ```
@@ -721,17 +671,16 @@ git diff --check
 
 Expected: required phrases are present and `git diff --check` exits successfully.
 
-- [ ] **Step 4: Commit docs update**
+- [ ] **Step 4: Review docs diff**
 
 Run:
 
 ```bash
 git status --short
-git add docs/todo/BACKLOG.md
-git commit -m "docs: byte-limit RSS plateau再測定を記録"
+git diff -- docs/todo/BACKLOG.md
 ```
 
-Expected: commit succeeds. If Task 5 was skipped and only docs changed, this may be the only execution commit after the plan commit.
+Expected: docs changes are limited to the measurement record. Commit only after explicit user approval and a final clean verification pass.
 
 ### Task 7: Final Verification
 
@@ -759,7 +708,7 @@ git status --short --branch
 git log --oneline -5
 ```
 
-Expected: working tree is clean. Recent commits include the plan/spec commits and any implementation/docs commits from this execution.
+Expected: before explicit user approval to commit, `git status` shows only the intended uncommitted implementation/docs diff. After commit, working tree is clean and recent commits include the plan/spec commits and any implementation/docs commits from this execution.
 
 - [ ] **Step 3: Prepare completion report**
 
@@ -775,4 +724,4 @@ Report:
 
 - Spec coverage: measurement fixtures, peak / after / settled RSS, dev / release, cold / warm, optional pre-read byte-budget implementation, security boundaries, rollback, and residual risks are covered by Tasks 1-7.
 - Placeholder scan: this plan uses concrete paths, commands, expected results, and code snippets. It contains no unresolved placeholders.
-- Type consistency: functions and types match the current codebase names: `search_directory_with_limits_blocking`, `SearchLimits`, `SearchTruncationReason::Byte`, `read_markdown_with_limit_blocking`, `MAX_FILE_SIZE`, and `SearchResponse`.
+- Type consistency: functions and types match the current codebase names: `search_directory_with_limits_blocking`, `SearchLimits`, `SearchTruncationReason::Byte`, `MAX_FILE_SIZE`, and `SearchResponse`.
