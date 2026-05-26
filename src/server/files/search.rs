@@ -14,6 +14,10 @@ use crate::server::{CanonicalPath, SearchGeneration};
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
 const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEARCH_CONTEXT_CHARS: usize = 800;
+const SEARCH_CONTEXT_ELLIPSIS: &str = "...";
+const CASE_FOLD_CANCEL_CHECK_CHARS: usize = 1024;
+const LARGE_SEARCH_BLOCK_BYTES: usize = 64 * 1024;
 pub(in crate::server) const MAX_SEARCH_QUERY_CHARS: usize = 256;
 const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 
@@ -58,6 +62,235 @@ fn notify_search_progress_for_test(relative: &str, searched_files: usize) {
 
 #[cfg(not(test))]
 fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
+
+#[cfg(test)]
+type SearchContextBuildHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
+type SearchBlockExtractHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
+type SearchBeforeResponseHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
+type SearchLargeBlockFindHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBlockExtractHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchBeforeResponseHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchLargeBlockFindHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_search_context_build_count_for_test() -> usize {
+    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_context_build_count_for_test() -> usize {
+    SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+struct SearchContextBuildHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchContextBuildHookGuard {
+    fn drop(&mut self) {
+        SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_context_build_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchContextBuildHookGuard {
+    SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchContextBuildHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_context_build_for_test() {
+    let next_count = SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(|count| {
+        let next_count = count.get() + 1;
+        count.set(next_count);
+        next_count
+    });
+    SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(next_count);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_context_build_for_test() {}
+
+#[cfg(test)]
+struct SearchBlockExtractHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchBlockExtractHookGuard {
+    fn drop(&mut self) {
+        SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_block_extract_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchBlockExtractHookGuard {
+    SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(|count| count.set(0));
+    SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchBlockExtractHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_block_extract_for_test() {
+    let next_count = SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(|count| {
+        let next_count = count.get() + 1;
+        count.set(next_count);
+        next_count
+    });
+    SEARCH_BLOCK_EXTRACT_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(next_count);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_block_extract_for_test() {}
+
+#[cfg(test)]
+struct SearchBeforeResponseHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchBeforeResponseHookGuard {
+    fn drop(&mut self) {
+        SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_before_response_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchBeforeResponseHookGuard {
+    SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchBeforeResponseHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_before_response_for_test() {
+    SEARCH_BEFORE_RESPONSE_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_before_response_for_test() {}
+
+#[cfg(test)]
+fn reset_search_case_fold_char_count_for_test() {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn search_case_fold_char_count_for_test() -> usize {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_case_fold_char_for_test() {
+    SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_case_fold_char_for_test() {}
+
+#[cfg(test)]
+struct SearchLargeBlockFindHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchLargeBlockFindHookGuard {
+    fn drop(&mut self) {
+        SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_large_block_find_hook_for_test(
+    hook: impl FnMut(usize) + 'static,
+) -> SearchLargeBlockFindHookGuard {
+    SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchLargeBlockFindHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_large_block_find_for_test(search_bytes: usize) {
+    SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(search_bytes);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_large_block_find_for_test(_search_bytes: usize) {}
+
+#[cfg(test)]
+fn reset_search_clip_scan_bytes_for_test() -> usize {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(|bytes| {
+        bytes.set(0);
+        bytes.get()
+    })
+}
+
+#[cfg(test)]
+fn search_clip_scan_bytes_for_test() -> usize {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_clip_scan_for_test(bytes: usize) {
+    SEARCH_CLIP_SCAN_BYTES_FOR_TEST.with(|scanned| {
+        scanned.set(scanned.get() + bytes);
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_clip_scan_for_test(_bytes: usize) {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -152,10 +385,6 @@ impl SearchCancellation {
     }
 
     fn is_cancelled_after_files(&self, searched_files: usize) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-
         #[cfg(test)]
         {
             self.cancel_after_files_for_test
@@ -170,10 +399,6 @@ impl SearchCancellation {
     }
 
     fn is_cancelled_after_read(&self, read_files: usize) -> bool {
-        if self.is_cancelled() {
-            return true;
-        }
-
         #[cfg(test)]
         {
             self.cancel_after_reads_for_test
@@ -381,7 +606,15 @@ fn search_directory_with_limits_blocking(
     }
 
     for relative in files.into_iter().take(limits.max_files) {
+        if cancellation.is_cancelled() {
+            results.clear();
+            break;
+        }
         if cancellation.is_cancelled_after_files(stats.searched_files) {
+            break;
+        }
+        if results.len() >= limits.max_results {
+            stats.mark_truncated(SearchTruncationReason::Result);
             break;
         }
 
@@ -411,6 +644,10 @@ fn search_directory_with_limits_blocking(
             }
         };
         read_files += 1;
+        if cancellation.is_cancelled() {
+            results.clear();
+            break;
+        }
         if cancellation.is_cancelled_after_read(read_files) {
             break;
         }
@@ -424,10 +661,30 @@ fn search_directory_with_limits_blocking(
         stats.searched_bytes += markdown.len();
         notify_search_progress_for_test(&relative, stats.searched_files);
         if cancellation.is_cancelled() {
+            results.clear();
             break;
         }
-        let blocks = extract_search_blocks(&markdown);
-        let file_results = find_matches_for_file(&relative, &blocks, &query);
+        let remaining_results = limits.max_results.saturating_sub(results.len());
+        if remaining_results == 0 {
+            stats.mark_truncated(SearchTruncationReason::Result);
+            break;
+        }
+        let Some(blocks) =
+            extract_search_blocks_until_cancelled(&markdown, &|| cancellation.is_cancelled())
+        else {
+            log_search_cancelled("extract_blocks", &stats, results.len());
+            results.clear();
+            break;
+        };
+        let Some(file_results) =
+            find_matches_for_file(&relative, &blocks, &query, remaining_results, &|| {
+                cancellation.is_cancelled()
+            })
+        else {
+            log_search_cancelled("find_matches", &stats, results.len());
+            results.clear();
+            break;
+        };
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -437,12 +694,20 @@ fn search_directory_with_limits_blocking(
         }
 
         if cancellation.is_cancelled_after_files(stats.searched_files) {
+            if cancellation.is_cancelled() {
+                results.clear();
+            }
             break;
         }
 
         if results.len() >= limits.max_results {
             break;
         }
+    }
+
+    notify_search_before_response_for_test();
+    if cancellation.is_cancelled() {
+        results.clear();
     }
 
     Ok(SearchResponse::from_parts(query, results, limits, stats))
@@ -466,6 +731,16 @@ fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
 
 fn log_safe_search_relative(relative: &str) -> String {
     relative.escape_debug().to_string()
+}
+
+fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: usize) {
+    tracing::debug!(
+        "[markdown-view] ディレクトリ検索がstale化したため中断しました: phase={} searched_files={} searched_bytes={} result_count={}",
+        phase,
+        stats.searched_files,
+        stats.searched_bytes,
+        result_count
+    );
 }
 
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
@@ -501,7 +776,16 @@ fn file_too_large_error() -> std::io::Error {
     )
 }
 
+#[cfg(test)]
 fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
+    extract_search_blocks_until_cancelled(markdown, &|| false)
+        .expect("キャンセルなしの検索ブロック抽出は常に完了する")
+}
+
+fn extract_search_blocks_until_cancelled(
+    markdown: &str,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchBlockEntry>> {
     let mut blocks = Vec::new();
     let mut current_block = String::new();
     let mut block_depth = 0usize;
@@ -512,6 +796,14 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
     let mut inline_html_depth = 0usize;
 
     for event in Parser::new_ext(markdown, markdown_options(MarkdownProfile::Search)) {
+        if is_cancelled() {
+            return None;
+        }
+        notify_search_block_extract_for_test();
+        if is_cancelled() {
+            return None;
+        }
+
         match event {
             Event::Start(tag) => {
                 if matches!(tag, Tag::Item) {
@@ -628,7 +920,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
         finalize_search_block(&mut blocks, &current_block);
     }
 
-    blocks
+    Some(blocks)
 }
 
 fn should_capture_text(
@@ -724,7 +1016,11 @@ fn finalize_search_block(blocks: &mut Vec<SearchBlockEntry>, text: &str) {
     }
     blocks.push(SearchBlockEntry {
         text: trimmed.to_string(),
-        sentences: split_text_into_sentence_ranges(trimmed),
+        sentences: if is_large_search_block(trimmed) {
+            Vec::new()
+        } else {
+            split_text_into_sentence_ranges(trimmed)
+        },
     });
 }
 
@@ -732,20 +1028,49 @@ fn find_matches_for_file(
     file: &str,
     blocks: &[SearchBlockEntry],
     query: &str,
-) -> Vec<SearchResultItem> {
+    remaining_results: usize,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchResultItem>> {
+    if remaining_results == 0 {
+        return Some(Vec::new());
+    }
+
     let mut results = Vec::new();
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
-    for (block_index, block) in blocks.iter().enumerate() {
+    'blocks: for (block_index, block) in blocks.iter().enumerate() {
+        if is_cancelled() {
+            return None;
+        }
         if block.text.is_empty() {
             continue;
         }
 
-        let normalized = build_case_fold_index(&block.text);
+        if is_large_search_block(&block.text) {
+            let file_results = find_matches_for_large_block(
+                file,
+                &block.text,
+                query,
+                file_match_index,
+                remaining_results.saturating_sub(results.len()),
+                is_cancelled,
+            )?;
+            file_match_index += file_results.len();
+            results.extend(file_results);
+            if results.len() >= remaining_results {
+                break 'blocks;
+            }
+            continue;
+        }
+
+        let normalized = build_case_fold_index(&block.text, is_cancelled)?;
         let mut search_start = 0usize;
 
         while search_start <= normalized.normalized_text.len() {
+            if is_cancelled() {
+                return None;
+            }
             let Some(relative_index) =
                 normalized.normalized_text[search_start..].find(&normalized_query)
             else {
@@ -764,11 +1089,110 @@ fn find_matches_for_file(
                 context.after,
             ));
             file_match_index += 1;
+            if is_cancelled() {
+                return None;
+            }
+            if results.len() >= remaining_results {
+                break 'blocks;
+            }
             search_start = normalized_match_end;
         }
     }
 
-    results
+    Some(results)
+}
+
+fn is_large_search_block(text: &str) -> bool {
+    text.len() > LARGE_SEARCH_BLOCK_BYTES
+}
+
+fn next_large_block_search_start(
+    normalized_text: &str,
+    current_search_start: usize,
+    normalized_query_len: usize,
+) -> usize {
+    let overlap_bytes = normalized_query_len.saturating_sub(1);
+    let mut next_start = normalized_text.len().saturating_sub(overlap_bytes);
+    while next_start > current_search_start && !normalized_text.is_char_boundary(next_start) {
+        next_start -= 1;
+    }
+    next_start.max(current_search_start)
+}
+
+fn find_matches_for_large_block(
+    file: &str,
+    text: &str,
+    query: &str,
+    file_match_index_start: usize,
+    remaining_results: usize,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchResultItem>> {
+    if remaining_results == 0 {
+        return Some(Vec::new());
+    }
+
+    let normalized_query = query.to_lowercase();
+    let mut normalized_text = String::new();
+    let mut original_offsets = vec![0usize];
+    let mut search_start = 0usize;
+    let mut results = Vec::new();
+
+    for (chars_seen, (char_index, ch)) in text.char_indices().enumerate() {
+        if chars_seen % CASE_FOLD_CANCEL_CHECK_CHARS == 0 && is_cancelled() {
+            return None;
+        }
+        notify_search_case_fold_char_for_test();
+        let char_end = char_index + ch.len_utf8();
+        let folded = ch.to_lowercase().collect::<String>();
+        normalized_text.push_str(&folded);
+        for _ in 0..folded.len() {
+            original_offsets.push(char_end);
+        }
+
+        while search_start <= normalized_text.len() {
+            notify_search_large_block_find_for_test(normalized_text.len() - search_start);
+            let Some(relative_index) = normalized_text[search_start..].find(&normalized_query)
+            else {
+                search_start = next_large_block_search_start(
+                    &normalized_text,
+                    search_start,
+                    normalized_query.len(),
+                );
+                break;
+            };
+            let normalized_match_start = search_start + relative_index;
+            let normalized_match_end = normalized_match_start + normalized_query.len();
+            if normalized_match_end > normalized_text.len() {
+                break;
+            }
+
+            let match_start = original_offsets
+                .get(normalized_match_start)
+                .copied()
+                .unwrap_or(0);
+            let match_end = original_offsets
+                .get(normalized_match_end)
+                .copied()
+                .unwrap_or_else(|| original_offsets.last().copied().unwrap_or(0));
+            let current = clip_text_around_match(text, match_start, match_end);
+            results.push(SearchResultItem::new(
+                file.to_string(),
+                file_match_index_start + results.len(),
+                String::new(),
+                current,
+                String::new(),
+            ));
+            if is_cancelled() {
+                return None;
+            }
+            if results.len() >= remaining_results {
+                return Some(results);
+            }
+            search_start = normalized_match_end;
+        }
+    }
+
+    Some(results)
 }
 
 #[derive(Debug, Clone)]
@@ -786,11 +1210,15 @@ impl CaseFoldIndex {
     }
 }
 
-fn build_case_fold_index(text: &str) -> CaseFoldIndex {
+fn build_case_fold_index(text: &str, is_cancelled: &impl Fn() -> bool) -> Option<CaseFoldIndex> {
     let mut normalized_text = String::new();
     let mut original_offsets = vec![0];
 
-    for (char_index, ch) in text.char_indices() {
+    for (chars_seen, (char_index, ch)) in text.char_indices().enumerate() {
+        if chars_seen % CASE_FOLD_CANCEL_CHECK_CHARS == 0 && is_cancelled() {
+            return None;
+        }
+        notify_search_case_fold_char_for_test();
         let char_end = char_index + ch.len_utf8();
         let folded = ch.to_lowercase().collect::<String>();
         normalized_text.push_str(&folded);
@@ -799,10 +1227,10 @@ fn build_case_fold_index(text: &str) -> CaseFoldIndex {
         }
     }
 
-    CaseFoldIndex {
+    Some(CaseFoldIndex {
         normalized_text,
         original_offsets,
-    }
+    })
 }
 
 fn build_search_context(
@@ -811,14 +1239,15 @@ fn build_search_context(
     match_start: usize,
     match_end: usize,
 ) -> SearchContext {
+    notify_search_context_build_for_test();
     let block = &blocks[block_index];
     let sentence_index = get_sentence_for_match(&block.sentences, match_start, match_end)
         .unwrap_or(if block.sentences.is_empty() { -1 } else { 0 });
     let current = if sentence_index >= 0 {
         let range = &block.sentences[sentence_index as usize];
-        block.text[range.start..range.end].to_string()
+        clip_match_context(&block.text, range, match_start, match_end)
     } else {
-        block.text.trim().to_string()
+        clip_text_around_match(&block.text, match_start, match_end)
     };
 
     SearchContext {
@@ -854,7 +1283,12 @@ fn get_adjacent_sentence(
         let entry = &blocks[target_block_index as usize];
         if target_sentence_index >= 0 && (target_sentence_index as usize) < entry.sentences.len() {
             let range = &entry.sentences[target_sentence_index as usize];
-            return entry.text[range.start..range.end].to_string();
+            let sentence = &entry.text[range.start..range.end];
+            return if direction < 0 {
+                clip_text_tail(sentence)
+            } else {
+                clip_text_head(sentence)
+            };
         }
 
         target_block_index += direction;
@@ -869,6 +1303,157 @@ fn get_adjacent_sentence(
     }
 
     String::new()
+}
+
+fn clip_match_context(
+    text: &str,
+    sentence_range: &Range<usize>,
+    match_start: usize,
+    match_end: usize,
+) -> String {
+    let sentence = &text[sentence_range.start..sentence_range.end];
+    let relative_match_start = match_start.saturating_sub(sentence_range.start);
+    let relative_match_end = match_end.saturating_sub(sentence_range.start);
+    clip_text_around_match(sentence, relative_match_start, relative_match_end)
+}
+
+fn clip_text_around_match(text: &str, match_start: usize, match_end: usize) -> String {
+    if !has_more_than_context_chars(text) {
+        return text.to_string();
+    }
+
+    let match_start = previous_char_boundary(text, match_start.min(text.len()));
+    let match_end = previous_char_boundary(text, match_end.min(text.len()).max(match_start));
+    let match_chars = counted_chars_in_range(text, match_start, match_end);
+    let target_match_chars = match_chars.min(MAX_SEARCH_CONTEXT_CHARS);
+    let before_budget = (MAX_SEARCH_CONTEXT_CHARS - target_match_chars) / 2;
+    let after_budget = MAX_SEARCH_CONTEXT_CHARS - target_match_chars - before_budget;
+
+    let (mut start_byte, before_chars) = start_byte_before_chars(text, match_start, before_budget);
+    let after_target = after_budget + before_budget.saturating_sub(before_chars);
+    let (end_byte, after_chars) = end_byte_after_chars(text, match_end, after_target);
+    let after_shortage = after_target.saturating_sub(after_chars);
+    if after_shortage > 0 {
+        start_byte = start_byte_before_chars(text, match_start, before_budget + after_shortage).0;
+    }
+
+    clip_text_bytes(text, start_byte, end_byte)
+}
+
+fn has_more_than_context_chars(text: &str) -> bool {
+    let mut chars_seen = 0usize;
+    for (_, ch) in text.char_indices() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        chars_seen += 1;
+        if chars_seen > MAX_SEARCH_CONTEXT_CHARS {
+            return true;
+        }
+    }
+    false
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn counted_chars_in_range(text: &str, start_byte: usize, end_byte: usize) -> usize {
+    let mut count = 0usize;
+    for ch in text[start_byte..end_byte].chars() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        count += 1;
+    }
+    count
+}
+
+fn start_byte_before_chars(text: &str, end_byte: usize, char_budget: usize) -> (usize, usize) {
+    if char_budget == 0 {
+        return (end_byte, 0);
+    }
+
+    let mut start_byte = end_byte;
+    let mut chars_seen = 0usize;
+    for (byte_index, ch) in text[..end_byte].char_indices().rev() {
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        start_byte = byte_index;
+        chars_seen += 1;
+        if chars_seen >= char_budget {
+            break;
+        }
+    }
+    (start_byte, chars_seen)
+}
+
+fn end_byte_after_chars(text: &str, start_byte: usize, char_budget: usize) -> (usize, usize) {
+    if char_budget == 0 {
+        return (start_byte, 0);
+    }
+
+    let mut end_byte = start_byte;
+    let mut chars_seen = 0usize;
+    for (relative_byte, ch) in text[start_byte..].char_indices() {
+        if chars_seen >= char_budget {
+            break;
+        }
+        notify_search_clip_scan_for_test(ch.len_utf8());
+        end_byte = start_byte + relative_byte + ch.len_utf8();
+        chars_seen += 1;
+    }
+    (end_byte, chars_seen)
+}
+
+fn clip_text_head(text: &str) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+        return text.to_string();
+    }
+
+    let mut snippet = char_slice_to_string(text, 0, MAX_SEARCH_CONTEXT_CHARS);
+    snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    snippet
+}
+
+fn clip_text_tail(text: &str) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= MAX_SEARCH_CONTEXT_CHARS {
+        return text.to_string();
+    }
+
+    let mut snippet = String::from(SEARCH_CONTEXT_ELLIPSIS);
+    snippet.push_str(&char_slice_to_string(
+        text,
+        total_chars - MAX_SEARCH_CONTEXT_CHARS,
+        total_chars,
+    ));
+    snippet
+}
+
+fn char_slice_to_string(text: &str, start_char: usize, end_char: usize) -> String {
+    let start_byte = char_index_to_byte(text, start_char);
+    let end_byte = char_index_to_byte(text, end_char);
+    text[start_byte..end_byte].to_string()
+}
+
+fn clip_text_bytes(text: &str, start_byte: usize, end_byte: usize) -> String {
+    let mut snippet = String::new();
+    if start_byte > 0 {
+        snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    }
+    snippet.push_str(&text[start_byte..end_byte]);
+    if end_byte < text.len() {
+        snippet.push_str(SEARCH_CONTEXT_ELLIPSIS);
+    }
+    snippet
+}
+
+fn char_index_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .map(|(byte_index, _)| byte_index)
+        .nth(char_index)
+        .unwrap_or(text.len())
 }
 
 fn split_text_into_sentence_ranges(text: &str) -> Vec<Range<usize>> {
@@ -934,6 +1519,8 @@ fn trim_sentence_range(text: &str, start: usize, end: usize) -> Option<Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use tracing_test::traced_test;
 
     #[test]
     fn test_read_markdown_with_limit_blocking_utf8本文を読む() {
@@ -1100,6 +1687,22 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_search_blocks_until_cancelled_途中staleならnoneを返す() {
+        let checks = Cell::new(0usize);
+
+        let blocks = extract_search_blocks_until_cancelled(
+            "# title\n\nfirst paragraph\n\nsecond paragraph",
+            &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 3
+            },
+        );
+
+        assert!(blocks.is_none());
+    }
+
+    #[test]
     fn test_find_matches_for_file_ローカル一致番号を維持する() {
         let blocks = vec![
             SearchBlockEntry {
@@ -1112,7 +1715,9 @@ mod tests {
             },
         ];
 
-        let results = find_matches_for_file("README.md", &blocks, "alpha note");
+        let results =
+            find_matches_for_file("README.md", &blocks, "alpha note", usize::MAX, &|| false)
+                .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[1].file_match_index, 1);
@@ -1127,11 +1732,230 @@ mod tests {
             sentences: split_text_into_sentence_ranges(text),
         }];
 
-        let results = find_matches_for_file("README.md", &blocks, "i̇stanbul");
+        let results =
+            find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX, &|| false).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_match_index, 0);
         assert_eq!(results[0].current, "İstanbul is here.");
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックunicode小文字化でバイト長が変わっても安全に一致する()
+    {
+        let block_text = format!(
+            "{}İstanbul is here.",
+            "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1)
+        );
+        let blocks = vec![SearchBlockEntry {
+            text: block_text,
+            sentences: Vec::new(),
+        }];
+
+        let results =
+            find_matches_for_file("README.md", &blocks, "i̇stanbul", usize::MAX, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_match_index, 0);
+        assert!(results[0].current.contains("İstanbul is here."));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックno_matchはprefix全体を繰り返し検索しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let block_text = "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000);
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let hook_calls = Rc::new(Cell::new(0usize));
+        let hook_calls_for_hook = Rc::clone(&hook_calls);
+        let max_scanned_bytes = block_text.len() * 32;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            hook_calls_for_hook.set(hook_calls_for_hook.get() + 1);
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロックno-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, "needle", usize::MAX, &|| false).unwrap();
+
+        assert!(results.is_empty());
+        assert!(hook_calls.get() > 0);
+        assert!(scanned_bytes.get() > 0);
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックlate_matchはprefix全体を繰り返し検索しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let hook_calls = Rc::new(Cell::new(0usize));
+        let hook_calls_for_hook = Rc::clone(&hook_calls);
+        let max_scanned_bytes = block_text.len() * 32;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            hook_calls_for_hook.set(hook_calls_for_hook.get() + 1);
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロックlate-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, "needle", usize::MAX, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].current.contains("needle"));
+        assert!(hook_calls.get() > 0);
+        assert!(scanned_bytes.get() > 0);
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロックsnippet生成は全文を結果件数分走査しない() {
+        let block_text = format!(
+            "{}{}",
+            "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000),
+            (0..10).map(|_| " needle").collect::<Vec<_>>().join("")
+        );
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+
+        reset_search_clip_scan_bytes_for_test();
+        let results = find_matches_for_file("many.md", &blocks, "needle", 3, &|| false).unwrap();
+        let scanned_bytes = search_clip_scan_bytes_for_test();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|item| item.current.contains("needle")));
+        assert!(scanned_bytes > 0);
+        assert!(
+            scanned_bytes < block_text.len(),
+            "巨大ブロックsnippet生成で本文全体を繰り返し走査している: {scanned_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn test_find_matches_for_file_残り件数で同一ファイル内探索を停止する() {
+        let block_text = (0..120)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: split_text_into_sentence_ranges(&block_text),
+        }];
+
+        let before_context_builds = reset_search_context_build_count_for_test();
+        let results = find_matches_for_file("many.md", &blocks, "needle", 3, &|| false).unwrap();
+        let context_builds = search_context_build_count_for_test() - before_context_builds;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(context_builds, 3);
+        assert_eq!(results[0].file_match_index, 0);
+        assert_eq!(results[1].file_match_index, 1);
+        assert_eq!(results[2].file_match_index, 2);
+        assert!(results.iter().all(|item| item.file == "many.md"));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロック正規化中にstaleならcontextを生成しない() {
+        use std::cell::Cell;
+
+        let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let cancel_checks = Cell::new(0usize);
+        reset_search_context_build_count_for_test();
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| {
+            let next = cancel_checks.get() + 1;
+            cancel_checks.set(next);
+            next >= 3
+        });
+
+        assert!(results.is_none());
+        assert_eq!(search_context_build_count_for_test(), 0);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_残り件数0なら結果を生成しない() {
+        let block_text = "needle first. needle second.";
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.to_string(),
+            sentences: split_text_into_sentence_ranges(block_text),
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 0, &|| false).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大currentはmatch周辺へ切り詰める() {
+        let block_text = format!("{}needle{}", "a".repeat(2_000), "b".repeat(2_000));
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: split_text_into_sentence_ranges(&block_text),
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].current.len() < block_text.len());
+        assert!(results[0].current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6);
+        assert!(results[0].current.contains("needle"));
+        assert!(results[0].current.starts_with("..."));
+        assert!(results[0].current.ends_with("..."));
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大before_afterを切り詰める() {
+        let before = "a".repeat(2_000);
+        let after = "b".repeat(2_000);
+        let block_text = format!("{before}.\nneedle.\n{after}.");
+        let blocks = vec![SearchBlockEntry {
+            text: block_text,
+            sentences: vec![0..2001, 2002..2009, 2010..4011],
+        }];
+
+        let results = find_matches_for_file("many.md", &blocks, "needle", 1, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].before.len() <= MAX_SEARCH_CONTEXT_CHARS + 3);
+        assert!(results[0].after.len() <= MAX_SEARCH_CONTEXT_CHARS + 3);
+        assert!(results[0].before.starts_with("..."));
+        assert!(results[0].before.ends_with('.'));
+        assert!(results[0].after.starts_with('b'));
+        assert!(results[0].after.ends_with("..."));
+    }
+
+    fn repeated_needles(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn canonical_of(path: &Path) -> CanonicalPath {
@@ -1217,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_directory_1ファイル後にキャンセルされたら後続ファイルへ進まない() {
+    fn test_search_directory_test用ファイル数limitは結果を破棄せず後続ファイルへ進まない() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
         std::fs::write(dir.path().join("b.md"), "needle second").unwrap();
@@ -1239,6 +2063,8 @@ mod tests {
         assert_eq!(response.searched_files, 1);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
     }
 
     #[test]
@@ -1263,6 +2089,265 @@ mod tests {
 
         assert_eq!(response.searched_files, 0);
         assert!(response.results.is_empty());
+    }
+
+    #[test]
+    fn test_search_directory_応答構築直前にstaleなら結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        let _guard = set_search_before_response_hook_for_test(move || {
+            current.store(2, Ordering::Release);
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_ファイル内探索中にstale化したら部分結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        reset_search_context_build_count_for_test();
+        let _guard = set_search_context_build_hook_for_test(move |count| {
+            if count == 3 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(search_context_build_count_for_test(), 3);
+        assert_eq!(response.searched_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(logs_contain(
+            "ディレクトリ検索がstale化したため中断しました"
+        ));
+        assert!(logs_contain("phase=find_matches"));
+        assert!(logs_contain("searched_files=1"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("many.md"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_前ファイル結果があってもファイル内探索中staleなら結果を返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        reset_search_context_build_count_for_test();
+        let _guard = set_search_context_build_hook_for_test(move |count| {
+            if count == 3 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(search_context_build_count_for_test(), 3);
+        assert_eq!(response.searched_files, 2);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(logs_contain("phase=find_matches"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("a.md"));
+        assert!(!logs_contain("b.md"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_ブロック抽出中staleなら蓄積済み結果も返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle first").unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        let _block_guard = set_search_block_extract_hook_for_test(move |count| {
+            if count > 20 {
+                current.store(2, Ordering::Release);
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 2);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(logs_contain("phase=extract_blocks"));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("a.md"));
+        assert!(!logs_contain("b.md"));
+    }
+
+    #[test]
+    fn test_search_directory_巨大単一文many_matchのjson応答サイズを抑える() {
+        let dir = tempfile::tempdir().unwrap();
+        let block_text = format!("{}{}", "needle".repeat(120), "a".repeat(20_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(json.len() < 120_000);
+        assert!(response
+            .results
+            .iter()
+            .all(|item| item.current.len() <= MAX_SEARCH_CONTEXT_CHARS + 6));
+    }
+
+    #[test]
+    fn test_search_directory_巨大単一ブロックmany_matchはresult_limit後に全文正規化しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = (0..120)
+            .map(|index| format!("needle {index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let block_text = format!("{prefix} {}", "a".repeat(200_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_case_fold_char_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert!(
+            search_case_fold_char_count_for_test() < 64 * 1024,
+            "巨大tailまでcase-foldしている: {} chars",
+            search_case_fold_char_count_for_test()
+        );
+    }
+
+    #[test]
+    fn test_search_directory_マルチバイト巨大単一文many_matchのjson応答サイズを抑える() {
+        let dir = tempfile::tempdir().unwrap();
+        let block_text = format!("{}{}", "針".repeat(120), "語😀".repeat(10_000));
+        std::fs::write(dir.path().join("many.md"), block_text).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "針",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert_eq!(response.results.len(), 100);
+        assert!(json.len() < 360_000);
+        assert!(response
+            .results
+            .iter()
+            .all(|item| item.current.chars().count() <= MAX_SEARCH_CONTEXT_CHARS + 6));
     }
 
     #[tokio::test]
@@ -1318,11 +2403,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_directory_結果数上限到達を明示する() {
         let dir = tempfile::tempdir().unwrap();
-        let markdown = (0..120)
-            .map(|index| format!("needle sentence {index}."))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
 
         let canonical = canonical_of(dir.path());
         let response = search_directory(&canonical, "needle", SearchCancellation::none(), None)
@@ -1336,6 +2417,67 @@ mod tests {
         );
         assert_eq!(response.results.len(), 100);
         assert_eq!(response.searched_files, 1);
+    }
+
+    #[test]
+    fn test_search_directory_残り結果件数だけ次ファイルのcontextを生成する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), repeated_needles(95)).unwrap();
+        std::fs::write(dir.path().join("b.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_context_build_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(response.results.len(), 100);
+        assert_eq!(search_context_build_count_for_test(), 100);
+        assert_eq!(response.results[94].file, "a.md");
+        assert_eq!(response.results[95].file, "b.md");
+    }
+
+    #[test]
+    fn test_search_directory_結果上限0なら読込と解析を行わず打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("many.md"), repeated_needles(120)).unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_context_build_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 0,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert_eq!(search_context_build_count_for_test(), 0);
     }
 
     #[tokio::test]
