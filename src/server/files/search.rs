@@ -2661,6 +2661,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_search_directory_byte予算超過候補はutf8検証前に打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        std::fs::write(
+            dir.path().join("b.md"),
+            [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'],
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("c.md"), "needle after invalid").unwrap();
+
+        let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: "needle".len(),
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.skipped_files, 0);
+        assert_eq!(response.searched_bytes, "needle".len());
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "byte-limit超過候補はUTF-8検証前に本文読込を避ける"
+        );
+    }
+
     #[test]
     fn test_search_directory_queryが上限を超えるとinvalid_inputを返す() {
         let dir = tempfile::tempdir().unwrap();
