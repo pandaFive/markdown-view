@@ -89,6 +89,7 @@ std::thread_local! {
     static SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchLargeBlockFindHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_MARKDOWN_READ_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -103,6 +104,27 @@ fn reset_search_context_build_count_for_test() -> usize {
 fn search_context_build_count_for_test() -> usize {
     SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(std::cell::Cell::get)
 }
+
+#[cfg(test)]
+fn reset_search_markdown_read_count_for_test() -> usize {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_markdown_read_count_for_test() -> usize {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_markdown_read_for_test() {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_markdown_read_for_test() {}
 
 #[cfg(test)]
 struct SearchContextBuildHookGuard;
@@ -631,6 +653,27 @@ fn search_directory_with_limits_blocking(
             }
         };
 
+        match should_stop_before_reading_for_byte_limit(
+            &file_path,
+            stats.searched_bytes,
+            limits.max_bytes,
+        ) {
+            Ok(true) => {
+                stats.mark_truncated(SearchTruncationReason::Byte);
+                break;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] 検索対象ファイルmetadata取得失敗（スキップ）: {} ({})",
+                    log_safe_search_relative(&relative),
+                    error
+                );
+                stats.skipped_files += 1;
+                continue;
+            }
+        }
+
         let markdown = match read_markdown_with_limit_blocking(&file_path) {
             Ok(markdown) => markdown,
             Err(error) => {
@@ -743,7 +786,22 @@ fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: 
     );
 }
 
+fn should_stop_before_reading_for_byte_limit(
+    file_path: &Path,
+    searched_bytes: usize,
+    max_bytes: usize,
+) -> std::io::Result<bool> {
+    let metadata = std::fs::metadata(file_path)?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Ok(false);
+    }
+
+    let file_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    Ok(searched_bytes.saturating_add(file_len) > max_bytes)
+}
+
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
+    notify_search_markdown_read_for_test();
     let metadata = std::fs::metadata(file_path)?;
     if metadata.len() > MAX_FILE_SIZE {
         return Err(file_too_large_error());
@@ -2543,6 +2601,30 @@ mod tests {
         assert_eq!(response.results.len(), 2);
     }
 
+    #[test]
+    fn test_should_stop_before_reading_for_byte_limit_予算内なら読込を許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        std::fs::write(&path, "needle").unwrap();
+
+        let stop = should_stop_before_reading_for_byte_limit(&path, 0, "needle".len()).unwrap();
+
+        assert!(!stop);
+    }
+
+    #[test]
+    fn test_should_stop_before_reading_for_byte_limit_予算超過なら読込前に停止する() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.md");
+        std::fs::write(&path, "needle should not be searched").unwrap();
+
+        let stop =
+            should_stop_before_reading_for_byte_limit(&path, "needle".len(), "needle".len())
+                .unwrap();
+
+        assert!(stop);
+    }
+
     #[tokio::test]
     async fn test_search_directory_総読込バイト上限到達を明示し超過ファイルは検索しない() {
         let dir = tempfile::tempdir().unwrap();
@@ -2550,6 +2632,7 @@ mod tests {
         std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
 
         let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
         let response = search_directory_with_limits_blocking(
             &canonical,
             "needle",
@@ -2571,6 +2654,11 @@ mod tests {
         assert_eq!(response.searched_bytes, "needle".len());
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "byte-limit超過候補ファイルは本文読込前に打ち切る"
+        );
     }
 
     #[test]
