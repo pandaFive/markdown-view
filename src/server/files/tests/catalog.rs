@@ -37,6 +37,25 @@ fn test_list_markdown_files_from_canonical_base_基本動作() {
 }
 
 #[test]
+fn test_list_markdown_files_from_canonical_base_起動後base差し替えを拒否する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("workspace");
+    let replacement = parent.path().join("replacement");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::write(base.join("old.md"), "# old").unwrap();
+    let canonical = CanonicalPath::try_from_path(&base).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("new.md"), "# new").unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
+    std::fs::rename(&replacement, &base).unwrap();
+
+    let error = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST)
+        .expect_err("起動時と異なるbase実体のファイル一覧は拒否する");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[test]
 fn test_list_markdown_files_from_canonical_base_until_cancelled_列挙途中で停止する() {
     let dir = tempfile::tempdir().unwrap();
     for index in 0..10 {

@@ -71,7 +71,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 現状の流れは次の通りである。
 
 1. `resolve_file()` で対象ファイルの相対パス契約を検証する。
-2. base directory capability から対象を開き、open 済み handle の metadata を確認する。
+2. 解決済みの ambient path を `read_markdown_with_limit_blocking()` 相当で再度 open する。
 3. `read_markdown_with_limit_blocking()` 相当の本文読込で本文を `String` に読み切る。
 4. `stats.searched_bytes + markdown.len() > limits.max_bytes` の場合、`byte_limit` で終了する。
 

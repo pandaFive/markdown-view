@@ -1,6 +1,9 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use cap_std::fs::Dir;
+
+#[cfg(test)]
 use crate::server::log_path::{
     sanitize_path_for_logging_escaped, sanitize_path_for_logging_lexical_escaped,
 };
@@ -77,21 +80,56 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base_until_cancelled
     max_files: usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> std::io::Result<Vec<String>> {
-    let base_path = base_dir.as_path();
-    let mut files = Vec::new();
-    let mut visited_dirs = HashSet::new();
-    visited_dirs.insert(base_path.to_path_buf());
-    let traversal = CatalogTraversal {
-        log_base_dir: base_path,
-        canonical_base_dir: base_path,
+    let verified_base_dir = open_verified_base_dir(base_dir, "ファイル一覧base directory")?;
+    list_markdown_files_from_verified_base_until_cancelled(
+        &verified_base_dir,
+        base_dir.as_path(),
         max_files,
         is_cancelled,
+        &|display_path| notify_catalog_progress_for_test(display_path),
+    )
+}
+
+pub(in crate::server) fn open_verified_base_dir(
+    base_dir: &CanonicalPath,
+    label: &'static str,
+) -> std::io::Result<Dir> {
+    let verified_base_dir =
+        Dir::open_ambient_dir(base_dir.as_path(), cap_std::ambient_authority())?;
+    let metadata = verified_base_dir.dir_metadata()?;
+    if base_dir.matches_cap_metadata_identity(&metadata) {
+        return Ok(verified_base_dir);
+    }
+
+    tracing::warn!("[markdown-view] {}の実体差し替えを検出しました", label);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{}が起動時と異なります", label),
+    ))
+}
+
+pub(in crate::server) fn list_markdown_files_from_verified_base_until_cancelled(
+    base_dir: &Dir,
+    canonical_base_dir: &Path,
+    max_files: usize,
+    is_cancelled: &dyn Fn() -> bool,
+    on_progress: &dyn Fn(&Path),
+) -> std::io::Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut visited_dirs = HashSet::new();
+    visited_dirs.insert(PathBuf::new());
+    let traversal = CapCatalogTraversal {
+        base_dir,
+        canonical_base_dir,
+        max_files,
+        is_cancelled,
+        on_progress,
     };
 
-    list_markdown_files_recursive(
+    list_markdown_files_from_verified_base_recursive(
         &traversal,
-        base_path,
-        base_path,
+        Path::new(""),
+        Path::new(""),
         &mut files,
         &mut visited_dirs,
         0,
@@ -101,11 +139,12 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base_until_cancelled
     Ok(files)
 }
 
-struct CatalogTraversal<'a> {
-    log_base_dir: &'a Path,
+struct CapCatalogTraversal<'a> {
+    base_dir: &'a Dir,
     canonical_base_dir: &'a Path,
     max_files: usize,
     is_cancelled: &'a dyn Fn() -> bool,
+    on_progress: &'a dyn Fn(&Path),
 }
 
 fn relative_path_to_slash_string(relative: &Path) -> String {
@@ -119,10 +158,10 @@ fn relative_path_to_slash_string(relative: &Path) -> String {
     output
 }
 
-fn list_markdown_files_recursive(
-    traversal: &CatalogTraversal<'_>,
-    current_dir: &Path,
-    display_dir: &Path,
+fn list_markdown_files_from_verified_base_recursive(
+    traversal: &CapCatalogTraversal<'_>,
+    current_relative: &Path,
+    display_relative: &Path,
     files: &mut Vec<String>,
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
@@ -134,18 +173,16 @@ fn list_markdown_files_recursive(
     if depth >= MAX_DIR_DEPTH {
         tracing::warn!(
             "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
-            sanitize_path_for_logging_lexical_escaped(current_dir, traversal.log_base_dir)
+            log_catalog_relative(display_relative)
         );
         return Ok(());
     }
 
-    ensure_current_dir_still_canonical(
-        current_dir,
-        traversal.canonical_base_dir,
-        traversal.log_base_dir,
-    )?;
-
-    let entries = std::fs::read_dir(current_dir)?;
+    let entries = if current_relative.as_os_str().is_empty() {
+        traversal.base_dir.entries()?
+    } else {
+        traversal.base_dir.read_dir(current_relative)?
+    };
     for entry in entries {
         if (traversal.is_cancelled)() {
             return Ok(());
@@ -156,7 +193,7 @@ fn list_markdown_files_recursive(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
-                    sanitize_path_for_logging_escaped(current_dir, traversal.log_base_dir),
+                    log_catalog_relative(display_relative),
                     error
                 );
                 continue;
@@ -168,15 +205,15 @@ fn list_markdown_files_recursive(
             continue;
         }
 
-        let path = entry.path();
-        let display_path = display_dir.join(&name);
-        notify_catalog_progress_for_test(&display_path);
+        let access_relative = current_relative.join(&name);
+        let display_path = display_relative.join(&name);
+        (traversal.on_progress)(&display_path);
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
-                    sanitize_path_for_logging_escaped(&path, traversal.log_base_dir),
+                    log_catalog_relative(&display_path),
                     error
                 );
                 continue;
@@ -187,56 +224,41 @@ fn list_markdown_files_recursive(
             if files.len() >= traversal.max_files {
                 return Ok(());
             }
-            if (traversal.is_cancelled)() {
-                return Ok(());
-            }
-
-            let Some(traversal_path) = resolve_recursable_directory(
-                &path,
-                file_type.is_symlink(),
+            let Some(traversal_relative) = resolve_cap_recursable_directory(
+                traversal.base_dir,
                 traversal.canonical_base_dir,
-                visited_dirs,
-                traversal.log_base_dir,
-            )
-            .map_err(|error| {
-                tracing::warn!(
-                    "[markdown-view] ディレクトリ再帰判定エラー: {} ({})",
-                    sanitize_path_for_logging_escaped(&path, traversal.log_base_dir),
-                    error
-                );
-                error
-            })?
+                &access_relative,
+                &display_path,
+                file_type.is_symlink(),
+            )?
             else {
                 continue;
             };
-
-            list_markdown_files_recursive(
+            if !visited_dirs.insert(traversal_relative.clone()) {
+                if file_type.is_symlink() {
+                    tracing::warn!(
+                        "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
+                        log_catalog_relative(&display_path)
+                    );
+                }
+                continue;
+            }
+            list_markdown_files_from_verified_base_recursive(
                 traversal,
-                &traversal_path,
+                &traversal_relative,
                 &display_path,
                 files,
                 visited_dirs,
                 depth + 1,
             )?;
         } else if file_type.is_file()
-            && path
+            && display_path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         {
-            match display_path.strip_prefix(traversal.log_base_dir) {
-                Ok(relative) => {
-                    files.push(relative_path_to_slash_string(relative));
-                    if files.len() >= traversal.max_files {
-                        return Ok(());
-                    }
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "[markdown-view] 相対パス算出不可（スキップ）: {} (ベース: {})",
-                        sanitize_path_for_logging_escaped(&path, traversal.log_base_dir),
-                        traversal.log_base_dir.display()
-                    );
-                }
+            files.push(relative_path_to_slash_string(&display_path));
+            if files.len() >= traversal.max_files {
+                return Ok(());
             }
         }
     }
@@ -244,6 +266,134 @@ fn list_markdown_files_recursive(
     Ok(())
 }
 
+fn resolve_cap_recursable_directory(
+    base_dir: &Dir,
+    canonical_base_dir: &Path,
+    access_relative: &Path,
+    display_path: &Path,
+    is_symlink: bool,
+) -> std::io::Result<Option<PathBuf>> {
+    let canonical_relative = match canonical_cap_relative_dir(base_dir, access_relative) {
+        Ok(relative) => relative,
+        Err(error) if is_symlink => {
+            match canonical_symlink_relative(canonical_base_dir, access_relative, display_path)? {
+                Some(relative) => relative,
+                None => {
+                    tracing::debug!(
+                    "[markdown-view] シンボリックリンクディレクトリ解決失敗（スキップ）: {} ({})",
+                    log_catalog_relative(display_path),
+                    error
+                );
+                    return Ok(None);
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    };
+
+    if is_symlink {
+        let metadata = match base_dir.metadata(&canonical_relative) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] シンボリックリンクのメタデータ取得に失敗（スキップ）: {} ({})",
+                    log_catalog_relative(display_path),
+                    error
+                );
+                return Ok(None);
+            }
+        };
+        if !metadata.is_dir() {
+            tracing::debug!(
+                "[markdown-view] シンボリックリンクが通常ファイルを指すためスキップ: {} -> {}",
+                log_catalog_relative(display_path),
+                log_catalog_relative(&canonical_relative)
+            );
+            return Ok(None);
+        }
+    } else if canonical_relative != access_relative {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "通常ディレクトリの正規化先が走査前検証時と一致しません",
+        ));
+    }
+
+    Ok(Some(canonical_relative))
+}
+
+fn canonical_symlink_relative(
+    canonical_base_dir: &Path,
+    access_relative: &Path,
+    display_path: &Path,
+) -> std::io::Result<Option<PathBuf>> {
+    let absolute_candidate = canonical_base_dir.join(access_relative);
+    let resolved = match absolute_candidate.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] シンボリックリンクの正規化に失敗（スキップ）: {} ({})",
+                log_catalog_relative(display_path),
+                error
+            );
+            return Ok(None);
+        }
+    };
+    if !resolved.starts_with(canonical_base_dir) {
+        tracing::warn!(
+            "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
+            log_catalog_relative(display_path),
+            resolved.display()
+        );
+        return Ok(None);
+    }
+    let relative = resolved
+        .strip_prefix(canonical_base_dir)
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "シンボリックリンクの正規化先がベースディレクトリ外です",
+            )
+        })?
+        .to_path_buf();
+    if exclusion_reason_for_relative_path(&relative).is_some() {
+        tracing::debug!(
+            "[markdown-view] シンボリックリンクが除外ディレクトリを指すためスキップ: {} -> {}",
+            log_catalog_relative(display_path),
+            log_catalog_relative(&relative)
+        );
+        return Ok(None);
+    }
+    Ok(Some(relative))
+}
+
+fn canonical_cap_relative_dir(base_dir: &Dir, relative: &Path) -> std::io::Result<PathBuf> {
+    let canonical_relative = base_dir.canonicalize(relative)?;
+    if canonical_relative.is_absolute()
+        || canonical_relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象ディレクトリがベースディレクトリ外を指しています",
+        ));
+    }
+    if exclusion_reason_for_relative_path(&canonical_relative).is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象ディレクトリが除外パスを指しています",
+        ));
+    }
+    Ok(canonical_relative)
+}
+
+fn log_catalog_relative(path: &Path) -> String {
+    relative_path_to_slash_string(path)
+        .escape_debug()
+        .to_string()
+}
+
+#[cfg(test)]
 pub(super) fn ensure_current_dir_still_canonical(
     current_dir: &Path,
     canonical_base_dir: &Path,
@@ -273,6 +423,7 @@ pub(super) fn ensure_current_dir_still_canonical(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn resolve_recursable_directory(
     path: &Path,
     is_symlink: bool,
@@ -371,6 +522,7 @@ pub(super) fn resolve_recursable_directory(
     Ok(Some(resolved))
 }
 
+#[cfg(test)]
 pub(super) fn canonicalize_dir_for_cycle(
     path: &Path,
     label: &str,

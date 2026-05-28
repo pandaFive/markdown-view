@@ -1188,6 +1188,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_files_起動後base差し替えは拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("old.md"), "# Old").unwrap();
+        let state = create_directory_state(&base);
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("new.md"), "# New").unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+        std::fs::rename(&replacement, &base).unwrap();
+
+        let error = list_files(&state)
+            .await
+            .expect_err("起動時と異なるbase実体のファイル一覧は拒否する");
+
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn test_list_files_単一ファイルモードでは空配列を返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");

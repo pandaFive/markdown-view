@@ -7,11 +7,13 @@ use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tokio::sync::OwnedSemaphorePermit;
 
-use super::catalog::MAX_DIR_DEPTH;
+use super::catalog::{
+    list_markdown_files_from_verified_base_until_cancelled, open_verified_base_dir,
+};
 use super::content::MAX_FILE_SIZE;
 use crate::markdown::{markdown_options, MarkdownProfile};
 use crate::server::{CanonicalPath, SearchGeneration};
-use crate::workspace_exclusion::{exclusion_reason_for_name, exclusion_reason_for_relative_path};
+use crate::workspace_exclusion::exclusion_reason_for_relative_path;
 
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
@@ -133,6 +135,9 @@ type SearchAfterBaseIdentityValidationHook = Box<dyn FnMut()>;
 type SearchAfterByteLimitHook = Box<dyn FnMut()>;
 
 #[cfg(test)]
+type SearchAfterMetadataHook = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
 std::thread_local! {
     static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
@@ -152,6 +157,8 @@ std::thread_local! {
     static SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterBaseIdentityValidationHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterByteLimitHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_METADATA_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterMetadataHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_MARKDOWN_READ_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -371,6 +378,40 @@ fn notify_search_after_byte_limit_for_test() {
 
 #[cfg(not(test))]
 fn notify_search_after_byte_limit_for_test() {}
+
+#[cfg(test)]
+struct SearchAfterMetadataHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterMetadataHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_metadata_hook_for_test(
+    hook: impl FnMut(&str) + 'static,
+) -> SearchAfterMetadataHookGuard {
+    SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterMetadataHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_metadata_for_test(relative: &str) {
+    SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_metadata_for_test(_relative: &str) {}
 
 #[cfg(test)]
 struct SearchAfterResolveHookGuard;
@@ -824,14 +865,19 @@ fn search_directory_with_limits_blocking(
         ));
     }
 
-    let search_base_dir = open_verified_search_base_dir(base_dir)?;
+    let search_base_dir = open_verified_base_dir(base_dir, "検索base directory")?;
     notify_search_after_base_identity_validation_for_test();
     validate_search_base_path_identity(base_dir)?;
 
-    let files = list_markdown_files_from_search_base_until_cancelled(
+    let files = list_markdown_files_from_verified_base_until_cancelled(
         &search_base_dir,
+        base_dir.as_path(),
         limits.max_files.saturating_add(1),
         &|| cancellation.is_cancelled(),
+        &|relative| {
+            let relative = path_to_search_relative(relative);
+            notify_search_listing_progress_for_test(&relative);
+        },
     )?;
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
@@ -952,20 +998,6 @@ fn search_directory_with_limits_blocking(
     Ok(SearchResponse::from_parts(query, results, limits, stats))
 }
 
-fn open_verified_search_base_dir(base_dir: &CanonicalPath) -> std::io::Result<Dir> {
-    let search_base_dir = Dir::open_ambient_dir(base_dir.as_path(), cap_std::ambient_authority())?;
-    let metadata = search_base_dir.dir_metadata()?;
-    if base_dir.matches_cap_metadata_identity(&metadata) {
-        return Ok(search_base_dir);
-    }
-
-    tracing::warn!("[markdown-view] 検索base directoryの実体差し替えを検出しました");
-    Err(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        "検索base directoryが起動時と異なります",
-    ))
-}
-
 fn validate_search_base_path_identity(base_dir: &CanonicalPath) -> std::io::Result<()> {
     if base_dir.has_current_identity()? {
         return Ok(());
@@ -976,204 +1008,6 @@ fn validate_search_base_path_identity(base_dir: &CanonicalPath) -> std::io::Resu
         std::io::ErrorKind::PermissionDenied,
         "検索base directory pathが起動時と異なります",
     ))
-}
-
-fn list_markdown_files_from_search_base_until_cancelled(
-    base_dir: &Dir,
-    max_files: usize,
-    is_cancelled: &dyn Fn() -> bool,
-) -> std::io::Result<Vec<String>> {
-    let mut files = Vec::new();
-    let mut visited_dirs = std::collections::HashSet::new();
-    visited_dirs.insert(Path::new("").to_path_buf());
-    let traversal = SearchListingTraversal {
-        base_dir,
-        max_files,
-        is_cancelled,
-    };
-
-    list_markdown_files_from_search_base_recursive(
-        &traversal,
-        Path::new(""),
-        Path::new(""),
-        &mut files,
-        &mut visited_dirs,
-        0,
-    )?;
-    files.sort();
-    files.truncate(max_files);
-    Ok(files)
-}
-
-struct SearchListingTraversal<'a> {
-    base_dir: &'a Dir,
-    max_files: usize,
-    is_cancelled: &'a dyn Fn() -> bool,
-}
-
-fn list_markdown_files_from_search_base_recursive(
-    traversal: &SearchListingTraversal<'_>,
-    current_relative: &Path,
-    display_relative: &Path,
-    files: &mut Vec<String>,
-    visited_dirs: &mut std::collections::HashSet<std::path::PathBuf>,
-    depth: usize,
-) -> std::io::Result<()> {
-    if (traversal.is_cancelled)() {
-        return Ok(());
-    }
-    if depth >= MAX_DIR_DEPTH {
-        tracing::warn!(
-            "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
-            log_safe_search_relative(&path_to_search_relative(display_relative))
-        );
-        return Ok(());
-    }
-
-    let entries = if current_relative.as_os_str().is_empty() {
-        traversal.base_dir.entries()?
-    } else {
-        traversal.base_dir.read_dir(current_relative)?
-    };
-    for entry in entries {
-        if (traversal.is_cancelled)() {
-            return Ok(());
-        }
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
-                    log_safe_search_relative(&path_to_search_relative(display_relative)),
-                    error
-                );
-                continue;
-            }
-        };
-
-        let name = entry.file_name();
-        if exclusion_reason_for_name(&name).is_some() {
-            continue;
-        }
-        let access_relative = current_relative.join(&name);
-        let display_entry = display_relative.join(&name);
-        let display_entry_relative = path_to_search_relative(&display_entry);
-        notify_search_listing_progress_for_test(&display_entry_relative);
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
-                    log_safe_search_relative(&display_entry_relative),
-                    error
-                );
-                continue;
-            }
-        };
-
-        if file_type.is_dir() || file_type.is_symlink() {
-            if files.len() >= traversal.max_files {
-                return Ok(());
-            }
-            let Some(traversal_relative) = resolve_search_recursable_directory(
-                traversal.base_dir,
-                &access_relative,
-                file_type.is_symlink(),
-            )?
-            else {
-                continue;
-            };
-            if !visited_dirs.insert(traversal_relative.clone()) {
-                continue;
-            }
-            list_markdown_files_from_search_base_recursive(
-                traversal,
-                &traversal_relative,
-                &display_entry,
-                files,
-                visited_dirs,
-                depth + 1,
-            )?;
-        } else if file_type.is_file()
-            && display_entry
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-        {
-            files.push(display_entry_relative);
-            if files.len() >= traversal.max_files {
-                return Ok(());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn resolve_search_recursable_directory(
-    base_dir: &Dir,
-    access_relative: &Path,
-    is_symlink: bool,
-) -> std::io::Result<Option<std::path::PathBuf>> {
-    let canonical_relative = match canonical_search_relative_dir(base_dir, access_relative) {
-        Ok(relative) => relative,
-        Err(error) if is_symlink => {
-            tracing::debug!(
-                "[markdown-view] シンボリックリンクディレクトリ解決失敗（スキップ）: {} ({})",
-                log_safe_search_relative(&path_to_search_relative(access_relative)),
-                error
-            );
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-
-    if is_symlink {
-        let metadata = match base_dir.metadata(&canonical_relative) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                tracing::debug!(
-                    "[markdown-view] シンボリックリンク先metadata取得失敗（スキップ）: {} ({})",
-                    log_safe_search_relative(&path_to_search_relative(access_relative)),
-                    error
-                );
-                return Ok(None);
-            }
-        };
-        if !metadata.is_dir() {
-            return Ok(None);
-        }
-    } else if canonical_relative != access_relative {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "通常ディレクトリの正規化先が走査前検証時と一致しません",
-        ));
-    }
-
-    Ok(Some(canonical_relative))
-}
-
-fn canonical_search_relative_dir(
-    base_dir: &Dir,
-    relative: &Path,
-) -> std::io::Result<std::path::PathBuf> {
-    let canonical_relative = base_dir.canonicalize(relative)?;
-    if canonical_relative.is_absolute()
-        || canonical_relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "検索対象ディレクトリがベースディレクトリ外を指しています",
-        ));
-    }
-    if exclusion_reason_for_relative_path(&canonical_relative).is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "検索対象ディレクトリが除外パスを指しています",
-        ));
-    }
-    Ok(canonical_relative)
 }
 
 fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
@@ -1227,6 +1061,7 @@ fn read_search_markdown_with_byte_budget(
     notify_search_after_canonicalize_for_test(relative);
     let file = open_search_file(base_dir, &canonical_relative)?;
     let metadata = file.metadata()?;
+    notify_search_after_metadata_for_test(relative);
     if !metadata.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1238,11 +1073,16 @@ fn read_search_markdown_with_byte_budget(
     }
 
     let file_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-    if searched_bytes.saturating_add(file_len) > max_bytes {
+    let remaining_bytes = max_bytes.saturating_sub(searched_bytes);
+    if file_len > remaining_bytes {
         return Ok(SearchMarkdownRead::ByteLimit);
     }
 
-    read_markdown_from_open_file(file).map(SearchMarkdownRead::Markdown)
+    let read_limit = u64::try_from(remaining_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+        .min(MAX_FILE_SIZE + 1);
+    read_markdown_from_open_file_with_byte_budget(file, read_limit, remaining_bytes)
 }
 
 #[cfg(test)]
@@ -1288,6 +1128,7 @@ fn open_search_file(base_dir: &Dir, relative: &Path) -> std::io::Result<CapFile>
     base_dir.open_with(relative, &options)
 }
 
+#[cfg(test)]
 fn read_markdown_from_open_file(file: impl Read) -> std::io::Result<String> {
     notify_search_markdown_read_for_test();
     let mut limited_reader = file.take(MAX_FILE_SIZE + 1);
@@ -1307,6 +1148,36 @@ fn read_markdown_from_open_file(file: impl Read) -> std::io::Result<String> {
             "ファイルがUTF-8テキストではありません",
         )
     })
+}
+
+fn read_markdown_from_open_file_with_byte_budget(
+    file: impl Read,
+    read_limit: u64,
+    remaining_bytes: usize,
+) -> std::io::Result<SearchMarkdownRead> {
+    notify_search_markdown_read_for_test();
+    let mut limited_reader = file.take(read_limit);
+    let mut buffer = Vec::new();
+    limited_reader.read_to_end(&mut buffer)?;
+    if buffer.len() as u64 > MAX_FILE_SIZE {
+        return Err(file_too_large_error());
+    }
+    if buffer.len() > remaining_bytes {
+        return Ok(SearchMarkdownRead::ByteLimit);
+    }
+
+    String::from_utf8(buffer)
+        .map(SearchMarkdownRead::Markdown)
+        .map_err(|error| {
+            tracing::warn!(
+                "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+                error.utf8_error().valid_up_to()
+            );
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ファイルがUTF-8テキストではありません",
+            )
+        })
 }
 
 fn file_too_large_error() -> std::io::Error {
@@ -3200,6 +3071,32 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, SearchMarkdownRead::ByteLimit));
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_metadata後に増えた本文も残り予算で打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.md");
+        std::fs::write(&path, "needle").unwrap();
+        let path_for_hook = path.clone();
+        let _guard = set_search_after_metadata_hook_for_test(move |relative| {
+            if relative == "growing.md" {
+                std::fs::write(&path_for_hook, "needle should not be fully read").unwrap();
+            }
+        });
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+        reset_search_markdown_read_count_for_test();
+
+        let result =
+            read_search_markdown_with_byte_budget(&base_dir, "growing.md", 0, "needle".len())
+                .unwrap();
+
+        assert!(matches!(result, SearchMarkdownRead::ByteLimit));
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "残り予算+1の限定読込でbyte-limitを検出する"
+        );
     }
 
     #[test]
