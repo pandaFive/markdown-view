@@ -3,10 +3,9 @@ use std::path::{Component, Path, PathBuf};
 
 use cap_std::fs::Dir;
 
+use crate::server::log_path::sanitize_path_for_logging_escaped;
 #[cfg(test)]
-use crate::server::log_path::{
-    sanitize_path_for_logging_escaped, sanitize_path_for_logging_lexical_escaped,
-};
+use crate::server::log_path::sanitize_path_for_logging_lexical_escaped;
 use crate::server::{CanonicalPath, CanonicalPathError};
 use crate::workspace_exclusion::{exclusion_reason_for_name, exclusion_reason_for_relative_path};
 
@@ -64,6 +63,10 @@ fn notify_catalog_progress_for_test(_display_path: &Path) {}
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
         CanonicalPathError::Canonicalize(error) | CanonicalPathError::Metadata(error) => error,
+        CanonicalPathError::UnsupportedIdentity => std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "このファイルシステムではパスの実体IDを取得できません",
+        ),
     })?;
     list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST)
 }
@@ -342,7 +345,7 @@ fn canonical_symlink_relative(
         tracing::warn!(
             "[markdown-view] ベースディレクトリ外を指すシンボリックリンク（スキップ）: {} -> {}",
             log_catalog_relative(display_path),
-            resolved.display()
+            sanitize_path_for_logging_escaped(&resolved, canonical_base_dir)
         );
         return Ok(None);
     }

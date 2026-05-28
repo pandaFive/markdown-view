@@ -55,6 +55,10 @@ impl PathIdentity {
             PathIdentity::Unknown => false,
         }
     }
+
+    fn is_supported(&self) -> bool {
+        matches!(self, PathIdentity::Known { .. })
+    }
 }
 
 #[cfg(unix)]
@@ -121,9 +125,13 @@ impl CanonicalPath {
             .canonicalize()
             .map_err(CanonicalPathError::Canonicalize)?;
         let metadata = std::fs::metadata(&canonical).map_err(CanonicalPathError::Metadata)?;
+        let identity = PathIdentity::from_metadata(&metadata);
+        if !identity.is_supported() {
+            return Err(CanonicalPathError::UnsupportedIdentity);
+        }
         Ok(Self {
             path: canonical,
-            identity: PathIdentity::from_metadata(&metadata),
+            identity,
         })
     }
 
@@ -134,6 +142,9 @@ impl CanonicalPath {
 
     /// 現在のパスが生成時と同じファイルシステム実体を指しているか確認する
     pub(crate) fn has_current_identity(&self) -> std::io::Result<bool> {
+        if !self.identity.is_supported() {
+            return Err(unsupported_identity_error());
+        }
         let metadata = std::fs::metadata(&self.path)?;
         Ok(self.identity.matches_metadata(&metadata))
     }
@@ -168,6 +179,8 @@ pub enum CanonicalPathError {
     Canonicalize(std::io::Error),
     /// メタデータ取得失敗
     Metadata(std::io::Error),
+    /// ファイルシステム実体IDを取得できない
+    UnsupportedIdentity,
 }
 
 impl std::fmt::Display for CanonicalPathError {
@@ -179,6 +192,9 @@ impl std::fmt::Display for CanonicalPathError {
             CanonicalPathError::Metadata(e) => {
                 write!(f, "パスのメタデータ取得に失敗しました: {}", e)
             }
+            CanonicalPathError::UnsupportedIdentity => {
+                write!(f, "このファイルシステムではパスの実体IDを取得できません")
+            }
         }
     }
 }
@@ -189,8 +205,16 @@ impl std::error::Error for CanonicalPathError {
             CanonicalPathError::Canonicalize(error) | CanonicalPathError::Metadata(error) => {
                 Some(error)
             }
+            CanonicalPathError::UnsupportedIdentity => None,
         }
     }
+}
+
+fn unsupported_identity_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "このファイルシステムではパスの実体IDを取得できません",
+    )
 }
 
 /// `AppMode` 構築エラー
@@ -726,6 +750,18 @@ mod tests {
             result,
             Err(AppModeBuildError::NotDirectory(path)) if path == canonical
         ));
+    }
+
+    #[test]
+    fn test_canonical_path_unknown_identityは明示的にunsupportedを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_path = CanonicalPath::unknown_identity_for_test(dir.path());
+
+        let error = canonical_path
+            .has_current_identity()
+            .expect_err("identity未取得状態は明示的なunsupportedとして扱う");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     }
 
     #[test]

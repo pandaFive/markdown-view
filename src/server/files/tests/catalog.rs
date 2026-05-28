@@ -96,6 +96,27 @@ fn test_list_markdown_files_from_canonical_base_ベース外symlinkディレク�
 #[test]
 #[cfg(unix)]
 #[tracing_test::traced_test]
+fn test_list_markdown_files_from_canonical_base_ベース外symlink先の絶対パスをログに出さない() {
+    use std::os::unix::fs::symlink;
+
+    let base = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_dir = outside.path().join("private-target");
+    std::fs::create_dir(&outside_dir).unwrap();
+    std::fs::write(outside_dir.join("secret.md"), "# secret").unwrap();
+    symlink(&outside_dir, base.path().join("linked")).unwrap();
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(files.is_empty());
+    assert!(logs_contain("<outside-base>/private-target"));
+    assert!(!logs_contain(&outside_dir.display().to_string()));
+}
+
+#[test]
+#[cfg(unix)]
+#[tracing_test::traced_test]
 fn test_list_markdown_files_from_canonical_base_ベース内symlinkはディレクトリだけ辿る() {
     use std::os::unix::fs::symlink;
 

@@ -24,7 +24,8 @@
 - UI 変更。
 - メトリクス基盤の追加。ファイル open 境界を capability-based API に寄せるための最小依存追加は許容する。
 - `pulldown-cmark` parser の全面逐次化。
-- Host/Origin 検証、path validation、HTML sanitization、CSP の変更。
+- Host/Origin 検証、HTML sanitization、CSP の変更。
+- path validation の public contract 変更。内部実装を base identity 検証と capability-based access に寄せることは許容するが、base 外、hidden、非 Markdown、symlink 差し替え拒否は弱めない。
 
 ## 測定設計
 
@@ -68,10 +69,10 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 
 測定で必要と判断した場合の実装は、`src/server/files/search.rs` の `search_directory_with_limits_blocking()` で、base directory capability から検索対象を開き、open 済み handle の metadata size と残り byte 予算を本文 `String` 構築前に比較することである。
 
-現状の流れは次の通りである。
+変更前の課題は次の通りである。
 
-1. `resolve_file()` で対象ファイルの相対パス契約を検証する。
-2. 解決済みの ambient path を `read_markdown_with_limit_blocking()` 相当で再度 open する。
+1. 対象ファイルの相対パス契約を検証する。
+2. 検証済みの ambient path を `read_markdown_with_limit_blocking()` 相当で再度 open する。
 3. `read_markdown_with_limit_blocking()` 相当の本文読込で本文を `String` に読み切る。
 4. `stats.searched_bytes + markdown.len() > limits.max_bytes` の場合、`byte_limit` で終了する。
 
@@ -114,7 +115,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
   - 検索関連 unit test
   - 必要なら `docs/todo/BACKLOG.md`
 
-`SearchResponse` JSON、HTTP route、UI、CSP、Host/Origin 検証、path validation、HTML sanitization、ブラウザ assets は変更しない。
+`SearchResponse` JSON、HTTP route、UI、CSP、Host/Origin 検証、path validation の public contract、HTML sanitization、ブラウザ assets は変更しない。path validation の内部実装は base identity 検証と capability-based access へ寄せる。
 
 ## エラー処理
 

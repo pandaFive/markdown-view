@@ -24,7 +24,7 @@
 
 ## Scope Check
 
-この plan は単一サブシステム、ディレクトリ検索 byte-limit 経路だけを扱う。検索 API の JSON shape、検索結果の意味、UI、Host/Origin 検証、path validation、HTML sanitization、CSP、検索インデックス、parser 全面逐次化は扱わない。
+この plan は単一サブシステム、ディレクトリ検索 byte-limit 経路だけを扱う。検索 API の JSON shape、検索結果の意味、UI、Host/Origin 検証、path validation の public contract、HTML sanitization、CSP、検索インデックス、parser 全面逐次化は扱わない。内部実装を base identity 検証と capability-based access に寄せる場合も、base 外、hidden、非 Markdown、symlink 差し替え拒否は弱めない。
 
 測定だけで plateau が許容できると判断できた場合は Task 4 から Task 6 へ進み、Task 5 のコード変更は実行しない。plateau しない、または byte-limit 超過候補ファイル読込の peak RSS が明確に大きい場合だけ Task 5 を実行する。
 
@@ -547,7 +547,7 @@ In `src/server/files/search.rs`, add a helper after `log_search_cancelled()` tha
 
 - [ ] **Step 4: Use the helper before building the Markdown String**
 
-In `search_directory_with_limits_blocking()`, keep `resolve_file()` as the relative-path validation step, then call the capability-based helper. If it returns byte-limit, re-check cancellation before marking `SearchTruncationReason::Byte`; if it returns a Markdown `String`, continue through the existing search flow; if it returns an error, log and increment `skipped_files`.
+In `search_directory_with_limits_blocking()`, use the verified base directory capability and pass each listed relative path to the capability-based helper. The helper performs canonical relative validation and NoFollow open before reading. If it returns byte-limit, re-check cancellation before marking `SearchTruncationReason::Byte`; if it returns a Markdown `String`, continue through the existing search flow; if it returns an error, log and increment `skipped_files`.
 
 Keep the existing post-read check:
 
