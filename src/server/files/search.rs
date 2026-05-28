@@ -7,12 +7,11 @@ use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tokio::sync::OwnedSemaphorePermit;
 
-use super::catalog::list_markdown_files_from_canonical_base_until_cancelled;
+use super::catalog::MAX_DIR_DEPTH;
 use super::content::MAX_FILE_SIZE;
-use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
 use crate::server::{CanonicalPath, SearchGeneration};
-use crate::workspace_exclusion::exclusion_reason_for_relative_path;
+use crate::workspace_exclusion::{exclusion_reason_for_name, exclusion_reason_for_relative_path};
 
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
@@ -28,16 +27,35 @@ const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 type SearchProgressHook = std::sync::Arc<dyn Fn(&str, usize) + Send + Sync + 'static>;
 
 #[cfg(test)]
+type SearchListingProgressHook = std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
+
+#[cfg(test)]
 static SEARCH_PROGRESS_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<SearchProgressHook>>> =
     std::sync::OnceLock::new();
+
+#[cfg(test)]
+static SEARCH_LISTING_PROGRESS_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<SearchListingProgressHook>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 pub(in crate::server) struct SearchProgressHookGuard;
 
 #[cfg(test)]
+pub(in crate::server) struct SearchListingProgressHookGuard;
+
+#[cfg(test)]
 impl Drop for SearchProgressHookGuard {
     fn drop(&mut self) {
         let hook = SEARCH_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+impl Drop for SearchListingProgressHookGuard {
+    fn drop(&mut self) {
+        let hook = SEARCH_LISTING_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
         *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
@@ -49,6 +67,15 @@ pub(in crate::server) fn set_search_progress_hook_for_test(
     let slot = SEARCH_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     SearchProgressHookGuard
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_search_listing_progress_hook_for_test(
+    hook: SearchListingProgressHook,
+) -> SearchListingProgressHookGuard {
+    let slot = SEARCH_LISTING_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    SearchListingProgressHookGuard
 }
 
 #[cfg(test)]
@@ -65,6 +92,21 @@ fn notify_search_progress_for_test(relative: &str, searched_files: usize) {
 
 #[cfg(not(test))]
 fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
+
+#[cfg(test)]
+fn notify_search_listing_progress_for_test(relative: &str) {
+    let hook = SEARCH_LISTING_PROGRESS_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(relative);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_search_listing_progress_for_test(_relative: &str) {}
 
 #[cfg(test)]
 type SearchContextBuildHook = Box<dyn FnMut(usize)>;
@@ -85,6 +127,12 @@ type SearchAfterResolveHook = Box<dyn FnMut(&str)>;
 type SearchAfterCanonicalizeHook = Box<dyn FnMut(&str)>;
 
 #[cfg(test)]
+type SearchAfterBaseIdentityValidationHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
+type SearchAfterByteLimitHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
 std::thread_local! {
     static SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_CONTEXT_BUILD_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchContextBuildHook>> =
@@ -100,6 +148,10 @@ std::thread_local! {
     static SEARCH_AFTER_RESOLVE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterResolveHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_AFTER_CANONICALIZE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterCanonicalizeHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterBaseIdentityValidationHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterByteLimitHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_MARKDOWN_READ_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -251,6 +303,74 @@ fn notify_search_before_response_for_test() {
 
 #[cfg(not(test))]
 fn notify_search_before_response_for_test() {}
+
+#[cfg(test)]
+struct SearchAfterBaseIdentityValidationHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterBaseIdentityValidationHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_base_identity_validation_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchAfterBaseIdentityValidationHookGuard {
+    SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterBaseIdentityValidationHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_base_identity_validation_for_test() {
+    SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_base_identity_validation_for_test() {}
+
+#[cfg(test)]
+struct SearchAfterByteLimitHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterByteLimitHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_byte_limit_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchAfterByteLimitHookGuard {
+    SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterByteLimitHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_byte_limit_for_test() {
+    SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_byte_limit_for_test() {}
 
 #[cfg(test)]
 struct SearchAfterResolveHookGuard;
@@ -704,15 +824,15 @@ fn search_directory_with_limits_blocking(
         ));
     }
 
-    validate_search_base_identity(base_dir)?;
+    let search_base_dir = open_verified_search_base_dir(base_dir)?;
+    notify_search_after_base_identity_validation_for_test();
+    validate_search_base_path_identity(base_dir)?;
 
-    let files = list_markdown_files_from_canonical_base_until_cancelled(
-        base_dir,
+    let files = list_markdown_files_from_search_base_until_cancelled(
+        &search_base_dir,
         limits.max_files.saturating_add(1),
         &|| cancellation.is_cancelled(),
     )?;
-    let base_path = base_dir.as_path();
-    let search_base_dir = Dir::open_ambient_dir(base_path, cap_std::ambient_authority())?;
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
     let mut read_files = 0usize;
@@ -734,17 +854,7 @@ fn search_directory_with_limits_blocking(
             break;
         }
 
-        if let Err(error) = resolve_file(base_path, &relative) {
-            tracing::warn!(
-                "[markdown-view] 検索対象ファイル解決失敗（スキップ）: {} ({})",
-                log_safe_search_relative(&relative),
-                error
-            );
-            stats.skipped_files += 1;
-            continue;
-        }
         notify_search_after_resolve_for_test(&relative);
-
         let markdown = match read_search_markdown_with_byte_budget(
             &search_base_dir,
             &relative,
@@ -752,6 +862,7 @@ fn search_directory_with_limits_blocking(
             limits.max_bytes,
         ) {
             Ok(SearchMarkdownRead::ByteLimit) => {
+                notify_search_after_byte_limit_for_test();
                 if cancellation.is_cancelled() {
                     results.clear();
                     break;
@@ -841,9 +952,11 @@ fn search_directory_with_limits_blocking(
     Ok(SearchResponse::from_parts(query, results, limits, stats))
 }
 
-fn validate_search_base_identity(base_dir: &CanonicalPath) -> std::io::Result<()> {
-    if base_dir.has_current_identity()? {
-        return Ok(());
+fn open_verified_search_base_dir(base_dir: &CanonicalPath) -> std::io::Result<Dir> {
+    let search_base_dir = Dir::open_ambient_dir(base_dir.as_path(), cap_std::ambient_authority())?;
+    let metadata = search_base_dir.dir_metadata()?;
+    if base_dir.matches_cap_metadata_identity(&metadata) {
+        return Ok(search_base_dir);
     }
 
     tracing::warn!("[markdown-view] 検索base directoryの実体差し替えを検出しました");
@@ -851,6 +964,216 @@ fn validate_search_base_identity(base_dir: &CanonicalPath) -> std::io::Result<()
         std::io::ErrorKind::PermissionDenied,
         "検索base directoryが起動時と異なります",
     ))
+}
+
+fn validate_search_base_path_identity(base_dir: &CanonicalPath) -> std::io::Result<()> {
+    if base_dir.has_current_identity()? {
+        return Ok(());
+    }
+
+    tracing::warn!("[markdown-view] 検索base directory pathの実体差し替えを検出しました");
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "検索base directory pathが起動時と異なります",
+    ))
+}
+
+fn list_markdown_files_from_search_base_until_cancelled(
+    base_dir: &Dir,
+    max_files: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> std::io::Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut visited_dirs = std::collections::HashSet::new();
+    visited_dirs.insert(Path::new("").to_path_buf());
+    let traversal = SearchListingTraversal {
+        base_dir,
+        max_files,
+        is_cancelled,
+    };
+
+    list_markdown_files_from_search_base_recursive(
+        &traversal,
+        Path::new(""),
+        Path::new(""),
+        &mut files,
+        &mut visited_dirs,
+        0,
+    )?;
+    files.sort();
+    files.truncate(max_files);
+    Ok(files)
+}
+
+struct SearchListingTraversal<'a> {
+    base_dir: &'a Dir,
+    max_files: usize,
+    is_cancelled: &'a dyn Fn() -> bool,
+}
+
+fn list_markdown_files_from_search_base_recursive(
+    traversal: &SearchListingTraversal<'_>,
+    current_relative: &Path,
+    display_relative: &Path,
+    files: &mut Vec<String>,
+    visited_dirs: &mut std::collections::HashSet<std::path::PathBuf>,
+    depth: usize,
+) -> std::io::Result<()> {
+    if (traversal.is_cancelled)() {
+        return Ok(());
+    }
+    if depth >= MAX_DIR_DEPTH {
+        tracing::warn!(
+            "[markdown-view] ディレクトリ深度上限に到達（スキップ）: {}",
+            log_safe_search_relative(&path_to_search_relative(display_relative))
+        );
+        return Ok(());
+    }
+
+    let entries = if current_relative.as_os_str().is_empty() {
+        traversal.base_dir.entries()?
+    } else {
+        traversal.base_dir.read_dir(current_relative)?
+    };
+    for entry in entries {
+        if (traversal.is_cancelled)() {
+            return Ok(());
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] ディレクトリエントリ読み取りエラー（スキップ）: {} ({})",
+                    log_safe_search_relative(&path_to_search_relative(display_relative)),
+                    error
+                );
+                continue;
+            }
+        };
+
+        let name = entry.file_name();
+        if exclusion_reason_for_name(&name).is_some() {
+            continue;
+        }
+        let access_relative = current_relative.join(&name);
+        let display_entry = display_relative.join(&name);
+        let display_entry_relative = path_to_search_relative(&display_entry);
+        notify_search_listing_progress_for_test(&display_entry_relative);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(
+                    "[markdown-view] ファイルタイプ取得エラー（スキップ）: {} ({})",
+                    log_safe_search_relative(&display_entry_relative),
+                    error
+                );
+                continue;
+            }
+        };
+
+        if file_type.is_dir() || file_type.is_symlink() {
+            if files.len() >= traversal.max_files {
+                return Ok(());
+            }
+            let Some(traversal_relative) = resolve_search_recursable_directory(
+                traversal.base_dir,
+                &access_relative,
+                file_type.is_symlink(),
+            )?
+            else {
+                continue;
+            };
+            if !visited_dirs.insert(traversal_relative.clone()) {
+                continue;
+            }
+            list_markdown_files_from_search_base_recursive(
+                traversal,
+                &traversal_relative,
+                &display_entry,
+                files,
+                visited_dirs,
+                depth + 1,
+            )?;
+        } else if file_type.is_file()
+            && display_entry
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            files.push(display_entry_relative);
+            if files.len() >= traversal.max_files {
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_search_recursable_directory(
+    base_dir: &Dir,
+    access_relative: &Path,
+    is_symlink: bool,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let canonical_relative = match canonical_search_relative_dir(base_dir, access_relative) {
+        Ok(relative) => relative,
+        Err(error) if is_symlink => {
+            tracing::debug!(
+                "[markdown-view] シンボリックリンクディレクトリ解決失敗（スキップ）: {} ({})",
+                log_safe_search_relative(&path_to_search_relative(access_relative)),
+                error
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    if is_symlink {
+        let metadata = match base_dir.metadata(&canonical_relative) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(
+                    "[markdown-view] シンボリックリンク先metadata取得失敗（スキップ）: {} ({})",
+                    log_safe_search_relative(&path_to_search_relative(access_relative)),
+                    error
+                );
+                return Ok(None);
+            }
+        };
+        if !metadata.is_dir() {
+            return Ok(None);
+        }
+    } else if canonical_relative != access_relative {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "通常ディレクトリの正規化先が走査前検証時と一致しません",
+        ));
+    }
+
+    Ok(Some(canonical_relative))
+}
+
+fn canonical_search_relative_dir(
+    base_dir: &Dir,
+    relative: &Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let canonical_relative = base_dir.canonicalize(relative)?;
+    if canonical_relative.is_absolute()
+        || canonical_relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象ディレクトリがベースディレクトリ外を指しています",
+        ));
+    }
+    if exclusion_reason_for_relative_path(&canonical_relative).is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象ディレクトリが除外パスを指しています",
+        ));
+    }
+    Ok(canonical_relative)
 }
 
 fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
@@ -871,6 +1194,17 @@ fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
 
 fn log_safe_search_relative(relative: &str) -> String {
     relative.escape_debug().to_string()
+}
+
+fn path_to_search_relative(path: &Path) -> String {
+    let mut output = String::new();
+    for component in path.components() {
+        if !output.is_empty() {
+            output.push('/');
+        }
+        output.push_str(&component.as_os_str().to_string_lossy());
+    }
+    output
 }
 
 fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: usize) {
@@ -2276,6 +2610,61 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_base検証後の実体差し替えを拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("a.md"), "old needle").unwrap();
+        let canonical = canonical_of(&base);
+
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("a.md"), "new needle").unwrap();
+        let base_for_hook = base.clone();
+        let replacement_for_hook = replacement.clone();
+        let _guard = set_search_after_base_identity_validation_hook_for_test(move || {
+            std::fs::remove_dir_all(&base_for_hook).unwrap();
+            std::fs::rename(&replacement_for_hook, &base_for_hook).unwrap();
+        });
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("base directory検証後の実体差し替えも拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn test_search_directory_base_identity不明なら拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        let canonical = CanonicalPath::unknown_identity_for_test(dir.path());
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("identityを取得できないbase directory検索は拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
     #[test]
     fn test_search_directory_test用ファイル数limitは結果を破棄せず後続ファイルへ進まない() {
         let dir = tempfile::tempdir().unwrap();
@@ -3008,7 +3397,7 @@ mod tests {
         let current = Arc::new(AtomicU64::new(1));
         let generation = SearchGeneration::new(1, Arc::clone(&current));
         let cancellation = SearchCancellation::new(generation);
-        let _guard = set_search_before_response_hook_for_test(move || {
+        let _guard = set_search_after_byte_limit_hook_for_test(move || {
             current.store(2, Ordering::Release);
         });
 

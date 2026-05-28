@@ -21,6 +21,7 @@ static CATALOG_PROGRESS_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<Catalo
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(in crate::server) struct CatalogProgressHookGuard;
 
 #[cfg(test)]
@@ -32,6 +33,7 @@ impl Drop for CatalogProgressHookGuard {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(in crate::server) fn set_catalog_progress_hook_for_test(
     hook: CatalogProgressHook,
 ) -> CatalogProgressHookGuard {

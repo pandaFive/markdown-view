@@ -38,10 +38,21 @@ impl PathIdentity {
         identity_from_metadata(metadata)
     }
 
+    fn from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> Self {
+        identity_from_cap_metadata(metadata)
+    }
+
     fn matches_metadata(&self, metadata: &std::fs::Metadata) -> bool {
         match self {
             PathIdentity::Known { .. } => self == &Self::from_metadata(metadata),
-            PathIdentity::Unknown => true,
+            PathIdentity::Unknown => false,
+        }
+    }
+
+    fn matches_cap_metadata(&self, metadata: &cap_primitives::fs::Metadata) -> bool {
+        match self {
+            PathIdentity::Known { .. } => self == &Self::from_cap_metadata(metadata),
+            PathIdentity::Unknown => false,
         }
     }
 }
@@ -49,6 +60,16 @@ impl PathIdentity {
 #[cfg(unix)]
 fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
     use std::os::unix::fs::MetadataExt;
+
+    PathIdentity::Known {
+        device: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn identity_from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> PathIdentity {
+    use cap_primitives::fs::MetadataExt;
 
     PathIdentity::Known {
         device: metadata.dev(),
@@ -69,8 +90,26 @@ fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
     }
 }
 
+#[cfg(windows)]
+fn identity_from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> PathIdentity {
+    use cap_primitives::fs::MetadataExt;
+
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => PathIdentity::Known {
+            device: u64::from(volume),
+            file: index,
+        },
+        _ => PathIdentity::Unknown,
+    }
+}
+
 #[cfg(not(any(unix, windows)))]
 fn identity_from_metadata(_: &std::fs::Metadata) -> PathIdentity {
+    PathIdentity::Unknown
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity_from_cap_metadata(_: &cap_primitives::fs::Metadata) -> PathIdentity {
     PathIdentity::Unknown
 }
 
@@ -97,6 +136,22 @@ impl CanonicalPath {
     pub(crate) fn has_current_identity(&self) -> std::io::Result<bool> {
         let metadata = std::fs::metadata(&self.path)?;
         Ok(self.identity.matches_metadata(&metadata))
+    }
+
+    /// 指定されたcapability metadataが生成時と同じファイルシステム実体を指しているか確認する
+    pub(crate) fn matches_cap_metadata_identity(
+        &self,
+        metadata: &cap_primitives::fs::Metadata,
+    ) -> bool {
+        self.identity.matches_cap_metadata(metadata)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unknown_identity_for_test(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().canonicalize().unwrap(),
+            identity: PathIdentity::Unknown,
+        }
     }
 }
 

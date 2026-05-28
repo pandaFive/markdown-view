@@ -302,8 +302,8 @@ mod tests {
     use tokio::sync::{broadcast, Mutex, MutexGuard};
 
     use crate::server::files::{
-        set_catalog_progress_hook_for_test, set_search_progress_hook_for_test, MockMemoFs, Op,
-        RouteTargetKind,
+        set_search_listing_progress_hook_for_test, set_search_progress_hook_for_test, MockMemoFs,
+        Op, RouteTargetKind,
     };
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
@@ -798,12 +798,11 @@ mod tests {
         }
         let state = Arc::new(create_directory_state(dir.path()));
         let fired = Arc::new(AtomicBool::new(false));
-        let base_dir = dir.path().to_path_buf();
-        let _hook = set_catalog_progress_hook_for_test({
+        let _hook = set_search_listing_progress_hook_for_test({
             let state = Arc::clone(&state);
             let fired = Arc::clone(&fired);
-            Arc::new(move |display_path| {
-                if display_path.starts_with(&base_dir) && !fired.swap(true, Ordering::SeqCst) {
+            Arc::new(move |relative| {
+                if relative == "note-00.md" && !fired.swap(true, Ordering::SeqCst) {
                     state.begin_search_generation("client-a", None).unwrap();
                 }
             })
