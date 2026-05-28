@@ -242,12 +242,14 @@ Run:
 
 ```bash
 test -n "${SEARCH_FIXTURE_DIR:-}"
-cargo run -- "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3026 &
+cargo build
+target/debug/markdown-view "$SEARCH_FIXTURE_DIR/near-64m-many-files" --port 3026 &
 export MARKDOWN_VIEW_SERVER_PID=$!
 printf 'MARKDOWN_VIEW_SERVER_PID=%s\n' "$MARKDOWN_VIEW_SERVER_PID"
+ps -o pid=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
 
-Expected: server starts and binds to `127.0.0.1:3026`. If measuring from another terminal/session, copy the printed PID and run `export MARKDOWN_VIEW_SERVER_PID=<pid>` in the measuring shell before calling `measure_search_run`.
+Expected: server starts and binds to `127.0.0.1:3026`, and `comm` is `markdown-view`. If measuring from another terminal/session, copy the printed PID and run `export MARKDOWN_VIEW_SERVER_PID=<pid>` in the measuring shell before calling `measure_search_run`.
 
 - [ ] **Step 4: Run near-64m debug cold request with RSS sampling**
 
@@ -304,9 +306,13 @@ Expected: no output.
 Start:
 
 ```bash
-cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3027 &
+cargo build
+target/debug/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3027 &
 export MARKDOWN_VIEW_SERVER_PID=$!
+ps -o pid=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
+
+Expected: `comm` is `markdown-view`.
 
 Run in the measuring shell:
 
@@ -606,9 +612,12 @@ If Task 5 was executed, run these commands for the overshoot fixture after rebui
 
 ```bash
 cargo build
-cargo run -- "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3030 &
+target/debug/markdown-view "$SEARCH_FIXTURE_DIR/overshoot-file" --port 3030 &
 export MARKDOWN_VIEW_SERVER_PID=$!
+ps -o pid=,comm= -p "$MARKDOWN_VIEW_SERVER_PID"
 ```
+
+Expected: `comm` is `markdown-view`.
 
 In the measuring shell:
 
