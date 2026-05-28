@@ -1208,6 +1208,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_files_走査上限到達は不完全一覧を返さずエラーにする() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..20 {
+            std::fs::write(dir.path().join(format!("skip-{index:02}.txt")), "skip").unwrap();
+        }
+        let state = create_directory_state(dir.path());
+        let _guard = crate::server::files::set_catalog_limits_for_test(5, 100);
+
+        let error = list_files(&state)
+            .await
+            .expect_err("走査上限で不完全な一覧になった場合は成功扱いにしない");
+
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn test_list_files_単一ファイルモードでは空配列を返す() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("note.md");

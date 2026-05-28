@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status:** Executed in branch `docs/byte-limit-plateau-design`; retained as a historical plan. The checkboxes below are the original execution checklist, not current open work.
+
 **Goal:** 64MiB byte-limit 近傍検索の RSS peak / after / settled を測定し、必要な場合は byte-limit 超過候補ファイルを本文読込前に打ち切る。
 
 **Architecture:** まず `/tmp` fixture と対象 server PID の短周期 RSS sampling で dev / release、cold / warm、peak / after / settled を分けて測定する。測定で必要性が確認できたら、`search_directory_with_limits_blocking()` に metadata ベースの読込前 byte-budget 判定を追加し、読んだファイルだけを `searched_files` / `searched_bytes` に含める既存契約を維持する。
@@ -495,7 +497,7 @@ fn notify_search_markdown_read_for_test() {
 fn notify_search_markdown_read_for_test() {}
 ```
 
-Then add the notify call as the first line in `read_markdown_with_limit_blocking()`:
+Then add the notify call at the entry point that reads Markdown bytes for search, before metadata or file open work that counts as a read attempt:
 
 ```rust
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {

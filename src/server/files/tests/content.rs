@@ -172,6 +172,36 @@ async fn test_load_route_update_解決後base差し替えでも差し替え後�
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn test_load_route_update_単一ファイル解決後差し替えでも差し替え後本文を読まない() {
+    let parent = tempfile::tempdir().unwrap();
+    let note = parent.path().join("note.md");
+    let secret = parent.path().join("secret.md");
+    std::fs::write(&note, "# harmless").unwrap();
+    std::fs::write(&secret, "# secret").unwrap();
+    let state = create_single_file_state(&note);
+
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
+    let note_for_hook = note.clone();
+    let secret_for_hook = secret.clone();
+    let _guard = set_content_before_read_hook_for_test(std::sync::Arc::new(move |file_path| {
+        if file_path.ends_with("note.md") {
+            std::fs::remove_file(&note_for_hook).unwrap();
+            std::os::unix::fs::symlink(&secret_for_hook, &note_for_hook).unwrap();
+        }
+    }));
+
+    let update = load_route_update(&target, RouteTargetRequest::page(None))
+        .await
+        .expect("単一ファイルtargetも解決時の実体から読む");
+
+    assert!(update.content().as_str().contains("harmless"));
+    assert!(!update.content().as_str().contains("secret"));
+}
+
+#[tokio::test]
 async fn test_resolve_route_target_api_memoはfile_listを含まない() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());
@@ -225,7 +255,7 @@ async fn test_resolve_route_target_page_queryなしではreadme不在時に先�
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_load_route_update_ioエラーを500へ変換する() {
+async fn test_load_route_update_単一ファイル解決後削除でも解決時本文を読む() {
     let (_dir, file_path) = create_markdown_fixture("test.md", "# title");
     let state = create_single_file_state(&file_path);
     let target = resolve_route_target(&state, RouteTargetRequest::page(None))
@@ -233,13 +263,11 @@ async fn test_load_route_update_ioエラーを500へ変換する() {
         .unwrap();
     std::fs::remove_file(&file_path).unwrap();
 
-    let (status, body) = load_route_update(&target, RouteTargetRequest::page(None))
+    let update = load_route_update(&target, RouteTargetRequest::page(None))
         .await
-        .expect_err("missing file should map to api error");
+        .expect("解決済みtargetはpath削除後も解決時のfile handleから読む");
 
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(json["error"], "ファイルの読み込みに失敗しました");
+    assert!(update.content().as_str().contains("title"));
 }
 
 #[tokio::test]

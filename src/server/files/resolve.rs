@@ -191,11 +191,12 @@ pub(super) fn resolve_single_file_target(
     };
 
     let validated_path = revalidate_single_file_target(file_path, state.mode().base_dir())?;
+    let read_file = open_single_file_for_read(file_path)?;
     Ok(Some(build_resolved_target(
         state,
         validated_path,
         None,
-        None,
+        Some(read_file),
         warn_label,
     )))
 }
@@ -206,11 +207,12 @@ pub(super) fn resolve_change_target(
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
     if let Some(expected) = state.mode().single_file() {
         let validated_path = revalidate_single_file_target(expected, state.mode().base_dir())?;
+        let read_file = open_single_file_for_read(expected)?;
         return Ok(Some(build_resolved_target(
             state,
             validated_path,
             None,
-            None,
+            Some(read_file),
             "更新対象の相対パス算出失敗",
         )));
     }
@@ -228,7 +230,11 @@ async fn resolve_request_target(
                 tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
                 error.status_code()
             })?;
-        return Ok((canonical, None, None));
+        let read_file = open_single_file_for_read(path).map_err(|error| {
+            tracing::warn!("[markdown-view] 単一ファイルopen検証エラー: {}", error);
+            error.status_code()
+        })?;
+        return Ok((canonical, None, Some(read_file)));
     }
 
     let Some(base_dir) = state.mode().directory_canonical() else {
@@ -302,17 +308,7 @@ async fn resolve_file_blocking(
     let base_dir = base_dir.clone();
     let relative = relative.to_owned();
     run_blocking_file_task("ファイル解決", move || {
-        validate_directory_base_identity_for_resolve(&base_dir)?;
-        let path = resolve_file(base_dir.as_path(), &relative)?;
-        let relative_path = path
-            .strip_prefix(base_dir.as_path())
-            .map_err(|_| ResolveFileError::Traversal)?;
-        let verified_base = open_verified_base_dir(&base_dir, "ファイル解決base directory")
-            .map_err(|error| ResolveFileError::Io(error.kind()))?;
-        let file = open_relative_file_nofollow(&verified_base, relative_path)
-            .map_err(|error| ResolveFileError::Io(error.kind()))?
-            .into_std();
-        Ok(ResolvedFileHandle { path, file })
+        resolve_file_from_canonical_base(&base_dir, &relative)
     })
     .await
 }
@@ -321,6 +317,65 @@ async fn resolve_file_blocking(
 struct ResolvedFileHandle {
     path: PathBuf,
     file: std::fs::File,
+}
+
+fn resolve_file_from_canonical_base(
+    base_dir: &CanonicalPath,
+    relative: &str,
+) -> Result<ResolvedFileHandle, ResolveFileError> {
+    validate_directory_base_identity_for_resolve(base_dir)?;
+    let path = resolve_file(base_dir.as_path(), relative)?;
+    let relative_path = path
+        .strip_prefix(base_dir.as_path())
+        .map_err(|_| ResolveFileError::Traversal)?;
+    let verified_base = open_verified_base_dir(base_dir, "ファイル解決base directory")
+        .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    let file = match open_relative_file_nofollow(&verified_base, relative_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    if !metadata.is_file() {
+        return Err(ResolveFileError::NotFile);
+    }
+    Ok(ResolvedFileHandle {
+        path,
+        file: file.into_std(),
+    })
+}
+
+fn open_single_file_for_read(path: &Path) -> Result<std::fs::File, ResolveFileError> {
+    let parent = path.parent().ok_or(ResolveFileError::InvalidPath)?;
+    let file_name = path.file_name().ok_or(ResolveFileError::InvalidPath)?;
+    let parent_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    let file = match open_relative_file_nofollow(&parent_dir, Path::new(file_name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    if !metadata.is_file() {
+        return Err(ResolveFileError::NotFile);
+    }
+    Ok(file.into_std())
 }
 
 fn validate_directory_base_identity_for_resolve(
@@ -339,7 +394,11 @@ fn validate_directory_base_identity_for_resolve(
                 "[markdown-view] ファイル解決base directory pathの実体検証に失敗しました: {}",
                 error
             );
-            Err(ResolveFileError::Io(error.kind()))
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Err(ResolveFileError::NotFound)
+            } else {
+                Err(ResolveFileError::Io(error.kind()))
+            }
         }
     }
 }
@@ -372,19 +431,19 @@ fn resolve_directory_change_target(
     state: &AppState,
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    let Some(base_dir) = state.mode().directory() else {
+    let Some(base_dir) = state.mode().directory_canonical() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
         return Err(ResolveFileError::InternalState);
     };
 
-    let relative = relative_change_path(base_dir, changed_file)?;
+    let relative = relative_change_path(base_dir.as_path(), changed_file)?;
     let relative_string = relative_change_path_to_query(&relative)?;
-    let validated_path = resolve_file_for_directory_change(base_dir, &relative_string)?;
+    let resolved = resolve_file_from_canonical_base(base_dir, &relative_string)?;
     Ok(Some(build_resolved_target(
         state,
-        validated_path,
+        resolved.path,
         None,
-        None,
+        Some(resolved.file),
         "更新対象の相対パス算出失敗",
     )))
 }
@@ -443,13 +502,6 @@ fn resolve_canonicalize_error(error_kind: std::io::ErrorKind) -> ResolveFileErro
 
 /// 相対パスを安全に解決する（ディレクトリトラバーサル防止）
 pub fn resolve_file(base_dir: &Path, relative: &str) -> Result<PathBuf, ResolveFileError> {
-    resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
-}
-
-fn resolve_file_for_directory_change(
-    base_dir: &Path,
-    relative: &str,
-) -> Result<PathBuf, ResolveFileError> {
     resolve_file_with_canonicalize_error(base_dir, relative, resolve_canonicalize_error)
 }
 

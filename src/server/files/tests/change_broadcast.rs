@@ -103,6 +103,40 @@ async fn test_build_change_broadcast_message_unixのbackslashファイル名をu
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn test_build_change_broadcast_message_解決後差し替えでも差し替え後本文をbroadcastしない() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("note.md");
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&target, "# harmless").unwrap();
+    std::fs::write(&secret, "# secret").unwrap();
+    let state = create_directory_state(dir.path());
+    let target_for_hook = target.clone();
+    let secret_for_hook = secret.clone();
+    let _guard = crate::server::files::set_content_before_read_hook_for_test(std::sync::Arc::new(
+        move |file_path| {
+            if file_path.ends_with("note.md") {
+                std::fs::remove_file(&target_for_hook).unwrap();
+                std::os::unix::fs::symlink(&secret_for_hook, &target_for_hook).unwrap();
+            }
+        },
+    ));
+
+    let message = build_change_broadcast_message(&state, &target)
+        .await
+        .expect("解決済み変更targetは解決時の実体から読む");
+
+    match message {
+        BroadcastMessage::Update(update) => {
+            assert!(update.content().as_str().contains("harmless"));
+            assert!(!update.content().as_str().contains("secret"));
+        }
+        other => panic!("Updateを期待したが {:?} を受信", other),
+    }
+}
+
+#[tokio::test]
 async fn test_build_change_broadcast_message_隠しパスは検証エラーをbroadcastする() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());

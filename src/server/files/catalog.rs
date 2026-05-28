@@ -42,14 +42,44 @@ static CATALOG_AFTER_CANONICALIZE_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
+static CATALOG_LIMITS_FOR_TEST: std::sync::OnceLock<std::sync::Mutex<Option<(usize, usize)>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+static CATALOG_TEST_OVERRIDE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+type CatalogTestOverrideLockGuard = std::sync::MutexGuard<'static, ()>;
+
+#[cfg(test)]
 #[allow(dead_code)]
-pub(in crate::server) struct CatalogProgressHookGuard;
+pub(in crate::server) struct CatalogProgressHookGuard {
+    _lock: CatalogTestOverrideLockGuard,
+}
 
 #[cfg(test)]
-pub(in crate::server) struct CatalogBeforeRecurseHookGuard;
+pub(in crate::server) struct CatalogBeforeRecurseHookGuard {
+    _lock: CatalogTestOverrideLockGuard,
+}
 
 #[cfg(test)]
-pub(in crate::server) struct CatalogAfterCanonicalizeHookGuard;
+pub(in crate::server) struct CatalogAfterCanonicalizeHookGuard {
+    _lock: CatalogTestOverrideLockGuard,
+}
+
+#[cfg(test)]
+pub(in crate::server) struct CatalogLimitsGuard {
+    _lock: CatalogTestOverrideLockGuard,
+}
+
+#[cfg(test)]
+fn lock_catalog_test_override() -> CatalogTestOverrideLockGuard {
+    CATALOG_TEST_OVERRIDE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[cfg(test)]
 impl Drop for CatalogProgressHookGuard {
@@ -76,31 +106,68 @@ impl Drop for CatalogAfterCanonicalizeHookGuard {
 }
 
 #[cfg(test)]
+impl Drop for CatalogLimitsGuard {
+    fn drop(&mut self) {
+        let limits = CATALOG_LIMITS_FOR_TEST.get_or_init(|| std::sync::Mutex::new(None));
+        *limits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_catalog_limits_for_test(
+    max_entries: usize,
+    max_dirs: usize,
+) -> CatalogLimitsGuard {
+    let lock = lock_catalog_test_override();
+    let slot = CATALOG_LIMITS_FOR_TEST.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((max_entries, max_dirs));
+    CatalogLimitsGuard { _lock: lock }
+}
+
+#[cfg(test)]
+fn catalog_limits_for_test() -> Option<(usize, usize)> {
+    *CATALOG_LIMITS_FOR_TEST
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(not(test))]
+fn catalog_limits_for_test() -> Option<(usize, usize)> {
+    None
+}
+
+#[cfg(test)]
 #[allow(dead_code)]
 pub(in crate::server) fn set_catalog_progress_hook_for_test(
     hook: CatalogProgressHook,
 ) -> CatalogProgressHookGuard {
+    let lock = lock_catalog_test_override();
     let slot = CATALOG_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
-    CatalogProgressHookGuard
+    CatalogProgressHookGuard { _lock: lock }
 }
 
 #[cfg(test)]
 pub(in crate::server) fn set_catalog_before_recurse_hook_for_test(
     hook: CatalogBeforeRecurseHook,
 ) -> CatalogBeforeRecurseHookGuard {
+    let lock = lock_catalog_test_override();
     let slot = CATALOG_BEFORE_RECURSE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
-    CatalogBeforeRecurseHookGuard
+    CatalogBeforeRecurseHookGuard { _lock: lock }
 }
 
 #[cfg(test)]
 pub(in crate::server) fn set_catalog_after_canonicalize_hook_for_test(
     hook: CatalogAfterCanonicalizeHook,
 ) -> CatalogAfterCanonicalizeHookGuard {
+    let lock = lock_catalog_test_override();
     let slot = CATALOG_AFTER_CANONICALIZE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
-    CatalogAfterCanonicalizeHookGuard
+    CatalogAfterCanonicalizeHookGuard { _lock: lock }
 }
 
 #[cfg(test)]
@@ -164,10 +231,14 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
-    Ok(
-        list_markdown_files_from_canonical_base_until_cancelled(base_dir, max_files, &|| false)?
-            .files,
-    )
+    let catalog =
+        list_markdown_files_from_canonical_base_until_cancelled(base_dir, max_files, &|| false)?;
+    if catalog.truncated {
+        return Err(std::io::Error::other(
+            "ファイル一覧走査上限に到達したため完全な一覧を返せません",
+        ));
+    }
+    Ok(catalog.files)
 }
 
 pub(in crate::server) fn list_markdown_files_from_canonical_base_until_cancelled(
@@ -245,12 +316,14 @@ pub(in crate::server) fn list_markdown_files_from_verified_base_until_cancelled(
     is_cancelled: &dyn Fn() -> bool,
     on_progress: &dyn Fn(&Path),
 ) -> std::io::Result<CatalogList> {
+    let (max_entries, max_dirs) =
+        catalog_limits_for_test().unwrap_or((MAX_CATALOG_ENTRIES, MAX_CATALOG_DIRS));
     list_markdown_files_from_verified_base_with_limits_until_cancelled(
         base_dir,
         canonical_base_dir,
         max_files,
-        MAX_CATALOG_ENTRIES,
-        MAX_CATALOG_DIRS,
+        max_entries,
+        max_dirs,
         is_cancelled,
         on_progress,
     )

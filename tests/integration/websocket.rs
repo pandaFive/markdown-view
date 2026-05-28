@@ -148,14 +148,14 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
         return;
     };
 
-    // debounce 経過後に build_change_broadcast_message が走り、Io arm が Error broadcast を発信
+    // debounce 経過後に解決済みhandleを保持できないため、検証エラーを発信する。
     let msg = next_ws_message(&mut read).await;
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let error = json["error"].as_str().expect("errorフィールドが存在する");
     assert_eq!(
         error,
-        "ファイル読み込みエラー (watch_io_error.md): ファイルの読み込みに失敗しました"
+        "ファイル検証エラー (watch_io_error.md): ファイル解決中にI/Oエラーが発生しました (PermissionDenied)"
     );
 
     // 権限復元を明示し、後続の shutdown / cleanup に読み取り不可状態を持ち越さない
@@ -385,14 +385,14 @@ async fn test_websocket_サイズ超過ファイルでclose_frameにuser_message
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn test_websocket_ioエラーでclose_frameが1011を返す() {
+async fn test_websocket_open権限エラーでclose_frameが1008を返す() {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::PermissionsExt;
 
     let (_state, addr, _server, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
 
-    // 読込 IO を誘発: resolve (canonicalize/is_file) はパスするが open(2) が EACCES で失敗
+    // 解決済みhandleを保持できない状態ではpath再openへ戻さず、検証エラーとして止める。
     let original_mode = fs::metadata(&file_path).unwrap().permissions().mode();
     fs::set_permissions(&file_path, Permissions::from_mode(0o000)).unwrap();
 
@@ -400,7 +400,12 @@ async fn test_websocket_ioエラーでclose_frameが1011を返す() {
     let (ws_stream, _) = connect_ws(&url, &format!("http://{}", addr)).await.unwrap();
     let (_write, mut read) = ws_stream.split();
 
-    assert_close_frame_message(&mut read, 1011, "ファイルの読み込みに失敗しました").await;
+    assert_close_frame_message(
+        &mut read,
+        1008,
+        "ファイル検証に失敗しました: ファイル解決中にI/Oエラーが発生しました (PermissionDenied)",
+    )
+    .await;
 
     // teardown: TempDir drop で失敗しないよう権限を復元
     fs::set_permissions(&file_path, Permissions::from_mode(original_mode)).unwrap();
@@ -439,7 +444,7 @@ async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する(
         state.tx().send(BroadcastMessage::Refresh).unwrap();
     }
 
-    // 次フレームは Lagged → build_lagged_recovery_message → Io ReadFailed →
+    // 次フレームは Lagged → build_lagged_recovery_message → resolve error →
     // BroadcastMessage::Error 経路で送出される
     let msg = next_ws_message(&mut read).await;
     let text = msg.into_text().unwrap();
@@ -447,7 +452,7 @@ async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する(
     let error = json["error"].as_str().expect("errorフィールドが存在する");
     assert_eq!(
         error,
-        "ファイル読み込みエラー (lagged_io.md): ファイルの読み込みに失敗しました"
+        "ファイル検証エラー: ファイル解決中にI/Oエラーが発生しました (PermissionDenied)"
     );
 
     // 順序: assert 後に権限復元 → tempdir 自動 drop。recovery 実行中は guard 生存中で

@@ -28,7 +28,24 @@ static CONTENT_BEFORE_READ_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-pub(in crate::server) struct ContentBeforeReadHookGuard;
+static CONTENT_TEST_OVERRIDE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+type ContentTestOverrideLockGuard = std::sync::MutexGuard<'static, ()>;
+
+#[cfg(test)]
+pub(in crate::server) struct ContentBeforeReadHookGuard {
+    _lock: ContentTestOverrideLockGuard,
+}
+
+#[cfg(test)]
+fn lock_content_test_override() -> ContentTestOverrideLockGuard {
+    CONTENT_TEST_OVERRIDE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[cfg(test)]
 impl Drop for ContentBeforeReadHookGuard {
@@ -42,9 +59,10 @@ impl Drop for ContentBeforeReadHookGuard {
 pub(in crate::server) fn set_content_before_read_hook_for_test(
     hook: ContentBeforeReadHook,
 ) -> ContentBeforeReadHookGuard {
+    let lock = lock_content_test_override();
     let slot = CONTENT_BEFORE_READ_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
-    ContentBeforeReadHookGuard
+    ContentBeforeReadHookGuard { _lock: lock }
 }
 
 #[cfg(test)]

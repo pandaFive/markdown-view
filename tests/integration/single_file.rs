@@ -53,11 +53,11 @@ async fn test_単一ファイルモードでfileクエリは無視される() {
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn test_api_content_io_エラーで500を返す() {
+async fn test_api_content_open権限エラーは検証エラーで404を返す() {
     let (_state, addr, _server, _tmp_dir, file_path) =
         setup_single_file_server_with_bytes("unreadable.md", b"# content").await;
 
-    // resolve (canonicalize/is_file) はパスし、open(2) のみが EACCES で失敗する状態を作る
+    // 解決済みhandleを保持できない状態ではpath再openへ戻さず、検証エラーとして止める。
     let Some(_permission_guard) = make_file_unreadable(&file_path) else {
         return;
     };
@@ -65,8 +65,8 @@ async fn test_api_content_io_エラーで500を返す() {
     assert_json_error_for_paths(
         addr,
         &["/api/content"],
-        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-        Some("ファイルの読み込みに失敗しました"),
+        reqwest::StatusCode::NOT_FOUND,
+        None,
     )
     .await;
 }
