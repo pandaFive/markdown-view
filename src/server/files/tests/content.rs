@@ -4,7 +4,9 @@ use axum::response::IntoResponse;
 use super::support::{
     create_directory_state, create_markdown_fixture, create_single_file_state, create_test_dir,
 };
-use crate::server::files::content::{read_bytes_with_limit, ReadMarkdownError};
+use crate::server::files::content::{
+    read_bytes_with_limit, set_content_before_read_hook_for_test, ReadMarkdownError,
+};
 use crate::server::files::*;
 
 #[test]
@@ -135,6 +137,38 @@ async fn test_resolve_route_target_api_content_起動後base差し替えを拒�
         .expect_err("起動時と異なるbase実体の明示ファイル解決は拒否する");
 
     assert_eq!(error.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_load_route_update_解決後base差し替えでも差し替え後本文を読まない() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("workspace");
+    let replacement = parent.path().join("replacement");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::write(base.join("note.md"), "# harmless").unwrap();
+    let state = create_directory_state(&base);
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("note.md"), "# secret").unwrap();
+
+    let target = resolve_route_target(&state, RouteTargetRequest::api_content(Some("note.md")))
+        .await
+        .unwrap();
+    let base_for_hook = base.clone();
+    let replacement_for_hook = replacement.clone();
+    let _guard = set_content_before_read_hook_for_test(std::sync::Arc::new(move |file_path| {
+        if file_path.ends_with("note.md") {
+            std::fs::remove_dir_all(&base_for_hook).unwrap();
+            std::fs::rename(&replacement_for_hook, &base_for_hook).unwrap();
+        }
+    }));
+
+    let update = load_route_update(&target, RouteTargetRequest::api_content(Some("note.md")))
+        .await
+        .expect("解決済みtargetは差し替え後のbaseではなく解決時の実体から読む");
+
+    assert!(update.content().as_str().contains("harmless"));
+    assert!(!update.content().as_str().contains("secret"));
 }
 
 #[tokio::test]

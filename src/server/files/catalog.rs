@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use cap_std::fs::Dir;
+use cap_primitives::fs::{open_dir_nofollow, FollowSymlinks};
+use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
 
 use crate::server::log_path::sanitize_path_for_logging_escaped;
 #[cfg(test)]
@@ -14,12 +15,17 @@ pub(in crate::server) const MAX_FILE_LIST: usize = 1000;
 
 /// ディレクトリ走査の最大深度（スタックオーバーフロー防止）
 pub(super) const MAX_DIR_DEPTH: usize = 32;
+pub(super) const MAX_CATALOG_ENTRIES: usize = 50_000;
+pub(super) const MAX_CATALOG_DIRS: usize = 10_000;
 
 #[cfg(test)]
 type CatalogProgressHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
 
 #[cfg(test)]
 type CatalogBeforeRecurseHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+type CatalogAfterCanonicalizeHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
 
 #[cfg(test)]
 static CATALOG_PROGRESS_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<CatalogProgressHook>>> =
@@ -31,11 +37,19 @@ static CATALOG_BEFORE_RECURSE_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
+static CATALOG_AFTER_CANONICALIZE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<CatalogAfterCanonicalizeHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
 #[allow(dead_code)]
 pub(in crate::server) struct CatalogProgressHookGuard;
 
 #[cfg(test)]
 pub(in crate::server) struct CatalogBeforeRecurseHookGuard;
+
+#[cfg(test)]
+pub(in crate::server) struct CatalogAfterCanonicalizeHookGuard;
 
 #[cfg(test)]
 impl Drop for CatalogProgressHookGuard {
@@ -49,6 +63,14 @@ impl Drop for CatalogProgressHookGuard {
 impl Drop for CatalogBeforeRecurseHookGuard {
     fn drop(&mut self) {
         let hook = CATALOG_BEFORE_RECURSE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+impl Drop for CatalogAfterCanonicalizeHookGuard {
+    fn drop(&mut self) {
+        let hook = CATALOG_AFTER_CANONICALIZE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
         *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
@@ -70,6 +92,15 @@ pub(in crate::server) fn set_catalog_before_recurse_hook_for_test(
     let slot = CATALOG_BEFORE_RECURSE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     CatalogBeforeRecurseHookGuard
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_catalog_after_canonicalize_hook_for_test(
+    hook: CatalogAfterCanonicalizeHook,
+) -> CatalogAfterCanonicalizeHookGuard {
+    let slot = CATALOG_AFTER_CANONICALIZE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    CatalogAfterCanonicalizeHookGuard
 }
 
 #[cfg(test)]
@@ -102,6 +133,21 @@ fn notify_catalog_before_recurse_for_test(display_path: &Path) {
 #[cfg(not(test))]
 fn notify_catalog_before_recurse_for_test(_display_path: &Path) {}
 
+#[cfg(test)]
+fn notify_catalog_after_canonicalize_for_test(display_path: &Path) {
+    let hook = CATALOG_AFTER_CANONICALIZE_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(display_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_catalog_after_canonicalize_for_test(_display_path: &Path) {}
+
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
     let canonical = CanonicalPath::try_from_path(base_dir).map_err(|error| match error {
@@ -118,14 +164,17 @@ pub(in crate::server) fn list_markdown_files_from_canonical_base(
     base_dir: &CanonicalPath,
     max_files: usize,
 ) -> std::io::Result<Vec<String>> {
-    list_markdown_files_from_canonical_base_until_cancelled(base_dir, max_files, &|| false)
+    Ok(
+        list_markdown_files_from_canonical_base_until_cancelled(base_dir, max_files, &|| false)?
+            .files,
+    )
 }
 
 pub(in crate::server) fn list_markdown_files_from_canonical_base_until_cancelled(
     base_dir: &CanonicalPath,
     max_files: usize,
     is_cancelled: &dyn Fn() -> bool,
-) -> std::io::Result<Vec<String>> {
+) -> std::io::Result<CatalogList> {
     let verified_base_dir = open_verified_base_dir(base_dir, "ファイル一覧base directory")?;
     list_markdown_files_from_verified_base_until_cancelled(
         &verified_base_dir,
@@ -154,16 +203,91 @@ pub(in crate::server) fn open_verified_base_dir(
     ))
 }
 
+pub(in crate::server) fn open_relative_dir_nofollow(
+    base_dir: &Dir,
+    relative: &Path,
+) -> std::io::Result<Dir> {
+    let mut current = base_dir.try_clone()?.into_std_file();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "ディレクトリpathに通常component以外が含まれています",
+            ));
+        };
+        current = open_dir_nofollow(&current, Path::new(name))?;
+    }
+    Ok(Dir::from_std_file(current))
+}
+
+pub(in crate::server) fn open_relative_file_nofollow(
+    base_dir: &Dir,
+    relative: &Path,
+) -> std::io::Result<CapFile> {
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = relative.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ファイルpathにファイル名がありません",
+        )
+    })?;
+    let parent_dir = open_relative_dir_nofollow(base_dir, parent)?;
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    options._cap_fs_ext_follow(FollowSymlinks::No);
+    parent_dir.open_with(Path::new(file_name), &options)
+}
+
 pub(in crate::server) fn list_markdown_files_from_verified_base_until_cancelled(
     base_dir: &Dir,
     canonical_base_dir: &Path,
     max_files: usize,
     is_cancelled: &dyn Fn() -> bool,
     on_progress: &dyn Fn(&Path),
-) -> std::io::Result<Vec<String>> {
+) -> std::io::Result<CatalogList> {
+    list_markdown_files_from_verified_base_with_limits_until_cancelled(
+        base_dir,
+        canonical_base_dir,
+        max_files,
+        MAX_CATALOG_ENTRIES,
+        MAX_CATALOG_DIRS,
+        is_cancelled,
+        on_progress,
+    )
+}
+
+#[cfg(test)]
+pub(in crate::server) fn list_markdown_files_from_verified_base_with_limits_for_test(
+    base_dir: &Dir,
+    canonical_base_dir: &Path,
+    max_files: usize,
+    max_entries: usize,
+    max_dirs: usize,
+) -> std::io::Result<CatalogList> {
+    list_markdown_files_from_verified_base_with_limits_until_cancelled(
+        base_dir,
+        canonical_base_dir,
+        max_files,
+        max_entries,
+        max_dirs,
+        &|| false,
+        &|_| {},
+    )
+}
+
+fn list_markdown_files_from_verified_base_with_limits_until_cancelled(
+    base_dir: &Dir,
+    canonical_base_dir: &Path,
+    max_files: usize,
+    max_entries: usize,
+    max_dirs: usize,
+    is_cancelled: &dyn Fn() -> bool,
+    on_progress: &dyn Fn(&Path),
+) -> std::io::Result<CatalogList> {
     let mut files = Vec::new();
     let mut visited_dirs = HashSet::new();
     visited_dirs.insert(PathBuf::new());
+    let mut budget = CatalogTraversalBudget::new(max_entries, max_dirs);
     let traversal = CapCatalogTraversal {
         base_dir,
         canonical_base_dir,
@@ -177,13 +301,25 @@ pub(in crate::server) fn list_markdown_files_from_verified_base_until_cancelled(
         base_dir,
         Path::new(""),
         Path::new(""),
-        &mut files,
-        &mut visited_dirs,
+        &mut CatalogTraversalState {
+            files: &mut files,
+            visited_dirs: &mut visited_dirs,
+            budget: &mut budget,
+        },
         0,
     )?;
     files.sort();
     files.truncate(max_files);
-    Ok(files)
+    Ok(CatalogList {
+        files,
+        truncated: budget.truncated,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::server) struct CatalogList {
+    pub(in crate::server) files: Vec<String>,
+    pub(in crate::server) truncated: bool,
 }
 
 struct CapCatalogTraversal<'a> {
@@ -192,6 +328,61 @@ struct CapCatalogTraversal<'a> {
     max_files: usize,
     is_cancelled: &'a dyn Fn() -> bool,
     on_progress: &'a dyn Fn(&Path),
+}
+
+struct CatalogTraversalState<'a> {
+    files: &'a mut Vec<String>,
+    visited_dirs: &'a mut HashSet<PathBuf>,
+    budget: &'a mut CatalogTraversalBudget,
+}
+
+#[derive(Debug, Default)]
+struct CatalogTraversalBudget {
+    entries: usize,
+    dirs: usize,
+    max_entries: usize,
+    max_dirs: usize,
+    truncated: bool,
+}
+
+impl CatalogTraversalBudget {
+    fn new(max_entries: usize, max_dirs: usize) -> Self {
+        Self {
+            entries: 0,
+            dirs: 0,
+            max_entries,
+            max_dirs,
+            truncated: false,
+        }
+    }
+
+    fn try_count_entry(&mut self, display_path: &Path) -> bool {
+        if self.entries >= self.max_entries {
+            self.truncated = true;
+            tracing::warn!(
+                "[markdown-view] ファイル一覧entry走査上限に到達（部分結果を返します）: limit={} path={}",
+                self.max_entries,
+                log_catalog_relative(display_path)
+            );
+            return false;
+        }
+        self.entries += 1;
+        true
+    }
+
+    fn try_count_dir(&mut self, display_path: &Path) -> bool {
+        if self.dirs >= self.max_dirs {
+            self.truncated = true;
+            tracing::warn!(
+                "[markdown-view] ファイル一覧directory走査上限に到達（部分結果を返します）: limit={} path={}",
+                self.max_dirs,
+                log_catalog_relative(display_path)
+            );
+            return false;
+        }
+        self.dirs += 1;
+        true
+    }
 }
 
 fn relative_path_to_slash_string(relative: &Path) -> String {
@@ -210,8 +401,7 @@ fn list_markdown_files_from_verified_base_recursive(
     current_dir: &Dir,
     current_relative: &Path,
     display_relative: &Path,
-    files: &mut Vec<String>,
-    visited_dirs: &mut HashSet<PathBuf>,
+    state: &mut CatalogTraversalState<'_>,
     depth: usize,
 ) -> std::io::Result<()> {
     if (traversal.is_cancelled)() {
@@ -245,12 +435,15 @@ fn list_markdown_files_from_verified_base_recursive(
         };
 
         let name = entry.file_name();
+        let display_path = display_relative.join(&name);
+        if !state.budget.try_count_entry(&display_path) {
+            return Ok(());
+        }
         if exclusion_reason_for_name(&name).is_some() {
             continue;
         }
 
         let access_relative = current_relative.join(&name);
-        let display_path = display_relative.join(&name);
         (traversal.on_progress)(&display_path);
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
@@ -265,7 +458,10 @@ fn list_markdown_files_from_verified_base_recursive(
         };
 
         if file_type.is_dir() || file_type.is_symlink() {
-            if files.len() >= traversal.max_files {
+            if state.files.len() >= traversal.max_files {
+                return Ok(());
+            }
+            if !state.budget.try_count_dir(&display_path) {
                 return Ok(());
             }
             let Some((traversal_relative, traversal_dir)) = resolve_cap_recursable_directory(
@@ -278,7 +474,7 @@ fn list_markdown_files_from_verified_base_recursive(
             else {
                 continue;
             };
-            if !visited_dirs.insert(traversal_relative.clone()) {
+            if !state.visited_dirs.insert(traversal_relative.clone()) {
                 if file_type.is_symlink() {
                     tracing::warn!(
                         "[markdown-view] シンボリックリンクのサイクルを検出（スキップ）: {}",
@@ -293,8 +489,7 @@ fn list_markdown_files_from_verified_base_recursive(
                 &traversal_dir,
                 &traversal_relative,
                 &display_path,
-                files,
-                visited_dirs,
+                state,
                 depth + 1,
             )?;
         } else if file_type.is_file()
@@ -302,8 +497,10 @@ fn list_markdown_files_from_verified_base_recursive(
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         {
-            files.push(relative_path_to_slash_string(&display_path));
-            if files.len() >= traversal.max_files {
+            state
+                .files
+                .push(relative_path_to_slash_string(&display_path));
+            if state.files.len() >= traversal.max_files {
                 return Ok(());
             }
         }
@@ -336,6 +533,7 @@ fn resolve_cap_recursable_directory(
         }
         Err(error) => return Err(error),
     };
+    notify_catalog_after_canonicalize_for_test(display_path);
 
     if is_symlink {
         let metadata = match base_dir.metadata(&canonical_relative) {
@@ -364,7 +562,17 @@ fn resolve_cap_recursable_directory(
         ));
     }
 
-    let traversal_dir = base_dir.open_dir(&canonical_relative)?;
+    let traversal_dir = match open_relative_dir_nofollow(base_dir, &canonical_relative) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] 走査対象ディレクトリopen検証エラー（スキップ）: {} ({})",
+                log_catalog_relative(display_path),
+                error
+            );
+            return Ok(None);
+        }
+    };
     Ok(Some((canonical_relative, traversal_dir)))
 }
 

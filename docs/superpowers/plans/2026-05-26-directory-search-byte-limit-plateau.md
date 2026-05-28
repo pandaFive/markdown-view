@@ -19,12 +19,23 @@
 - Modify if implementation is needed: `src/server/files/search.rs`
   - byte-limit 超過候補ファイルを本文読込前に判定する。
   - test-only read counter hook を追加して、超過候補ファイルを読まないことを固定する。
+- Modify if hardening is needed: `src/server/files/catalog.rs`
+  - capability base から nofollow でディレクトリを開き、canonicalize 後の symlink 差し替えを列挙しない。
+  - Markdown 以外が大量にある tree でも entry / directory 予算で部分結果を返す。
+- Modify if hardening is needed: `src/server/files/resolve.rs`
+  - ディレクトリモードのファイル解決後に base identity を再検証し、nofollow で開いたファイル handle を `ResolvedTarget` に保持する。
+- Modify if hardening is needed: `src/server/files/content.rs`
+  - 解決済み handle がある場合は path を再 open せず、その handle から本文を読む。
+- Modify if implementation is needed: `tests/integration/search.rs`
+  - `/api/search` が `byte_limit` を JSON で返し、public JSON shape を増やさないことを固定する。
 - Temporary only: `/tmp/markdown-view-search-byte-limit-plateau.XXXXXX`
   - 測定 fixture、HTTP response、RSS sample を保存する。repo へ追加しない。
 
 ## Scope Check
 
-この plan は単一サブシステム、ディレクトリ検索 byte-limit 経路だけを扱う。検索 API の JSON shape、検索結果の意味、UI、Host/Origin 検証、path validation の public contract、HTML sanitization、CSP、検索インデックス、parser 全面逐次化は扱わない。内部実装を base identity 検証と capability-based access に寄せる場合も、base 外、hidden、非 Markdown、symlink 差し替え拒否は弱めない。
+この plan はディレクトリ検索 byte-limit 経路と、その安全性を支えるファイル列挙・ファイル解決・本文読み込み境界だけを扱う。検索 API の JSON shape、検索結果の意味、UI、Host/Origin 検証、path validation の public contract、HTML sanitization、CSP、検索インデックス、parser 全面逐次化は扱わない。内部実装を base identity 検証と capability-based access に寄せる場合も、base 外、hidden、非 Markdown、symlink 差し替え拒否は弱めない。
+
+`SearchResponse` に `budgeted_bytes` や `consumed_bytes` は追加しない。`searched_bytes` は public contract として、本文を読み検索処理へ進めた UTF-8 Markdown bytes のみを表す。列挙予算で部分結果になった場合は、既存の `file_limit` truncation reason に写像する。
 
 測定だけで plateau が許容できると判断できた場合は Task 4 から Task 6 へ進み、Task 5 のコード変更は実行しない。plateau しない、または byte-limit 超過候補ファイル読込の peak RSS が明確に大きい場合だけ Task 5 を実行する。
 

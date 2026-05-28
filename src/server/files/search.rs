@@ -2,13 +2,13 @@ use std::io::Read;
 use std::ops::Range;
 use std::path::{Component, Path};
 
-use cap_primitives::fs::FollowSymlinks;
-use cap_std::fs::{Dir, File as CapFile, OpenOptions as CapOpenOptions};
+use cap_std::fs::Dir;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::catalog::{
-    list_markdown_files_from_verified_base_until_cancelled, open_verified_base_dir,
+    list_markdown_files_from_verified_base_until_cancelled, open_relative_file_nofollow,
+    open_verified_base_dir,
 };
 use super::content::MAX_FILE_SIZE;
 use crate::markdown::{markdown_options, MarkdownProfile};
@@ -878,7 +878,7 @@ fn search_directory_with_limits_blocking(
     notify_search_after_base_identity_validation_for_test();
     validate_search_base_path_identity(base_dir)?;
 
-    let files = list_markdown_files_from_verified_base_until_cancelled(
+    let catalog = list_markdown_files_from_verified_base_until_cancelled(
         &search_base_dir,
         base_dir.as_path(),
         limits.max_files.saturating_add(1),
@@ -888,11 +888,12 @@ fn search_directory_with_limits_blocking(
             notify_search_listing_progress_for_test(&relative);
         },
     )?;
+    let files = catalog.files;
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
     let mut read_files = 0usize;
 
-    if files.len() > limits.max_files {
+    if catalog.truncated || files.len() > limits.max_files {
         stats.mark_truncated(SearchTruncationReason::File);
     }
 
@@ -1092,7 +1093,7 @@ fn read_search_markdown_with_byte_budget(
 ) -> std::io::Result<SearchMarkdownRead> {
     let canonical_relative = canonical_search_relative(base_dir, relative)?;
     notify_search_after_canonicalize_for_test(relative);
-    let file = open_search_file(base_dir, &canonical_relative)?;
+    let file = open_relative_file_nofollow(base_dir, &canonical_relative)?;
     let metadata = file.metadata()?;
     notify_search_after_metadata_for_test(relative);
     if !metadata.is_file() {
@@ -1152,13 +1153,6 @@ fn canonical_search_relative(
             "検索対象がMarkdownファイルではありません",
         )),
     }
-}
-
-fn open_search_file(base_dir: &Dir, relative: &Path) -> std::io::Result<CapFile> {
-    let mut options = CapOpenOptions::new();
-    options.read(true);
-    options._cap_fs_ext_follow(FollowSymlinks::No);
-    base_dir.open_with(relative, &options)
 }
 
 #[cfg(test)]

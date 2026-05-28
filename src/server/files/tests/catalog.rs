@@ -10,7 +10,9 @@ use crate::server::files::catalog::{
     canonicalize_dir_for_cycle, ensure_current_dir_still_canonical,
     list_markdown_files_from_canonical_base,
     list_markdown_files_from_canonical_base_until_cancelled,
-    set_catalog_before_recurse_hook_for_test, MAX_DIR_DEPTH, MAX_FILE_LIST,
+    list_markdown_files_from_verified_base_with_limits_for_test, open_verified_base_dir,
+    set_catalog_after_canonicalize_hook_for_test, set_catalog_before_recurse_hook_for_test,
+    MAX_DIR_DEPTH, MAX_FILE_LIST,
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
@@ -72,10 +74,35 @@ fn test_list_markdown_files_from_canonical_base_until_cancelled_列挙途中で�
         .unwrap();
 
     assert!(
-        files.len() < 10,
+        files.files.len() < 10,
         "キャンセル後は全件列挙せず部分結果で停止する必要がある: {files:?}"
     );
     assert!(checks.load(Ordering::SeqCst) >= 3);
+}
+
+#[test]
+fn test_list_markdown_files_from_verified_base_非markdown大量entryで部分結果を返す() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..20 {
+        std::fs::write(dir.path().join(format!("skip-{index:02}.txt")), "skip").unwrap();
+    }
+
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let verified = open_verified_base_dir(&canonical, "test base").unwrap();
+    let catalog = list_markdown_files_from_verified_base_with_limits_for_test(
+        &verified,
+        dir.path(),
+        100,
+        5,
+        100,
+    )
+    .unwrap();
+
+    assert!(catalog.files.is_empty());
+    assert!(
+        catalog.truncated,
+        "Markdown以外が大量にある場合もentry予算で部分結果として停止する必要がある"
+    );
 }
 
 #[test]
@@ -193,6 +220,35 @@ fn test_list_markdown_files_from_canonical_base_再帰直前の除外symlink差�
     assert!(
         !files.iter().any(|file| file.contains("secret.md")),
         "再帰直前に除外ディレクトリへ差し替えられても除外配下のファイル名を返してはいけない: {files:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_canonicalize後の除外symlink差し替えを列挙しない() {
+    let base = tempfile::tempdir().unwrap();
+    let visible_dir = base.path().join("visible");
+    std::fs::create_dir_all(&visible_dir).unwrap();
+    std::fs::write(visible_dir.join("safe.md"), "# safe").unwrap();
+    let excluded_dir = base.path().join(".git");
+    std::fs::create_dir_all(&excluded_dir).unwrap();
+    std::fs::write(excluded_dir.join("secret.md"), "# secret").unwrap();
+    let visible_for_hook = visible_dir.clone();
+    let excluded_for_hook = excluded_dir.clone();
+    let _guard =
+        set_catalog_after_canonicalize_hook_for_test(std::sync::Arc::new(move |relative| {
+            if relative == std::path::Path::new("visible") {
+                std::fs::remove_dir_all(&visible_for_hook).unwrap();
+                symlink(&excluded_for_hook, &visible_for_hook).unwrap();
+            }
+        }));
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(
+        !files.iter().any(|file| file.contains("secret.md")),
+        "canonicalize後に除外ディレクトリへ差し替えられても除外配下のファイル名を返してはいけない: {files:?}"
     );
 }
 

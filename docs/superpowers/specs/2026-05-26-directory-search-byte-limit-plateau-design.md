@@ -19,6 +19,7 @@
 ## 非ゴール
 
 - 検索 API の JSON shape 変更。
+- `SearchResponse` への `budgeted_bytes` / `consumed_bytes` 追加。
 - 検索結果の意味変更。
 - 検索インデックス導入。
 - UI 変更。
@@ -80,7 +81,9 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 
 本文読込後の既存 `markdown.len()` ベース確認は残す。metadata と本文読込の間の TOCTOU、UTF-8 decode 後の実 byte 長、特殊ファイルシステム差異に備えるためである。
 
-この実装では、byte-limit に含めるのは実際に検索した bytes という既存契約を維持する。超過して読まなかったファイルは `searched_files` と `searched_bytes` に加えず、`truncated=true`、`truncated_reasons=["byte_limit"]` を返す。
+この実装では、byte-limit に含めるのは実際に検索した bytes という既存契約を維持する。超過して読まなかったファイルは `searched_files` と `searched_bytes` に加えず、`truncated=true`、`truncated_reasons=["byte_limit"]` を返す。内部で metadata byte 予算を管理しても public JSON には出さず、`searched_bytes` は本文を読み検索処理へ進めた UTF-8 Markdown bytes のみを表す。
+
+検索対象列挙の安全性を保つため、catalog / search / resolve のファイル open は base directory capability から nofollow で行う。canonicalize 後に symlink や base directory が差し替えられても、除外 path や base 外 path は列挙・読込しない。Markdown 以外の大量 entry による走査 DoS は catalog の entry / directory 予算で部分結果にし、検索 API では既存の `file_limit` truncation reason へ写像する。
 
 ## テスト方針
 
@@ -115,12 +118,14 @@ plateau 判定は、同一 server process に同一条件の request を複数�
   - `Cargo.lock`
   - `src/server/state.rs`
   - `src/server/files/catalog.rs`
+  - `src/server/files/content.rs`
   - `src/server/files/mod.rs`
   - `src/server/files/resolve.rs`
   - `src/server/files/search.rs`
   - `src/server/service.rs`
   - `src/server/log_path.rs`
   - 検索、ファイル一覧、ファイル解決関連 unit test
+  - `/api/search` integration test
   - 必要なら `docs/todo/BACKLOG.md`
 
 `SearchResponse` JSON、HTTP route、UI、CSP、Host/Origin 検証、path validation の public contract、HTML sanitization、ブラウザ assets は変更しない。path validation の内部実装は base identity 検証と capability-based access へ寄せる。
@@ -149,7 +154,7 @@ plateau 判定は、同一 server process に同一条件の request を複数�
 
 測定のみの場合、docs 更新 commit を revert すれば元に戻せる。fixture は `/tmp` 配下の対象ディレクトリを確認して削除する。
 
-実装した場合は、`search_directory_with_limits_blocking()` の本文読込前 metadata 判定と関連テストを revert すれば、従来の読込後 byte-limit 判定へ戻せる。
+実装した場合は、`search_directory_with_limits_blocking()` の本文読込前 metadata 判定、catalog の走査予算、resolve/content の解決済み handle 読込、nofollow open helper、関連テストを同じ commit 単位で revert すれば、従来の読込後 byte-limit 判定へ戻せる。rollback 後は symlink race と大量非 Markdown entry の防御も戻るため、再適用する場合は個別に切り出す。
 
 ## 残余リスク
 

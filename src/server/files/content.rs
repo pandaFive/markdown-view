@@ -19,6 +19,49 @@ use crate::template::{error_message_json, UpdateMessage};
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const FILE_SIZE_LIMIT_ERROR_MESSAGE: &str = "ファイルサイズが上限（10MB）を超えています";
 
+#[cfg(test)]
+type ContentBeforeReadHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static CONTENT_BEFORE_READ_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<ContentBeforeReadHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::server) struct ContentBeforeReadHookGuard;
+
+#[cfg(test)]
+impl Drop for ContentBeforeReadHookGuard {
+    fn drop(&mut self) {
+        let hook = CONTENT_BEFORE_READ_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_content_before_read_hook_for_test(
+    hook: ContentBeforeReadHook,
+) -> ContentBeforeReadHookGuard {
+    let slot = CONTENT_BEFORE_READ_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    ContentBeforeReadHookGuard
+}
+
+#[cfg(test)]
+fn notify_content_before_read_for_test(file_path: &Path) {
+    let hook = CONTENT_BEFORE_READ_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(file_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_content_before_read_for_test(_file_path: &Path) {}
+
 #[derive(Debug, Clone)]
 /// WebSocket初期化時のエラー。closeフレームのコードと理由を保持する。
 pub(in crate::server) struct SocketInitError {
@@ -48,7 +91,7 @@ pub(in crate::server) async fn load_route_update(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<UpdateMessage, ApiError> {
-    read_and_render_file(target.file_path())
+    read_and_render_target(target)
         .await
         .map(|update| target.attach_file_info(update))
         .map_err(|error| {
@@ -89,7 +132,7 @@ async fn validate_and_render(
         Ok(None) => return ValidateRenderOutcome::NoTarget,
         Err(error) => return ValidateRenderOutcome::ResolveFailed(error),
     };
-    match read_and_render_file(target.file_path()).await {
+    match read_and_render_target(&target).await {
         Ok(update) => {
             let stamped = target.attach_file_info(update);
             ValidateRenderOutcome::Rendered(target, stamped)
@@ -390,6 +433,7 @@ impl IntoResponse for ReadMarkdownError {
 pub(super) async fn read_markdown_with_limit(
     file_path: &Path,
 ) -> Result<String, ReadMarkdownError> {
+    notify_content_before_read_for_test(file_path);
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
@@ -402,6 +446,25 @@ pub(super) async fn read_markdown_with_limit(
         .map_err(ReadMarkdownError::Io)?;
     let buffer = read_bytes_with_limit(file).await?;
 
+    markdown_from_utf8(buffer)
+}
+
+async fn read_markdown_from_open_file(
+    file_path: &Path,
+    file: std::fs::File,
+) -> Result<String, ReadMarkdownError> {
+    notify_content_before_read_for_test(file_path);
+    let metadata = file.metadata().map_err(ReadMarkdownError::Io)?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(ReadMarkdownError::TooLarge);
+    }
+
+    let file = tokio::fs::File::from_std(file);
+    let buffer = read_bytes_with_limit(file).await?;
+    markdown_from_utf8(buffer)
+}
+
+fn markdown_from_utf8(buffer: Vec<u8>) -> Result<String, ReadMarkdownError> {
     String::from_utf8(buffer).map_err(|error| {
         tracing::warn!(
             "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
@@ -426,9 +489,17 @@ pub(super) async fn read_bytes_with_limit(
     Ok(buffer)
 }
 
-/// ファイルを読み込み、Markdown→HTML変換とTOC生成を行いUpdateMessageとして返す
-async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMarkdownError> {
-    let markdown = read_markdown_with_limit(file_path).await?;
-    let document = render_document(&markdown);
+async fn read_and_render_target(
+    target: &ResolvedTarget,
+) -> Result<UpdateMessage, ReadMarkdownError> {
+    let markdown = match target.read_file().map_err(ReadMarkdownError::Io)? {
+        Some(file) => read_markdown_from_open_file(target.file_path(), file).await?,
+        None => read_markdown_with_limit(target.file_path()).await?,
+    };
+    render_markdown_update(&markdown)
+}
+
+fn render_markdown_update(markdown: &str) -> Result<UpdateMessage, ReadMarkdownError> {
+    let document = render_document(markdown);
     Ok(UpdateMessage::new(document.content, document.toc, None))
 }

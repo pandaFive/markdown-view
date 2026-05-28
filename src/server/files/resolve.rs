@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
-use super::catalog::list_markdown_files_from_canonical_base;
+use super::catalog::{
+    list_markdown_files_from_canonical_base, open_relative_file_nofollow, open_verified_base_dir,
+};
 use super::run_blocking_file_task;
 use crate::server::guards::json_error;
 use crate::server::log_path::sanitize_path_for_logging;
@@ -18,6 +20,7 @@ pub(in crate::server) struct ResolvedTarget {
     file_list: Option<Vec<String>>,
     relative_path: Option<String>,
     file_label: String,
+    read_file: Option<std::sync::Arc<std::fs::File>>,
 }
 
 impl ResolvedTarget {
@@ -25,6 +28,7 @@ impl ResolvedTarget {
         file_path: PathBuf,
         file_list: Option<Vec<String>>,
         relative_path: Option<String>,
+        read_file: Option<std::fs::File>,
     ) -> Self {
         let file_label = relative_path
             .clone()
@@ -35,6 +39,7 @@ impl ResolvedTarget {
             file_list,
             relative_path,
             file_label,
+            read_file: read_file.map(std::sync::Arc::new),
         }
     }
 
@@ -44,7 +49,7 @@ impl ResolvedTarget {
         file_list: Option<Vec<String>>,
         relative_path: Option<String>,
     ) -> Self {
-        Self::new(file_path, file_list, relative_path)
+        Self::new(file_path, file_list, relative_path, None)
     }
 
     pub(in crate::server) fn file_path(&self) -> &Path {
@@ -61,6 +66,13 @@ impl ResolvedTarget {
 
     pub(in crate::server) fn file_label(&self) -> &str {
         &self.file_label
+    }
+
+    pub(in crate::server) fn read_file(&self) -> std::io::Result<Option<std::fs::File>> {
+        self.read_file
+            .as_ref()
+            .map(|file| file.try_clone())
+            .transpose()
     }
 
     pub(super) fn attach_file_info(&self, update: UpdateMessage) -> UpdateMessage {
@@ -142,7 +154,7 @@ pub(in crate::server) async fn resolve_route_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
 ) -> Result<ResolvedTarget, ApiError> {
-    let (file_path, file_list) =
+    let (file_path, file_list, read_file) =
         resolve_request_target(state, request)
             .await
             .map_err(|status| {
@@ -165,6 +177,7 @@ pub(in crate::server) async fn resolve_route_target(
         state,
         file_path,
         file_list,
+        read_file,
         "ターゲットファイルの相対パス算出失敗",
     ))
 }
@@ -182,6 +195,7 @@ pub(super) fn resolve_single_file_target(
         state,
         validated_path,
         None,
+        None,
         warn_label,
     )))
 }
@@ -196,6 +210,7 @@ pub(super) fn resolve_change_target(
             state,
             validated_path,
             None,
+            None,
             "更新対象の相対パス算出失敗",
         )));
     }
@@ -206,14 +221,14 @@ pub(super) fn resolve_change_target(
 async fn resolve_request_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
-) -> Result<(PathBuf, Option<Vec<String>>), StatusCode> {
+) -> Result<(PathBuf, Option<Vec<String>>, Option<std::fs::File>), StatusCode> {
     if let Some(path) = state.mode().single_file() {
         let canonical =
             revalidate_single_file_target(path, state.mode().base_dir()).map_err(|error| {
                 tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
                 error.status_code()
             })?;
-        return Ok((canonical, None));
+        return Ok((canonical, None, None));
     }
 
     let Some(base_dir) = state.mode().directory_canonical() else {
@@ -221,13 +236,14 @@ async fn resolve_request_target(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
     let mut precomputed_files = None;
-    let file_path = if let Some(relative) = request.query_file() {
-        resolve_file_blocking(base_dir, relative)
+    let (file_path, read_file) = if let Some(relative) = request.query_file() {
+        let resolved = resolve_file_blocking(base_dir, relative)
             .await?
             .map_err(|error| {
                 tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
                 error.status_code()
-            })?
+            })?;
+        (resolved.path, Some(resolved.file))
     } else {
         let files = list_markdown_files_blocking(base_dir).await?;
         precomputed_files = Some(files.clone());
@@ -239,12 +255,17 @@ async fn resolve_request_target(
 
         match default_file {
             Some(relative) => {
-                resolve_file_blocking(base_dir, relative)
-                    .await?
-                    .map_err(|error| {
-                        tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?
+                let resolved =
+                    resolve_file_blocking(base_dir, relative)
+                        .await?
+                        .map_err(|error| {
+                            tracing::warn!(
+                                "[markdown-view] デフォルトファイル解決エラー: {}",
+                                error
+                            );
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?;
+                (resolved.path, Some(resolved.file))
             }
             None => return Err(StatusCode::NOT_FOUND),
         }
@@ -259,7 +280,7 @@ async fn resolve_request_target(
         None
     };
 
-    Ok((file_path, file_list))
+    Ok((file_path, file_list, read_file))
 }
 
 async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
@@ -277,14 +298,29 @@ async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<St
 async fn resolve_file_blocking(
     base_dir: &CanonicalPath,
     relative: &str,
-) -> Result<Result<PathBuf, ResolveFileError>, StatusCode> {
+) -> Result<Result<ResolvedFileHandle, ResolveFileError>, StatusCode> {
     let base_dir = base_dir.clone();
     let relative = relative.to_owned();
     run_blocking_file_task("ファイル解決", move || {
         validate_directory_base_identity_for_resolve(&base_dir)?;
-        resolve_file(base_dir.as_path(), &relative)
+        let path = resolve_file(base_dir.as_path(), &relative)?;
+        let relative_path = path
+            .strip_prefix(base_dir.as_path())
+            .map_err(|_| ResolveFileError::Traversal)?;
+        let verified_base = open_verified_base_dir(&base_dir, "ファイル解決base directory")
+            .map_err(|error| ResolveFileError::Io(error.kind()))?;
+        let file = open_relative_file_nofollow(&verified_base, relative_path)
+            .map_err(|error| ResolveFileError::Io(error.kind()))?
+            .into_std();
+        Ok(ResolvedFileHandle { path, file })
     })
     .await
+}
+
+#[derive(Debug)]
+struct ResolvedFileHandle {
+    path: PathBuf,
+    file: std::fs::File,
 }
 
 fn validate_directory_base_identity_for_resolve(
@@ -312,6 +348,7 @@ fn build_resolved_target(
     state: &AppState,
     file_path: PathBuf,
     file_list: Option<Vec<String>>,
+    read_file: Option<std::fs::File>,
     warn_label: &'static str,
 ) -> ResolvedTarget {
     let relative_path = state.mode().relative_path_of(&file_path);
@@ -328,7 +365,7 @@ fn build_resolved_target(
         // - WebSocket変更通知経路: 変更ターゲット解決時の再検証後にここへ到達したら内部不整合
     }
 
-    ResolvedTarget::new(file_path, file_list, relative_path)
+    ResolvedTarget::new(file_path, file_list, relative_path, read_file)
 }
 
 fn resolve_directory_change_target(
@@ -346,6 +383,7 @@ fn resolve_directory_change_target(
     Ok(Some(build_resolved_target(
         state,
         validated_path,
+        None,
         None,
         "更新対象の相対パス算出失敗",
     )))
