@@ -118,6 +118,26 @@ async fn test_resolve_route_target_api_contentはfile_listを含まない() {
 }
 
 #[tokio::test]
+async fn test_resolve_route_target_api_content_起動後base差し替えを拒否する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("workspace");
+    let replacement = parent.path().join("replacement");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::write(base.join("old.md"), "# old").unwrap();
+    let state = create_directory_state(&base);
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("new.md"), "# new").unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
+    std::fs::rename(&replacement, &base).unwrap();
+
+    let error = resolve_route_target(&state, RouteTargetRequest::api_content(Some("new.md")))
+        .await
+        .expect_err("起動時と異なるbase実体の明示ファイル解決は拒否する");
+
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_resolve_route_target_api_memoはfile_listを含まない() {
     let dir = create_test_dir();
     let state = create_directory_state(dir.path());

@@ -9,7 +9,8 @@ use super::support::{create_test_dir, make_dir_unsearchable};
 use crate::server::files::catalog::{
     canonicalize_dir_for_cycle, ensure_current_dir_still_canonical,
     list_markdown_files_from_canonical_base,
-    list_markdown_files_from_canonical_base_until_cancelled, MAX_DIR_DEPTH, MAX_FILE_LIST,
+    list_markdown_files_from_canonical_base_until_cancelled,
+    set_catalog_before_recurse_hook_for_test, MAX_DIR_DEPTH, MAX_FILE_LIST,
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
@@ -165,6 +166,34 @@ fn test_list_markdown_files_from_canonical_base_隠しsymlink先ディレクト�
     let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
 
     assert!(files.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_list_markdown_files_from_canonical_base_再帰直前の除外symlink差し替えを列挙しない() {
+    let base = tempfile::tempdir().unwrap();
+    let visible_dir = base.path().join("visible");
+    std::fs::create_dir_all(&visible_dir).unwrap();
+    std::fs::write(visible_dir.join("safe.md"), "# safe").unwrap();
+    let excluded_dir = base.path().join(".git");
+    std::fs::create_dir_all(&excluded_dir).unwrap();
+    std::fs::write(excluded_dir.join("secret.md"), "# secret").unwrap();
+    let visible_for_hook = visible_dir.clone();
+    let excluded_for_hook = excluded_dir.clone();
+    let _guard = set_catalog_before_recurse_hook_for_test(std::sync::Arc::new(move |relative| {
+        if relative == std::path::Path::new("visible") {
+            std::fs::remove_dir_all(&visible_for_hook).unwrap();
+            symlink(&excluded_for_hook, &visible_for_hook).unwrap();
+        }
+    }));
+
+    let canonical = CanonicalPath::try_from_path(base.path()).unwrap();
+    let files = list_markdown_files_from_canonical_base(&canonical, MAX_FILE_LIST).unwrap();
+
+    assert!(
+        !files.iter().any(|file| file.contains("secret.md")),
+        "再帰直前に除外ディレクトリへ差し替えられても除外配下のファイル名を返してはいけない: {files:?}"
+    );
 }
 
 #[test]

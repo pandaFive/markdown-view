@@ -19,17 +19,36 @@ pub(super) const MAX_DIR_DEPTH: usize = 32;
 type CatalogProgressHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
 
 #[cfg(test)]
+type CatalogBeforeRecurseHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
 static CATALOG_PROGRESS_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<CatalogProgressHook>>> =
     std::sync::OnceLock::new();
+
+#[cfg(test)]
+static CATALOG_BEFORE_RECURSE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<CatalogBeforeRecurseHook>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(in crate::server) struct CatalogProgressHookGuard;
 
 #[cfg(test)]
+pub(in crate::server) struct CatalogBeforeRecurseHookGuard;
+
+#[cfg(test)]
 impl Drop for CatalogProgressHookGuard {
     fn drop(&mut self) {
         let hook = CATALOG_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+impl Drop for CatalogBeforeRecurseHookGuard {
+    fn drop(&mut self) {
+        let hook = CATALOG_BEFORE_RECURSE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
         *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
@@ -42,6 +61,15 @@ pub(in crate::server) fn set_catalog_progress_hook_for_test(
     let slot = CATALOG_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     CatalogProgressHookGuard
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_catalog_before_recurse_hook_for_test(
+    hook: CatalogBeforeRecurseHook,
+) -> CatalogBeforeRecurseHookGuard {
+    let slot = CATALOG_BEFORE_RECURSE_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    CatalogBeforeRecurseHookGuard
 }
 
 #[cfg(test)]
@@ -58,6 +86,21 @@ fn notify_catalog_progress_for_test(display_path: &Path) {
 
 #[cfg(not(test))]
 fn notify_catalog_progress_for_test(_display_path: &Path) {}
+
+#[cfg(test)]
+fn notify_catalog_before_recurse_for_test(display_path: &Path) {
+    let hook = CATALOG_BEFORE_RECURSE_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(display_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_catalog_before_recurse_for_test(_display_path: &Path) {}
 
 /// ディレクトリ内の.mdファイルを再帰的に列挙する
 pub fn list_markdown_files(base_dir: &Path) -> std::io::Result<Vec<String>> {
@@ -131,6 +174,7 @@ pub(in crate::server) fn list_markdown_files_from_verified_base_until_cancelled(
 
     list_markdown_files_from_verified_base_recursive(
         &traversal,
+        base_dir,
         Path::new(""),
         Path::new(""),
         &mut files,
@@ -163,6 +207,7 @@ fn relative_path_to_slash_string(relative: &Path) -> String {
 
 fn list_markdown_files_from_verified_base_recursive(
     traversal: &CapCatalogTraversal<'_>,
+    current_dir: &Dir,
     current_relative: &Path,
     display_relative: &Path,
     files: &mut Vec<String>,
@@ -181,11 +226,7 @@ fn list_markdown_files_from_verified_base_recursive(
         return Ok(());
     }
 
-    let entries = if current_relative.as_os_str().is_empty() {
-        traversal.base_dir.entries()?
-    } else {
-        traversal.base_dir.read_dir(current_relative)?
-    };
+    let entries = current_dir.entries()?;
     for entry in entries {
         if (traversal.is_cancelled)() {
             return Ok(());
@@ -227,7 +268,7 @@ fn list_markdown_files_from_verified_base_recursive(
             if files.len() >= traversal.max_files {
                 return Ok(());
             }
-            let Some(traversal_relative) = resolve_cap_recursable_directory(
+            let Some((traversal_relative, traversal_dir)) = resolve_cap_recursable_directory(
                 traversal.base_dir,
                 traversal.canonical_base_dir,
                 &access_relative,
@@ -246,8 +287,10 @@ fn list_markdown_files_from_verified_base_recursive(
                 }
                 continue;
             }
+            notify_catalog_before_recurse_for_test(&display_path);
             list_markdown_files_from_verified_base_recursive(
                 traversal,
+                &traversal_dir,
                 &traversal_relative,
                 &display_path,
                 files,
@@ -275,7 +318,7 @@ fn resolve_cap_recursable_directory(
     access_relative: &Path,
     display_path: &Path,
     is_symlink: bool,
-) -> std::io::Result<Option<PathBuf>> {
+) -> std::io::Result<Option<(PathBuf, Dir)>> {
     let canonical_relative = match canonical_cap_relative_dir(base_dir, access_relative) {
         Ok(relative) => relative,
         Err(error) if is_symlink => {
@@ -321,7 +364,8 @@ fn resolve_cap_recursable_directory(
         ));
     }
 
-    Ok(Some(canonical_relative))
+    let traversal_dir = base_dir.open_dir(&canonical_relative)?;
+    Ok(Some((canonical_relative, traversal_dir)))
 }
 
 fn canonical_symlink_relative(

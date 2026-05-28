@@ -111,8 +111,16 @@ plateau 判定は、同一 server process に同一条件の request を複数�
   - `/tmp/markdown-view-search-byte-limit-plateau.***`
 
 - 実装する場合
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/server/state.rs`
+  - `src/server/files/catalog.rs`
+  - `src/server/files/mod.rs`
+  - `src/server/files/resolve.rs`
   - `src/server/files/search.rs`
-  - 検索関連 unit test
+  - `src/server/service.rs`
+  - `src/server/log_path.rs`
+  - 検索、ファイル一覧、ファイル解決関連 unit test
   - 必要なら `docs/todo/BACKLOG.md`
 
 `SearchResponse` JSON、HTTP route、UI、CSP、Host/Origin 検証、path validation の public contract、HTML sanitization、ブラウザ assets は変更しない。path validation の内部実装は base identity 検証と capability-based access へ寄せる。

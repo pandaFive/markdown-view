@@ -281,9 +281,31 @@ async fn resolve_file_blocking(
     let base_dir = base_dir.clone();
     let relative = relative.to_owned();
     run_blocking_file_task("ファイル解決", move || {
+        validate_directory_base_identity_for_resolve(&base_dir)?;
         resolve_file(base_dir.as_path(), &relative)
     })
     .await
+}
+
+fn validate_directory_base_identity_for_resolve(
+    base_dir: &CanonicalPath,
+) -> Result<(), ResolveFileError> {
+    match base_dir.has_current_identity() {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(
+                "[markdown-view] ファイル解決base directory pathの実体差し替えを検出しました"
+            );
+            Err(ResolveFileError::Traversal)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] ファイル解決base directory pathの実体検証に失敗しました: {}",
+                error
+            );
+            Err(ResolveFileError::Io(error.kind()))
+        }
+    }
 }
 
 fn build_resolved_target(
