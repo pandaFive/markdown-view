@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,23 +122,116 @@ impl WatcherDiagnostics {
         );
     }
 }
-pub(super) fn send_merged_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path: PathBuf) -> bool {
+
+#[derive(Default)]
+pub(super) struct WatchEventDropReporter {
+    reserved_capacity_reported: AtomicBool,
+    reserved_capacity_suppressed_count: AtomicU64,
+    last_reported_suppressed_count: AtomicU64,
+}
+
+impl WatchEventDropReporter {
+    fn report_reserved_capacity_drop(&self) -> bool {
+        let should_report = !self.reserved_capacity_reported.swap(true, Ordering::AcqRel);
+        if should_report {
+            tracing::warn!(
+                dropped_count = 1_u64,
+                drop_reason = "reserved_capacity",
+                event_type = "FileChanged",
+                "[markdown-view] 監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました"
+            );
+        } else {
+            let suppressed_count = self
+                .reserved_capacity_suppressed_count
+                .fetch_add(1, Ordering::AcqRel)
+                + 1;
+            self.report_live_summary_if_threshold_reached(suppressed_count);
+        }
+        should_report
+    }
+
+    fn report_live_summary_if_threshold_reached(&self, suppressed_count: u64) {
+        if !is_power_of_ten(suppressed_count) {
+            return;
+        }
+
+        self.last_reported_suppressed_count
+            .store(suppressed_count, Ordering::Release);
+        report_reserved_capacity_suppressed_summary(suppressed_count);
+    }
+}
+
+impl Drop for WatchEventDropReporter {
+    fn drop(&mut self) {
+        let suppressed_count = self
+            .reserved_capacity_suppressed_count
+            .load(Ordering::Acquire);
+        let last_reported = self.last_reported_suppressed_count.load(Ordering::Acquire);
+        if suppressed_count > 0 && suppressed_count != last_reported {
+            report_reserved_capacity_suppressed_summary(suppressed_count);
+        }
+    }
+}
+
+fn report_reserved_capacity_suppressed_summary(suppressed_count: u64) {
+    let total_dropped_count = suppressed_count.saturating_add(1);
+    tracing::warn!(
+        suppressed_count,
+        total_dropped_count,
+        drop_reason = "reserved_capacity",
+        event_type = "FileChanged",
+        "[markdown-view] 監視イベント転送チャネル混雑中に追加のFileChangedを抑制しました"
+    );
+}
+
+#[allow(clippy::manual_is_multiple_of)]
+fn is_power_of_ten(mut value: u64) -> bool {
+    if value < 10 {
+        return false;
+    }
+    while value % 10 == 0 {
+        value /= 10;
+    }
+    value == 1
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MergedFileChangedSendResult {
+    Sent,
+    DroppedReservedCapacity { warned: bool },
+    DroppedFull,
+    Closed,
+}
+
+impl MergedFileChangedSendResult {
+    pub(super) fn is_channel_open(&self) -> bool {
+        !matches!(self, Self::Closed)
+    }
+}
+
+pub(super) fn send_merged_file_changed_event(
+    tx: &mpsc::Sender<WatchEvent>,
+    path: PathBuf,
+    drop_reporter: &WatchEventDropReporter,
+) -> MergedFileChangedSendResult {
     if tx.is_closed() {
         tracing::warn!(
             "[markdown-view] 監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
         );
-        return false;
+        return MergedFileChangedSendResult::Closed;
     }
 
     if tx.capacity() <= 1 {
-        tracing::warn!(
-            "[markdown-view] 監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました"
-        );
-        return !tx.is_closed();
+        let warned = drop_reporter.report_reserved_capacity_drop();
+        return if tx.is_closed() {
+            MergedFileChangedSendResult::Closed
+        } else {
+            MergedFileChangedSendResult::DroppedReservedCapacity { warned }
+        };
     }
 
     match tx.try_send(WatchEvent::FileChanged(path)) {
-        Ok(()) => true,
+        Ok(()) => MergedFileChangedSendResult::Sent,
         Err(mpsc::error::TrySendError::Full(_)) => {
             debug_assert!(
                 false,
@@ -147,13 +240,13 @@ pub(super) fn send_merged_file_changed_event(tx: &mpsc::Sender<WatchEvent>, path
             tracing::warn!(
                 "[markdown-view] 監視イベント転送チャネルが満杯のためFileChangedを破棄しました"
             );
-            true
+            MergedFileChangedSendResult::DroppedFull
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             tracing::warn!(
                 "[markdown-view] 監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
             );
-            false
+            MergedFileChangedSendResult::Closed
         }
     }
 }
@@ -391,6 +484,7 @@ pub(super) fn handle_internal_channel_disconnected(
 mod tests {
     use super::super::test_support::*;
     use super::*;
+    use std::mem::ManuallyDrop;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -991,8 +1085,12 @@ mod tests {
     async fn test_send_merged_file_changed_eventはerror用capacityを残す() {
         let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
         let (_dir, changed) = create_markdown_fixture("changed.md", "# changed");
+        let drop_reporter = WatchEventDropReporter::default();
 
-        assert!(send_merged_file_changed_event(&merged_tx, changed));
+        assert_eq!(
+            send_merged_file_changed_event(&merged_tx, changed, &drop_reporter),
+            MergedFileChangedSendResult::DroppedReservedCapacity { warned: true }
+        );
 
         assert!(
             merged_rx.try_recv().is_err(),
@@ -1001,16 +1099,293 @@ mod tests {
         assert_eq!(merged_tx.capacity(), 1);
     }
 
+    #[tokio::test]
+    async fn test_send_merged_file_changed_eventは混雑warnを初回だけ報告する() {
+        let events = capture_watch_drop_events(|| {
+            let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+            let drop_reporter = ManuallyDrop::new(WatchEventDropReporter::default());
+
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-first-warn.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: true }
+            );
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-first-warn-again.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: false }
+            );
+
+            assert!(
+                merged_rx.try_recv().is_err(),
+                "残容量が1以下ならFileChangedはmerged channelへ積まない"
+            );
+            assert_eq!(merged_tx.capacity(), 1);
+        });
+
+        let first_warn_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.fields.get("message").is_some_and(|message| {
+                        message.contains(
+                            "監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました",
+                        )
+                    })
+            })
+            .collect();
+        assert_eq!(first_warn_events.len(), 1);
+        assert_eq!(
+            first_warn_events[0]
+                .fields
+                .get("drop_reason")
+                .map(String::as_str),
+            Some("\"reserved_capacity\"")
+        );
+        assert_eq!(
+            first_warn_events[0]
+                .fields
+                .get("event_type")
+                .map(String::as_str),
+            Some("\"FileChanged\"")
+        );
+        assert_eq!(
+            first_warn_events[0]
+                .fields
+                .get("dropped_count")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            !log_events_contain_text(&events, "secret-drop-sentinel-first-warn"),
+            "混雑dropログには監視対象pathを含めない"
+        );
+    }
+
+    #[test]
+    fn test_send_merged_file_changed_eventは混雑warnと抑制件数要約を記録する() {
+        let events = capture_watch_drop_events(|| {
+            let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+            let drop_reporter = WatchEventDropReporter::default();
+
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-direct-first.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: true }
+            );
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-direct-second.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: false }
+            );
+            assert!(
+                merged_rx.try_recv().is_err(),
+                "残容量が1以下ならFileChangedはmerged channelへ積まない"
+            );
+        });
+
+        assert_eq!(
+            count_log_message(
+                &events,
+                "監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました"
+            ),
+            1
+        );
+        let summary_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.fields.get("message").is_some_and(|message| {
+                        message.contains(
+                            "監視イベント転送チャネル混雑中に追加のFileChangedを抑制しました",
+                        )
+                    })
+            })
+            .collect();
+        assert_eq!(summary_events.len(), 1);
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("suppressed_count")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("total_dropped_count")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert!(
+            !log_events_contain_text(&events, "secret-drop-sentinel-direct"),
+            "混雑dropログには監視対象pathを含めない"
+        );
+    }
+
+    #[test]
+    fn test_send_merged_file_changed_eventは追加dropを10の累乗ごとにlive要約する() {
+        let events = capture_watch_drop_events(|| {
+            let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+            let drop_reporter = ManuallyDrop::new(WatchEventDropReporter::default());
+
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-live-first.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: true }
+            );
+            for index in 0..10 {
+                assert_eq!(
+                    send_merged_file_changed_event(
+                        &merged_tx,
+                        PathBuf::from(format!("secret-drop-sentinel-live-{index}.md")),
+                        &drop_reporter
+                    ),
+                    MergedFileChangedSendResult::DroppedReservedCapacity { warned: false }
+                );
+            }
+            assert!(
+                merged_rx.try_recv().is_err(),
+                "残容量が1以下ならFileChangedはmerged channelへ積まない"
+            );
+        });
+
+        let live_summary_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.fields.get("message").is_some_and(|message| {
+                        message.contains(
+                            "監視イベント転送チャネル混雑中に追加のFileChangedを抑制しました",
+                        )
+                    })
+            })
+            .collect();
+        assert_eq!(live_summary_events.len(), 1);
+        assert_eq!(
+            live_summary_events[0]
+                .fields
+                .get("suppressed_count")
+                .map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            live_summary_events[0]
+                .fields
+                .get("total_dropped_count")
+                .map(String::as_str),
+            Some("11")
+        );
+        assert_eq!(
+            live_summary_events[0]
+                .fields
+                .get("drop_reason")
+                .map(String::as_str),
+            Some("\"reserved_capacity\"")
+        );
+        assert_eq!(
+            live_summary_events[0]
+                .fields
+                .get("event_type")
+                .map(String::as_str),
+            Some("\"FileChanged\"")
+        );
+        assert!(
+            !log_events_contain_text(&events, "secret-drop-sentinel-live"),
+            "混雑dropログには監視対象pathを含めない"
+        );
+    }
+
+    #[test]
+    fn test_send_merged_file_changed_eventはlive要約済み件数をdrop時に重複記録しない() {
+        let events = capture_watch_drop_events(|| {
+            let (merged_tx, mut merged_rx) = mpsc::channel::<WatchEvent>(1);
+            let drop_reporter = WatchEventDropReporter::default();
+
+            assert_eq!(
+                send_merged_file_changed_event(
+                    &merged_tx,
+                    PathBuf::from("secret-drop-sentinel-duplicate-first.md"),
+                    &drop_reporter
+                ),
+                MergedFileChangedSendResult::DroppedReservedCapacity { warned: true }
+            );
+            for index in 0..10 {
+                assert_eq!(
+                    send_merged_file_changed_event(
+                        &merged_tx,
+                        PathBuf::from(format!("secret-drop-sentinel-duplicate-{index}.md")),
+                        &drop_reporter
+                    ),
+                    MergedFileChangedSendResult::DroppedReservedCapacity { warned: false }
+                );
+            }
+            assert!(
+                merged_rx.try_recv().is_err(),
+                "残容量が1以下ならFileChangedはmerged channelへ積まない"
+            );
+        });
+
+        let summary_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.fields.get("message").is_some_and(|message| {
+                        message.contains(
+                            "監視イベント転送チャネル混雑中に追加のFileChangedを抑制しました",
+                        )
+                    })
+            })
+            .collect();
+        assert_eq!(summary_events.len(), 1);
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("suppressed_count")
+                .map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("total_dropped_count")
+                .map(String::as_str),
+            Some("11")
+        );
+        assert!(
+            !log_events_contain_text(&events, "secret-drop-sentinel-duplicate"),
+            "混雑dropログには監視対象pathを含めない"
+        );
+    }
+
     #[traced_test]
     #[test]
     fn test_send_merged_file_changed_eventはclosed時にwarnを残す() {
         let (merged_tx, merged_rx) = mpsc::channel::<WatchEvent>(1);
         drop(merged_rx);
 
+        let drop_reporter = WatchEventDropReporter::default();
         assert!(!send_merged_file_changed_event(
             &merged_tx,
-            PathBuf::from("closed.md")
-        ));
+            PathBuf::from("closed.md"),
+            &drop_reporter
+        )
+        .is_channel_open());
         assert!(logs_contain(
             "監視イベント転送チャネルが閉じているためFileChangedを破棄しました"
         ));

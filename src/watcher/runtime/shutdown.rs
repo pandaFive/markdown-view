@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use super::super::{WatchError, WatchEvent};
-use super::dispatch::{send_merged_file_changed_event, WatcherDiagnostics};
+use super::dispatch::{send_merged_file_changed_event, WatchEventDropReporter, WatcherDiagnostics};
 use super::error_queue::{PriorityErrorReceiver, PriorityErrorSender};
 use super::health::{WatcherFailureKind, WatcherHealthState};
 
@@ -151,6 +151,7 @@ pub(super) fn spawn_watch_event_merge_forwarder(
     let (done_tx, done_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _done = ForwarderDoneOnDrop(Some(done_tx));
+        let drop_reporter = WatchEventDropReporter::default();
         loop {
             while let Ok(error) = error_rx.try_recv() {
                 if merged_tx.send(WatchEvent::Error(error)).await.is_err() {
@@ -172,7 +173,9 @@ pub(super) fn spawn_watch_event_merge_forwarder(
                         }
                         None => {
                             while let Some(path) = file_rx.recv().await {
-                                if !send_merged_file_changed_event(&merged_tx, path) {
+                                if !send_merged_file_changed_event(&merged_tx, path, &drop_reporter)
+                                    .is_channel_open()
+                                {
                                     return;
                                 }
                             }
@@ -183,7 +186,9 @@ pub(super) fn spawn_watch_event_merge_forwarder(
                 path = file_rx.recv() => {
                     match path {
                         Some(path) => {
-                            if !send_merged_file_changed_event(&merged_tx, path) {
+                            if !send_merged_file_changed_event(&merged_tx, path, &drop_reporter)
+                                .is_channel_open()
+                            {
                                 break;
                             }
                         }
@@ -365,6 +370,79 @@ mod tests {
             .await_completion()
             .await
             .expect("merge forwarderが正常終了する");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_merge_forwarderは混雑warnを初回だけ出して抑制件数を要約する() {
+        let events = capture_watch_drop_events_async(async {
+            let (file_tx, file_rx) = mpsc::channel::<PathBuf>(4);
+            let (error_tx, error_rx) =
+                priority_error_channel(super::super::error_queue::WATCHER_ERROR_QUEUE_CAPACITY);
+            let (merged_tx, _merged_rx) = mpsc::channel::<WatchEvent>(1);
+
+            file_tx
+                .send(PathBuf::from("secret-drop-sentinel-forwarder-first.md"))
+                .await
+                .expect("first file eventを送信できる");
+            file_tx
+                .send(PathBuf::from("secret-drop-sentinel-forwarder-second.md"))
+                .await
+                .expect("second file eventを送信できる");
+            file_tx
+                .send(PathBuf::from("secret-drop-sentinel-forwarder-third.md"))
+                .await
+                .expect("third file eventを送信できる");
+
+            let forwarder = super::super::shutdown::spawn_watch_event_merge_forwarder(
+                file_rx, error_rx, merged_tx,
+            );
+            drop(file_tx);
+            drop(error_tx);
+
+            forwarder
+                .await_completion()
+                .await
+                .expect("merge forwarderが正常終了する");
+        })
+        .await;
+
+        assert_eq!(
+            count_log_message(
+                &events,
+                "監視イベント転送チャネルが混雑しているためError用の余白を残してFileChangedを破棄しました"
+            ),
+            1
+        );
+        let summary_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN
+                    && event.fields.get("message").is_some_and(|message| {
+                        message.contains(
+                            "監視イベント転送チャネル混雑中に追加のFileChangedを抑制しました",
+                        )
+                    })
+            })
+            .collect();
+        assert_eq!(summary_events.len(), 1);
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("suppressed_count")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            summary_events[0]
+                .fields
+                .get("total_dropped_count")
+                .map(String::as_str),
+            Some("3")
+        );
+        assert!(
+            !log_events_contain_text(&events, "secret-drop-sentinel-forwarder"),
+            "混雑dropログには監視対象pathを含めない"
+        );
     }
 
     #[tokio::test]
