@@ -342,31 +342,51 @@ function createDocumentSearchController(
     blockEntries.forEach(function(blockText: DocumentSearchBlockEntry, blockIndex: number): void {
       var matchIndex;
       var searchIndex = 0;
+      var blockMatches: Array<{
+        matchStart: number;
+        matchEnd: number;
+        matchId: number;
+        context: DocumentSearchContext;
+        marks: HTMLElement[];
+      }> = [];
 
       if (!blockText.text) return;
 
       matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
       while (matchIndex !== -1) {
-        var marks = wrapDocumentSearchMatch(
-          blockText.nodes,
-          matchIndex,
-          matchIndex + normalizedQuery.length,
-          ctx.search.documentMatches.length
-        );
-        if (marks.length) {
-          ctx.search.documentMatches.push({
-            marks: marks,
-            context: buildDocumentSearchContext(
-              blockEntries,
-              blockIndex,
-              matchIndex,
-              matchIndex + normalizedQuery.length
-            )
-          });
-        }
+        blockMatches.push({
+          matchStart: matchIndex,
+          matchEnd: matchIndex + normalizedQuery.length,
+          matchId: ctx.search.documentMatches.length + blockMatches.length,
+          context: buildDocumentSearchContext(
+            blockEntries,
+            blockIndex,
+            matchIndex,
+            matchIndex + normalizedQuery.length
+          ),
+          marks: []
+        });
         searchIndex = matchIndex + normalizedQuery.length;
         matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
       }
+
+      blockMatches.slice().reverse().forEach(function(match): void {
+        var marks = wrapDocumentSearchMatch(
+          blockText.nodes,
+          match.matchStart,
+          match.matchEnd,
+          match.matchId
+        );
+        match.marks = marks;
+      });
+
+      blockMatches.forEach(function(match): void {
+        if (!match.marks.length) return;
+        ctx.search.documentMatches.push({
+          marks: match.marks,
+          context: match.context
+        });
+      });
     });
 
     if (ctx.search.documentMatches.length) {
