@@ -138,12 +138,18 @@ impl Drop for Watcher {
 
 #[cfg(test)]
 pub(super) mod test_support {
+    use std::collections::BTreeMap;
+    use std::fmt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, oneshot};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
 
     use super::dispatch::{BestEffortFileSender, WatchEventSenders, WatcherDiagnostics};
     use super::error_queue::{priority_error_channel, PriorityErrorReceiver};
@@ -151,6 +157,100 @@ pub(super) mod test_support {
     use super::thread::{handle_watcher_panic, InitResult};
     use super::Watcher;
     use crate::watcher::WatchEvent;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct CapturedEvent {
+        pub(super) level: Level,
+        pub(super) fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct CapturedFields {
+        values: BTreeMap<String, String>,
+    }
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.values
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.values
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.values
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .expect("event capture lock")
+                .push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields: fields.values,
+                });
+        }
+    }
+
+    pub(super) fn capture_watch_drop_events(action: impl FnOnce()) -> Vec<CapturedEvent> {
+        let capture = EventCapture::default();
+        let events = Arc::clone(&capture.0);
+        let subscriber = Registry::default().with(capture);
+
+        tracing::subscriber::with_default(subscriber, action);
+
+        let captured = events.lock().expect("event capture lock").clone();
+        captured
+    }
+
+    pub(super) async fn capture_watch_drop_events_async(
+        action: impl std::future::Future<Output = ()>,
+    ) -> Vec<CapturedEvent> {
+        let capture = EventCapture::default();
+        let events = Arc::clone(&capture.0);
+        let subscriber = Registry::default().with(capture);
+        // thread-local subscriber に依存するため、current_thread runtime のテスト専用。
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        action.await;
+
+        let captured = events.lock().expect("event capture lock").clone();
+        captured
+    }
+
+    pub(super) fn count_log_message(events: &[CapturedEvent], message: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                event.level == Level::WARN
+                    && event
+                        .fields
+                        .get("message")
+                        .is_some_and(|logged| logged.contains(message))
+            })
+            .count()
+    }
+
+    pub(super) fn log_events_contain_text(events: &[CapturedEvent], text: &str) -> bool {
+        events
+            .iter()
+            .any(|event| event.fields.values().any(|value| value.contains(text)))
+    }
+
     pub(super) fn create_markdown_fixture(
         name: &str,
         content: &str,
