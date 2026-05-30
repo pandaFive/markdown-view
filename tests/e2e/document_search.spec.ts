@@ -177,6 +177,24 @@ test('装飾をまたぐ語句も検索できる', async ({ page }) => {
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
 
+test('同じテキストノード内の複数一致をすべて検索できる', async ({ page }) => {
+  await updateContentAndActivateToc(page, {
+    content:
+      '<h1 id="readme">README</h1>' +
+      '<p>alpha alpha alpha</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(3);
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(3);
+
+  await page.locator('#document-search-input').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
+});
+
 test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
