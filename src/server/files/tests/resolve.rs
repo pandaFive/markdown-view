@@ -9,6 +9,7 @@ use super::support::{
 };
 use crate::server::files::resolve::{resolve_change_target, revalidate_single_file_target};
 use crate::server::files::*;
+use crate::server::state::CanonicalPath;
 
 #[test]
 fn test_resolve_file_正常なパス() {
@@ -386,6 +387,22 @@ fn test_resolve_change_target_単一ファイル変更は再検証済みpathを�
 }
 
 #[test]
+fn test_resolve_change_target_単一ファイル通常ファイル差し替えは拒否する() {
+    let parent = tempfile::tempdir().unwrap();
+    let target = parent.path().join("target.md");
+    let replacement = parent.path().join("replacement.md");
+    std::fs::write(&target, "# target").unwrap();
+    std::fs::write(&replacement, "# replacement").unwrap();
+    let state = create_single_file_state(&target);
+    std::fs::remove_file(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
 fn test_resolve_file_mdディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("folder.md")).unwrap();
@@ -422,19 +439,23 @@ fn test_resolve_file_error_hidden_displayは除外対象を含む() {
 #[test]
 fn test_revalidate_single_file_target_正常なファイルを許可する() {
     let (dir, file_path) = create_markdown_fixture("test.md", "# test");
-    let canonical = file_path.canonicalize().unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    let expected_path = canonical.as_path().to_path_buf();
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &base_dir);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), canonical);
+    assert_eq!(result.unwrap(), expected_path);
 }
 
 #[test]
 fn test_revalidate_single_file_target_存在しないファイルはnotfoundを返す() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("nonexistent.md");
+    std::fs::write(&file_path, "# temporary").unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    std::fs::remove_file(&file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&file_path, &base_dir);
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
 }
 
@@ -446,12 +467,13 @@ fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
     std::fs::create_dir(&locked_dir).unwrap();
     let target = locked_dir.join("secret.md");
     std::fs::write(&target, "# secret").unwrap();
+    let canonical = CanonicalPath::try_from_path(&target).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
     let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
         return;
     };
 
-    let result = revalidate_single_file_target(&target, &base_dir);
+    let result = revalidate_single_file_target(&canonical, &base_dir);
 
     assert!(matches!(
         result,
@@ -462,8 +484,9 @@ fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
 #[test]
 fn test_revalidate_single_file_target_ディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
-    let canonical = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&canonical, &canonical);
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
@@ -472,21 +495,23 @@ fn test_revalidate_single_file_target_非mdファイルはnotmarkdownを返す()
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello").unwrap();
-    let canonical = file_path.canonicalize().unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotMarkdown));
 }
 
-#[cfg(unix)]
 #[test]
-fn test_revalidate_single_file_target_シンボリックリンクはtraversalを返す() {
+fn test_revalidate_single_file_target_実体差し替えはtraversalを返す() {
     let dir = tempfile::tempdir().unwrap();
-    let real_file = dir.path().join("real.md");
-    std::fs::write(&real_file, "# real").unwrap();
-    let link_path = dir.path().join("link.md");
-    std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
+    let file_path = dir.path().join("real.md");
+    let replacement = dir.path().join("replacement.md");
+    std::fs::write(&file_path, "# real").unwrap();
+    std::fs::write(&replacement, "# replacement").unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    std::fs::remove_file(&file_path).unwrap();
+    std::fs::rename(&replacement, &file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&link_path, &base_dir);
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::Traversal));
 }

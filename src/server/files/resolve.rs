@@ -186,7 +186,7 @@ pub(super) fn resolve_single_file_target(
     state: &AppState,
     warn_label: &'static str,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    let Some(file_path) = state.mode().single_file() else {
+    let Some(file_path) = state.mode().single_file_canonical() else {
         return Ok(None);
     };
 
@@ -205,7 +205,7 @@ pub(super) fn resolve_change_target(
     state: &AppState,
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    if let Some(expected) = state.mode().single_file() {
+    if let Some(expected) = state.mode().single_file_canonical() {
         let validated_path = revalidate_single_file_target(expected, state.mode().base_dir())?;
         let read_file = open_single_file_for_read(expected)?;
         return Ok(Some(build_resolved_target(
@@ -224,7 +224,7 @@ async fn resolve_request_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
 ) -> Result<(PathBuf, Option<Vec<String>>, Option<std::fs::File>), StatusCode> {
-    if let Some(path) = state.mode().single_file() {
+    if let Some(path) = state.mode().single_file_canonical() {
         let canonical =
             revalidate_single_file_target(path, state.mode().base_dir()).map_err(|error| {
                 tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
@@ -353,9 +353,15 @@ fn resolve_file_from_canonical_base(
     })
 }
 
-fn open_single_file_for_read(path: &Path) -> Result<std::fs::File, ResolveFileError> {
-    let parent = path.parent().ok_or(ResolveFileError::InvalidPath)?;
-    let file_name = path.file_name().ok_or(ResolveFileError::InvalidPath)?;
+fn open_single_file_for_read(path: &CanonicalPath) -> Result<std::fs::File, ResolveFileError> {
+    let parent = path
+        .as_path()
+        .parent()
+        .ok_or(ResolveFileError::InvalidPath)?;
+    let file_name = path
+        .as_path()
+        .file_name()
+        .ok_or(ResolveFileError::InvalidPath)?;
     let parent_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
         .map_err(|error| ResolveFileError::Io(error.kind()))?;
     let file = match open_relative_file_nofollow(&parent_dir, Path::new(file_name)) {
@@ -374,6 +380,10 @@ fn open_single_file_for_read(path: &Path) -> Result<std::fs::File, ResolveFileEr
     };
     if !metadata.is_file() {
         return Err(ResolveFileError::NotFile);
+    }
+    if !path.matches_cap_metadata_identity(&metadata) {
+        tracing::warn!("[markdown-view] 単一ファイルtarget pathの実体差し替えを検出しました");
+        return Err(ResolveFileError::Traversal);
     }
     Ok(file.into_std())
 }
@@ -568,22 +578,36 @@ fn resolve_file_with_canonicalize_error(
 /// 起動時に正規化したパスと現在のパスを比較し、シンボリックリンク差し替え等の
 /// 攻撃を検出する。正規化後のパスが起動時と異なる場合はトラバーサルとして拒否する。
 pub(super) fn revalidate_single_file_target(
-    expected_path: &Path,
+    expected_path: &CanonicalPath,
     base_dir: &Path,
 ) -> Result<PathBuf, ResolveFileError> {
-    let canonical = expected_path.canonicalize().map_err(|error| {
+    let canonical = expected_path.as_path().canonicalize().map_err(|error| {
         let error_kind = error.kind();
         tracing::warn!(
             "[markdown-view] 単一ファイルパス正規化失敗: {} ({:?}: {})",
-            sanitize_path_for_logging(expected_path, base_dir),
+            sanitize_path_for_logging(expected_path.as_path(), base_dir),
             error_kind,
             error
         );
         resolve_canonicalize_error(error_kind)
     })?;
 
-    if canonical != expected_path {
+    if canonical != expected_path.as_path() {
         return Err(ResolveFileError::Traversal);
+    }
+    match expected_path.has_current_identity() {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("[markdown-view] 単一ファイルtarget pathの実体差し替えを検出しました");
+            return Err(ResolveFileError::Traversal);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] 単一ファイルtarget pathの実体検証に失敗しました: {}",
+                error
+            );
+            return Err(resolve_canonicalize_error(error.kind()));
+        }
     }
     if !canonical.is_file() {
         return Err(ResolveFileError::NotFile);

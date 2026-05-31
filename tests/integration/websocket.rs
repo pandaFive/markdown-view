@@ -93,7 +93,7 @@ async fn test_ファイル変更でwebsocket更新() {
     drop(tmp_dir);
 }
 #[tokio::test]
-async fn test_単一ファイルモード_atomic_save後にwebsocket更新() {
+async fn test_単一ファイルモード_atomic_save後の実体差し替えはwebsocketエラーにする() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("atomic_single.md");
     tokio::fs::write(&file_path, "# Before Atomic Save")
@@ -114,10 +114,11 @@ async fn test_単一ファイルモード_atomic_save後にwebsocket更新() {
     let msg = next_ws_message(&mut read).await;
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert!(json["content"]
-        .as_str()
-        .unwrap()
-        .contains("After Atomic Save"));
+    let error = json["error"].as_str().expect("errorフィールドが存在する");
+    assert_eq!(
+        error,
+        "ファイル検証エラー (atomic_single.md): ディレクトリ外へのアクセスは禁止されています"
+    );
     assert!(watch_service.is_alive());
 
     watch_service.shutdown().await;

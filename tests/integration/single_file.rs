@@ -1,5 +1,6 @@
+use std::fs;
 #[cfg(unix)]
-use std::{fs, os::unix::fs::symlink};
+use std::os::unix::fs::symlink;
 
 #[cfg(unix)]
 use super::support::make_file_unreadable;
@@ -166,6 +167,28 @@ async fn test_単一ファイルモード_シンボリックリンク差し替�
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_単一ファイルモード_通常ファイル差し替えを拒否する() {
+    let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Test").await;
+    let file_path = tmp_dir.path().join("test.md");
+    let replacement_path = tmp_dir.path().join("replacement.md");
+    tokio::fs::write(&replacement_path, "# Replacement")
+        .await
+        .unwrap();
+
+    fs::remove_file(&file_path).unwrap();
+    fs::rename(&replacement_path, &file_path).unwrap();
+
+    assert_json_error_for_paths(
+        addr,
+        &["/", "/api/content"],
+        reqwest::StatusCode::NOT_FOUND,
+        None,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_単一ファイルモードの後方互換_api_filesは空配列() {
     let (_state, addr, _server, _tmp_dir) = setup_single_file_server("# Test").await;
