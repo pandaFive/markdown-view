@@ -290,20 +290,33 @@ function createDocumentSearchController(ctx, deps) {
         blockEntries.forEach(function (blockText, blockIndex) {
             var matchIndex;
             var searchIndex = 0;
+            var blockMatches = [];
             if (!blockText.text)
                 return;
             matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
             while (matchIndex !== -1) {
-                var marks = wrapDocumentSearchMatch(blockText.nodes, matchIndex, matchIndex + normalizedQuery.length, ctx.search.documentMatches.length);
-                if (marks.length) {
-                    ctx.search.documentMatches.push({
-                        marks: marks,
-                        context: buildDocumentSearchContext(blockEntries, blockIndex, matchIndex, matchIndex + normalizedQuery.length)
-                    });
-                }
+                blockMatches.push({
+                    matchStart: matchIndex,
+                    matchEnd: matchIndex + normalizedQuery.length,
+                    matchId: ctx.search.documentMatches.length + blockMatches.length,
+                    context: buildDocumentSearchContext(blockEntries, blockIndex, matchIndex, matchIndex + normalizedQuery.length),
+                    marks: []
+                });
                 searchIndex = matchIndex + normalizedQuery.length;
                 matchIndex = blockText.text.toLowerCase().indexOf(normalizedQuery, searchIndex);
             }
+            blockMatches.slice().reverse().forEach(function (match) {
+                var marks = wrapDocumentSearchMatch(blockText.nodes, match.matchStart, match.matchEnd, match.matchId);
+                match.marks = marks;
+            });
+            blockMatches.forEach(function (match) {
+                if (!match.marks.length)
+                    return;
+                ctx.search.documentMatches.push({
+                    marks: match.marks,
+                    context: match.context
+                });
+            });
         });
         if (ctx.search.documentMatches.length) {
             setCurrentDocumentSearchMatch(0, false);
@@ -354,7 +367,14 @@ function createDocumentSearchController(ctx, deps) {
         setCurrentDocumentSearchMatch(ctx.search.currentDocumentIndex + step);
     }
     function applyDocumentSearchQuery(query) {
+        var previousDocumentQuery = ctx.search.currentDocumentQuery;
         ctx.search.currentDocumentQuery = (query || '').trim();
+        if (ctx.search.currentDocumentQuery !== previousDocumentQuery) {
+            ctx.search.currentDirectoryResultsScrollTop = 0;
+            if (ctx.elements.documentSearchResultsEl) {
+                ctx.elements.documentSearchResultsEl.scrollTop = 0;
+            }
+        }
         if (ctx.config.isDirMode) {
             applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
             ctx.search.pendingDirectoryNavigation = null;
@@ -376,7 +396,8 @@ function createDocumentSearchController(ctx, deps) {
                 ctx.search.currentDirectoryTruncatedReasons = [];
                 ctx.search.currentDirectoryLoading = false;
                 ctx.search.currentDirectoryError = '';
-                deps.renderDirectorySearchUi();
+                ctx.search.currentDirectoryResultsScrollTop = 0;
+                deps.renderDirectorySearchUi({ preserveScroll: false });
                 return;
             }
             ctx.search.currentDirectoryResults = [];
@@ -387,7 +408,9 @@ function createDocumentSearchController(ctx, deps) {
             ctx.search.currentDirectoryLoading = true;
             ctx.search.currentDirectoryError = '';
             deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
-            deps.renderDirectorySearchUi();
+            deps.renderDirectorySearchUi({
+                preserveScroll: ctx.search.currentDocumentQuery === previousDocumentQuery
+            });
             return;
         }
         applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
@@ -415,9 +438,10 @@ function createDocumentSearchController(ctx, deps) {
         ctx.search.currentDirectoryTruncatedReasons = [];
         ctx.search.currentDirectoryLoading = false;
         ctx.search.currentDirectoryError = '';
+        ctx.search.currentDirectoryResultsScrollTop = 0;
         clearDocumentSearchHighlights();
         if (ctx.config.isDirMode) {
-            deps.renderDirectorySearchUi();
+            deps.renderDirectorySearchUi({ preserveScroll: false });
         }
     }
     function syncDocumentSearchAfterContentUpdate(options) {

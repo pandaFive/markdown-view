@@ -6,9 +6,14 @@ function createDirectorySearchController(ctx, deps) {
         item.textContent = '上限により一部のみ表示しています。';
         return item;
     }
-    function renderDirectorySearchResults() {
+    function renderDirectorySearchResults(options) {
+        options = options || {};
         var resultsEl = ctx.elements.documentSearchResultsEl;
         var preservedScrollTop = resultsEl.scrollTop;
+        var hadRenderedResults = Boolean(resultsEl.querySelector('.document-search-result'));
+        if (options.preserveScroll !== false && hadRenderedResults) {
+            ctx.search.currentDirectoryResultsScrollTop = preservedScrollTop;
+        }
         resultsEl.innerHTML = '';
         if (!ctx.search.currentDocumentQuery)
             return;
@@ -53,11 +58,11 @@ function createDirectorySearchController(ctx, deps) {
             button.appendChild(body);
             resultsEl.appendChild(button);
         });
-        resultsEl.scrollTop = preservedScrollTop;
+        resultsEl.scrollTop = ctx.search.currentDirectoryResultsScrollTop;
     }
-    function renderDirectorySearchUi() {
+    function renderDirectorySearchUi(options) {
         deps.updateDocumentSearchSummary();
-        renderDirectorySearchResults();
+        renderDirectorySearchResults(options);
     }
     function applyPendingDirectorySearchNavigation() {
         if (!ctx.config.isDirMode || !ctx.search.pendingDirectoryNavigation)

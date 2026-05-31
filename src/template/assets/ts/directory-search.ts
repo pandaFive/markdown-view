@@ -9,9 +9,14 @@ function createDirectorySearchController(
     return item;
   }
 
-  function renderDirectorySearchResults(): void {
+  function renderDirectorySearchResults(options?: DirectorySearchRenderOptions): void {
+    options = options || {};
     var resultsEl = ctx.elements.documentSearchResultsEl!;
     var preservedScrollTop = resultsEl.scrollTop;
+    var hadRenderedResults = Boolean(resultsEl.querySelector('.document-search-result'));
+    if (options.preserveScroll !== false && hadRenderedResults) {
+      ctx.search.currentDirectoryResultsScrollTop = preservedScrollTop;
+    }
     resultsEl.innerHTML = '';
 
     if (!ctx.search.currentDocumentQuery) return;
@@ -66,12 +71,12 @@ function createDirectorySearchController(
       resultsEl.appendChild(button);
     });
 
-    resultsEl.scrollTop = preservedScrollTop;
+    resultsEl.scrollTop = ctx.search.currentDirectoryResultsScrollTop;
   }
 
-  function renderDirectorySearchUi(): void {
+  function renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void {
     deps.updateDocumentSearchSummary();
-    renderDirectorySearchResults();
+    renderDirectorySearchResults(options);
   }
 
   function applyPendingDirectorySearchNavigation(): void {

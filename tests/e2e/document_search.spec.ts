@@ -177,6 +177,24 @@ test('装飾をまたぐ語句も検索できる', async ({ page }) => {
   await expect.poll(() => currentMatchText(page)).toContain('Alpha note');
 });
 
+test('同じテキストノード内の複数一致をすべて検索できる', async ({ page }) => {
+  await updateContentAndActivateToc(page, {
+    content:
+      '<h1 id="readme">README</h1>' +
+      '<p>alpha alpha alpha</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
+  await expect.poll(() => visibleMatchCount(page)).toBe(3);
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(3);
+
+  await page.locator('#document-search-input').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#document-search-summary')).toHaveText('2 / 3 件');
+});
+
 test('EnterとShift+Enterで次前のヒットへ移動する', async ({ page }) => {
   await setDocumentSearchQuery(page, 'alpha note');
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 3 件');
@@ -1242,6 +1260,112 @@ test('ディレクトリモードではlive update後に検索結果一覧を再
 
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(2);
   await expect(page.locator('#document-search-summary')).toHaveText('1 / 2 件');
+});
+
+test('ディレクトリモードではlive update後も検索結果一覧のスクロール位置を維持する', async ({ page }) => {
+  const results = Array.from({ length: 24 }, (_, index) => ({
+    file: 'README.md',
+    file_match_index: index,
+    before: '',
+    current: `Alpha note appears in directory result ${index + 1}.`,
+    after: ''
+  }));
+  let searchCallCount = 0;
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: 'alpha note',
+        results,
+        searched_files: 1,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+
+  const beforeScrollTop = await page.evaluate(() => {
+    const resultsEl = document.getElementById('document-search-results')!;
+    resultsEl.scrollTop = resultsEl.scrollHeight;
+    return resultsEl.scrollTop;
+  });
+  expect(beforeScrollTop).toBeGreaterThan(0);
+
+  await updateContent(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect.poll(() => searchCallCount).toBe(2);
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+  await expect.poll(() => page.evaluate(() => {
+    return document.getElementById('document-search-results')!.scrollTop;
+  })).toBe(beforeScrollTop);
+});
+
+test('ディレクトリモードでは別クエリ入力時に検索結果一覧のスクロール位置を先頭へ戻す', async ({ page }) => {
+  const makeResults = (queryLabel: string) => Array.from({ length: 24 }, (_, index) => ({
+    file: 'README.md',
+    file_match_index: index,
+    before: '',
+    current: `${queryLabel} appears in directory result ${index + 1}.`,
+    after: ''
+  }));
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    const query = url.searchParams.get('q') || '';
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query,
+        results: makeResults(query),
+        searched_files: 1,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+
+  const beforeScrollTop = await page.evaluate(() => {
+    const resultsEl = document.getElementById('document-search-results')!;
+    resultsEl.scrollTop = resultsEl.scrollHeight;
+    return resultsEl.scrollTop;
+  });
+  expect(beforeScrollTop).toBeGreaterThan(0);
+
+  await setDocumentSearchQuery(page, 'beta note');
+
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+  await expect(page.locator('#document-search-results .document-search-result').first())
+    .toContainText('beta note appears in directory result 1.');
+  await expect.poll(() => page.evaluate(() => {
+    return document.getElementById('document-search-results')!.scrollTop;
+  })).toBe(0);
 });
 
 test('ディレクトリモードでは古い検索失敗で新しいクエリのエラー表示に切り替わらない', async ({ page }) => {

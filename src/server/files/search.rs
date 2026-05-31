@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Component, Path};
@@ -1552,19 +1553,6 @@ fn is_large_search_block(text: &str) -> bool {
     text.len() > LARGE_SEARCH_BLOCK_BYTES
 }
 
-fn next_large_block_search_start(
-    normalized_text: &str,
-    current_search_start: usize,
-    normalized_query_len: usize,
-) -> usize {
-    let overlap_bytes = normalized_query_len.saturating_sub(1);
-    let mut next_start = normalized_text.len().saturating_sub(overlap_bytes);
-    while next_start > current_search_start && !normalized_text.is_char_boundary(next_start) {
-        next_start -= 1;
-    }
-    next_start.max(current_search_start)
-}
-
 fn find_matches_for_large_block(
     file: &str,
     text: &str,
@@ -1578,9 +1566,15 @@ fn find_matches_for_large_block(
     }
 
     let normalized_query = query.to_lowercase();
-    let mut normalized_text = String::new();
-    let mut original_offsets = vec![0usize];
-    let mut search_start = 0usize;
+    if normalized_query.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let pattern = normalized_query.as_bytes();
+    let prefix_table = build_kmp_prefix_table(pattern);
+    let mut matched_bytes = 0usize;
+    let mut normalized_boundary = 0usize;
+    let mut recent_offsets = VecDeque::from([(0usize, 0usize)]);
     let mut results = Vec::new();
 
     for (chars_seen, (char_index, ch)) in text.char_indices().enumerate() {
@@ -1590,36 +1584,30 @@ fn find_matches_for_large_block(
         notify_search_case_fold_char_for_test();
         let char_end = char_index + ch.len_utf8();
         let folded = ch.to_lowercase().collect::<String>();
-        normalized_text.push_str(&folded);
-        for _ in 0..folded.len() {
-            original_offsets.push(char_end);
-        }
 
-        while search_start <= normalized_text.len() {
-            notify_search_large_block_find_for_test(normalized_text.len() - search_start);
-            let Some(relative_index) = normalized_text[search_start..].find(&normalized_query)
-            else {
-                search_start = next_large_block_search_start(
-                    &normalized_text,
-                    search_start,
-                    normalized_query.len(),
-                );
-                break;
-            };
-            let normalized_match_start = search_start + relative_index;
-            let normalized_match_end = normalized_match_start + normalized_query.len();
-            if normalized_match_end > normalized_text.len() {
-                break;
+        for byte in folded.bytes() {
+            notify_search_large_block_find_for_test(1);
+            normalized_boundary += 1;
+            recent_offsets.push_back((normalized_boundary, char_end));
+            while recent_offsets.len() > pattern.len() + 1 {
+                recent_offsets.pop_front();
             }
 
-            let match_start = original_offsets
-                .get(normalized_match_start)
-                .copied()
-                .unwrap_or(0);
-            let match_end = original_offsets
-                .get(normalized_match_end)
-                .copied()
-                .unwrap_or_else(|| original_offsets.last().copied().unwrap_or(0));
+            while matched_bytes > 0 && byte != pattern[matched_bytes] {
+                matched_bytes = prefix_table[matched_bytes - 1];
+            }
+            if byte == pattern[matched_bytes] {
+                matched_bytes += 1;
+            }
+            if matched_bytes < pattern.len() {
+                continue;
+            }
+
+            let normalized_match_end = normalized_boundary;
+            let normalized_match_start = normalized_match_end.saturating_sub(pattern.len());
+            let match_start = recent_offset(&recent_offsets, normalized_match_start).unwrap_or(0);
+            let match_end =
+                recent_offset(&recent_offsets, normalized_match_end).unwrap_or(char_end);
             let current = clip_text_around_match(text, match_start, match_end);
             results.push(SearchResultItem::new(
                 file.to_string(),
@@ -1634,11 +1622,34 @@ fn find_matches_for_large_block(
             if results.len() >= remaining_results {
                 return Some(results);
             }
-            search_start = normalized_match_end;
+            matched_bytes = 0;
         }
     }
 
     Some(results)
+}
+
+fn build_kmp_prefix_table(pattern: &[u8]) -> Vec<usize> {
+    let mut table = vec![0usize; pattern.len()];
+    let mut matched = 0usize;
+
+    for index in 1..pattern.len() {
+        while matched > 0 && pattern[index] != pattern[matched] {
+            matched = table[matched - 1];
+        }
+        if pattern[index] == pattern[matched] {
+            matched += 1;
+            table[index] = matched;
+        }
+    }
+
+    table
+}
+
+fn recent_offset(offsets: &VecDeque<(usize, usize)>, boundary: usize) -> Option<usize> {
+    offsets
+        .iter()
+        .find_map(|(candidate, offset)| (*candidate == boundary).then_some(*offset))
 }
 
 #[derive(Debug, Clone)]
@@ -2271,6 +2282,69 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].current.contains("needle"));
         assert!(hook_calls.get() > 0);
+        assert!(scanned_bytes.get() > 0);
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロック長いquery_no_matchはquery長ぶん再走査しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let block_text = "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000);
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let query = "b".repeat(MAX_SEARCH_QUERY_CHARS);
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let max_scanned_bytes = block_text.len() * 8;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロック長いquery no-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, &query, usize::MAX, &|| false).unwrap();
+
+        assert!(results.is_empty());
+        assert!(scanned_bytes.get() > 0);
+        assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_find_matches_for_file_巨大ブロック長いquery_late_matchはquery長ぶん再走査しない() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let query = "b".repeat(MAX_SEARCH_QUERY_CHARS);
+        let block_text = format!("{}{}", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000), query);
+        let blocks = vec![SearchBlockEntry {
+            text: block_text.clone(),
+            sentences: Vec::new(),
+        }];
+        let scanned_bytes = Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = Rc::clone(&scanned_bytes);
+        let max_scanned_bytes = block_text.len() * 8;
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            let next = scanned_bytes_for_hook.get() + search_bytes;
+            assert!(
+                next <= max_scanned_bytes,
+                "巨大ブロック長いquery late-matchで検索範囲を再走査しすぎている: {next} bytes"
+            );
+            scanned_bytes_for_hook.set(next);
+        });
+
+        let results =
+            find_matches_for_file("many.md", &blocks, &query, usize::MAX, &|| false).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].current.contains(&query));
         assert!(scanned_bytes.get() > 0);
         assert!(scanned_bytes.get() <= max_scanned_bytes);
     }
