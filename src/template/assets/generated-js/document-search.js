@@ -367,7 +367,14 @@ function createDocumentSearchController(ctx, deps) {
         setCurrentDocumentSearchMatch(ctx.search.currentDocumentIndex + step);
     }
     function applyDocumentSearchQuery(query) {
+        var previousDocumentQuery = ctx.search.currentDocumentQuery;
         ctx.search.currentDocumentQuery = (query || '').trim();
+        if (ctx.search.currentDocumentQuery !== previousDocumentQuery) {
+            ctx.search.currentDirectoryResultsScrollTop = 0;
+            if (ctx.elements.documentSearchResultsEl) {
+                ctx.elements.documentSearchResultsEl.scrollTop = 0;
+            }
+        }
         if (ctx.config.isDirMode) {
             applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
             ctx.search.pendingDirectoryNavigation = null;
@@ -389,7 +396,8 @@ function createDocumentSearchController(ctx, deps) {
                 ctx.search.currentDirectoryTruncatedReasons = [];
                 ctx.search.currentDirectoryLoading = false;
                 ctx.search.currentDirectoryError = '';
-                deps.renderDirectorySearchUi();
+                ctx.search.currentDirectoryResultsScrollTop = 0;
+                deps.renderDirectorySearchUi({ preserveScroll: false });
                 return;
             }
             ctx.search.currentDirectoryResults = [];
@@ -400,7 +408,9 @@ function createDocumentSearchController(ctx, deps) {
             ctx.search.currentDirectoryLoading = true;
             ctx.search.currentDirectoryError = '';
             deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
-            deps.renderDirectorySearchUi();
+            deps.renderDirectorySearchUi({
+                preserveScroll: ctx.search.currentDocumentQuery === previousDocumentQuery
+            });
             return;
         }
         applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
@@ -428,9 +438,10 @@ function createDocumentSearchController(ctx, deps) {
         ctx.search.currentDirectoryTruncatedReasons = [];
         ctx.search.currentDirectoryLoading = false;
         ctx.search.currentDirectoryError = '';
+        ctx.search.currentDirectoryResultsScrollTop = 0;
         clearDocumentSearchHighlights();
         if (ctx.config.isDirMode) {
-            deps.renderDirectorySearchUi();
+            deps.renderDirectorySearchUi({ preserveScroll: false });
         }
     }
     function syncDocumentSearchAfterContentUpdate(options) {

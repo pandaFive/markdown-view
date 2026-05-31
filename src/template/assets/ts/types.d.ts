@@ -218,6 +218,7 @@ interface MarkdownViewSearchState {
   currentDirectoryTruncatedReasons: SearchTruncationReason[];
   currentDirectoryLoading: boolean;
   currentDirectoryError: string;
+  currentDirectoryResultsScrollTop: number;
   documentDebounceTimer: number | null;
   documentFetchGeneration: number;
   directorySearchClientId: string;
@@ -259,7 +260,7 @@ interface MarkdownViewContentController {
   moveDocumentSearch(step: number): void;
   applyDocumentSearchQuery(query: string): void;
   clearDocumentSearchQuery(): void;
-  renderDirectorySearchUi(): void;
+  renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void;
   scheduleDirectorySearch(query: string): void;
   augmentHashWithTrailingLineHint(link: Element, hash: string): string;
   setLiveStatus(state: LiveStatusState): void;
@@ -316,12 +317,16 @@ interface MarkdownViewDocumentSearchController {
   updateDocumentSearchSummary(): void;
 }
 
+interface DirectorySearchRenderOptions {
+  preserveScroll?: boolean;
+}
+
 interface MarkdownViewDirectorySearchController {
   applyPendingDirectorySearchNavigation(): void;
   cancelDirectorySearch(): void;
   openDirectorySearchResult(index: number): void;
-  renderDirectorySearchResults(): void;
-  renderDirectorySearchUi(): void;
+  renderDirectorySearchResults(options?: DirectorySearchRenderOptions): void;
+  renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void;
   scheduleDirectorySearch(query: string): void;
 }
 
@@ -341,8 +346,8 @@ interface DocumentSearchDeps {
   activateSidebarTab(target: string): void;
   applyPendingDirectorySearchNavigation(): void;
   openDirectorySearchResult(index: number): void;
-  renderDirectorySearchResults(): void;
-  renderDirectorySearchUi(): void;
+  renderDirectorySearchResults(options?: DirectorySearchRenderOptions): void;
+  renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void;
   cancelDirectorySearch(): void;
   scheduleDirectorySearch(query: string): void;
 }

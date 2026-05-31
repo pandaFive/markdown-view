@@ -30,11 +30,11 @@ function createContentController(
     openDirectorySearchResult: function(index: number): void {
       return requireDirectorySearch().openDirectorySearchResult(index);
     },
-    renderDirectorySearchResults: function(): void {
-      return requireDirectorySearch().renderDirectorySearchResults();
+    renderDirectorySearchResults: function(options?: DirectorySearchRenderOptions): void {
+      return requireDirectorySearch().renderDirectorySearchResults(options);
     },
-    renderDirectorySearchUi: function(): void {
-      return requireDirectorySearch().renderDirectorySearchUi();
+    renderDirectorySearchUi: function(options?: DirectorySearchRenderOptions): void {
+      return requireDirectorySearch().renderDirectorySearchUi(options);
     },
     cancelDirectorySearch: function(): void {
       return requireDirectorySearch().cancelDirectorySearch();
