@@ -25,11 +25,11 @@ function createContentController(ctx, deps) {
         openDirectorySearchResult: function (index) {
             return requireDirectorySearch().openDirectorySearchResult(index);
         },
-        renderDirectorySearchResults: function () {
-            return requireDirectorySearch().renderDirectorySearchResults();
+        renderDirectorySearchResults: function (options) {
+            return requireDirectorySearch().renderDirectorySearchResults(options);
         },
-        renderDirectorySearchUi: function () {
-            return requireDirectorySearch().renderDirectorySearchUi();
+        renderDirectorySearchUi: function (options) {
+            return requireDirectorySearch().renderDirectorySearchUi(options);
         },
         cancelDirectorySearch: function () {
             return requireDirectorySearch().cancelDirectorySearch();

@@ -137,6 +137,7 @@ function createAppContext(doc: Document): MarkdownViewAppContext {
       currentDirectoryTruncatedReasons: [],
       currentDirectoryLoading: false,
       currentDirectoryError: '',
+      currentDirectoryResultsScrollTop: 0,
       documentDebounceTimer: null,
       documentFetchGeneration: 0,
       directorySearchClientId: getDirectorySearchClientId(),
