@@ -3,6 +3,9 @@ import net from 'node:net';
 import { test, expect } from '@playwright/test';
 import { resetStandardFixtures } from './helpers';
 
+const singleFileServerReadyTimeoutMs = 45000;
+const singleFileServerStopTimeoutMs = 5000;
+
 async function getUnusedPort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -20,10 +23,10 @@ async function getUnusedPort(): Promise<number> {
 
 async function waitForSingleFileServer(port: number, server: ChildProcess): Promise<void> {
   const url = `http://127.0.0.1:${port}/`;
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + singleFileServerReadyTimeoutMs;
   while (Date.now() < deadline) {
-    if (server.exitCode !== null) {
-      throw new Error(`single file server exited early: ${server.exitCode}`);
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'}`);
     }
     try {
       const response = await fetch(url);
@@ -35,13 +38,47 @@ async function waitForSingleFileServer(port: number, server: ChildProcess): Prom
   throw new Error('single file server did not become ready');
 }
 
-async function stopServer(server: ChildProcess): Promise<void> {
-  if (server.exitCode !== null || server.killed) return;
-  await new Promise<void>((resolve) => {
-    server.once('exit', () => resolve());
-    server.kill();
-    setTimeout(resolve, 5000);
+function hasServerExited(server: ChildProcess): boolean {
+  return server.exitCode !== null || server.signalCode !== null;
+}
+
+function signalServer(server: ChildProcess, signal: NodeJS.Signals): void {
+  if (hasServerExited(server)) return;
+  try {
+    if (process.platform !== 'win32' && server.pid) {
+      process.kill(-server.pid, signal);
+      return;
+    }
+    server.kill(signal);
+  } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') {
+      throw error;
+    }
+  }
+}
+
+async function waitForServerExit(server: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (hasServerExited(server)) return true;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      server.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    function onExit(): void {
+      clearTimeout(timeout);
+      resolve(true);
+    }
+    server.once('exit', onExit);
   });
+}
+
+async function stopServer(server: ChildProcess): Promise<void> {
+  if (hasServerExited(server)) return;
+  signalServer(server, 'SIGTERM');
+  if (await waitForServerExit(server, singleFileServerStopTimeoutMs)) return;
+  signalServer(server, 'SIGKILL');
+  if (await waitForServerExit(server, singleFileServerStopTimeoutMs)) return;
+  throw new Error('single file server did not stop');
 }
 
 test.beforeEach(async ({ page }) => {
@@ -173,6 +210,22 @@ test('モバイル幅ではリサイズハンドルを非表示にする', async
 
   await expect(page.locator('#sidebar-width-resizer')).toBeHidden();
   await expect(page.locator('#panel-files .sidebar-content-resizer')).toBeHidden();
+});
+
+test('低いデスクトップ表示でもサイドバー下部へスクロール到達できる', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 160 });
+
+  const sidebar = page.locator('#sidebar');
+  const panel = page.locator('#panel-files');
+  const handle = page.locator('#panel-files .sidebar-content-resizer');
+  await expect.poll(async () => await panel.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await sidebar.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await panel.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(handle).toBeInViewport();
 });
 
 test('pointer capture開始失敗時もリサイズ状態を残さない', async ({ page }) => {
@@ -322,6 +375,7 @@ test('pointer capture喪失時に幅と内部リサイズの状態を片付け�
 });
 
 test('単一ファイルモードでも内部リサイズを操作できる', async ({ page }) => {
+  test.setTimeout(90000);
   const port = await getUnusedPort();
   const server = spawn('cargo', [
     'run',
@@ -331,6 +385,7 @@ test('単一ファイルモードでも内部リサイズを操作できる', as
     String(port),
     '--no-open'
   ], {
+    detached: process.platform !== 'win32',
     cwd: process.cwd(),
     stdio: 'ignore'
   });
