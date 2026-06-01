@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { test, expect } from '@playwright/test';
@@ -33,8 +34,24 @@ function appendServerOutput(output: SingleFileServerOutput, chunk: Buffer): void
   output.text = (output.text + sanitizeServerOutput(chunk.toString('utf8'))).slice(-singleFileServerOutputLimit);
 }
 
+function summarizeOutputText(value: string): string {
+  var sanitized = sanitizeServerOutput(value);
+  if (!sanitized) return '(no output)';
+  if (sanitized.length <= singleFileServerOutputLimit) return sanitized;
+  return `[truncated to last ${singleFileServerOutputLimit} chars]\n${sanitized.slice(-singleFileServerOutputLimit)}`;
+}
+
 function serverOutputSummary(output: SingleFileServerOutput): string {
-  return output.text || '(no output)';
+  return summarizeOutputText(output.text);
+}
+
+function fakeRunningServer(kill: () => boolean = () => true): ChildProcess {
+  return Object.assign(new EventEmitter(), {
+    exitCode: null,
+    signalCode: null,
+    pid: undefined,
+    kill
+  }) as unknown as ChildProcess;
 }
 
 function singleFileServerBinaryPath(): string {
@@ -42,7 +59,7 @@ function singleFileServerBinaryPath(): string {
 }
 
 function commandOutputSummary(error: CommandError): string {
-  return sanitizeServerOutput(`${error.stdout?.toString() || ''}${error.stderr?.toString() || ''}`) || '(no output)';
+  return summarizeOutputText(`${error.stdout?.toString() || ''}${error.stderr?.toString() || ''}`);
 }
 
 async function buildSingleFileServerBinary(): Promise<string> {
@@ -118,16 +135,32 @@ async function waitForServerExit(server: ChildProcess, timeoutMs: number): Promi
   });
 }
 
-async function stopServer(server: ChildProcess): Promise<void> {
-  if (hasServerExited(server)) return;
-  signalServer(server, 'SIGTERM');
-  if (await waitForServerExit(server, singleFileServerStopTimeoutMs)) return;
-  signalServer(server, 'SIGKILL');
-  if (await waitForServerExit(server, singleFileServerStopTimeoutMs)) return;
-  throw new Error('single file server did not stop');
+function serverStopDiagnostics(server: ChildProcess, output: SingleFileServerOutput, signals: NodeJS.Signals[]): string {
+  return `pid=${server.pid ?? 'unknown'} exitCode=${server.exitCode ?? 'null'} signalCode=${server.signalCode ?? 'null'} signals=${signals.join(',')} output=${serverOutputSummary(output)}`;
 }
 
-async function withStoppedServer<T>(server: ChildProcess, run: () => Promise<T>): Promise<T> {
+async function stopServer(
+  server: ChildProcess,
+  output: SingleFileServerOutput,
+  timeoutMs: number = singleFileServerStopTimeoutMs
+): Promise<void> {
+  if (hasServerExited(server)) return;
+  const signals: NodeJS.Signals[] = [];
+  signals.push('SIGTERM');
+  signalServer(server, 'SIGTERM');
+  if (await waitForServerExit(server, timeoutMs)) return;
+  signals.push('SIGKILL');
+  signalServer(server, 'SIGKILL');
+  if (await waitForServerExit(server, timeoutMs)) return;
+  throw new Error(`single file server did not stop: ${serverStopDiagnostics(server, output, signals)}`);
+}
+
+async function withStoppedServer<T>(
+  server: ChildProcess,
+  output: SingleFileServerOutput,
+  run: () => Promise<T>,
+  stopTimeoutMs: number = singleFileServerStopTimeoutMs
+): Promise<T> {
   let runError: unknown;
   try {
     return await run();
@@ -136,10 +169,10 @@ async function withStoppedServer<T>(server: ChildProcess, run: () => Promise<T>)
     throw error;
   } finally {
     try {
-      await stopServer(server);
+      await stopServer(server, output, stopTimeoutMs);
     } catch (cleanupError) {
       if (!runError) throw cleanupError;
-      console.warn(`single file server cleanup failed after test failure: ${errorMessage(cleanupError)}`);
+      throw new AggregateError([runError, cleanupError], 'test failed and single file server cleanup also failed');
     }
   }
 }
@@ -152,6 +185,42 @@ test.beforeEach(async ({ page }) => {
 
 test.afterEach(async () => {
   await resetStandardFixtures();
+});
+
+test('command output summaryは長いstdout/stderrを末尾に制限する', () => {
+  const error = new Error('build failed') as CommandError;
+  error.stdout = `stdout-${'a'.repeat(singleFileServerOutputLimit)}`;
+  error.stderr = `stderr-${'b'.repeat(100)}`;
+
+  const summary = commandOutputSummary(error);
+
+  expect(summary.length).toBeLessThanOrEqual(singleFileServerOutputLimit + 64);
+  expect(summary).toContain('truncated to last');
+  expect(summary).not.toContain('stdout-');
+  expect(summary).toContain('stderr-');
+});
+
+test('stopServerの停止失敗は診断情報を含む', async () => {
+  const output: SingleFileServerOutput = { spawnError: '', text: 'URL: http://127.0.0.1:4123\nready' };
+  const server = fakeRunningServer();
+
+  await expect(stopServer(server, output, 1)).rejects.toThrow(/pid=[\s\S]*exitCode=[\s\S]*signalCode=[\s\S]*SIGTERM[\s\S]*SIGKILL[\s\S]*ready/);
+});
+
+test('withStoppedServerは本体失敗とcleanup失敗をAggregateErrorで保持する', async () => {
+  const output: SingleFileServerOutput = { spawnError: '', text: 'server output' };
+  const server = fakeRunningServer();
+  const runError = new Error('assertion failed');
+
+  await expect(withStoppedServer(server, output, async () => {
+    throw runError;
+  }, 1)).rejects.toMatchObject({
+    name: 'AggregateError',
+    errors: [
+      runError,
+      expect.any(Error)
+    ]
+  });
 });
 
 test('サイドバー幅はドラッグで伸び縮みできる', async ({ page }) => {
@@ -518,7 +587,7 @@ test('単一ファイルモードでも内部リサイズを操作できる', as
     serverOutput.spawnError = errorMessage(error);
   });
 
-  await withStoppedServer(server, async () => {
+  await withStoppedServer(server, serverOutput, async () => {
     const url = await waitForSingleFileServer(server, serverOutput);
     await page.goto(url);
     await expect(page.locator('#sidebar')).toBeVisible();
