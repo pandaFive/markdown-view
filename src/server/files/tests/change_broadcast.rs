@@ -190,7 +190,7 @@ async fn test_build_change_broadcast_message_非utf8相対パスはbroadcastを�
     );
 }
 #[tokio::test]
-async fn test_build_change_broadcast_message_正規化io失敗はkind付き検証エラーをbroadcastする() {
+async fn test_build_change_broadcast_message_正規化io失敗はkindを隠して検証エラーをbroadcastする() {
     let base_dir = tempfile::tempdir().unwrap();
     let outside_dir = tempfile::tempdir().unwrap();
     let locked_dir = outside_dir.path().join("locked");
@@ -214,8 +214,13 @@ async fn test_build_change_broadcast_message_正規化io失敗はkind付き検�
                 msg
             );
             assert!(
-                msg.contains("PermissionDenied"),
-                "I/O種別の表示を期待: {}",
+                msg.contains("ファイルの検証に失敗しました"),
+                "汎用検証エラーの表示を期待: {}",
+                msg
+            );
+            assert!(
+                !msg.contains("PermissionDenied"),
+                "I/O種別は外部表示しない: {}",
                 msg
             );
         }
@@ -223,7 +228,7 @@ async fn test_build_change_broadcast_message_正規化io失敗はkind付き検�
     }
 }
 #[tokio::test]
-async fn test_build_change_broadcast_message_base配下の正規化io失敗はkind付き検証エラーをbroadcastする(
+async fn test_build_change_broadcast_message_base配下の正規化io失敗はkindを隠して検証エラーをbroadcastする(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let locked_dir = dir.path().join("locked");
@@ -247,8 +252,13 @@ async fn test_build_change_broadcast_message_base配下の正規化io失敗はki
                 msg
             );
             assert!(
-                msg.contains("PermissionDenied"),
-                "I/O種別の表示を期待: {}",
+                msg.contains("ファイルの検証に失敗しました"),
+                "汎用検証エラーの表示を期待: {}",
+                msg
+            );
+            assert!(
+                !msg.contains("PermissionDenied"),
+                "I/O種別は外部表示しない: {}",
                 msg
             );
         }

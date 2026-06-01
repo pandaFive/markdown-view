@@ -260,18 +260,36 @@ pub(in crate::server) fn open_verified_base_dir(
     base_dir: &CanonicalPath,
     label: &'static str,
 ) -> std::io::Result<Dir> {
-    let verified_base_dir =
-        Dir::open_ambient_dir(base_dir.as_path(), cap_std::ambient_authority())?;
-    let metadata = verified_base_dir.dir_metadata()?;
+    open_verified_base_dir_checked(base_dir, label).map_err(|error| match error {
+        OpenVerifiedBaseDirError::Io(error) => error,
+        OpenVerifiedBaseDirError::IdentityChanged => std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{}が起動時と異なります", label),
+        ),
+    })
+}
+
+#[derive(Debug)]
+pub(in crate::server) enum OpenVerifiedBaseDirError {
+    Io(std::io::Error),
+    IdentityChanged,
+}
+
+pub(in crate::server) fn open_verified_base_dir_checked(
+    base_dir: &CanonicalPath,
+    label: &'static str,
+) -> Result<Dir, OpenVerifiedBaseDirError> {
+    let verified_base_dir = Dir::open_ambient_dir(base_dir.as_path(), cap_std::ambient_authority())
+        .map_err(OpenVerifiedBaseDirError::Io)?;
+    let metadata = verified_base_dir
+        .dir_metadata()
+        .map_err(OpenVerifiedBaseDirError::Io)?;
     if base_dir.matches_cap_metadata_identity(&metadata) {
         return Ok(verified_base_dir);
     }
 
     tracing::warn!("[markdown-view] {}の実体差し替えを検出しました", label);
-    Err(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        format!("{}が起動時と異なります", label),
-    ))
+    Err(OpenVerifiedBaseDirError::IdentityChanged)
 }
 
 pub(in crate::server) fn open_relative_dir_nofollow(

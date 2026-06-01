@@ -1,4 +1,6 @@
 #[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::time::Duration;
 
@@ -84,6 +86,45 @@ async fn test_apiメモ_put_raw非文字列は422で拒否する() {
 
     assert_eq!(save.status(), 422);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_apiメモ_単一ファイル親差し替え後の空保存は差し替え先sidecarを削除しない() {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    fs::create_dir(&parent).unwrap();
+    fs::write(&file_path, "# note").unwrap();
+    fs::write(parent.join(".note.md.memo.md"), "original memo").unwrap();
+    let (_state, addr, _server) = setup_single_file_server_from_path(&file_path).await;
+
+    fs::rename(&parent, &moved_parent).unwrap();
+    fs::create_dir(&parent).unwrap();
+    fs::write(parent.join("note.md"), "# replaced").unwrap();
+    fs::write(parent.join(".note.md.memo.md"), "replacement memo").unwrap();
+
+    let client = reqwest::Client::new();
+    let save = client
+        .put(format!("http://{}/api/memo", addr))
+        .json(&serde_json::json!({ "raw": "   " }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save.status(), reqwest::StatusCode::NOT_FOUND);
+    let json: serde_json::Value = save.json().await.unwrap();
+    assert_eq!(json["error"], "指定したファイルが見つかりません");
+    assert_eq!(
+        fs::read_to_string(parent.join(".note.md.memo.md")).unwrap(),
+        "replacement memo"
+    );
+    assert_eq!(
+        fs::read_to_string(moved_parent.join(".note.md.memo.md")).unwrap(),
+        "original memo"
+    );
+}
+
 #[tokio::test]
 async fn test_apiメモ_保存成功後にtmpファイルが残らない() {
     let (_state, addr, _server, tmp_dir) = setup_single_file_server("# Memo\n\nBody").await;

@@ -2,16 +2,20 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
+use super::catalog::{
+    open_relative_dir_nofollow, open_verified_base_dir_checked, OpenVerifiedBaseDirError,
+};
 use super::content::MAX_FILE_SIZE;
 use super::memo_fs::{
-    before_rename_future, BeforeRenameCheck, MemoBeforeRenameError, MemoFs, MemoReadError,
-    MemoWriteError,
+    before_access_future, before_remove_future, BeforeAccessCheck, BeforeRemoveCheck,
+    CheckedMemoPath, MemoBeforeRenameError, MemoFs, MemoReadError, MemoRemoveError, MemoWriteError,
 };
 use super::memo_sidecar::SidecarMemoName;
 use super::resolve::ResolvedTarget;
+use super::run_blocking_file_task;
 use super::RouteTargetRequest;
 use crate::server::guards::json_error;
-use crate::server::log_path::sanitize_path_for_logging;
+use crate::server::log_path::sanitize_path_for_logging_escaped;
 use crate::server::messages::ApiError;
 use crate::server::state::AppState;
 use crate::template::MemoResponse;
@@ -27,6 +31,7 @@ pub(in crate::server) async fn load_route_memo(
 ) -> Result<MemoResponse, ApiError> {
     let fs = state.memo_fs().as_ref();
     let memo_paths = memo_paths_for_target(state, target);
+    ensure_current_memo_root_for_memo_api(state, target, request).await?;
     let Some(raw) = read_active_memo_file(state, target, request, &memo_paths, fs).await? else {
         return Ok(MemoResponse::empty(
             target.relative_path().map(ToOwned::to_owned),
@@ -61,23 +66,18 @@ pub(in crate::server) async fn save_route_memo(
     }
 
     let memo_path = &memo_paths.sidecar;
+    ensure_current_memo_root_for_memo_api(state, target, request).await?;
     ensure_safe_memo_path(memo_path, state, target, request).await?;
-    if let Some(parent) = memo_path.parent() {
-        fs.create_dir_all(parent)
-            .await
-            .map_err(|error| io_api_error(target, request, "ディレクトリ作成", error))?;
-    }
-    let before_rename = |final_path: &Path, tmp_path: &Path| {
-        let final_path = final_path.to_path_buf();
-        let tmp_path = tmp_path.to_path_buf();
-        before_rename_future(async move {
-            ensure_safe_memo_rename_paths(&final_path, &tmp_path, state, target, request).await
+    let before_write = |write_path: &Path| {
+        let write_path = write_path.to_path_buf();
+        before_access_future(async move {
+            checked_safe_memo_access_path(&write_path, state, target, request).await
         })
     };
     fs.write_atomic(
         memo_path,
         raw.as_bytes(),
-        &before_rename as &BeforeRenameCheck<'_>,
+        &before_write as &BeforeAccessCheck<'_>,
     )
     .await
     .map_err(|error| memo_write_error_to_api_error(target, request, error))?;
@@ -98,15 +98,23 @@ async fn delete_route_memo(
     memo_paths: &MemoPaths,
     fs: &dyn MemoFs,
 ) -> Result<MemoResponse, ApiError> {
+    ensure_current_memo_root_for_memo_api(state, target, request).await?;
     ensure_safe_memo_path(&memo_paths.sidecar, state, target, request).await?;
 
     cleanup_compat_sidecar_required(state, target, request, memo_paths, fs).await?;
     cleanup_legacy_memo_required(state, target, request, &memo_paths.legacy, fs).await?;
 
-    match fs.remove_file(&memo_paths.sidecar).await {
+    match remove_memo_file_checked(state, target, request, &memo_paths.sidecar, fs).await {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(io_api_error(target, request, "削除", error)),
+        Err(MemoRemoveError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(MemoRemoveError::Io(error)) => {
+            return Err(io_api_error(target, request, "削除", error))
+        }
+        Err(MemoRemoveError::BeforeRemove(error)) => {
+            return Err(memo_before_remove_error_to_api_error(
+                target, request, "削除", error,
+            ));
+        }
     }
 
     Ok(MemoResponse::empty(
@@ -246,12 +254,12 @@ async fn read_existing_safe_memo_file(
     fs: &dyn MemoFs,
 ) -> Result<Option<String>, ApiError> {
     let Some(path) =
-        pick_existing_safe_path(state, target, request, path, label, unsafe_path, fs).await?
+        pick_existing_safe_path(state, target, request, path, label, unsafe_path).await?
     else {
         return Ok(None);
     };
 
-    read_memo_file_if_present(&path, target, request, fs).await
+    read_memo_file_if_present(state, &path, target, request, fs).await
 }
 
 #[derive(Clone, Copy)]
@@ -267,7 +275,6 @@ async fn pick_existing_safe_path(
     path: &Path,
     label: &str,
     unsafe_path: UnsafeMemoPath,
-    fs: &dyn MemoFs,
 ) -> Result<Option<PathBuf>, ApiError> {
     if let Err(error) = ensure_safe_memo_path(path, state, target, request).await {
         let action = match unsafe_path {
@@ -279,7 +286,7 @@ async fn pick_existing_safe_path(
             request.read_error_log_label(),
             label,
             action,
-            target.file_label(),
+            target.file_label().escape_debug(),
             error
         );
         return match unsafe_path {
@@ -288,11 +295,7 @@ async fn pick_existing_safe_path(
         };
     }
 
-    match fs.try_exists(path).await {
-        Ok(true) => Ok(Some(path.to_path_buf())),
-        Ok(false) => Ok(None),
-        Err(error) => Err(io_api_error(target, request, "存在確認", error)),
-    }
+    Ok(Some(path.to_path_buf()))
 }
 
 async fn cleanup_compat_sidecar_best_effort(
@@ -361,7 +364,7 @@ async fn cleanup_memo_path_best_effort(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),
             label,
-            target.file_label(),
+            target.file_label().escape_debug(),
             error
         );
         return;
@@ -375,23 +378,32 @@ async fn cleanup_memo_path_best_effort(
                 "[markdown-view] {}{}メモcleanup存在確認失敗を無視します ({}): {}",
                 request.read_error_log_label(),
                 label,
-                target.file_label(),
+                target.file_label().escape_debug(),
                 error
             );
             return;
         }
     }
 
-    match fs.remove_file(path).await {
+    match remove_memo_file_checked(state, target, request, path, fs).await {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
+        Err(MemoRemoveError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(MemoRemoveError::Io(error)) => {
             tracing::warn!(
                 "[markdown-view] {}{}メモcleanup削除失敗を無視します ({}): {}",
                 request.read_error_log_label(),
                 label,
-                target.file_label(),
+                target.file_label().escape_debug(),
                 error
+            );
+        }
+        Err(MemoRemoveError::BeforeRemove(error)) => {
+            tracing::warn!(
+                "[markdown-view] {}{}メモcleanup削除直前検証失敗を無視します ({}): {}",
+                request.read_error_log_label(),
+                label,
+                target.file_label().escape_debug(),
+                error.user_message()
             );
         }
     }
@@ -411,7 +423,7 @@ async fn cleanup_memo_path_required(
                 "[markdown-view] {}{}メモ必須cleanup安全確認失敗 ({}): {:?}",
                 request.read_error_log_label(),
                 label,
-                target.file_label(),
+                target.file_label().escape_debug(),
                 error
             );
             return Err(error);
@@ -420,17 +432,58 @@ async fn cleanup_memo_path_required(
             "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {:?}",
             request.read_error_log_label(),
             label,
-            target.file_label(),
+            target.file_label().escape_debug(),
             error
         );
         return Ok(());
     }
 
-    match fs.remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_api_error(target, request, "cleanup削除", error)),
+    match fs.try_exists(path).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => return Err(io_api_error(target, request, "cleanup存在確認", error)),
     }
+
+    match remove_memo_file_checked(state, target, request, path, fs).await {
+        Ok(()) => Ok(()),
+        Err(MemoRemoveError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(MemoRemoveError::Io(error)) => Err(io_api_error(target, request, "cleanup削除", error)),
+        Err(MemoRemoveError::BeforeRemove(error))
+            if error.status_code() == StatusCode::FORBIDDEN =>
+        {
+            tracing::warn!(
+                "[markdown-view] {}unsafeな{}メモは削除せず無視します ({}): {}",
+                request.read_error_log_label(),
+                label,
+                target.file_label().escape_debug(),
+                error.user_message()
+            );
+            Ok(())
+        }
+        Err(MemoRemoveError::BeforeRemove(error)) => Err(memo_before_remove_error_to_api_error(
+            target,
+            request,
+            "cleanup削除",
+            error,
+        )),
+    }
+}
+
+async fn remove_memo_file_checked(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    path: &Path,
+    fs: &dyn MemoFs,
+) -> Result<(), MemoRemoveError> {
+    let before_remove = |remove_path: &Path| {
+        let remove_path = remove_path.to_path_buf();
+        before_remove_future(async move {
+            checked_safe_memo_access_path(&remove_path, state, target, request).await
+        })
+    };
+    fs.remove_file(path, &before_remove as &BeforeRemoveCheck<'_>)
+        .await
 }
 
 async fn ensure_safe_memo_path(
@@ -450,30 +503,181 @@ async fn ensure_safe_memo_path(
     Ok(())
 }
 
-async fn ensure_safe_memo_rename_paths(
-    final_path: &Path,
-    tmp_path: &Path,
+async fn checked_safe_memo_access_path(
+    memo_path: &Path,
     state: &AppState,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
-) -> Result<(), MemoBeforeRenameError> {
-    let base_dir = state.mode().base_dir();
-    if final_path.parent() != tmp_path.parent() {
-        tracing::warn!(
-            "[markdown-view] {}メモ一時ファイルが保存先と同一ディレクトリではないため拒否 ({}): {} -> {}",
-            request.read_error_log_label(),
-            target.file_label(),
-            sanitize_path_for_logging(final_path, base_dir),
-            sanitize_path_for_logging(tmp_path, base_dir)
-        );
-        return Err(MemoBeforeRenameError::new(
-            "メモ保存の内部状態が不正なため操作を中止しました",
-        ));
-    }
+) -> Result<CheckedMemoPath, MemoBeforeRenameError> {
+    let checked = checked_current_memo_root_for_memo_rename(state, target, request).await?;
+    ensure_current_memo_target_parent_for_memo_rename(target, request).await?;
+    ensure_safe_memo_rename_path(memo_path, state, target, request).await?;
+    let memo_parent = memo_path
+        .parent()
+        .ok_or_else(|| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let relative_parent = memo_parent
+        .strip_prefix(checked.root_path.as_path())
+        .map_err(|_| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let file_name = memo_path
+        .file_name()
+        .ok_or_else(|| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let parent_dir = open_relative_dir_nofollow(&checked.root_dir, relative_parent)
+        .map_err(|error| MemoBeforeRenameError::internal(error.to_string()))?;
+    Ok(CheckedMemoPath::new(parent_dir, PathBuf::from(file_name)))
+}
 
-    ensure_safe_memo_rename_path(final_path, state, target, request).await?;
-    ensure_safe_memo_rename_path(tmp_path, state, target, request).await?;
-    Ok(())
+async fn ensure_current_memo_root_for_memo_api(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<(), ApiError> {
+    match current_memo_root_status(state, target, request).await {
+        Ok(_) => Ok(()),
+        Err(MemoRootError::Changed) => Err(json_error(
+            StatusCode::FORBIDDEN,
+            "メモ保存先の安全確認に失敗しました",
+        )),
+        Err(MemoRootError::InspectionFailed) => Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "メモ保存先の安全確認に失敗しました",
+        )),
+    }
+}
+
+async fn ensure_current_memo_target_parent_for_memo_rename(
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<(), MemoBeforeRenameError> {
+    let Some(parent) = target.target_parent_canonical().cloned() else {
+        tracing::warn!(
+            "[markdown-view] {}メモ対象parent directoryの同一性情報がないため拒否 ({})",
+            request.read_error_log_label(),
+            target.file_label().escape_debug()
+        );
+        return Err(MemoBeforeRenameError::internal(
+            "メモ保存先の安全確認に失敗しました",
+        ));
+    };
+    let file_label = target.file_label().escape_debug().to_string();
+    match run_blocking_file_task("メモ対象parent directory同一性確認", move || {
+        parent.has_current_identity()
+    })
+    .await
+    {
+        Err(_) => Err(MemoBeforeRenameError::internal(
+            "メモ保存先の安全確認に失敗しました",
+        )),
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => {
+            tracing::warn!(
+                "[markdown-view] {}メモ対象parent directoryの実体差し替えを検出しました ({})",
+                request.read_error_log_label(),
+                file_label
+            );
+            Err(MemoBeforeRenameError::new(
+                "メモ保存先の安全確認に失敗しました",
+            ))
+        }
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            MemoBeforeRenameError::new("メモ保存先の安全確認に失敗しました"),
+        ),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "[markdown-view] {}メモ対象parent directoryの同一性確認に失敗しました ({}): kind={:?}",
+                request.read_error_log_label(),
+                file_label,
+                error.kind()
+            );
+            Err(MemoBeforeRenameError::internal(
+                "メモ保存先の安全確認に失敗しました",
+            ))
+        }
+    }
+}
+
+async fn checked_current_memo_root_for_memo_rename(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<CheckedMemoRoot, MemoBeforeRenameError> {
+    match current_memo_root_status(state, target, request).await {
+        Ok(root) => Ok(root),
+        Err(MemoRootError::Changed) => Err(MemoBeforeRenameError::new(
+            "メモ保存先の安全確認に失敗しました",
+        )),
+        Err(MemoRootError::InspectionFailed) => Err(MemoBeforeRenameError::internal(
+            "メモ保存先の安全確認に失敗しました",
+        )),
+    }
+}
+
+enum MemoRootError {
+    Changed,
+    InspectionFailed,
+}
+
+struct CheckedMemoRoot {
+    root_path: crate::server::state::CanonicalPath,
+    root_dir: cap_std::fs::Dir,
+}
+
+async fn current_memo_root_status(
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<CheckedMemoRoot, MemoRootError> {
+    let Some((root, label)) = state
+        .mode()
+        .single_file_parent_canonical()
+        .map(|root| (root, "parent directory"))
+        .or_else(|| {
+            state
+                .mode()
+                .directory_canonical()
+                .map(|root| (root, "base directory"))
+        })
+    else {
+        return Err(MemoRootError::InspectionFailed);
+    };
+    let root = root.clone();
+    let file_label = target.file_label().escape_debug().to_string();
+    let log_root = sanitize_path_for_logging_escaped(root.as_path(), state.mode().base_dir());
+
+    match run_blocking_file_task("メモroot directory同一性確認", move || {
+        let root_dir = open_verified_base_dir_checked(&root, "メモ保存先root directory")?;
+        Ok::<_, OpenVerifiedBaseDirError>(CheckedMemoRoot {
+            root_path: root,
+            root_dir,
+        })
+    })
+    .await
+    {
+        Err(_) => Err(MemoRootError::InspectionFailed),
+        Ok(Ok(root)) => Ok(root),
+        Ok(Err(error)) => match error {
+            OpenVerifiedBaseDirError::IdentityChanged => {
+                tracing::warn!(
+                    "[markdown-view] {}メモ保存先{}の実体差し替えを検出しました ({}; root={})",
+                    request.read_error_log_label(),
+                    label,
+                    file_label,
+                    log_root
+                );
+                Err(MemoRootError::Changed)
+            }
+            OpenVerifiedBaseDirError::Io(error) => {
+                tracing::warn!(
+                    "[markdown-view] {}メモ保存先{}の同一性確認に失敗しました ({}; root={}): kind={:?}",
+                    request.read_error_log_label(),
+                    label,
+                    file_label,
+                    log_root,
+                    error.kind()
+                );
+                Err(MemoRootError::InspectionFailed)
+            }
+        },
+    }
 }
 
 async fn ensure_safe_memo_rename_path(
@@ -535,16 +739,16 @@ fn log_unsafe_memo_path(
         UnsafeMemoPathComponent::Symlink(_) => tracing::warn!(
             "[markdown-view] {}メモパスがシンボリックリンクを含むため拒否 ({} -> {}): {}",
             request.read_error_log_label(),
-            target.file_label(),
-            sanitize_path_for_logging(memo_path, base_dir),
-            sanitize_path_for_logging(unsafe_component.path(), base_dir)
+            target.file_label().escape_debug(),
+            sanitize_path_for_logging_escaped(memo_path, base_dir),
+            sanitize_path_for_logging_escaped(unsafe_component.path(), base_dir)
         ),
         UnsafeMemoPathComponent::InspectionError(_) => tracing::warn!(
             "[markdown-view] {}メモパスの安全確認に失敗したため拒否 ({} -> {}): {}",
             request.read_error_log_label(),
-            target.file_label(),
-            sanitize_path_for_logging(memo_path, base_dir),
-            sanitize_path_for_logging(unsafe_component.path(), base_dir)
+            target.file_label().escape_debug(),
+            sanitize_path_for_logging_escaped(memo_path, base_dir),
+            sanitize_path_for_logging_escaped(unsafe_component.path(), base_dir)
         ),
     }
 }
@@ -558,7 +762,7 @@ async fn first_unsafe_memo_path_component(
         Err(_) => {
             tracing::warn!(
                 "[markdown-view] メモパスがbase外のため安全側で拒否します: {} (base: {})",
-                sanitize_path_for_logging(target, base_dir),
+                sanitize_path_for_logging_escaped(target, base_dir),
                 base_dir.display()
             );
             return Some(UnsafeMemoPathComponent::InspectionError(
@@ -578,7 +782,7 @@ async fn first_unsafe_memo_path_component(
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] メモパス要素のsymlink検査に失敗したため安全側で拒否します ({}): {}",
-                    sanitize_path_for_logging(&current, base_dir),
+                    sanitize_path_for_logging_escaped(&current, base_dir),
                     error
                 );
                 return Some(UnsafeMemoPathComponent::InspectionError(current));
@@ -589,37 +793,36 @@ async fn first_unsafe_memo_path_component(
 }
 
 async fn read_memo_file_if_present(
+    state: &AppState,
     memo_path: &Path,
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
     fs: &dyn MemoFs,
 ) -> Result<Option<String>, ApiError> {
-    let metadata = match fs.metadata(memo_path).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_api_error(target, request, "メタデータ取得", error)),
+    let before_read = |read_path: &Path| {
+        let read_path = read_path.to_path_buf();
+        before_access_future(async move {
+            checked_safe_memo_read_path(&read_path, state, target, request).await
+        })
     };
-    if metadata.len() > MAX_FILE_SIZE {
-        return Err(json_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "メモサイズが上限（10MB）を超えています",
-        ));
-    }
-
-    let bytes = match fs.read_with_limit(memo_path).await {
+    let bytes = match fs
+        .read_with_limit(memo_path, &before_read as &BeforeAccessCheck<'_>)
+        .await
+    {
         Ok(bytes) => bytes,
         Err(MemoReadError::Open(error)) | Err(MemoReadError::Read(error))
             if error.kind() == std::io::ErrorKind::NotFound =>
         {
             return Ok(None);
         }
+        Err(MemoReadError::BeforeAccess(MemoBeforeRenameError::Missing)) => return Ok(None),
         Err(error) => return Err(memo_read_error_to_api_error(target, request, error)),
     };
     String::from_utf8(bytes).map(Some).map_err(|error| {
         tracing::warn!(
             "[markdown-view] {}メモUTF-8デコード失敗 ({}): {}",
             request.read_error_log_label(),
-            target.file_label(),
+            target.file_label().escape_debug(),
             error
         );
         json_error(
@@ -627,6 +830,35 @@ async fn read_memo_file_if_present(
             "メモはUTF-8テキストである必要があります",
         )
     })
+}
+
+async fn checked_safe_memo_read_path(
+    memo_path: &Path,
+    state: &AppState,
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+) -> Result<CheckedMemoPath, MemoBeforeRenameError> {
+    let checked = checked_current_memo_root_for_memo_rename(state, target, request).await?;
+    ensure_current_memo_target_parent_for_memo_rename(target, request).await?;
+    ensure_safe_memo_rename_path(memo_path, state, target, request).await?;
+    let memo_parent = memo_path
+        .parent()
+        .ok_or_else(|| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let relative_parent = memo_parent
+        .strip_prefix(checked.root_path.as_path())
+        .map_err(|_| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let file_name = memo_path
+        .file_name()
+        .ok_or_else(|| MemoBeforeRenameError::internal("メモ保存先の安全確認に失敗しました"))?;
+    let parent_dir =
+        open_relative_dir_nofollow(&checked.root_dir, relative_parent).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MemoBeforeRenameError::missing()
+            } else {
+                MemoBeforeRenameError::internal(error.to_string())
+            }
+        })?;
+    Ok(CheckedMemoPath::new(parent_dir, PathBuf::from(file_name)))
 }
 
 fn memo_write_error_to_api_error(
@@ -640,12 +872,28 @@ fn memo_write_error_to_api_error(
             tracing::warn!(
                 "[markdown-view] {}メモrename直前検証エラー ({}): {}",
                 request.read_error_log_label(),
-                target.file_label(),
+                target.file_label().escape_debug(),
                 error.user_message()
             );
             json_error(error.status_code(), error.user_message())
         }
     }
+}
+
+fn memo_before_remove_error_to_api_error(
+    target: &ResolvedTarget,
+    request: RouteTargetRequest<'_>,
+    action: &str,
+    error: MemoBeforeRenameError,
+) -> ApiError {
+    tracing::warn!(
+        "[markdown-view] {}メモ{}直前検証エラー ({}): {}",
+        request.read_error_log_label(),
+        action,
+        target.file_label().escape_debug(),
+        error.user_message()
+    );
+    json_error(error.status_code(), error.user_message())
 }
 
 fn io_api_error(
@@ -658,7 +906,7 @@ fn io_api_error(
         "[markdown-view] {}メモ{}エラー ({}): {}",
         request.read_error_log_label(),
         action,
-        target.file_label(),
+        target.file_label().escape_debug(),
         error
     );
     json_error(
@@ -675,7 +923,7 @@ fn read_io_api_error(
     tracing::warn!(
         "[markdown-view] {}メモ読み込みエラー ({}): {}",
         request.read_error_log_label(),
-        target.file_label(),
+        target.file_label().escape_debug(),
         error
     );
     json_error(
@@ -692,6 +940,9 @@ fn memo_read_error_to_api_error(
     match error {
         MemoReadError::Open(error) => io_api_error(target, request, "読込", error),
         MemoReadError::Read(error) => read_io_api_error(target, request, error),
+        MemoReadError::BeforeAccess(error) => {
+            memo_before_remove_error_to_api_error(target, request, "読み込み", error)
+        }
         MemoReadError::TooLarge => json_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "メモサイズが上限（10MB）を超えています",

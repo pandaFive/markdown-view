@@ -237,7 +237,7 @@ impl std::fmt::Display for AppModeBuildError {
             AppModeBuildError::NotFile(path) => {
                 write!(
                     f,
-                    "単一ファイルモードにはファイルを指定してください: {}",
+                    "単一ファイルモードには通常ファイルかつ安全なファイル参照を指定してください: {}",
                     path.display()
                 )
             }
@@ -294,7 +294,10 @@ fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBu
 
 #[derive(Debug, Clone)]
 enum AppModeKind {
-    SingleFile(CanonicalPath),
+    SingleFile {
+        target: CanonicalPath,
+        parent: CanonicalPath,
+    },
     Directory(CanonicalPath),
 }
 
@@ -316,7 +319,17 @@ impl AppMode {
                 ));
             }
         }
-        Ok(Self(AppModeKind::SingleFile(canonical)))
+        let parent_path = canonical
+            .as_path()
+            .parent()
+            .ok_or_else(|| AppModeBuildError::NotDirectory(canonical.as_path().to_path_buf()))?;
+        let parent =
+            CanonicalPath::try_from_path(parent_path).map_err(AppModeBuildError::CanonicalPath)?;
+        ensure_canonical_directory(&parent)?;
+        Ok(Self(AppModeKind::SingleFile {
+            target: canonical,
+            parent,
+        }))
     }
 
     /// ディレクトリモードを生成する（canonicalize済みディレクトリのみ許可）
@@ -330,7 +343,7 @@ impl AppMode {
     /// ベースディレクトリを返す（ファイルモードは親、ディレクトリモードはそのまま）
     pub fn base_dir(&self) -> &Path {
         match &self.0 {
-            AppModeKind::SingleFile(p) => p.as_path().parent().unwrap_or(p.as_path()),
+            AppModeKind::SingleFile { parent, .. } => parent.as_path(),
             AppModeKind::Directory(p) => p.as_path(),
         }
     }
@@ -338,7 +351,7 @@ impl AppMode {
     /// 単一ファイルモードのパスを返す（ディレクトリモードはNone）
     pub fn single_file(&self) -> Option<&Path> {
         match &self.0 {
-            AppModeKind::SingleFile(p) => Some(p.as_path()),
+            AppModeKind::SingleFile { target, .. } => Some(target.as_path()),
             AppModeKind::Directory(_) => None,
         }
     }
@@ -346,7 +359,7 @@ impl AppMode {
     /// ディレクトリモードのパスを返す（単一ファイルモードはNone）
     pub fn directory(&self) -> Option<&Path> {
         match &self.0 {
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
             AppModeKind::Directory(p) => Some(p.as_path()),
         }
     }
@@ -354,7 +367,15 @@ impl AppMode {
     /// 単一ファイルモードの正規化パスを返す。ディレクトリモードの場合はNone
     pub(crate) fn single_file_canonical(&self) -> Option<&CanonicalPath> {
         match &self.0 {
-            AppModeKind::SingleFile(path) => Some(path),
+            AppModeKind::SingleFile { target, .. } => Some(target),
+            AppModeKind::Directory(_) => None,
+        }
+    }
+
+    /// 単一ファイルモードの親ディレクトリ正規化パスを返す。ディレクトリモードの場合はNone
+    pub(crate) fn single_file_parent_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile { parent, .. } => Some(parent),
             AppModeKind::Directory(_) => None,
         }
     }
@@ -362,7 +383,7 @@ impl AppMode {
     /// ディレクトリモードの正規化パスを返す。単一ファイルモードの場合はNone
     pub(crate) fn directory_canonical(&self) -> Option<&CanonicalPath> {
         match &self.0 {
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
             AppModeKind::Directory(path) => Some(path),
         }
     }
@@ -383,7 +404,7 @@ impl AppMode {
                 .strip_prefix(base.as_path())
                 .ok()
                 .map(relative_path_to_display_string),
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
         }
     }
 }
@@ -638,10 +659,29 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    fn hard_link_or_skip(source: &Path, linked: &Path) -> bool {
+        assert!(source.exists(), "hardlink元は存在する必要があります");
+        assert!(
+            !linked.exists(),
+            "hardlink先は事前に存在しない必要があります"
+        );
+        match std::fs::hard_link(source, linked) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                eprintln!(
+                    "hardlink非対応環境のためテストをスキップします: kind={:?}",
+                    error.kind()
+                );
+                false
+            }
+            Err(error) => panic!("hardlink作成に失敗しました: kind={:?}", error.kind()),
+        }
+    }
 
     #[test]
     fn test_app_mode_new_single_file() {
@@ -653,6 +693,11 @@ mod tests {
         assert_eq!(mode.base_dir(), canonical.parent().unwrap());
         assert_eq!(mode.single_file(), Some(canonical.as_path()));
         assert!(mode.single_file_canonical().is_some());
+        assert_eq!(
+            mode.single_file_parent_canonical()
+                .map(CanonicalPath::as_path),
+            Some(canonical.parent().unwrap())
+        );
         assert!(mode.directory().is_none());
         assert!(mode.directory_canonical().is_none());
     }
@@ -667,6 +712,7 @@ mod tests {
         assert_eq!(mode.base_dir(), canonical.as_path());
         assert!(mode.single_file().is_none());
         assert!(mode.single_file_canonical().is_none());
+        assert!(mode.single_file_parent_canonical().is_none());
         assert_eq!(mode.directory(), Some(canonical.as_path()));
         assert!(mode.directory_canonical().is_some());
     }
@@ -712,7 +758,29 @@ mod tests {
     fn test_app_mode_new_single_file_ディレクトリ指定は拒否() {
         let dir = tempfile::tempdir().unwrap();
         let result = AppMode::new_single_file(dir.path());
-        assert!(matches!(result, Err(AppModeBuildError::NotFile(_))));
+        let error = result.expect_err("ディレクトリ指定は単一ファイルとして拒否する");
+        assert!(matches!(error, AppModeBuildError::NotFile(_)));
+        assert!(error.to_string().contains("通常ファイル"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tracing_test::traced_test]
+    #[test]
+    fn test_app_mode_new_single_file_hardlink済みファイルも許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.md");
+        let linked = dir.path().join("linked.md");
+        std::fs::write(&source, "# source").unwrap();
+        if !hard_link_or_skip(&source, &linked) {
+            return;
+        }
+
+        let mode = AppMode::new_single_file(&linked)
+            .expect("hardlink済みMarkdownも通常ファイルとして許可する");
+        let canonical = linked.canonicalize().unwrap();
+
+        assert_eq!(mode.single_file(), Some(canonical.as_path()));
+        assert_eq!(mode.base_dir(), canonical.parent().unwrap());
     }
 
     #[test]

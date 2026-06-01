@@ -14,8 +14,8 @@ use crate::server::messages::BroadcastMessage;
 use crate::server::state::{AppMode, AppState};
 
 use super::memo_fs::{
-    always_ok_before_rename, before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError,
-    MemoWriteError, TokioMemoFs,
+    always_ok_before_access, always_ok_before_remove, before_access_future, BeforeAccessCheck,
+    BeforeRemoveCheck, MemoFs, MemoReadError, MemoRemoveError, MemoWriteError, TokioMemoFs,
 };
 
 /// tempdir ベースのテスト用ワークスペース。
@@ -64,9 +64,7 @@ impl TempWorkspace {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) enum Op {
     TryExists,
-    Metadata,
     Read,
-    CreateDirAll,
     WriteAtomic,
     AtomicRename,
     RemoveFile,
@@ -133,39 +131,30 @@ impl MemoFs for MockMemoFs {
         self.inner.try_exists(path).await
     }
 
-    async fn metadata(&self, path: &Path) -> io::Result<std::fs::Metadata> {
-        if let Some(kind) = self.lookup_failure(Op::Metadata, path) {
-            return Err(io::Error::from(kind));
-        }
-
-        self.inner.metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
         if let Some(kind) = self.lookup_failure(Op::Read, path) {
             return Err(MemoReadError::Read(io::Error::from(kind)));
         }
 
-        self.inner.read_with_limit(path).await
-    }
-
-    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        if let Some(kind) = self.lookup_failure(Op::CreateDirAll, path) {
-            return Err(io::Error::from(kind));
-        }
-
-        self.inner.create_dir_all(path).await
+        self.inner.read_with_limit(path, before_read).await
     }
 
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError> {
         if let Some(kind) = self.lookup_failure(Op::WriteAtomic, path) {
             return Err(MemoWriteError::Io(io::Error::from(kind)));
         }
+        let checked = before_write(path)
+            .await
+            .map_err(MemoWriteError::BeforeRename)?;
 
         let tmp_path = path.with_extension("memo-atomic-test-tmp");
         match tokio::fs::remove_file(&tmp_path).await {
@@ -186,17 +175,20 @@ impl MemoFs for MockMemoFs {
             .expect("atomic write observer mutex poisoned")
             .push((path.to_path_buf(), content.to_vec()));
 
-        if let Err(error) = before_rename(path, &tmp_path).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(MemoWriteError::BeforeRename(error));
-        }
-
         if let Some(kind) = self.lookup_failure(Op::AtomicRename, path) {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(MemoWriteError::Io(io::Error::from(kind)));
         }
 
-        if let Err(error) = tokio::fs::rename(&tmp_path, path).await {
+        let tmp_file_name = tmp_path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "tmp path has no file name"))
+            .map_err(MemoWriteError::Io)?;
+        if let Err(error) = checked.parent_dir().rename(
+            Path::new(tmp_file_name),
+            checked.parent_dir(),
+            checked.file_name(),
+        ) {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(MemoWriteError::Io(error));
         }
@@ -208,16 +200,27 @@ impl MemoFs for MockMemoFs {
         Ok(())
     }
 
-    async fn remove_file(&self, path: &Path) -> io::Result<()> {
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        let checked = before_remove(path)
+            .await
+            .map_err(MemoRemoveError::BeforeRemove)?;
+
         if let Some(kind) = self.lookup_failure(Op::RemoveFile, path) {
-            return Err(io::Error::from(kind));
+            return Err(MemoRemoveError::Io(io::Error::from(kind)));
         }
 
         self.operations
             .lock()
             .expect("operations mutex poisoned")
             .push(OpEvent::RemoveFile(path.to_path_buf()));
-        self.inner.remove_file(path).await
+        checked
+            .parent_dir()
+            .remove_file(checked.file_name())
+            .map_err(MemoRemoveError::Io)
     }
 }
 
@@ -263,21 +266,18 @@ mod tests {
         let memo_path_for_check = memo_path.clone();
 
         memo_fs
-            .write_atomic(&memo_path, b"new", &move |final_path, tmp_path| {
+            .write_atomic(&memo_path, b"new", &move |final_path| {
                 let final_path = final_path.to_path_buf();
-                let tmp_path = tmp_path.to_path_buf();
                 let memo_path_for_check = memo_path_for_check.clone();
-                before_rename_future(async move {
+                before_access_future(async move {
                     assert_eq!(final_path.as_path(), memo_path_for_check.as_path());
-                    assert_eq!(tmp_path.parent(), final_path.parent());
-                    assert!(tmp_path.exists(), "tmp file should exist before rename");
-                    Ok(())
+                    always_ok_before_access(&final_path).await
                 })
             })
             .await
             .expect("atomic write should succeed");
         memo_fs
-            .remove_file(&memo_path)
+            .remove_file(&memo_path, &always_ok_before_remove)
             .await
             .expect("remove file should succeed");
 
@@ -314,11 +314,11 @@ mod tests {
         memo_fs.fail_at(Op::AtomicRename, &rename_path, io::ErrorKind::AlreadyExists);
 
         let write_err = memo_fs
-            .write_atomic(&write_path, b"new", &always_ok_before_rename)
+            .write_atomic(&write_path, b"new", &always_ok_before_access)
             .await
             .expect_err("write_atomic failure should be injected");
         let rename_err = memo_fs
-            .write_atomic(&rename_path, b"new", &always_ok_before_rename)
+            .write_atomic(&rename_path, b"new", &always_ok_before_access)
             .await
             .expect_err("atomic rename failure should be injected");
 

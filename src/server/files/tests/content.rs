@@ -5,7 +5,8 @@ use super::support::{
     create_directory_state, create_markdown_fixture, create_single_file_state, create_test_dir,
 };
 use crate::server::files::content::{
-    read_bytes_with_limit, set_content_before_read_hook_for_test, ReadMarkdownError,
+    check_readable_before_render, map_socket_validation_error, read_bytes_with_limit,
+    set_content_before_read_hook_for_test, ReadMarkdownError,
 };
 use crate::server::files::*;
 
@@ -25,6 +26,27 @@ fn test_close_code_too_largeは1009を返す() {
 fn test_close_code_not_utf8は1003を返す() {
     let err = ReadMarkdownError::NotUtf8;
     assert_eq!(err.close_code(), 1003);
+}
+
+#[test]
+fn test_map_socket_validation_error_internalstateは1011を返す() {
+    let error = map_socket_validation_error(ResolveFileError::InternalState);
+
+    assert_eq!(error.close_code(), 1011);
+    assert!(error.reason().contains("内部エラー"));
+}
+
+#[test]
+fn test_map_socket_validation_error_ioはkindを外部表示しない() {
+    let error =
+        map_socket_validation_error(ResolveFileError::Io(std::io::ErrorKind::PermissionDenied));
+
+    assert_eq!(error.close_code(), 1008);
+    assert_eq!(
+        error.reason(),
+        "ファイル検証に失敗しました: ファイルの検証に失敗しました"
+    );
+    assert!(!error.reason().contains("PermissionDenied"));
 }
 
 #[tokio::test]
@@ -199,6 +221,25 @@ async fn test_load_route_update_単一ファイル解決後差し替えでも差
 
     assert!(update.content().as_str().contains("harmless"));
     assert!(!update.content().as_str().contains("secret"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_check_readable_before_render_解決済みhandleを優先する() {
+    let parent = tempfile::tempdir().unwrap();
+    let note = parent.path().join("note.md");
+    std::fs::write(&note, "# harmless").unwrap();
+    let state = create_single_file_state(&note);
+
+    let target = resolve_route_target(&state, RouteTargetRequest::page(None))
+        .await
+        .unwrap();
+    std::fs::remove_file(&note).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/secret.md", &note).unwrap();
+
+    check_readable_before_render(&target)
+        .await
+        .expect("解決済みhandleがある場合はpath再openに依存しない");
 }
 
 #[tokio::test]

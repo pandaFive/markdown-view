@@ -327,8 +327,8 @@ mod tests {
             BroadcastMessage::Error(message) => {
                 assert!(message.contains("ファイル検証エラー"));
                 assert!(
-                    message.contains("ディレクトリ外へのアクセスは禁止されています"),
-                    "Traversalのエラー文言を期待: {}",
+                    message.contains("安全でないファイル参照は禁止されています"),
+                    "安全でない参照のエラー文言を期待: {}",
                     message
                 );
             }

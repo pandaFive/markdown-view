@@ -11,8 +11,9 @@ use crate::server::files::catalog::{
     list_markdown_files_from_canonical_base,
     list_markdown_files_from_canonical_base_until_cancelled,
     list_markdown_files_from_verified_base_with_limits_for_test, open_verified_base_dir,
-    set_catalog_after_canonicalize_hook_for_test, set_catalog_before_recurse_hook_for_test,
-    MAX_DIR_DEPTH, MAX_FILE_LIST,
+    open_verified_base_dir_checked, set_catalog_after_canonicalize_hook_for_test,
+    set_catalog_before_recurse_hook_for_test, OpenVerifiedBaseDirError, MAX_DIR_DEPTH,
+    MAX_FILE_LIST,
 };
 use crate::server::files::*;
 use crate::server::CanonicalPath;
@@ -56,6 +57,44 @@ fn test_list_markdown_files_from_canonical_base_起動後base差し替えを拒�
         .expect_err("起動時と異なるbase実体のファイル一覧は拒否する");
 
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn test_open_verified_base_dir_checked_起動後base差し替えをidentity_changedで返す() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("workspace");
+    let replacement = parent.path().join("replacement");
+    std::fs::create_dir(&base).unwrap();
+    let canonical = CanonicalPath::try_from_path(&base).unwrap();
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
+    std::fs::rename(&replacement, &base).unwrap();
+
+    let error = open_verified_base_dir_checked(&canonical, "test base")
+        .expect_err("起動時と異なるbase実体は専用errorで返す");
+
+    assert!(matches!(error, OpenVerifiedBaseDirError::IdentityChanged));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_open_verified_base_dir_checked_permission_deniedはio_errorとして保持する() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().join("blocked");
+    std::fs::create_dir(&base).unwrap();
+    let canonical = CanonicalPath::try_from_path(&base).unwrap();
+    let Some(_guard) = make_dir_unsearchable(parent.path(), &base) else {
+        return;
+    };
+
+    let error = open_verified_base_dir_checked(&canonical, "test base")
+        .expect_err("permission deniedはidentity changed扱いにしない");
+
+    assert!(matches!(
+        error,
+        OpenVerifiedBaseDirError::Io(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
 }
 
 #[test]

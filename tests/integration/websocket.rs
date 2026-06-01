@@ -93,7 +93,7 @@ async fn test_ファイル変更でwebsocket更新() {
     drop(tmp_dir);
 }
 #[tokio::test]
-async fn test_単一ファイルモード_atomic_save後の実体差し替えはwebsocketエラーにする() {
+async fn test_単一ファイルモード_atomic_save後にwebsocket更新() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let file_path = tmp_dir.path().join("atomic_single.md");
     tokio::fs::write(&file_path, "# Before Atomic Save")
@@ -114,11 +114,19 @@ async fn test_単一ファイルモード_atomic_save後の実体差し替えは
     let msg = next_ws_message(&mut read).await;
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let error = json["error"].as_str().expect("errorフィールドが存在する");
-    assert_eq!(
-        error,
-        "ファイル検証エラー (atomic_single.md): ディレクトリ外へのアクセスは禁止されています"
-    );
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("After Atomic Save"));
+
+    atomic_save_markdown_file(&file_path, "# After Second Atomic Save");
+    let msg = next_ws_message(&mut read).await;
+    let text = msg.into_text().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["content"]
+        .as_str()
+        .unwrap()
+        .contains("After Second Atomic Save"));
     assert!(watch_service.is_alive());
 
     watch_service.shutdown().await;
@@ -156,7 +164,7 @@ async fn test_ファイル変更_io_エラーでwebsocketエラー通知() {
     let error = json["error"].as_str().expect("errorフィールドが存在する");
     assert_eq!(
         error,
-        "ファイル検証エラー (watch_io_error.md): ファイル解決中にI/Oエラーが発生しました (PermissionDenied)"
+        "ファイル検証エラー (watch_io_error.md): ファイルの検証に失敗しました"
     );
 
     // 権限復元を明示し、後続の shutdown / cleanup に読み取り不可状態を持ち越さない
@@ -404,7 +412,7 @@ async fn test_websocket_open権限エラーでclose_frameが1008を返す() {
     assert_close_frame_message(
         &mut read,
         1008,
-        "ファイル検証に失敗しました: ファイル解決中にI/Oエラーが発生しました (PermissionDenied)",
+        "ファイル検証に失敗しました: ファイルの検証に失敗しました",
     )
     .await;
 
@@ -451,10 +459,7 @@ async fn test_websocket_lagged_recovery_ioエラーでerror_jsonを送信する(
     let text = msg.into_text().unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
     let error = json["error"].as_str().expect("errorフィールドが存在する");
-    assert_eq!(
-        error,
-        "ファイル検証エラー: ファイル解決中にI/Oエラーが発生しました (PermissionDenied)"
-    );
+    assert_eq!(error, "ファイル検証エラー: ファイルの検証に失敗しました");
 
     // 順序: assert 後に権限復元 → tempdir 自動 drop。recovery 実行中は guard 生存中で
     // chmod 0o000 が維持されている必要がある。

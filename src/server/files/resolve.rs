@@ -1,17 +1,138 @@
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
 use super::catalog::{
-    list_markdown_files_from_canonical_base, open_relative_file_nofollow, open_verified_base_dir,
+    list_markdown_files_from_canonical_base, open_relative_dir_nofollow,
+    open_relative_file_nofollow, open_verified_base_dir,
 };
 use super::run_blocking_file_task;
 use crate::server::guards::json_error;
-use crate::server::log_path::sanitize_path_for_logging;
+use crate::server::log_path::{sanitize_path_for_logging, sanitize_path_for_logging_escaped};
 use crate::server::messages::ApiError;
-use crate::server::state::{AppState, CanonicalPath};
+use crate::server::state::{AppMode, AppState, CanonicalPath};
 use crate::template::UpdateMessage;
 use crate::workspace_exclusion::exclusion_reason_for_relative_path;
+
+#[cfg(test)]
+type SingleFileAfterParentVerificationHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<SingleFileAfterParentVerificationHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK_TEST_LOCK: std::sync::OnceLock<
+    std::sync::Mutex<()>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::server) struct SingleFileAfterParentVerificationHookGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for SingleFileAfterParentVerificationHookGuard {
+    fn drop(&mut self) {
+        SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("single file hook mutex should not be poisoned")
+            .take();
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_single_file_after_parent_verification_hook_for_test(
+    hook: SingleFileAfterParentVerificationHook,
+) -> SingleFileAfterParentVerificationHookGuard {
+    let lock = SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("single file hook test lock should not be poisoned");
+    SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("single file hook mutex should not be poisoned")
+        .replace(hook);
+    SingleFileAfterParentVerificationHookGuard { _lock: lock }
+}
+
+#[cfg(test)]
+fn notify_single_file_after_parent_verification_for_test(file_path: &Path) {
+    let hook = SINGLE_FILE_AFTER_PARENT_VERIFICATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("single file hook mutex should not be poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(file_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_single_file_after_parent_verification_for_test(_file_path: &Path) {}
+
+#[cfg(test)]
+type DirectoryFileAfterOpenHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static DIRECTORY_FILE_AFTER_OPEN_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<DirectoryFileAfterOpenHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static DIRECTORY_FILE_AFTER_OPEN_HOOK_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(in crate::server) struct DirectoryFileAfterOpenHookGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for DirectoryFileAfterOpenHookGuard {
+    fn drop(&mut self) {
+        DIRECTORY_FILE_AFTER_OPEN_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("directory file hook mutex should not be poisoned")
+            .take();
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_directory_file_after_open_hook_for_test(
+    hook: DirectoryFileAfterOpenHook,
+) -> DirectoryFileAfterOpenHookGuard {
+    let lock = DIRECTORY_FILE_AFTER_OPEN_HOOK_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("directory file hook test lock should not be poisoned");
+    DIRECTORY_FILE_AFTER_OPEN_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("directory file hook mutex should not be poisoned")
+        .replace(hook);
+    DirectoryFileAfterOpenHookGuard { _lock: lock }
+}
+
+#[cfg(test)]
+fn notify_directory_file_after_open_for_test(file_path: &Path) {
+    let hook = DIRECTORY_FILE_AFTER_OPEN_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("directory file hook mutex should not be poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(file_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_directory_file_after_open_for_test(_file_path: &Path) {}
 
 #[derive(Debug, Clone)]
 /// ファイル解決結果。ターゲットファイルのパス、ファイル一覧、相対パス、表示用ラベルを保持する。
@@ -21,6 +142,7 @@ pub(in crate::server) struct ResolvedTarget {
     relative_path: Option<String>,
     file_label: String,
     read_file: Option<std::sync::Arc<std::fs::File>>,
+    target_parent: Option<CanonicalPath>,
 }
 
 impl ResolvedTarget {
@@ -29,6 +151,7 @@ impl ResolvedTarget {
         file_list: Option<Vec<String>>,
         relative_path: Option<String>,
         read_file: Option<std::fs::File>,
+        target_parent: Option<CanonicalPath>,
     ) -> Self {
         let file_label = relative_path
             .clone()
@@ -40,6 +163,7 @@ impl ResolvedTarget {
             relative_path,
             file_label,
             read_file: read_file.map(std::sync::Arc::new),
+            target_parent,
         }
     }
 
@@ -49,7 +173,7 @@ impl ResolvedTarget {
         file_list: Option<Vec<String>>,
         relative_path: Option<String>,
     ) -> Self {
-        Self::new(file_path, file_list, relative_path, None)
+        Self::new(file_path, file_list, relative_path, None, None)
     }
 
     pub(in crate::server) fn file_path(&self) -> &Path {
@@ -69,10 +193,16 @@ impl ResolvedTarget {
     }
 
     pub(in crate::server) fn read_file(&self) -> std::io::Result<Option<std::fs::File>> {
-        self.read_file
-            .as_ref()
-            .map(|file| file.try_clone())
-            .transpose()
+        let Some(file) = &self.read_file else {
+            return Ok(None);
+        };
+        let mut file = file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(Some(file))
+    }
+
+    pub(in crate::server) fn target_parent_canonical(&self) -> Option<&CanonicalPath> {
+        self.target_parent.as_ref()
     }
 
     pub(super) fn attach_file_info(&self, update: UpdateMessage) -> UpdateMessage {
@@ -154,104 +284,136 @@ pub(in crate::server) async fn resolve_route_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
 ) -> Result<ResolvedTarget, ApiError> {
-    let (file_path, file_list, read_file) =
-        resolve_request_target(state, request)
-            .await
-            .map_err(|status| {
-                let message = match status {
-                    StatusCode::NOT_FOUND => request.not_found_message(),
-                    StatusCode::INTERNAL_SERVER_ERROR => "ファイル一覧の取得に失敗しました",
-                    other => {
-                        tracing::warn!(
-                            "[markdown-view] 予期しないファイル解決ステータスを検出: request={:?}, status={}",
-                            request,
-                            other
-                        );
-                        "ファイル解決に失敗しました"
-                    }
-                };
-                json_error(status, message)
-            })?;
+    let (file_path, file_list, read_file, target_parent) = resolve_request_target(state, request)
+        .await
+        .map_err(|error| json_error(error.status, error.message))?;
 
     Ok(build_resolved_target(
         state,
         file_path,
         file_list,
         read_file,
+        target_parent,
         "ターゲットファイルの相対パス算出失敗",
     ))
 }
 
-pub(super) fn resolve_single_file_target(
+pub(super) async fn resolve_single_file_target_blocking(
     state: &AppState,
     warn_label: &'static str,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    let Some(file_path) = state.mode().single_file_canonical() else {
-        return Ok(None);
-    };
-
-    let validated_path = revalidate_single_file_target(file_path, state.mode().base_dir())?;
-    let read_file = open_single_file_for_read(file_path)?;
-    Ok(Some(build_resolved_target(
-        state,
-        validated_path,
-        None,
-        Some(read_file),
-        warn_label,
-    )))
+    let mode = state.mode().clone();
+    run_blocking_file_task("単一ファイルターゲット解決", move || {
+        resolve_single_file_target_from_mode(&mode, warn_label)
+    })
+    .await
+    .map_err(|_| ResolveFileError::InternalState)?
 }
 
+#[cfg(test)]
 pub(super) fn resolve_change_target(
     state: &AppState,
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    if let Some(expected) = state.mode().single_file_canonical() {
-        let validated_path = revalidate_single_file_target(expected, state.mode().base_dir())?;
-        let read_file = open_single_file_for_read(expected)?;
-        return Ok(Some(build_resolved_target(
-            state,
-            validated_path,
+    resolve_change_target_from_mode(state.mode(), changed_file)
+}
+
+pub(super) async fn resolve_change_target_blocking(
+    state: &AppState,
+    changed_file: &Path,
+) -> Result<Option<ResolvedTarget>, ResolveFileError> {
+    let mode = state.mode().clone();
+    let changed_file = changed_file.to_path_buf();
+    run_blocking_file_task("変更ターゲット解決", move || {
+        resolve_change_target_from_mode(&mode, &changed_file)
+    })
+    .await
+    .map_err(|_| ResolveFileError::InternalState)?
+}
+
+fn resolve_single_file_target_from_mode(
+    mode: &AppMode,
+    warn_label: &'static str,
+) -> Result<Option<ResolvedTarget>, ResolveFileError> {
+    resolve_single_file_handle_from_mode(mode)?.map_or(Ok(None), |handle| {
+        Ok(Some(build_resolved_target_for_mode(
+            mode,
+            handle.path,
             None,
-            Some(read_file),
+            Some(handle.file),
+            Some(handle.parent),
+            warn_label,
+        )))
+    })
+}
+
+fn resolve_change_target_from_mode(
+    mode: &AppMode,
+    changed_file: &Path,
+) -> Result<Option<ResolvedTarget>, ResolveFileError> {
+    if let Some(handle) = resolve_single_file_handle_from_mode(mode)? {
+        return Ok(Some(build_resolved_target_for_mode(
+            mode,
+            handle.path,
+            None,
+            Some(handle.file),
+            Some(handle.parent),
             "更新対象の相対パス算出失敗",
         )));
     }
 
-    resolve_directory_change_target(state, changed_file)
+    resolve_directory_change_target(mode, changed_file)
 }
 
 async fn resolve_request_target(
     state: &AppState,
     request: RouteTargetRequest<'_>,
-) -> Result<(PathBuf, Option<Vec<String>>, Option<std::fs::File>), StatusCode> {
-    if let Some(path) = state.mode().single_file_canonical() {
-        let canonical =
-            revalidate_single_file_target(path, state.mode().base_dir()).map_err(|error| {
+) -> Result<
+    (
+        PathBuf,
+        Option<Vec<String>>,
+        Option<std::fs::File>,
+        Option<CanonicalPath>,
+    ),
+    ResolveRequestError,
+> {
+    if state.mode().single_file_canonical().is_some() {
+        let handle = resolve_single_file_handle_blocking(state.mode())
+            .await
+            .map_err(ResolveRequestError::file_resolution_status)?
+            .map_err(|error| {
                 tracing::warn!("[markdown-view] 単一ファイル解決エラー: {}", error);
-                error.status_code()
+                ResolveRequestError::from_file_error(error, request)
             })?;
-        let read_file = open_single_file_for_read(path).map_err(|error| {
-            tracing::warn!("[markdown-view] 単一ファイルopen検証エラー: {}", error);
-            error.status_code()
-        })?;
-        return Ok((canonical, None, Some(read_file)));
+        let Some(handle) = handle else {
+            tracing::error!("[markdown-view] 単一ファイルAppModeの解決結果が空です");
+            return Err(ResolveRequestError::file_resolution_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        };
+        return Ok((handle.path, None, Some(handle.file), Some(handle.parent)));
     }
 
     let Some(base_dir) = state.mode().directory_canonical() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        return Err(ResolveRequestError::file_resolution_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
     };
     let mut precomputed_files = None;
-    let (file_path, read_file) = if let Some(relative) = request.query_file() {
+    let (file_path, read_file, target_parent) = if let Some(relative) = request.query_file() {
         let resolved = resolve_file_blocking(base_dir, relative)
-            .await?
+            .await
+            .map_err(ResolveRequestError::file_resolution_status)?
             .map_err(|error| {
                 tracing::warn!("[markdown-view] ファイル解決エラー: {}", error);
-                error.status_code()
+                ResolveRequestError::from_file_error(error, request)
             })?;
-        (resolved.path, Some(resolved.file))
+        (resolved.path, Some(resolved.file), Some(resolved.parent))
     } else {
-        let files = list_markdown_files_blocking(base_dir).await?;
+        let files = list_markdown_files_blocking(base_dir)
+            .await
+            .map_err(ResolveRequestError::file_list_status)?;
         precomputed_files = Some(files.clone());
 
         let default_file = files
@@ -261,32 +423,91 @@ async fn resolve_request_target(
 
         match default_file {
             Some(relative) => {
-                let resolved =
-                    resolve_file_blocking(base_dir, relative)
-                        .await?
-                        .map_err(|error| {
-                            tracing::warn!(
-                                "[markdown-view] デフォルトファイル解決エラー: {}",
-                                error
-                            );
-                            StatusCode::INTERNAL_SERVER_ERROR
-                        })?;
-                (resolved.path, Some(resolved.file))
+                let resolved = resolve_file_blocking(base_dir, relative)
+                    .await
+                    .map_err(ResolveRequestError::file_resolution_status)?
+                    .map_err(|error| {
+                        tracing::warn!("[markdown-view] デフォルトファイル解決エラー: {}", error);
+                        ResolveRequestError::file_resolution_status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        )
+                    })?;
+                (resolved.path, Some(resolved.file), Some(resolved.parent))
             }
-            None => return Err(StatusCode::NOT_FOUND),
+            None => return Err(ResolveRequestError::not_found(request)),
         }
     };
 
     let file_list = if request.include_file_list() {
         match precomputed_files {
             Some(files) => Some(files),
-            None => Some(list_markdown_files_blocking(base_dir).await?),
+            None => Some(
+                list_markdown_files_blocking(base_dir)
+                    .await
+                    .map_err(ResolveRequestError::file_list_status)?,
+            ),
         }
     } else {
         None
     };
 
-    Ok((file_path, file_list, read_file))
+    Ok((file_path, file_list, read_file, target_parent))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolveRequestError {
+    status: StatusCode,
+    message: &'static str,
+}
+
+impl ResolveRequestError {
+    fn not_found(request: RouteTargetRequest<'_>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: request.not_found_message(),
+        }
+    }
+
+    fn file_list_status(status: StatusCode) -> Self {
+        Self {
+            status,
+            message: "ファイル一覧の取得に失敗しました",
+        }
+    }
+
+    fn file_resolution_status(status: StatusCode) -> Self {
+        Self {
+            status,
+            message: "ファイル解決に失敗しました",
+        }
+    }
+
+    fn from_file_error(error: ResolveFileError, request: RouteTargetRequest<'_>) -> Self {
+        let status = error.status_code();
+        if status == StatusCode::NOT_FOUND {
+            return Self::not_found(request);
+        }
+        Self::file_resolution_status(status)
+    }
+
+    #[cfg(test)]
+    pub(in crate::server) fn message(self) -> &'static str {
+        self.message
+    }
+
+    #[cfg(test)]
+    pub(in crate::server) fn status(self) -> StatusCode {
+        self.status
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn map_file_resolve_error_for_test(
+    error: ResolveFileError,
+    request: RouteTargetRequest<'_>,
+) -> (StatusCode, &'static str) {
+    let error = ResolveRequestError::from_file_error(error, request);
+    (error.status(), error.message())
 }
 
 async fn list_markdown_files_blocking(base_dir: &CanonicalPath) -> Result<Vec<String>, StatusCode> {
@@ -313,10 +534,60 @@ async fn resolve_file_blocking(
     .await
 }
 
+async fn resolve_single_file_handle_blocking(
+    mode: &AppMode,
+) -> Result<Result<Option<ResolvedFileHandle>, ResolveFileError>, StatusCode> {
+    let mode = mode.clone();
+    run_blocking_file_task("単一ファイル解決", move || {
+        resolve_single_file_handle_from_mode(&mode)
+    })
+    .await
+}
+
 #[derive(Debug)]
 struct ResolvedFileHandle {
     path: PathBuf,
     file: std::fs::File,
+    parent: CanonicalPath,
+}
+
+fn resolve_single_file_handle_from_mode(
+    mode: &AppMode,
+) -> Result<Option<ResolvedFileHandle>, ResolveFileError> {
+    let Some(file_path) = mode.single_file_canonical() else {
+        return Ok(None);
+    };
+    let parent_dir = mode
+        .single_file_parent_canonical()
+        .ok_or(ResolveFileError::InternalState)?;
+    let parent_handle = open_verified_single_file_parent_dir(parent_dir)?;
+    notify_single_file_after_parent_verification_for_test(file_path.as_path());
+    let path = revalidate_single_file_target(file_path, mode.base_dir())?;
+    let file = open_single_file_for_read(file_path, parent_dir, &parent_handle)?;
+    verify_current_single_file_parent_identity(parent_dir)?;
+    Ok(Some(ResolvedFileHandle {
+        path,
+        file,
+        parent: parent_dir.clone(),
+    }))
+}
+
+fn verify_current_single_file_parent_identity(
+    parent: &CanonicalPath,
+) -> Result<(), ResolveFileError> {
+    match parent.has_current_identity() {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(
+                "[markdown-view] 単一ファイルparent directoryの実体差し替えを検出しました"
+            );
+            Err(ResolveFileError::Traversal)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(ResolveFileError::NotFound)
+        }
+        Err(error) => Err(ResolveFileError::Io(error.kind())),
+    }
 }
 
 fn resolve_file_from_canonical_base(
@@ -328,42 +599,24 @@ fn resolve_file_from_canonical_base(
     let relative_path = path
         .strip_prefix(base_dir.as_path())
         .map_err(|_| ResolveFileError::Traversal)?;
-    let verified_base = open_verified_base_dir(base_dir, "ファイル解決base directory")
-        .map_err(|error| ResolveFileError::Io(error.kind()))?;
-    let file = match open_relative_file_nofollow(&verified_base, relative_path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ResolveFileError::NotFound);
-        }
-        Err(error) => return Err(ResolveFileError::Io(error.kind())),
-    };
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ResolveFileError::NotFound);
-        }
-        Err(error) => return Err(ResolveFileError::Io(error.kind())),
-    };
-    if !metadata.is_file() {
-        return Err(ResolveFileError::NotFile);
-    }
-    Ok(ResolvedFileHandle {
-        path,
-        file: file.into_std(),
-    })
-}
-
-fn open_single_file_for_read(path: &CanonicalPath) -> Result<std::fs::File, ResolveFileError> {
-    let parent = path
-        .as_path()
-        .parent()
-        .ok_or(ResolveFileError::InvalidPath)?;
-    let file_name = path
-        .as_path()
+    let relative_parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = relative_path
         .file_name()
         .ok_or(ResolveFileError::InvalidPath)?;
-    let parent_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+    let parent = canonical_parent_for_resolved_file(&path)?;
+    let verified_base = open_verified_base_dir(base_dir, "ファイル解決base directory")
         .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    let parent_dir = open_relative_dir_nofollow(&verified_base, relative_parent)
+        .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    let parent_metadata = parent_dir
+        .dir_metadata()
+        .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    if !parent.matches_cap_metadata_identity(&parent_metadata) {
+        tracing::warn!(
+            "[markdown-view] ディレクトリモードtarget parent directoryの実体差し替えを検出しました"
+        );
+        return Err(ResolveFileError::Traversal);
+    }
     let file = match open_relative_file_nofollow(&parent_dir, Path::new(file_name)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -381,11 +634,109 @@ fn open_single_file_for_read(path: &CanonicalPath) -> Result<std::fs::File, Reso
     if !metadata.is_file() {
         return Err(ResolveFileError::NotFile);
     }
-    if !path.matches_cap_metadata_identity(&metadata) {
-        tracing::warn!("[markdown-view] 単一ファイルtarget pathの実体差し替えを検出しました");
-        return Err(ResolveFileError::Traversal);
+    notify_directory_file_after_open_for_test(&path);
+    verify_current_directory_target_parent_identity(&parent)?;
+    Ok(ResolvedFileHandle {
+        path,
+        file: file.into_std(),
+        parent,
+    })
+}
+
+fn verify_current_directory_target_parent_identity(
+    parent: &CanonicalPath,
+) -> Result<(), ResolveFileError> {
+    match parent.has_current_identity() {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(
+                "[markdown-view] ディレクトリモードtarget parent directoryの実体差し替えを検出しました"
+            );
+            Err(ResolveFileError::Traversal)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(ResolveFileError::NotFound)
+        }
+        Err(error) => Err(ResolveFileError::Io(error.kind())),
+    }
+}
+
+fn canonical_parent_for_resolved_file(path: &Path) -> Result<CanonicalPath, ResolveFileError> {
+    let parent = path.parent().ok_or(ResolveFileError::InvalidPath)?;
+    CanonicalPath::try_from_path(parent).map_err(canonical_path_error_to_resolve_error)
+}
+
+fn canonical_path_error_to_resolve_error(
+    error: crate::server::state::CanonicalPathError,
+) -> ResolveFileError {
+    match error {
+        crate::server::state::CanonicalPathError::Canonicalize(error)
+        | crate::server::state::CanonicalPathError::Metadata(error)
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            ResolveFileError::NotFound
+        }
+        crate::server::state::CanonicalPathError::Canonicalize(error)
+        | crate::server::state::CanonicalPathError::Metadata(error) => {
+            ResolveFileError::Io(error.kind())
+        }
+        crate::server::state::CanonicalPathError::UnsupportedIdentity => {
+            ResolveFileError::InternalState
+        }
+    }
+}
+
+fn open_single_file_for_read(
+    path: &CanonicalPath,
+    parent: &CanonicalPath,
+    parent_dir: &cap_std::fs::Dir,
+) -> Result<std::fs::File, ResolveFileError> {
+    let path_parent = path
+        .as_path()
+        .parent()
+        .ok_or(ResolveFileError::InvalidPath)?;
+    if path_parent != parent.as_path() {
+        return Err(ResolveFileError::InternalState);
+    }
+    let file_name = path
+        .as_path()
+        .file_name()
+        .ok_or(ResolveFileError::InvalidPath)?;
+    let file = match open_relative_file_nofollow(parent_dir, Path::new(file_name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ResolveFileError::NotFound);
+        }
+        Err(error) => return Err(ResolveFileError::Io(error.kind())),
+    };
+    if !metadata.is_file() {
+        return Err(ResolveFileError::NotFile);
     }
     Ok(file.into_std())
+}
+
+fn open_verified_single_file_parent_dir(
+    parent: &CanonicalPath,
+) -> Result<cap_std::fs::Dir, ResolveFileError> {
+    let parent_dir =
+        cap_std::fs::Dir::open_ambient_dir(parent.as_path(), cap_std::ambient_authority())
+            .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    let metadata = parent_dir
+        .dir_metadata()
+        .map_err(|error| ResolveFileError::Io(error.kind()))?;
+    if parent.matches_cap_metadata_identity(&metadata) {
+        return Ok(parent_dir);
+    }
+
+    tracing::warn!("[markdown-view] 単一ファイルparent directoryの実体差し替えを検出しました");
+    Err(ResolveFileError::Traversal)
 }
 
 fn validate_directory_base_identity_for_resolve(
@@ -418,15 +769,34 @@ fn build_resolved_target(
     file_path: PathBuf,
     file_list: Option<Vec<String>>,
     read_file: Option<std::fs::File>,
+    target_parent: Option<CanonicalPath>,
     warn_label: &'static str,
 ) -> ResolvedTarget {
-    let relative_path = state.mode().relative_path_of(&file_path);
-    if state.mode().is_directory() && relative_path.is_none() {
+    build_resolved_target_for_mode(
+        state.mode(),
+        file_path,
+        file_list,
+        read_file,
+        target_parent,
+        warn_label,
+    )
+}
+
+fn build_resolved_target_for_mode(
+    mode: &AppMode,
+    file_path: PathBuf,
+    file_list: Option<Vec<String>>,
+    read_file: Option<std::fs::File>,
+    target_parent: Option<CanonicalPath>,
+    warn_label: &'static str,
+) -> ResolvedTarget {
+    let relative_path = mode.relative_path_of(&file_path);
+    if mode.is_directory() && relative_path.is_none() {
         tracing::warn!(
             "[markdown-view] {}: {} はベース {} の配下ではありません",
             warn_label,
-            sanitize_path_for_logging(&file_path, state.mode().base_dir()),
-            state.mode().base_dir().display()
+            sanitize_path_for_logging(&file_path, mode.base_dir()),
+            mode.base_dir().display()
         );
         // 相対パス算出失敗時の方針（呼び出し経路ごとに後段で扱いを変える）:
         // - 本関数は警告ログのみで描画継続を許容する（graceful degradation）
@@ -434,14 +804,20 @@ fn build_resolved_target(
         // - WebSocket変更通知経路: 変更ターゲット解決時の再検証後にここへ到達したら内部不整合
     }
 
-    ResolvedTarget::new(file_path, file_list, relative_path, read_file)
+    ResolvedTarget::new(
+        file_path,
+        file_list,
+        relative_path,
+        read_file,
+        target_parent,
+    )
 }
 
 fn resolve_directory_change_target(
-    state: &AppState,
+    mode: &AppMode,
     changed_file: &Path,
 ) -> Result<Option<ResolvedTarget>, ResolveFileError> {
-    let Some(base_dir) = state.mode().directory_canonical() else {
+    let Some(base_dir) = mode.directory_canonical() else {
         tracing::error!("[markdown-view] 未知のAppModeです");
         return Err(ResolveFileError::InternalState);
     };
@@ -449,11 +825,12 @@ fn resolve_directory_change_target(
     let relative = relative_change_path(base_dir.as_path(), changed_file)?;
     let relative_string = relative_change_path_to_query(&relative)?;
     let resolved = resolve_file_from_canonical_base(base_dir, &relative_string)?;
-    Ok(Some(build_resolved_target(
-        state,
+    Ok(Some(build_resolved_target_for_mode(
+        mode,
         resolved.path,
         None,
         Some(resolved.file),
+        Some(resolved.parent),
         "更新対象の相対パス算出失敗",
     )))
 }
@@ -539,7 +916,7 @@ fn resolve_file_with_canonicalize_error(
     let canonical = candidate.canonicalize().map_err(|error| {
         tracing::warn!(
             "[markdown-view] ファイルパス正規化失敗: {} ({})",
-            sanitize_path_for_logging(&candidate, base_dir),
+            sanitize_path_for_logging_escaped(&candidate, base_dir),
             error
         );
         map_canonicalize_error(error.kind())
@@ -573,10 +950,12 @@ fn resolve_file_with_canonicalize_error(
     }
 }
 
-/// 単一ファイルモードの対象ファイルを安全に再検証する
+/// 単一ファイルモードの対象ファイルpath制約を再検証する。
 ///
-/// 起動時に正規化したパスと現在のパスを比較し、シンボリックリンク差し替え等の
-/// 攻撃を検出する。正規化後のパスが起動時と異なる場合はトラバーサルとして拒否する。
+/// 起動時に正規化したパスと現在のパスを比較し、正規化後のパスが起動時と
+/// 異なる場合だけトラバーサルとして拒否する。この関数単体ではtarget実体の
+/// 同一性を固定しない。実体の安全性は、呼び出し側で検証済み親ディレクトリ
+/// からの`nofollow` openと親ディレクトリidentity再確認を組み合わせて担保する。
 pub(super) fn revalidate_single_file_target(
     expected_path: &CanonicalPath,
     base_dir: &Path,
@@ -594,20 +973,6 @@ pub(super) fn revalidate_single_file_target(
 
     if canonical != expected_path.as_path() {
         return Err(ResolveFileError::Traversal);
-    }
-    match expected_path.has_current_identity() {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!("[markdown-view] 単一ファイルtarget pathの実体差し替えを検出しました");
-            return Err(ResolveFileError::Traversal);
-        }
-        Err(error) => {
-            tracing::warn!(
-                "[markdown-view] 単一ファイルtarget pathの実体検証に失敗しました: {}",
-                error
-            );
-            return Err(resolve_canonicalize_error(error.kind()));
-        }
     }
     if !canonical.is_file() {
         return Err(ResolveFileError::NotFile);
@@ -649,7 +1014,7 @@ impl std::fmt::Display for ResolveFileError {
             ResolveFileError::NotFound => write!(f, "ファイルが見つかりません"),
             ResolveFileError::NotFile => write!(f, "通常ファイルではありません"),
             ResolveFileError::Traversal => {
-                write!(f, "ディレクトリ外へのアクセスは禁止されています")
+                write!(f, "安全でないファイル参照は禁止されています")
             }
             ResolveFileError::NotMarkdown => write!(f, ".mdファイルのみアクセス可能です"),
             ResolveFileError::Hidden => write!(
@@ -667,12 +1032,26 @@ impl std::fmt::Display for ResolveFileError {
 impl std::error::Error for ResolveFileError {}
 
 impl ResolveFileError {
-    /// エラー種別に関わらず404を返す
-    ///
-    /// エラー種別で応答を分けるとファイル存在有無の推測材料になるため、
-    /// すべて404に統一してセキュリティを確保する。
+    /// 外部入力由来の解決失敗は404へマスクし、内部状態不整合だけ500へ分離する。
     pub fn status_code(&self) -> StatusCode {
-        StatusCode::NOT_FOUND
+        match self {
+            ResolveFileError::InternalState => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::NOT_FOUND,
+        }
+    }
+
+    pub(in crate::server) fn user_message(&self) -> &'static str {
+        match self {
+            ResolveFileError::EmptyPath => "ファイルパスが空です",
+            ResolveFileError::InvalidPath => "無効なパスです",
+            ResolveFileError::NotFound => "ファイルが見つかりません",
+            ResolveFileError::NotFile => "通常ファイルではありません",
+            ResolveFileError::Traversal => "安全でないファイル参照は禁止されています",
+            ResolveFileError::NotMarkdown => ".mdファイルのみアクセス可能です",
+            ResolveFileError::Hidden => "隠しファイルまたは除外対象へのアクセスは禁止されています",
+            ResolveFileError::Io(_) => "ファイルの検証に失敗しました",
+            ResolveFileError::InternalState => "内部エラーが発生しました",
+        }
     }
 }
 

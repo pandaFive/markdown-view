@@ -71,6 +71,8 @@ where
 }
 
 #[cfg(test)]
+pub(in crate::server) use self::resolve::set_single_file_after_parent_verification_hook_for_test;
+#[cfg(test)]
 pub(in crate::server) use self::resolve::RouteTargetKind;
 #[cfg(test)]
 pub(in crate::server) use self::test_support::{MockMemoFs, Op};
