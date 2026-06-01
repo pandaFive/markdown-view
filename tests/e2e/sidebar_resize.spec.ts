@@ -20,6 +20,11 @@ type CommandError = Error & {
   stderr?: string | Buffer;
 };
 
+type SignalDelivery = {
+  signal: NodeJS.Signals;
+  delivered: boolean;
+};
+
 function sanitizeServerOutput(value: string): string {
   return value
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
@@ -105,18 +110,22 @@ function hasServerExited(server: ChildProcess): boolean {
   return server.exitCode !== null || server.signalCode !== null;
 }
 
-function signalServer(server: ChildProcess, signal: NodeJS.Signals): void {
-  if (hasServerExited(server)) return;
+function signalServer(server: ChildProcess, signal: NodeJS.Signals): SignalDelivery {
+  if (hasServerExited(server)) return { signal, delivered: false };
   try {
     if (process.platform !== 'win32' && server.pid) {
       process.kill(-server.pid, signal);
-      return;
+      return { signal, delivered: true };
     }
-    server.kill(signal);
+    return { signal, delivered: server.kill(signal) };
   } catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') {
+    if (error instanceof Error && 'code' in error && error.code === 'ESRCH') {
+      return { signal, delivered: false };
+    }
+    if (!(error instanceof Error)) {
       throw error;
     }
+    throw error;
   }
 }
 
@@ -135,8 +144,12 @@ async function waitForServerExit(server: ChildProcess, timeoutMs: number): Promi
   });
 }
 
-function serverStopDiagnostics(server: ChildProcess, output: SingleFileServerOutput, signals: NodeJS.Signals[]): string {
-  return `pid=${server.pid ?? 'unknown'} exitCode=${server.exitCode ?? 'null'} signalCode=${server.signalCode ?? 'null'} signals=${signals.join(',')} output=${serverOutputSummary(output)}`;
+function signalDeliverySummary(signals: SignalDelivery[]): string {
+  return signals.map((entry) => `${entry.signal}=${entry.delivered}`).join(',');
+}
+
+function serverStopDiagnostics(server: ChildProcess, output: SingleFileServerOutput, signals: SignalDelivery[]): string {
+  return `pid=${server.pid ?? 'unknown'} exitCode=${server.exitCode ?? 'null'} signalCode=${server.signalCode ?? 'null'} signals=${signalDeliverySummary(signals)} output=${serverOutputSummary(output)}`;
 }
 
 async function stopServer(
@@ -145,12 +158,10 @@ async function stopServer(
   timeoutMs: number = singleFileServerStopTimeoutMs
 ): Promise<void> {
   if (hasServerExited(server)) return;
-  const signals: NodeJS.Signals[] = [];
-  signals.push('SIGTERM');
-  signalServer(server, 'SIGTERM');
+  const signals: SignalDelivery[] = [];
+  signals.push(signalServer(server, 'SIGTERM'));
   if (await waitForServerExit(server, timeoutMs)) return;
-  signals.push('SIGKILL');
-  signalServer(server, 'SIGKILL');
+  signals.push(signalServer(server, 'SIGKILL'));
   if (await waitForServerExit(server, timeoutMs)) return;
   throw new Error(`single file server did not stop: ${serverStopDiagnostics(server, output, signals)}`);
 }
@@ -172,7 +183,10 @@ async function withStoppedServer<T>(
       await stopServer(server, output, stopTimeoutMs);
     } catch (cleanupError) {
       if (!runError) throw cleanupError;
-      throw new AggregateError([runError, cleanupError], 'test failed and single file server cleanup also failed');
+      throw new AggregateError(
+        [runError, cleanupError],
+        `test failed and single file server cleanup also failed: run=${errorMessage(runError)} cleanup=${errorMessage(cleanupError)}`
+      );
     }
   }
 }
@@ -202,12 +216,12 @@ test('command output summaryは長いstdout/stderrを末尾に制限する', () 
 
 test('stopServerの停止失敗は診断情報を含む', async () => {
   const output: SingleFileServerOutput = { spawnError: '', text: 'URL: http://127.0.0.1:4123\nready' };
-  const server = fakeRunningServer();
+  const server = fakeRunningServer(() => false);
 
-  await expect(stopServer(server, output, 1)).rejects.toThrow(/pid=[\s\S]*exitCode=[\s\S]*signalCode=[\s\S]*SIGTERM[\s\S]*SIGKILL[\s\S]*ready/);
+  await expect(stopServer(server, output, 1)).rejects.toThrow(/pid=[\s\S]*exitCode=[\s\S]*signalCode=[\s\S]*SIGTERM=false[\s\S]*SIGKILL=false[\s\S]*ready/);
 });
 
-test('withStoppedServerは本体失敗とcleanup失敗をAggregateErrorで保持する', async () => {
+test('withStoppedServerは本体失敗とcleanup失敗をAggregateErrorのmessageにも保持する', async () => {
   const output: SingleFileServerOutput = { spawnError: '', text: 'server output' };
   const server = fakeRunningServer();
   const runError = new Error('assertion failed');
@@ -219,7 +233,8 @@ test('withStoppedServerは本体失敗とcleanup失敗をAggregateErrorで保持
     errors: [
       runError,
       expect.any(Error)
-    ]
+    ],
+    message: expect.stringMatching(/run=assertion failed[\s\S]*cleanup=single file server did not stop/)
   });
 });
 
@@ -386,6 +401,32 @@ test('狭いモバイル幅でもサイドバー幅はモバイル契約を維�
   await expect(page.locator('#sidebar')).toHaveClass(/open/);
   await expect.poll(async () => await page.locator('#sidebar').evaluate((element) => getComputedStyle(element).maxWidth)).toBe('320px');
   await expect.poll(async () => Math.round((await page.locator('#sidebar').boundingBox())?.width ?? 0)).toBe(320);
+});
+
+test('デスクトップで縮めた内部高さはモバイル表示へ持ち越さない', async ({ page }) => {
+  const panel = page.locator('#panel-files');
+  const content = panel.locator('.sidebar-resizable-content');
+  const handle = panel.locator('.sidebar-content-resizer');
+  const panelBox = await panel.boundingBox();
+  const handleBox = await handle.boundingBox();
+
+  expect(panelBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, panelBox!.y + 180);
+  await page.mouse.up();
+
+  await expect.poll(async () => (await content.boundingBox())?.height ?? 0).toBeLessThan(220);
+
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.locator('#sidebar-open').click();
+
+  await expect(page.locator('#sidebar')).toHaveClass(/open/);
+  await expect.poll(async () => await content.evaluate((element) => getComputedStyle(element).flexGrow)).toBe('1');
+  await expect.poll(async () => await content.evaluate((element) => getComputedStyle(element).maxHeight)).toBe('none');
+  await expect.poll(async () => (await content.boundingBox())?.height ?? 0).toBeGreaterThan(260);
 });
 
 test('内部リサイズのARIA最小値はCSSのmin-heightに追従する', async ({ page }) => {

@@ -70,6 +70,10 @@
   .sidebar-content-resizer {
     display: none;
   }
+  .sidebar-resizable-content {
+    flex: 1 1 auto;
+    max-height: none;
+  }
   .sidebar.open { transform: translateX(0); }
   .sidebar-toggle { display: block; }
   .sidebar-tabs .sidebar-toggle { display: block; }
