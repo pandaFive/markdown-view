@@ -81,6 +81,8 @@ function setupTabs(): void {
   });
 }
 
+var syncActiveSidebarResizePanel: (() => void) | null = null;
+
 function activateSidebarTab(target: string): void {
   var tabs = document.querySelectorAll<HTMLElement>('.sidebar-tab');
   tabs.forEach(function(tab: HTMLElement): void {
@@ -90,6 +92,9 @@ function activateSidebarTab(target: string): void {
   panels.forEach(function(panel: HTMLElement): void {
     panel.classList.toggle('active', panel.id === 'panel-' + target);
   });
+  if (syncActiveSidebarResizePanel) {
+    syncActiveSidebarResizePanel();
+  }
 }
 
 // URL エンコード差を吸収して比較するためのヘルパー。location.hash と
@@ -416,30 +421,56 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
     return panel && panel.classList.contains('active') ? panel : null;
   }
 
+  function syncActivePanelContentHeight(): void {
+    var activePanel = document.querySelector<HTMLElement>('.sidebar-panel.active');
+    if (!activePanel) return;
+    var content = activePanel.querySelector<HTMLElement>('.sidebar-resizable-content');
+    setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeight);
+  }
+
+  syncActiveSidebarResizePanel = syncActivePanelContentHeight;
+
   if (widthHandle) {
     var widthHandleEl = widthHandle;
     widthHandleEl.addEventListener('pointerdown', function(event: PointerEvent): void {
       if (!isResizableViewport()) return;
       event.preventDefault();
-      sidebar.classList.add('resizing');
-      widthHandleEl.setPointerCapture(event.pointerId);
-      setSidebarWidth(event.clientX);
 
       function onPointerMove(moveEvent: PointerEvent): void {
         setSidebarWidth(moveEvent.clientX);
       }
 
-      function onPointerUp(upEvent: PointerEvent): void {
+      function cleanup(pointerId: number): void {
         sidebar.classList.remove('resizing');
-        widthHandleEl.releasePointerCapture(upEvent.pointerId);
         widthHandleEl.removeEventListener('pointermove', onPointerMove);
-        widthHandleEl.removeEventListener('pointerup', onPointerUp);
-        widthHandleEl.removeEventListener('pointercancel', onPointerUp);
+        widthHandleEl.removeEventListener('pointerup', onPointerEnd);
+        widthHandleEl.removeEventListener('pointercancel', onPointerEnd);
+        widthHandleEl.removeEventListener('lostpointercapture', onLostPointerCapture);
+        if (widthHandleEl.hasPointerCapture(pointerId)) {
+          try { widthHandleEl.releasePointerCapture(pointerId); } catch (e) {}
+        }
       }
 
+      function onPointerEnd(upEvent: PointerEvent): void {
+        cleanup(upEvent.pointerId);
+      }
+
+      function onLostPointerCapture(lostEvent: PointerEvent): void {
+        cleanup(lostEvent.pointerId);
+      }
+
+      sidebar.classList.add('resizing');
+      try {
+        widthHandleEl.setPointerCapture(event.pointerId);
+      } catch (e) {
+        cleanup(event.pointerId);
+        return;
+      }
+      setSidebarWidth(event.clientX);
       widthHandleEl.addEventListener('pointermove', onPointerMove);
-      widthHandleEl.addEventListener('pointerup', onPointerUp);
-      widthHandleEl.addEventListener('pointercancel', onPointerUp);
+      widthHandleEl.addEventListener('pointerup', onPointerEnd);
+      widthHandleEl.addEventListener('pointercancel', onPointerEnd);
+      widthHandleEl.addEventListener('lostpointercapture', onLostPointerCapture);
     });
 
     widthHandleEl.addEventListener('keydown', function(event: KeyboardEvent): void {
@@ -457,25 +488,42 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
       var panel = activePanelFromHandle(handle);
       if (!panel || !isResizableViewport()) return;
       event.preventDefault();
-      sidebar.classList.add('resizing');
-      handle.setPointerCapture(event.pointerId);
-      setContentHeight(panel, event.clientY - panel.getBoundingClientRect().top);
 
       function onPointerMove(moveEvent: PointerEvent): void {
         setContentHeight(panel!, moveEvent.clientY - panel!.getBoundingClientRect().top);
       }
 
-      function onPointerUp(upEvent: PointerEvent): void {
+      function cleanup(pointerId: number): void {
         sidebar.classList.remove('resizing');
-        handle.releasePointerCapture(upEvent.pointerId);
         handle.removeEventListener('pointermove', onPointerMove);
-        handle.removeEventListener('pointerup', onPointerUp);
-        handle.removeEventListener('pointercancel', onPointerUp);
+        handle.removeEventListener('pointerup', onPointerEnd);
+        handle.removeEventListener('pointercancel', onPointerEnd);
+        handle.removeEventListener('lostpointercapture', onLostPointerCapture);
+        if (handle.hasPointerCapture(pointerId)) {
+          try { handle.releasePointerCapture(pointerId); } catch (e) {}
+        }
       }
 
+      function onPointerEnd(upEvent: PointerEvent): void {
+        cleanup(upEvent.pointerId);
+      }
+
+      function onLostPointerCapture(lostEvent: PointerEvent): void {
+        cleanup(lostEvent.pointerId);
+      }
+
+      sidebar.classList.add('resizing');
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch (e) {
+        cleanup(event.pointerId);
+        return;
+      }
+      setContentHeight(panel, event.clientY - panel.getBoundingClientRect().top);
       handle.addEventListener('pointermove', onPointerMove);
-      handle.addEventListener('pointerup', onPointerUp);
-      handle.addEventListener('pointercancel', onPointerUp);
+      handle.addEventListener('pointerup', onPointerEnd);
+      handle.addEventListener('pointercancel', onPointerEnd);
+      handle.addEventListener('lostpointercapture', onLostPointerCapture);
     });
 
     handle.addEventListener('keydown', function(event: KeyboardEvent): void {
@@ -491,12 +539,10 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
   window.addEventListener('resize', function(): void {
     if (!isResizableViewport()) return;
     setSidebarWidth(sidebar.getBoundingClientRect().width || 320);
-    var activePanel = document.querySelector<HTMLElement>('.sidebar-panel.active');
-    if (activePanel) {
-      var content = activePanel.querySelector<HTMLElement>('.sidebar-resizable-content');
-      setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeight);
-    }
+    syncActivePanelContentHeight();
   });
+
+  syncActivePanelContentHeight();
 }
 
 function setupSidebarInteractions(): void {
