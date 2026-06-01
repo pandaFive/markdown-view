@@ -821,6 +821,64 @@ test('ディレクトリ検索の400エラーは検索語をUIにもconsoleに�
   expect(consoleErrors[0]).toContain('"queryLength":' + secretQuery.length);
 });
 
+test('ディレクトリ検索の429エラーは検索混雑として表示し検索語を露出しない', async ({ page }) => {
+  const secretQuery = 'alpha secret throttle';
+
+  await page.evaluate(() => {
+    const win = window as unknown as { directorySearchConsoleErrorsForTest: string[] };
+    const originalError = console.error.bind(console);
+    win.directorySearchConsoleErrorsForTest = [];
+    console.error = function(...args: unknown[]) {
+      win.directorySearchConsoleErrorsForTest.push(args.map((arg) => {
+        try {
+          return JSON.stringify(arg);
+        } catch (_err) {
+          return String(arg);
+        }
+      }).join(' '));
+      originalError(...args);
+    };
+  });
+
+  await page.route('**/api/search**', async (route) => {
+    await route.fulfill({
+      status: 429,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: '検索が混み合っています: ' + secretQuery
+      })
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears here.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, secretQuery);
+
+  await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+  await expect(page.locator('#document-search-results'))
+    .toContainText('検索が混み合っています。少し待って再度お試しください。');
+  await expect(page.locator('#document-search-results')).not.toContainText(secretQuery);
+  await expect(page.locator('#document-search-results')).not.toContainText('ファイルの読み込みに失敗しました');
+  await expect.poll(() => page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest.length;
+  })).toBe(1);
+  const consoleErrors = await page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest;
+  });
+  expect(JSON.stringify(consoleErrors)).not.toContain(secretQuery);
+  expect(consoleErrors[0]).toContain('"status":429');
+  expect(consoleErrors[0]).toContain('"sequence":1');
+  expect(consoleErrors[0]).toContain('"generation":1');
+  expect(consoleErrors[0]).toContain('"queryLength":' + secretQuery.length);
+});
+
 test('ディレクトリ検索の不正な結果要素は検索エラーとして表示する', async ({ page }) => {
   await page.evaluate(() => {
     const win = window as unknown as { directorySearchConsoleWarningsForTest: string[] };

@@ -288,6 +288,9 @@ function createDirectorySearchController(ctx, deps) {
         if (typedError && typedError.type === 'http' && typedError.status === 400) {
             return '検索クエリが不正か長すぎます。';
         }
+        if (typedError && typedError.type === 'http' && typedError.status === 429) {
+            return '検索が混み合っています。少し待って再度お試しください。';
+        }
         return deps.getFileFetchErrorMessage(err);
     }
     function getDirectorySearchErrorLogContext(err, sequence, generation, queryLength) {
