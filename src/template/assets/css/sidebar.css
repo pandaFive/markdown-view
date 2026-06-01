@@ -1,8 +1,10 @@
 /* サイドバー */
 .sidebar {
+  --sidebar-min-width: 260px;
+  --sidebar-max-width: min(560px, 52vw);
   width: var(--sidebar-width, 320px);
-  min-width: 260px;
-  max-width: min(560px, 52vw);
+  min-width: var(--sidebar-min-width);
+  max-width: var(--sidebar-max-width);
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
   padding: 1.2rem 1rem;

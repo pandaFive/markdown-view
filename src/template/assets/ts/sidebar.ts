@@ -383,8 +383,6 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
   var widthHandle = document.getElementById('sidebar-width-resizer');
   var contentHandles = document.querySelectorAll<HTMLElement>('.sidebar-content-resizer');
   var desktopQuery = window.matchMedia('(min-width: 769px)');
-  var minSidebarWidth = 260;
-  var maxSidebarWidth = 560;
   var minContentHeightFallback = 128;
   var widthStep = 24;
   var heightStep = 24;
@@ -393,14 +391,24 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
     return desktopQuery.matches;
   }
 
+  function getSidebarWidthBounds(): { min: number; max: number } {
+    var sidebarStyle = window.getComputedStyle(sidebar);
+    var minSidebarWidth = parseCssPixels(sidebarStyle.minWidth) || 260;
+    var maxSidebarWidth = parseCssPixels(sidebarStyle.maxWidth) || 560;
+    return {
+      min: minSidebarWidth,
+      max: Math.max(minSidebarWidth, maxSidebarWidth)
+    };
+  }
+
   function setSidebarWidth(width: number): void {
-    var viewportMax = Math.max(minSidebarWidth, Math.min(maxSidebarWidth, Math.floor(window.innerWidth * 0.52)));
-    var nextWidth = clampSidebarSize(width, minSidebarWidth, viewportMax);
+    var bounds = getSidebarWidthBounds();
+    var nextWidth = clampSidebarSize(width, bounds.min, bounds.max);
     sidebar.style.setProperty('--sidebar-width', nextWidth + 'px');
     if (widthHandle) {
       widthHandle.setAttribute('aria-valuenow', String(Math.round(nextWidth)));
-      widthHandle.setAttribute('aria-valuemin', String(minSidebarWidth));
-      widthHandle.setAttribute('aria-valuemax', String(viewportMax));
+      widthHandle.setAttribute('aria-valuemin', String(Math.round(bounds.min)));
+      widthHandle.setAttribute('aria-valuemax', String(Math.round(bounds.max)));
     }
     scheduleTocTrackingUpdate();
   }
@@ -446,9 +454,11 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
     widthHandleEl.addEventListener('pointerdown', function(event: PointerEvent): void {
       if (!isResizableViewport()) return;
       event.preventDefault();
+      var startX = event.clientX;
+      var startWidth = sidebar.getBoundingClientRect().width;
 
       function onPointerMove(moveEvent: PointerEvent): void {
-        setSidebarWidth(moveEvent.clientX);
+        setSidebarWidth(startWidth + (moveEvent.clientX - startX));
       }
 
       function cleanup(pointerId: number): void {
@@ -477,7 +487,6 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
         cleanup(event.pointerId);
         return;
       }
-      setSidebarWidth(event.clientX);
       widthHandleEl.addEventListener('pointermove', onPointerMove);
       widthHandleEl.addEventListener('pointerup', onPointerEnd);
       widthHandleEl.addEventListener('pointercancel', onPointerEnd);
@@ -499,9 +508,12 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
       var panel = activePanelFromHandle(handle);
       if (!panel || !isResizableViewport()) return;
       event.preventDefault();
+      var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
+      var startY = event.clientY;
+      var startHeight = content ? content.getBoundingClientRect().height : minContentHeightFallback;
 
       function onPointerMove(moveEvent: PointerEvent): void {
-        setContentHeight(panel!, moveEvent.clientY - panel!.getBoundingClientRect().top);
+        setContentHeight(panel!, startHeight + (moveEvent.clientY - startY));
       }
 
       function cleanup(pointerId: number): void {
@@ -530,7 +542,6 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
         cleanup(event.pointerId);
         return;
       }
-      setContentHeight(panel, event.clientY - panel.getBoundingClientRect().top);
       handle.addEventListener('pointermove', onPointerMove);
       handle.addEventListener('pointerup', onPointerEnd);
       handle.addEventListener('pointercancel', onPointerEnd);

@@ -1,14 +1,22 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { test, expect } from '@playwright/test';
 import { resetStandardFixtures } from './helpers';
 
 const singleFileServerReadyTimeoutMs = 45000;
 const singleFileServerStopTimeoutMs = 5000;
 const singleFileServerOutputLimit = 8000;
+const execFileAsync = promisify(execFile);
 
 type SingleFileServerOutput = {
   spawnError: string;
   text: string;
+};
+
+type CommandError = Error & {
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
 };
 
 function sanitizeServerOutput(value: string): string {
@@ -17,12 +25,36 @@ function sanitizeServerOutput(value: string): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '?');
 }
 
+function errorMessage(error: unknown): string {
+  return sanitizeServerOutput(error instanceof Error ? error.message : String(error));
+}
+
 function appendServerOutput(output: SingleFileServerOutput, chunk: Buffer): void {
   output.text = (output.text + sanitizeServerOutput(chunk.toString('utf8'))).slice(-singleFileServerOutputLimit);
 }
 
 function serverOutputSummary(output: SingleFileServerOutput): string {
   return output.text || '(no output)';
+}
+
+function singleFileServerBinaryPath(): string {
+  return path.join(process.cwd(), 'target', 'debug', process.platform === 'win32' ? 'markdown-view.exe' : 'markdown-view');
+}
+
+function commandOutputSummary(error: CommandError): string {
+  return sanitizeServerOutput(`${error.stdout?.toString() || ''}${error.stderr?.toString() || ''}`) || '(no output)';
+}
+
+async function buildSingleFileServerBinary(): Promise<string> {
+  try {
+    await execFileAsync('cargo', ['build', '--bin', 'markdown-view'], { cwd: process.cwd() });
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`single file server build failed: ${errorMessage(error)} output=${commandOutputSummary(error as CommandError)}`);
+    }
+    throw new Error(`single file server build failed: ${errorMessage(error)}`);
+  }
+  return singleFileServerBinaryPath();
 }
 
 async function waitForSingleFileServer(server: ChildProcess, output: SingleFileServerOutput): Promise<string> {
@@ -95,6 +127,23 @@ async function stopServer(server: ChildProcess): Promise<void> {
   throw new Error('single file server did not stop');
 }
 
+async function withStoppedServer<T>(server: ChildProcess, run: () => Promise<T>): Promise<T> {
+  let runError: unknown;
+  try {
+    return await run();
+  } catch (error) {
+    runError = error;
+    throw error;
+  } finally {
+    try {
+      await stopServer(server);
+    } catch (cleanupError) {
+      if (!runError) throw cleanupError;
+      console.warn(`single file server cleanup failed after test failure: ${errorMessage(cleanupError)}`);
+    }
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await resetStandardFixtures();
   await page.goto('/');
@@ -132,6 +181,23 @@ test('サイドバー幅はドラッグで伸び縮みできる', async ({ page 
   await expect.poll(async () => (await sidebar.boundingBox())?.width ?? 0).toBeLessThan(expandedBox!.width - 60);
 });
 
+test('サイドバー幅はドラッグ開始だけでは変化しない', async ({ page }) => {
+  const sidebar = page.locator('#sidebar');
+  const handle = page.locator('#sidebar-width-resizer');
+  const initialBox = await sidebar.boundingBox();
+  const handleBox = await handle.boundingBox();
+
+  expect(initialBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + 80);
+  await page.mouse.down();
+
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())?.width ?? 0)).toBe(Math.round(initialBox!.width));
+
+  await page.mouse.up();
+});
+
 test('サイドバー内部コンテンツエリアはドラッグで伸び縮みできる', async ({ page }) => {
   const panel = page.locator('#panel-files');
   const content = panel.locator('.sidebar-resizable-content');
@@ -158,6 +224,24 @@ test('サイドバー内部コンテンツエリアはドラッグで伸び縮�
   await page.mouse.up();
 
   await expect.poll(async () => (await content.boundingBox())?.height ?? 0).toBeGreaterThan((shrunkenBox?.height ?? 0) + 50);
+});
+
+test('内部リサイズはドラッグ開始だけでは高さを変えない', async ({ page }) => {
+  const panel = page.locator('#panel-files');
+  const content = panel.locator('.sidebar-resizable-content');
+  const handle = panel.locator('.sidebar-content-resizer');
+  const initialBox = await content.boundingBox();
+  const handleBox = await handle.boundingBox();
+
+  expect(initialBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height - 1);
+  await page.mouse.down();
+
+  await expect.poll(async () => Math.round((await content.boundingBox())?.height ?? 0)).toBe(Math.round(initialBox!.height));
+
+  await page.mouse.up();
 });
 
 test('内部リサイズハンドルは初期表示とタブ切替後にARIA値を公開する', async ({ page }) => {
@@ -418,9 +502,7 @@ test('pointer capture喪失時に幅と内部リサイズの状態を片付け�
 test('単一ファイルモードでも内部リサイズを操作できる', async ({ page }) => {
   test.setTimeout(90000);
   const serverOutput: SingleFileServerOutput = { spawnError: '', text: '' };
-  const server = spawn('cargo', [
-    'run',
-    '--',
+  const server = spawn(await buildSingleFileServerBinary(), [
     'tests/fixtures/e2e/README.md',
     '--port',
     '0',
@@ -433,10 +515,10 @@ test('単一ファイルモードでも内部リサイズを操作できる', as
   server.stdout?.on('data', (chunk: Buffer) => appendServerOutput(serverOutput, chunk));
   server.stderr?.on('data', (chunk: Buffer) => appendServerOutput(serverOutput, chunk));
   server.once('error', (error: Error) => {
-    serverOutput.spawnError = sanitizeServerOutput(error.message);
+    serverOutput.spawnError = errorMessage(error);
   });
 
-  try {
+  await withStoppedServer(server, async () => {
     const url = await waitForSingleFileServer(server, serverOutput);
     await page.goto(url);
     await expect(page.locator('#sidebar')).toBeVisible();
@@ -474,7 +556,5 @@ test('単一ファイルモードでも内部リサイズを操作できる', as
     await page.mouse.up();
 
     await expect.poll(async () => (await memoContent.boundingBox())?.height ?? 0).toBeLessThan(220);
-  } finally {
-    await stopServer(server);
-  }
+  });
 });
