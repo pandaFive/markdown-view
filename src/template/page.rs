@@ -111,6 +111,7 @@ fn render_workspace_body(parts: &HtmlDocumentParts) -> String {
 <div class="app-shell">
 <aside id="sidebar" class="sidebar">
 {sidebar_inner}
+  <div id="sidebar-width-resizer" class="sidebar-width-resizer" role="separator" aria-label="サイドバー幅を調整" aria-orientation="vertical" tabindex="0"></div>
 </aside>
 <div class="workspace">
 <header class="topbar">
@@ -187,6 +188,7 @@ fn render_sidebar(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="閉じる">×</button>
   </div>
   <div class="sidebar-panel active" id="panel-files">
+    <div class="sidebar-resizable-content">
     <div class="sidebar-utility">
       <label class="sidebar-search">
         <span>絞り込み</span>
@@ -196,17 +198,25 @@ fn render_sidebar(
     </div>
     <div class="file-list">
 {tree_html}    </div>
+    </div>
+    <div class="sidebar-content-resizer" role="separator" aria-label="サイドバー内部エリアを調整" aria-orientation="horizontal" tabindex="0"></div>
   </div>
   <div class="sidebar-panel" id="panel-toc">
+    <div class="sidebar-resizable-content">
     {document_search}
     <label class="sidebar-search sidebar-search-compact">
       <span>目次検索</span>
       <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
     </label>
     <nav id="toc">{toc}</nav>
+    </div>
+    <div class="sidebar-content-resizer" role="separator" aria-label="サイドバー内部エリアを調整" aria-orientation="horizontal" tabindex="0"></div>
   </div>
   <div class="sidebar-panel" id="panel-memo">
+    <div class="sidebar-resizable-content">
 {memo_editor}
+    </div>
+    <div class="sidebar-content-resizer" role="separator" aria-label="サイドバー内部エリアを調整" aria-orientation="horizontal" tabindex="0"></div>
   </div>"##,
                 tree_html = tree_html,
                 document_search = document_search,
@@ -239,15 +249,21 @@ fn render_sidebar(
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="目次を閉じる">×</button>
   </div>
   <div class="sidebar-panel active" id="panel-toc">
+    <div class="sidebar-resizable-content">
     {document_search}
     <label class="sidebar-search sidebar-search-compact">
       <span>目次検索</span>
       <input id="toc-filter" type="search" placeholder="見出しを検索" autocomplete="off">
     </label>
     <nav id="toc">{toc}</nav>
+    </div>
+    <div class="sidebar-content-resizer" role="separator" aria-label="サイドバー内部エリアを調整" aria-orientation="horizontal" tabindex="0"></div>
   </div>
   <div class="sidebar-panel" id="panel-memo">
+    <div class="sidebar-resizable-content">
 {memo_editor}
+    </div>
+    <div class="sidebar-content-resizer" role="separator" aria-label="サイドバー内部エリアを調整" aria-orientation="horizontal" tabindex="0"></div>
   </div>"##,
                     document_search = document_search,
                     toc = toc.as_str(),
@@ -521,6 +537,22 @@ mod tests {
         assert!(html.contains("id=\"live-status\""));
         assert!(html.contains("id=\"reading-progress-bar\""));
         assert!(html.contains("id=\"back-to-top\""));
+    }
+
+    #[test]
+    fn test_サイドバー幅と内部エリアのリサイズハンドルが描画される() {
+        let memo = test_memo();
+        let single_file_html = render_single_file_page(&memo);
+        let directory_html = render_directory_page(&["README.md".to_string()], &memo);
+
+        for html in [single_file_html, directory_html] {
+            assert!(html.contains("id=\"sidebar-width-resizer\""));
+            assert!(html.contains("class=\"sidebar-width-resizer\""));
+            assert!(html.contains("aria-label=\"サイドバー幅を調整\""));
+            assert!(html.contains("class=\"sidebar-resizable-content\""));
+            assert!(html.contains("class=\"sidebar-content-resizer\""));
+            assert!(html.contains("aria-label=\"サイドバー内部エリアを調整\""));
+        }
     }
 
     #[test]

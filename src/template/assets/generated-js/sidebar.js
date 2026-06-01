@@ -349,6 +349,128 @@ function setupTocTracking() {
         setActiveTocLink(previousActiveTocId);
     }
 }
+function clampSidebarSize(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+function setupSidebarResizing(sidebar) {
+    var widthHandle = document.getElementById('sidebar-width-resizer');
+    var contentHandles = document.querySelectorAll('.sidebar-content-resizer');
+    var desktopQuery = window.matchMedia('(min-width: 769px)');
+    var minSidebarWidth = 260;
+    var maxSidebarWidth = 560;
+    var minContentHeight = 128;
+    var widthStep = 24;
+    var heightStep = 24;
+    function isResizableViewport() {
+        return desktopQuery.matches;
+    }
+    function setSidebarWidth(width) {
+        var viewportMax = Math.max(minSidebarWidth, Math.min(maxSidebarWidth, Math.floor(window.innerWidth * 0.52)));
+        var nextWidth = clampSidebarSize(width, minSidebarWidth, viewportMax);
+        sidebar.style.setProperty('--sidebar-width', nextWidth + 'px');
+        if (widthHandle) {
+            widthHandle.setAttribute('aria-valuenow', String(Math.round(nextWidth)));
+            widthHandle.setAttribute('aria-valuemin', String(minSidebarWidth));
+            widthHandle.setAttribute('aria-valuemax', String(viewportMax));
+        }
+        scheduleTocTrackingUpdate();
+    }
+    function setContentHeight(panel, height) {
+        var content = panel.querySelector('.sidebar-resizable-content');
+        if (!content)
+            return;
+        var panelRect = panel.getBoundingClientRect();
+        var handle = panel.querySelector('.sidebar-content-resizer');
+        var reserved = handle ? handle.getBoundingClientRect().height : 0;
+        var maxContentHeight = Math.max(minContentHeight, Math.floor(panelRect.height - reserved));
+        var nextHeight = clampSidebarSize(height, minContentHeight, maxContentHeight);
+        panel.style.setProperty('--sidebar-content-height', nextHeight + 'px');
+        if (handle) {
+            handle.setAttribute('aria-valuenow', String(Math.round(nextHeight)));
+            handle.setAttribute('aria-valuemin', String(minContentHeight));
+            handle.setAttribute('aria-valuemax', String(maxContentHeight));
+        }
+    }
+    function activePanelFromHandle(handle) {
+        var panel = handle.closest('.sidebar-panel');
+        return panel && panel.classList.contains('active') ? panel : null;
+    }
+    if (widthHandle) {
+        var widthHandleEl = widthHandle;
+        widthHandleEl.addEventListener('pointerdown', function (event) {
+            if (!isResizableViewport())
+                return;
+            event.preventDefault();
+            sidebar.classList.add('resizing');
+            widthHandleEl.setPointerCapture(event.pointerId);
+            setSidebarWidth(event.clientX);
+            function onPointerMove(moveEvent) {
+                setSidebarWidth(moveEvent.clientX);
+            }
+            function onPointerUp(upEvent) {
+                sidebar.classList.remove('resizing');
+                widthHandleEl.releasePointerCapture(upEvent.pointerId);
+                widthHandleEl.removeEventListener('pointermove', onPointerMove);
+                widthHandleEl.removeEventListener('pointerup', onPointerUp);
+                widthHandleEl.removeEventListener('pointercancel', onPointerUp);
+            }
+            widthHandleEl.addEventListener('pointermove', onPointerMove);
+            widthHandleEl.addEventListener('pointerup', onPointerUp);
+            widthHandleEl.addEventListener('pointercancel', onPointerUp);
+        });
+        widthHandleEl.addEventListener('keydown', function (event) {
+            if (!isResizableViewport() || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'))
+                return;
+            event.preventDefault();
+            var delta = event.key === 'ArrowRight' ? widthStep : -widthStep;
+            setSidebarWidth(sidebar.getBoundingClientRect().width + delta);
+        });
+        setSidebarWidth(sidebar.getBoundingClientRect().width || 320);
+    }
+    contentHandles.forEach(function (handle) {
+        handle.addEventListener('pointerdown', function (event) {
+            var panel = activePanelFromHandle(handle);
+            if (!panel || !isResizableViewport())
+                return;
+            event.preventDefault();
+            sidebar.classList.add('resizing');
+            handle.setPointerCapture(event.pointerId);
+            setContentHeight(panel, event.clientY - panel.getBoundingClientRect().top);
+            function onPointerMove(moveEvent) {
+                setContentHeight(panel, moveEvent.clientY - panel.getBoundingClientRect().top);
+            }
+            function onPointerUp(upEvent) {
+                sidebar.classList.remove('resizing');
+                handle.releasePointerCapture(upEvent.pointerId);
+                handle.removeEventListener('pointermove', onPointerMove);
+                handle.removeEventListener('pointerup', onPointerUp);
+                handle.removeEventListener('pointercancel', onPointerUp);
+            }
+            handle.addEventListener('pointermove', onPointerMove);
+            handle.addEventListener('pointerup', onPointerUp);
+            handle.addEventListener('pointercancel', onPointerUp);
+        });
+        handle.addEventListener('keydown', function (event) {
+            var panel = activePanelFromHandle(handle);
+            if (!panel || !isResizableViewport() || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown'))
+                return;
+            event.preventDefault();
+            var content = panel.querySelector('.sidebar-resizable-content');
+            var delta = event.key === 'ArrowDown' ? heightStep : -heightStep;
+            setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeight) + delta);
+        });
+    });
+    window.addEventListener('resize', function () {
+        if (!isResizableViewport())
+            return;
+        setSidebarWidth(sidebar.getBoundingClientRect().width || 320);
+        var activePanel = document.querySelector('.sidebar-panel.active');
+        if (activePanel) {
+            var content = activePanel.querySelector('.sidebar-resizable-content');
+            setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeight);
+        }
+    });
+}
 function setupSidebarInteractions() {
     var sidebarToggle = document.getElementById('sidebar-toggle');
     var sidebarOpen = document.getElementById('sidebar-open');
@@ -364,6 +486,9 @@ function setupSidebarInteractions() {
         sidebarOpen.addEventListener('click', function () {
             sidebarElForOpen.classList.add('open');
         });
+    }
+    if (sidebar) {
+        setupSidebarResizing(sidebar);
     }
     if (appContext.elements.backToTop) {
         appContext.elements.backToTop.addEventListener('click', function () {

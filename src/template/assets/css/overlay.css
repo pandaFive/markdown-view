@@ -65,6 +65,10 @@
     min-width: min(88vw, 320px);
     box-shadow: 2px 0 8px rgba(0,0,0,0.15);
   }
+  .sidebar-width-resizer,
+  .sidebar-content-resizer {
+    display: none;
+  }
   .sidebar.open { transform: translateX(0); }
   .sidebar-toggle { display: block; }
   .sidebar-tabs .sidebar-toggle { display: block; }

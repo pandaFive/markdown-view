@@ -1,11 +1,12 @@
 /* サイドバー */
 .sidebar {
-  width: 320px;
-  min-width: 320px;
+  width: var(--sidebar-width, 320px);
+  min-width: 260px;
+  max-width: min(560px, 52vw);
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
   padding: 1.2rem 1rem;
-  overflow-y: auto;
+  overflow: hidden;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -14,6 +15,40 @@
   flex-direction: column;
   gap: 0.85rem;
   backdrop-filter: blur(14px);
+}
+
+.sidebar.resizing,
+.sidebar.resizing * {
+  user-select: none;
+}
+
+.sidebar-width-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0.8rem;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 6;
+}
+
+.sidebar-width-resizer::after {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  bottom: 1rem;
+  right: 0.25rem;
+  width: 1px;
+  background: transparent;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.sidebar-width-resizer:hover::after,
+.sidebar-width-resizer:focus-visible::after,
+.sidebar.resizing .sidebar-width-resizer::after {
+  background: var(--toc-active);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .sidebar-brand {
@@ -322,9 +357,44 @@
 /* タブパネル */
 .sidebar-panel { display: none; }
 .sidebar-panel.active {
-  display: block;
+  display: flex;
+  flex-direction: column;
   flex: 1;
-  overflow-y: auto;
+  overflow: hidden;
   min-height: 0;
   padding: 0.25rem 0 1rem;
+}
+
+.sidebar-resizable-content {
+  flex: 0 1 var(--sidebar-content-height, 100%);
+  min-height: 8rem;
+  max-height: 100%;
+  overflow-y: auto;
+  padding-right: 0.15rem;
+}
+
+.sidebar-content-resizer {
+  flex: 0 0 0.9rem;
+  position: relative;
+  cursor: row-resize;
+  touch-action: none;
+  margin-top: 0.2rem;
+}
+
+.sidebar-content-resizer::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  top: 0.42rem;
+  height: 1px;
+  background: var(--sidebar-border);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.sidebar-content-resizer:hover::after,
+.sidebar-content-resizer:focus-visible::after,
+.sidebar.resizing .sidebar-content-resizer::after {
+  background: var(--toc-active);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
