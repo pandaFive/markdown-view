@@ -12,7 +12,7 @@ function createDocumentSearchController(ctx, deps) {
         if (!ctx.search.currentDocumentQuery) {
             baseText = '0 件';
         }
-        else if (ctx.search.currentDirectoryLoading) {
+        else if (ctx.search.currentDirectoryLoading && !ctx.search.currentDirectoryResults.length) {
             baseText = '検索中...';
         }
         else if (ctx.search.currentDirectoryError) {
@@ -27,12 +27,29 @@ function createDocumentSearchController(ctx, deps) {
         else {
             baseText = '0 / ' + ctx.search.currentDirectoryResults.length + ' 件';
         }
+        if (ctx.search.currentDirectoryLoading && ctx.search.currentDirectoryResults.length) {
+            baseText += '（更新中…）';
+        }
         if (ctx.search.currentDirectorySkippedFiles > 0) {
             return baseText + '（' + ctx.search.currentDirectorySkippedFiles + '件スキップ）';
         }
         return baseText;
     }
+    function setDocumentSearchNavigationDisabled(disabled) {
+        [ctx.elements.documentSearchPrevEl, ctx.elements.documentSearchNextEl].forEach(function (button) {
+            if (!button)
+                return;
+            button.disabled = disabled;
+            if (disabled) {
+                button.setAttribute('aria-disabled', 'true');
+            }
+            else {
+                button.removeAttribute('aria-disabled');
+            }
+        });
+    }
     function updateDocumentSearchSummary() {
+        setDocumentSearchNavigationDisabled(Boolean(ctx.config.isDirMode && ctx.search.currentDirectoryLoading));
         if (!ctx.elements.documentSearchSummaryEl)
             return;
         if (ctx.config.isDirMode) {
@@ -353,6 +370,8 @@ function createDocumentSearchController(ctx, deps) {
     }
     function moveDocumentSearch(step) {
         if (ctx.config.isDirMode) {
+            if (ctx.search.currentDirectoryLoading)
+                return;
             if (!ctx.search.currentDirectoryResults.length)
                 return;
             if (ctx.search.currentDirectoryIndex < 0) {
@@ -453,6 +472,8 @@ function createDocumentSearchController(ctx, deps) {
             applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
             deps.applyPendingDirectorySearchNavigation();
             if (ctx.search.currentDocumentQuery && options.requeryDirectorySearch !== false) {
+                ctx.search.currentDirectoryLoading = true;
+                ctx.search.currentDirectoryError = '';
                 deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
             }
             deps.renderDirectorySearchUi();

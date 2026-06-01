@@ -201,6 +201,14 @@ function createContentController(
     restoreNavigationFromLocation: navigation.restoreContentNavigationFromLocation,
     openDocumentSearch: documentSearch.openDocumentSearch,
     moveDocumentSearch: documentSearch.moveDocumentSearch,
+    openDirectorySearchResult: directorySearch.openDirectorySearchResult,
+    getDirectorySearchStateForTest: function(): MarkdownViewDirectorySearchStateSnapshot {
+      return {
+        currentDirectoryIndex: ctx.search.currentDirectoryIndex,
+        currentFile: ctx.state.currentFile,
+        hasPendingDirectoryNavigation: Boolean(ctx.search.pendingDirectoryNavigation)
+      };
+    },
     applyDocumentSearchQuery: documentSearch.applyDocumentSearchQuery,
     clearDocumentSearchQuery: documentSearch.clearDocumentSearchQuery,
     renderDirectorySearchUi: directorySearch.renderDirectorySearchUi,

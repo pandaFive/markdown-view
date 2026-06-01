@@ -708,6 +708,17 @@ test('ディレクトリ検索APIのクライアントIDは複製タブ相当で
 });
 
 test('ディレクトリ検索の不正な成功応答は検索エラーとして表示する', async ({ page }) => {
+  const warningPayloads: unknown[] = [];
+  const warningArgsText: string[] = [];
+  page.on('console', async (message) => {
+    if (!message.text().includes('ディレクトリ検索応答の契約違反')) return;
+    const args = message.args();
+    warningArgsText.push(JSON.stringify(await Promise.all(args.map((arg) => arg.jsonValue()))));
+    if (args[1]) {
+      warningPayloads.push(await args[1].jsonValue());
+    }
+  });
+
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({
       status: 200,
@@ -727,21 +738,59 @@ test('ディレクトリ検索の不正な成功応答は検索エラーとし�
     toc: '<ul><li><a href="#readme">README</a></li></ul>'
   });
 
-  await setDocumentSearchQuery(page, 'alpha');
+  await setDocumentSearchQuery(page, 'alpha secret');
 
   await expect(page.locator('#document-search-summary')).toHaveText('エラー');
   await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
+  await expect.poll(() => warningPayloads.length).toBe(1);
+  expect(warningPayloads[0]).toMatchObject({
+    expectedQueryLength: 'alpha secret'.length,
+    actualQueryLength: null,
+    hasActualQuery: false,
+    queryMatches: false,
+    hasResults: true,
+    resultsCount: 0,
+    firstInvalidResultIndex: null,
+    hasLimits: false,
+    invalidFields: expect.arrayContaining(['query', 'searched_files', 'skipped_files', 'searched_bytes', 'truncated', 'truncated_reasons', 'limits'])
+  });
+  expect(JSON.stringify(warningArgsText)).not.toContain('alpha secret');
 });
 
-test('ディレクトリ検索の400エラーはAPI本文の固定文言を表示する', async ({ page }) => {
+test('ディレクトリ検索の400エラーは検索語をUIにもconsoleにも出さない', async ({ page }) => {
   const query = 'あ'.repeat(257);
+  const secretQuery = query + ' secret';
+
+  await page.evaluate(() => {
+    const win = window as unknown as { directorySearchConsoleErrorsForTest: string[] };
+    const originalError = console.error.bind(console);
+    win.directorySearchConsoleErrorsForTest = [];
+    console.error = function(...args: unknown[]) {
+      win.directorySearchConsoleErrorsForTest.push(args.map((arg) => {
+        if (arg instanceof Error) {
+          return JSON.stringify({
+            message: arg.message,
+            type: (arg as { type?: unknown }).type,
+            status: (arg as { status?: unknown }).status,
+            userMessage: (arg as { userMessage?: unknown }).userMessage
+          });
+        }
+        try {
+          return JSON.stringify(arg);
+        } catch (_err) {
+          return String(arg);
+        }
+      }).join(' '));
+      originalError(...args);
+    };
+  });
 
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({
       status: 400,
       contentType: 'application/json',
       body: JSON.stringify({
-        error: '検索クエリが長すぎます'
+        error: '検索クエリが長すぎます: ' + secretQuery
       })
     });
   });
@@ -755,14 +804,40 @@ test('ディレクトリ検索の400エラーはAPI本文の固定文言を表�
     toc: '<ul><li><a href="#readme">README</a></li></ul>'
   });
 
-  await setDocumentSearchQuery(page, query);
+  await setDocumentSearchQuery(page, secretQuery);
 
   await expect(page.locator('#document-search-summary')).toHaveText('エラー');
-  await expect(page.locator('#document-search-results')).toContainText('検索クエリが長すぎます');
-  await expect(page.locator('#document-search-results')).not.toContainText(query);
+  await expect(page.locator('#document-search-results')).toContainText('検索クエリが不正か長すぎます。');
+  await expect(page.locator('#document-search-results')).not.toContainText(secretQuery);
+  await expect.poll(() => page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest.length;
+  })).toBe(1);
+  const consoleErrors = await page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest;
+  });
+  expect(JSON.stringify(consoleErrors)).not.toContain(secretQuery);
+  expect(consoleErrors[0]).toContain('"sequence":1');
+  expect(consoleErrors[0]).toContain('"generation":1');
+  expect(consoleErrors[0]).toContain('"queryLength":' + secretQuery.length);
 });
 
 test('ディレクトリ検索の不正な結果要素は検索エラーとして表示する', async ({ page }) => {
+  await page.evaluate(() => {
+    const win = window as unknown as { directorySearchConsoleWarningsForTest: string[] };
+    const originalWarn = console.warn.bind(console);
+    win.directorySearchConsoleWarningsForTest = [];
+    console.warn = function(...args: unknown[]) {
+      win.directorySearchConsoleWarningsForTest.push(args.map((arg) => {
+        try {
+          return JSON.stringify(arg);
+        } catch (_err) {
+          return String(arg);
+        }
+      }).join(' '));
+      originalWarn(...args);
+    };
+  });
+
   await page.route('**/api/search**', async (route) => {
     await route.fulfill({
       status: 200,
@@ -787,6 +862,16 @@ test('ディレクトリ検索の不正な結果要素は検索エラーとし�
 
   await expect(page.locator('#document-search-summary')).toHaveText('エラー');
   await expect(page.locator('#document-search-results')).toContainText('サーバー応答の解析に失敗しました。');
+  await expect.poll(() => page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleWarningsForTest: string[] }).directorySearchConsoleWarningsForTest.length;
+  })).toBe(1);
+  const consoleWarnings = await page.evaluate(() => {
+    return (window as unknown as { directorySearchConsoleWarningsForTest: string[] }).directorySearchConsoleWarningsForTest;
+  });
+  expect(consoleWarnings[0]).toContain('"firstInvalidResultIndex":0');
+  expect(consoleWarnings[0]).toContain('"results"');
+  expect(JSON.stringify(consoleWarnings)).not.toContain('alpha');
+  expect(JSON.stringify(consoleWarnings)).not.toContain('"query":"alpha"');
 });
 
 test('ディレクトリモードでは検索打ち切り警告を結果一覧の先頭に表示する', async ({ page }) => {
@@ -1314,6 +1399,263 @@ test('ディレクトリモードではlive update後も検索結果一覧のス
   await expect.poll(() => page.evaluate(() => {
     return document.getElementById('document-search-results')!.scrollTop;
   })).toBe(beforeScrollTop);
+});
+
+test('ディレクトリモードではlive update再検索中も既存検索結果一覧とスクロール位置を維持する', async ({ page }) => {
+  const results = Array.from({ length: 24 }, (_, index) => ({
+    file: 'README.md',
+    file_match_index: index,
+    before: '',
+    current: `Alpha note appears in directory result ${index + 1}.`,
+    after: ''
+  }));
+  let searchCallCount = 0;
+  let releaseSecondSearch: () => void = function() {};
+  const secondSearchPending = new Promise<void>((resolve) => {
+    releaseSecondSearch = resolve;
+  });
+  let secondSearchFulfilled: Promise<void> = Promise.resolve();
+
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    if (searchCallCount === 2) {
+      let markFulfilled: () => void = function() {};
+      secondSearchFulfilled = new Promise<void>((resolve) => {
+        markFulfilled = resolve;
+      });
+      await secondSearchPending;
+      try {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(directorySearchResponse({
+            query: 'alpha note',
+            results,
+            searched_files: 1,
+            skipped_files: 0
+          }))
+        });
+      } finally {
+        markFulfilled();
+      }
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: 'alpha note',
+        results,
+        searched_files: 1,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+
+  const beforeScrollTop = await page.evaluate(() => {
+    const resultsEl = document.getElementById('document-search-results')!;
+    resultsEl.scrollTop = resultsEl.scrollHeight;
+    return resultsEl.scrollTop;
+  });
+  expect(beforeScrollTop).toBeGreaterThan(0);
+
+  await updateContent(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  const debouncedLoadingState = await page.evaluate(() => {
+    return {
+      summary: document.getElementById('document-search-summary')!.textContent,
+      busy: document.getElementById('document-search-results')!.getAttribute('aria-busy'),
+      resultDisabled: document.querySelector<HTMLButtonElement>('#document-search-results .document-search-result')!.disabled,
+      prevDisabled: document.querySelector<HTMLButtonElement>('#document-search-prev')!.disabled,
+      nextDisabled: document.querySelector<HTMLButtonElement>('#document-search-next')!.disabled
+    };
+  });
+  expect(debouncedLoadingState).toEqual({
+    summary: '1 / 24 件（更新中…）',
+    busy: 'true',
+    resultDisabled: true,
+    prevDisabled: true,
+    nextDisabled: true
+  });
+  const stateBeforeDebouncedSearch = await page.evaluate(() => {
+    return window.markdownViewTestHooks.getDirectorySearchStateForTest();
+  });
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.openDirectorySearchResult(1);
+  });
+  await expect.poll(() => page.evaluate(() => {
+    return window.markdownViewTestHooks.getDirectorySearchStateForTest();
+  })).toEqual(stateBeforeDebouncedSearch);
+
+  await expect.poll(() => searchCallCount).toBe(2);
+  try {
+    await expect(page.locator('#document-search-input')).toHaveValue('alpha note');
+    await expect(page.locator('#document-search-summary')).toHaveText('1 / 24 件（更新中…）');
+    await expect(page.locator('#document-search-results')).toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+    await expect(page.locator('#document-search-results .document-search-result').first()).toBeDisabled();
+    await expect(page.locator('#document-search-prev')).toBeDisabled();
+    await expect(page.locator('#document-search-next')).toBeDisabled();
+    await expect(page.locator('#document-search-results')).not.toContainText('ディレクトリを検索しています。');
+    await expect.poll(() => page.evaluate(() => {
+      return document.getElementById('document-search-results')!.scrollTop;
+    })).toBe(beforeScrollTop);
+
+    await page.evaluate(() => {
+      document.querySelectorAll<HTMLButtonElement>('#document-search-results .document-search-result')[1]!.click();
+    });
+    await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
+    await expect(page.locator('#document-search-results .document-search-result').nth(1)).not.toHaveClass(/active/);
+
+    await page.locator('#document-search-input').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#document-search-results .document-search-result').first()).toHaveClass(/active/);
+    await expect(page.locator('#document-search-results .document-search-result').nth(1)).not.toHaveClass(/active/);
+
+    const stateBeforeDirectNavigation = await page.evaluate(() => {
+      return window.markdownViewTestHooks.getDirectorySearchStateForTest();
+    });
+    await page.evaluate(() => {
+      window.markdownViewTestHooks.openDirectorySearchResult(1);
+    });
+    await expect.poll(() => page.evaluate(() => {
+      return window.markdownViewTestHooks.getDirectorySearchStateForTest();
+    })).toEqual(stateBeforeDirectNavigation);
+
+    releaseSecondSearch();
+    await secondSearchFulfilled;
+    await expect(page.locator('#document-search-results')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#document-search-summary')).toHaveText('1 / 24 件');
+    await expect(page.locator('#document-search-results .document-search-result').first()).toBeEnabled();
+    await expect(page.locator('#document-search-prev')).toBeEnabled();
+    await expect(page.locator('#document-search-next')).toBeEnabled();
+  } finally {
+    releaseSecondSearch();
+    await secondSearchFulfilled;
+  }
+});
+
+test('ディレクトリモードではlive update再検索失敗時に更新中状態を解除して検索語を露出しない', async ({ page }) => {
+  const secretQuery = 'alpha note secret';
+  const results = Array.from({ length: 24 }, (_, index) => ({
+    file: 'README.md',
+    file_match_index: index,
+    before: '',
+    current: `Alpha note appears in directory result ${index + 1}.`,
+    after: ''
+  }));
+  let searchCallCount = 0;
+  let releaseSecondSearch: () => void = function() {};
+  const secondSearchPending = new Promise<void>((resolve) => {
+    releaseSecondSearch = resolve;
+  });
+  let secondSearchFulfilled: Promise<void> = Promise.resolve();
+
+  await page.evaluate(() => {
+    const win = window as unknown as { directorySearchConsoleErrorsForTest: string[] };
+    const originalError = console.error.bind(console);
+    win.directorySearchConsoleErrorsForTest = [];
+    console.error = function(...args: unknown[]) {
+      win.directorySearchConsoleErrorsForTest.push(args.map((arg) => {
+        try {
+          return JSON.stringify(arg);
+        } catch (_err) {
+          return String(arg);
+        }
+      }).join(' '));
+      originalError(...args);
+    };
+  });
+
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    if (searchCallCount === 2) {
+      let markFulfilled: () => void = function() {};
+      secondSearchFulfilled = new Promise<void>((resolve) => {
+        markFulfilled = resolve;
+      });
+      await secondSearchPending;
+      try {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'server failed: ' + secretQuery })
+        });
+      } finally {
+        markFulfilled();
+      }
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: secretQuery,
+        results,
+        searched_files: 1,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, secretQuery);
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(24);
+
+  await updateContent(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears in directory result 1.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect(page.locator('#document-search-summary')).toHaveText('0 / 24 件（更新中…）');
+  await expect.poll(() => searchCallCount).toBe(2);
+  try {
+    releaseSecondSearch();
+    await secondSearchFulfilled;
+
+    await expect(page.locator('#document-search-results')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#document-search-summary')).toHaveText('エラー');
+    await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+    await expect(page.locator('#document-search-results')).toContainText('サーバー内部エラーが発生しました。');
+    await expect(page.locator('#document-search-results')).not.toContainText(secretQuery);
+    await expect(page.locator('#document-search-prev')).toBeEnabled();
+    await expect(page.locator('#document-search-next')).toBeEnabled();
+    await expect.poll(() => page.evaluate(() => {
+      return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest.length;
+    })).toBe(1);
+    const consoleErrors = await page.evaluate(() => {
+      return (window as unknown as { directorySearchConsoleErrorsForTest: string[] }).directorySearchConsoleErrorsForTest;
+    });
+    expect(JSON.stringify(consoleErrors)).not.toContain(secretQuery);
+    expect(consoleErrors[0]).toContain('"status":500');
+    expect(consoleErrors[0]).toContain('"errorName":"Error"');
+  } finally {
+    releaseSecondSearch();
+    await secondSearchFulfilled;
+  }
 });
 
 test('ディレクトリモードでは別クエリ入力時に検索結果一覧のスクロール位置を先頭へ戻す', async ({ page }) => {

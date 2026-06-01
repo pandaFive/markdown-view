@@ -450,6 +450,12 @@ function installMarkdownViewTestHooks() {
         moveDocumentSearch: function (direction) {
             return appContext.content.moveDocumentSearch(direction);
         },
+        openDirectorySearchResult: function (index) {
+            return appContext.content.openDirectorySearchResult(index);
+        },
+        getDirectorySearchStateForTest: function () {
+            return appContext.content.getDirectorySearchStateForTest();
+        },
         scheduleBufferedLiveUpdate: function (data) {
             if (!appContext.websocket) {
                 throw new Error('WebSocket controller is not initialized');

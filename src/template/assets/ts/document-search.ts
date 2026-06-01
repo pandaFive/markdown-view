@@ -15,7 +15,7 @@ function createDocumentSearchController(
     var baseText;
     if (!ctx.search.currentDocumentQuery) {
       baseText = '0 件';
-    } else if (ctx.search.currentDirectoryLoading) {
+    } else if (ctx.search.currentDirectoryLoading && !ctx.search.currentDirectoryResults.length) {
       baseText = '検索中...';
     } else if (ctx.search.currentDirectoryError) {
       baseText = 'エラー';
@@ -27,13 +27,30 @@ function createDocumentSearchController(
       baseText = '0 / ' + ctx.search.currentDirectoryResults.length + ' 件';
     }
 
+    if (ctx.search.currentDirectoryLoading && ctx.search.currentDirectoryResults.length) {
+      baseText += '（更新中…）';
+    }
+
     if (ctx.search.currentDirectorySkippedFiles > 0) {
       return baseText + '（' + ctx.search.currentDirectorySkippedFiles + '件スキップ）';
     }
     return baseText;
   }
 
+  function setDocumentSearchNavigationDisabled(disabled: boolean): void {
+    [ctx.elements.documentSearchPrevEl, ctx.elements.documentSearchNextEl].forEach(function(button): void {
+      if (!button) return;
+      button.disabled = disabled;
+      if (disabled) {
+        button.setAttribute('aria-disabled', 'true');
+      } else {
+        button.removeAttribute('aria-disabled');
+      }
+    });
+  }
+
   function updateDocumentSearchSummary(): void {
+    setDocumentSearchNavigationDisabled(Boolean(ctx.config.isDirMode && ctx.search.currentDirectoryLoading));
     if (!ctx.elements.documentSearchSummaryEl) return;
     if (ctx.config.isDirMode) {
       ctx.elements.documentSearchSummaryEl.textContent = formatDirectorySearchSummary();
@@ -425,6 +442,7 @@ function createDocumentSearchController(
 
   function moveDocumentSearch(step: number): void {
     if (ctx.config.isDirMode) {
+      if (ctx.search.currentDirectoryLoading) return;
       if (!ctx.search.currentDirectoryResults.length) return;
       if (ctx.search.currentDirectoryIndex < 0) {
         deps.openDirectorySearchResult(step > 0 ? 0 : ctx.search.currentDirectoryResults.length - 1);
@@ -523,6 +541,8 @@ function createDocumentSearchController(
       applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
       deps.applyPendingDirectorySearchNavigation();
       if (ctx.search.currentDocumentQuery && options.requeryDirectorySearch !== false) {
+        ctx.search.currentDirectoryLoading = true;
+        ctx.search.currentDirectoryError = '';
         deps.scheduleDirectorySearch(ctx.search.currentDocumentQuery);
       }
       deps.renderDirectorySearchUi();

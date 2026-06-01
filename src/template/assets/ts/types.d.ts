@@ -12,10 +12,6 @@ interface MarkdownViewHttpError extends Error {
   userMessage?: string;
 }
 
-interface ApiErrorPayload {
-  error: string;
-}
-
 interface LineRange {
   start: number;
   end: number;
@@ -258,6 +254,8 @@ interface MarkdownViewContentController {
   restoreNavigationFromLocation(): void;
   openDocumentSearch(): void;
   moveDocumentSearch(step: number): void;
+  openDirectorySearchResult(index: number): void;
+  getDirectorySearchStateForTest(): MarkdownViewDirectorySearchStateSnapshot;
   applyDocumentSearchQuery(query: string): void;
   clearDocumentSearchQuery(): void;
   renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void;
@@ -328,6 +326,12 @@ interface MarkdownViewDirectorySearchController {
   renderDirectorySearchResults(options?: DirectorySearchRenderOptions): void;
   renderDirectorySearchUi(options?: DirectorySearchRenderOptions): void;
   scheduleDirectorySearch(query: string): void;
+}
+
+interface MarkdownViewDirectorySearchStateSnapshot {
+  currentDirectoryIndex: number;
+  currentFile: string;
+  hasPendingDirectoryNavigation: boolean;
 }
 
 interface ContentEnhancementsDeps {
@@ -443,6 +447,8 @@ interface MarkdownViewTestHooks {
   markPendingTocNavigation(id: string): void;
   setMarkPendingTocNavigationObserverForTest(callback: ((id: string) => void) | null): void;
   moveDocumentSearch(direction: number): void;
+  openDirectorySearchResult(index: number): void;
+  getDirectorySearchStateForTest(): MarkdownViewDirectorySearchStateSnapshot;
   scheduleBufferedLiveUpdate(data: ContentUpdatePayload): void;
   selectFile(file: string, pushHistory?: boolean, options?: SelectFileOptions): void;
   setCurrentFileForTest(file: string): void;

@@ -33,6 +33,11 @@ declare global {
     type ClickObservation = {
       defaultPrevented: boolean;
     };
+    type DirectorySearchStateSnapshot = {
+      currentDirectoryIndex: number;
+      currentFile: string;
+      hasPendingDirectoryNavigation: boolean;
+    };
     type TestWebSocketInstance = WebSocket & {
       onmessage: ((ev: MessageEvent) => void) | null;
     };
@@ -58,6 +63,8 @@ declare global {
       augmentHashWithTrailingLineHint(link: HTMLAnchorElement, hash: string): string;
       markPendingTocNavigation(id: string): void;
       moveDocumentSearch(direction: number): void;
+      openDirectorySearchResult(index: number): void;
+      getDirectorySearchStateForTest(): MvE2E.DirectorySearchStateSnapshot;
       scheduleBufferedLiveUpdate(data: MvE2E.UpdateMessage): void;
       selectFile(file: string, pushHistory?: boolean, options?: MvE2E.UpdateContentOptions): void;
       setCurrentFileForTest(file: string): void;
