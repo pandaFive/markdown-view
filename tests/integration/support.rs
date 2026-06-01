@@ -103,6 +103,27 @@ pub(super) fn atomic_save_markdown_file(path: &Path, new_content: &str) {
     std::fs::rename(&swp_path, path).unwrap();
     std::fs::remove_file(&backup_path).unwrap();
 }
+pub(super) fn hard_link_or_skip(source: &Path, linked: &Path) -> bool {
+    assert!(
+        source.is_file(),
+        "hardlink元は通常ファイルである必要があります"
+    );
+    assert!(
+        !linked.exists(),
+        "hardlink先は事前に存在しない必要があります"
+    );
+    match std::fs::hard_link(source, linked) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            eprintln!(
+                "hardlink非対応環境のためテストをスキップします: kind={:?}",
+                error.kind()
+            );
+            false
+        }
+        Err(error) => panic!("hardlink作成に失敗しました: kind={:?}", error.kind()),
+    }
+}
 pub(super) async fn setup_single_file_server_with_bytes(
     file_name: &str,
     content: &[u8],
@@ -265,6 +286,7 @@ pub(super) async fn next_ws_message(
         .expect("WebSocketストリームが予期せず終了")
         .expect("WebSocketメッセージの読み取りに失敗")
 }
+
 pub(super) async fn assert_close_frame_message(
     read: &mut WsReadHalf,
     expected_code: u16,

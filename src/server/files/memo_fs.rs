@@ -5,9 +5,8 @@
 //! テストでは `MockMemoFs`（`test_support` モジュール）を注入し、
 //! 特定パスの I/O エラーを決定論的に再現する。
 
-use std::fs::Metadata;
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -20,25 +19,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use axum::http::StatusCode;
+#[cfg(any(unix, windows))]
+use cap_std::fs::OpenOptionsExt as CapOpenOptionsExt;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_GENERIC_WRITE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
+use super::catalog::open_relative_file_nofollow;
 use super::content::{read_bytes_with_limit, ReadMarkdownError};
 
 #[derive(Debug)]
 pub(crate) enum MemoReadError {
     Open(std::io::Error),
     Read(std::io::Error),
+    BeforeAccess(MemoBeforeRenameError),
     TooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoBeforeRenameError {
+    Missing,
     Forbidden(String),
     Internal(String),
 }
@@ -52,14 +55,20 @@ impl MemoBeforeRenameError {
         Self::Internal(user_message.into())
     }
 
+    pub(crate) fn missing() -> Self {
+        Self::Missing
+    }
+
     pub(crate) fn user_message(&self) -> &str {
         match self {
+            Self::Missing => "メモファイルが存在しません",
             Self::Forbidden(message) | Self::Internal(message) => message,
         }
     }
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::Missing => StatusCode::NOT_FOUND,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -78,28 +87,104 @@ impl From<MemoBeforeRenameError> for MemoWriteError {
     }
 }
 
+#[cfg(any(test, windows))]
 /// tmp を最終パスへ置換する直前の非同期検査フック。
-///
-/// 第1引数は最終保存先、第2引数は同一ディレクトリ内に作成済みの tmp パス。
-/// `Err` を返すと tmp は削除され、最終保存先は置換されない。
-/// 実装は async で final/tmp の親ディレクトリ一致と symlink component 不在など、
-/// rename 直前に再確認すべき保存先不変条件を検査する。
-/// async block で引数を使う場合は `to_path_buf()` で値化してから捕捉し、
-/// 借用した `&Path` を future 内へ直接持ち込まない。
 pub(crate) type BeforeRenameFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a>>;
+#[cfg(any(test, windows))]
 pub(crate) type BeforeRenameCheck<'a> =
     dyn Fn(&Path, &Path) -> BeforeRenameFuture<'a> + Send + Sync + 'a;
+pub(crate) type BeforeAccessFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CheckedMemoPath, MemoBeforeRenameError>> + Send + 'a>>;
+pub(crate) type BeforeAccessCheck<'a> = dyn Fn(&Path) -> BeforeAccessFuture<'a> + Send + Sync + 'a;
+pub(crate) type BeforeRemoveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CheckedMemoPath, MemoBeforeRenameError>> + Send + 'a>>;
+pub(crate) type BeforeRemoveCheck<'a> = dyn Fn(&Path) -> BeforeRemoveFuture<'a> + Send + Sync + 'a;
 
+#[derive(Debug)]
+pub(crate) struct CheckedMemoPath {
+    parent_dir: cap_std::fs::Dir,
+    file_name: PathBuf,
+}
+
+impl CheckedMemoPath {
+    pub(crate) fn new(parent_dir: cap_std::fs::Dir, file_name: PathBuf) -> Self {
+        Self {
+            parent_dir,
+            file_name,
+        }
+    }
+
+    pub(crate) fn parent_dir(&self) -> &cap_std::fs::Dir {
+        &self.parent_dir
+    }
+
+    pub(crate) fn file_name(&self) -> &Path {
+        &self.file_name
+    }
+}
+
+#[cfg(any(test, windows))]
 pub(crate) fn before_rename_future<'a>(
     future: impl Future<Output = Result<(), MemoBeforeRenameError>> + Send + 'a,
 ) -> BeforeRenameFuture<'a> {
     Box::pin(future)
 }
 
-#[cfg(test)]
+pub(crate) fn before_access_future<'a>(
+    future: impl Future<Output = Result<CheckedMemoPath, MemoBeforeRenameError>> + Send + 'a,
+) -> BeforeAccessFuture<'a> {
+    Box::pin(future)
+}
+
+pub(crate) fn before_remove_future<'a>(
+    future: impl Future<Output = Result<CheckedMemoPath, MemoBeforeRenameError>> + Send + 'a,
+) -> BeforeRemoveFuture<'a> {
+    Box::pin(future)
+}
+
+#[cfg(any(test, windows))]
 pub(crate) fn always_ok_before_rename(_: &Path, _: &Path) -> BeforeRenameFuture<'static> {
     before_rename_future(async { Ok(()) })
+}
+
+#[cfg(test)]
+pub(crate) fn always_ok_before_access(path: &Path) -> BeforeAccessFuture<'static> {
+    let path = path.to_path_buf();
+    before_access_future(async move { checked_path_from_absolute_for_test(&path) })
+}
+
+#[cfg(test)]
+pub(crate) fn always_ok_before_remove(path: &Path) -> BeforeRemoveFuture<'static> {
+    let path = path.to_path_buf();
+    before_remove_future(async move { checked_path_from_absolute_for_test(&path) })
+}
+
+#[cfg(test)]
+fn checked_path_from_absolute_for_test(
+    path: &Path,
+) -> Result<CheckedMemoPath, MemoBeforeRenameError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| MemoBeforeRenameError::internal("テスト用メモpathにparentがありません"))?;
+    let file_name = path.file_name().ok_or_else(|| {
+        MemoBeforeRenameError::internal("テスト用メモpathにfile nameがありません")
+    })?;
+    let root_dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| MemoBeforeRenameError::internal(error.to_string()))?;
+    Ok(CheckedMemoPath::new(root_dir, PathBuf::from(file_name)))
+}
+
+#[derive(Debug)]
+pub(crate) enum MemoRemoveError {
+    Io(io::Error),
+    BeforeRemove(MemoBeforeRenameError),
+}
+
+impl From<MemoBeforeRenameError> for MemoRemoveError {
+    fn from(error: MemoBeforeRenameError) -> Self {
+        Self::BeforeRemove(error)
+    }
 }
 
 static ATOMIC_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -123,54 +208,46 @@ pub(crate) trait MemoFs: Send + Sync + std::fmt::Debug {
     /// パス存在確認。シンボリックリンク要素は呼び出し側で別途検査済み想定。
     async fn try_exists(&self, path: &Path) -> std::io::Result<bool>;
 
-    /// メタデータ取得（サイズ制限の一段目チェック用）
-    async fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
-
     /// バイト列読み込み。
     ///
-    /// 呼び出し側の metadata 事前チェック後にファイルが増える TOCTOU へ備え、
-    /// 実読み取り量が `MAX_FILE_SIZE` を超えた場合は `MemoReadError::TooLarge`
-    /// を返す。成功時に返す `Vec<u8>` は上限以下である。
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError>;
-
-    /// 親ディレクトリを再帰的に作成（既存ならエラーを返さない）
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
+    /// 検証済み親ディレクトリhandle配下で開き、実読み取り量が `MAX_FILE_SIZE`
+    /// を超えた場合は `MemoReadError::TooLarge` を返す。成功時に返す `Vec<u8>`
+    /// は上限以下である。
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError>;
 
     /// バイト列を同一ディレクトリ内 tmp へ書き込み、rename で最終パスへ差し替える。
     ///
-    /// tmp は `create_new` で作成し、書き込み・flush・sync 後、rename 直前に
-    /// `before_rename(final_path, tmp_path)` を呼ぶ。tmp 作成から rename までの失敗、
-    /// および rename 自体の失敗では tmp を best effort で削除し、最終保存先の
-    /// 既存内容を保持する。
+    /// tmp 作成前に `before_write(path)` を呼び、検証済み親ディレクトリhandle配下で
+    /// tmp作成・書き込み・rename・cleanupを完結する。tmp 作成から rename までの失敗、
+    /// および rename 自体の失敗では tmp を best effort で削除し、最終保存先の既存内容を保持する。
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError>;
 
-    /// ファイル削除。`NotFound` を含むエラーは透過する（呼び出し側で吸収）。
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()>;
+    /// ファイル削除。削除直前に `before_remove(path)` を呼び出す。
+    ///
+    /// `NotFound` を含む I/O エラーは透過する（呼び出し側で吸収）。
+    /// `before_remove` は symlink component や単一ファイル親ディレクトリの
+    /// 同一性など、削除直前に再確認すべき不変条件を検査する。
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError>;
 }
 
 /// 本番用 [`MemoFs`] 実装。`tokio::fs::*` を直接呼び出す。
 #[derive(Debug, Default)]
 pub(crate) struct TokioMemoFs;
 
-fn atomic_tmp_path(path: &Path, counter: u64, attempt: u8) -> io::Result<PathBuf> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "memo path must have a parent directory",
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "memo path must have a file name",
-        )
-    })?;
-
+fn atomic_tmp_file_name(file_name: &std::ffi::OsStr, counter: u64, attempt: u8) -> PathBuf {
     let suffix = format!(".tmp.{}.{}.{}", std::process::id(), counter, attempt);
     let base = file_name.to_string_lossy();
     let mut tmp_name = format!("{base}{suffix}");
@@ -184,36 +261,47 @@ fn atomic_tmp_path(path: &Path, counter: u64, attempt: u8) -> io::Result<PathBuf
         tmp_name = format!(".memo.{}.tmp", &hash[..32]);
     }
 
-    Ok(parent.join(tmp_name))
+    PathBuf::from(tmp_name)
+}
+
+#[cfg(test)]
+fn atomic_tmp_path(path: &Path, counter: u64, attempt: u8) -> io::Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "memo path must have a parent directory",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "memo path must have a file name",
+        )
+    })?;
+    Ok(parent.join(atomic_tmp_file_name(file_name, counter, attempt)))
 }
 
 async fn write_atomic_with_counter(
     path: &Path,
     content: &[u8],
-    before_rename: &BeforeRenameCheck<'_>,
+    before_write: &BeforeAccessCheck<'_>,
     counter: u64,
 ) -> Result<(), MemoWriteError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "memo path must have a parent directory",
-            )
-        })
-        .map_err(MemoWriteError::Io)?;
-
+    let checked = before_write(path)
+        .await
+        .map_err(MemoWriteError::BeforeRename)?;
+    let file_name = checked.file_name().to_path_buf();
     let mut last_already_exists = None;
     for attempt in 0..ATOMIC_TMP_ATTEMPTS {
-        let tmp_path = atomic_tmp_path(path, counter, attempt).map_err(MemoWriteError::Io)?;
-        let mut options = tokio::fs::OpenOptions::new();
+        let tmp_path = atomic_tmp_file_name(file_name.as_os_str(), counter, attempt);
+        let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         // tmp 名は推測可能なため、緩い umask の共有環境でも rename 前に他者読み取りさせない。
         options.mode(0o600);
         #[cfg(windows)]
-        configure_windows_atomic_tmp_options(&mut options);
-        let mut tmp_file = match options.open(&tmp_path).await {
+        configure_windows_cap_atomic_tmp_options(&mut options);
+        let mut tmp_file = match checked.parent_dir().open_with(&tmp_path, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 last_already_exists = Some(error);
@@ -222,41 +310,30 @@ async fn write_atomic_with_counter(
             Err(error) => return Err(MemoWriteError::Io(error)),
         };
 
-        if let Err(error) = tmp_file.write_all(content).await {
+        if let Err(error) = tmp_file.write_all(content) {
             drop(tmp_file);
-            cleanup_tmp_best_effort(&tmp_path).await;
+            cleanup_tmp_best_effort(checked.parent_dir(), &tmp_path);
             return Err(MemoWriteError::Io(error));
         }
-        if let Err(error) = tmp_file.flush().await {
+        if let Err(error) = tmp_file.flush() {
             drop(tmp_file);
-            cleanup_tmp_best_effort(&tmp_path).await;
+            cleanup_tmp_best_effort(checked.parent_dir(), &tmp_path);
             return Err(MemoWriteError::Io(error));
         }
-        if let Err(error) = tmp_file.sync_data().await {
+        if let Err(error) = tmp_file.sync_data() {
             drop(tmp_file);
-            cleanup_tmp_best_effort(&tmp_path).await;
+            cleanup_tmp_best_effort(checked.parent_dir(), &tmp_path);
             return Err(MemoWriteError::Io(error));
         }
 
-        #[cfg(windows)]
-        let replace_result =
-            checked_atomic_replace(&tmp_file, &tmp_path, path, before_rename).await;
-        #[cfg(not(windows))]
-        let replace_result = checked_atomic_replace(&tmp_path, path, before_rename).await;
-
-        if let Err(error) = replace_result {
-            drop(tmp_file);
-            cleanup_tmp_best_effort(&tmp_path).await;
-            return Err(error);
+        if let Err(error) =
+            replace_checked_tmp(checked.parent_dir(), tmp_file, &tmp_path, &file_name).await
+        {
+            cleanup_tmp_best_effort(checked.parent_dir(), &tmp_path);
+            return Err(MemoWriteError::Io(error));
         }
 
-        drop(tmp_file);
-        #[cfg(windows)]
-        sync_parent_dir_required(parent)
-            .await
-            .map_err(MemoWriteError::Io)?;
-        #[cfg(not(windows))]
-        sync_parent_dir_best_effort(parent).await;
+        sync_parent_dir_best_effort(checked.parent_dir());
         return Ok(());
     }
 
@@ -276,6 +353,24 @@ async fn write_atomic_with_counter(
     Err(MemoWriteError::Io(error))
 }
 
+async fn replace_checked_tmp(
+    parent_dir: &cap_std::fs::Dir,
+    tmp_file: cap_std::fs::File,
+    tmp_path: &Path,
+    file_name: &Path,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        drop(tmp_file);
+        parent_dir.rename(tmp_path, parent_dir, file_name)
+    }
+
+    #[cfg(windows)]
+    {
+        move_open_cap_tmp_replace(parent_dir, tmp_file, tmp_path, file_name).await
+    }
+}
+
 #[cfg(windows)]
 fn configure_windows_atomic_tmp_options(options: &mut tokio::fs::OpenOptions) {
     // handle-based renameに必要なDELETE accessを持たせ、retry中は外部書き込みをshare modeで拒否する。
@@ -283,19 +378,20 @@ fn configure_windows_atomic_tmp_options(options: &mut tokio::fs::OpenOptions) {
     options.share_mode(FILE_SHARE_DELETE);
 }
 
-async fn sync_parent_dir_best_effort(parent: &Path) {
-    let file = match tokio::fs::OpenOptions::new().read(true).open(parent).await {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::error!(
-                "[markdown-view] メモ保存後の親ディレクトリopenに失敗しました: {}",
-                error
-            );
-            return;
-        }
-    };
+#[cfg(windows)]
+fn configure_windows_cap_atomic_tmp_options(options: &mut cap_std::fs::OpenOptions) {
+    // handle-based renameに必要なDELETE accessを持たせ、retry中は外部書き込みをshare modeで拒否する。
+    options.access_mode(FILE_GENERIC_WRITE | DELETE);
+    options.share_mode(FILE_SHARE_DELETE);
+}
 
-    if let Err(error) = file.sync_all().await {
+fn sync_parent_dir_best_effort(parent: &cap_std::fs::Dir) {
+    let Ok(file) = parent.try_clone() else {
+        tracing::error!("[markdown-view] メモ保存後の親ディレクトリcloneに失敗しました");
+        return;
+    };
+    let file = file.into_std_file();
+    if let Err(error) = file.sync_all() {
         // rename成功後は応答を巻き戻せないためbest-effortだが、クラッシュ耐性の劣化としてerrorで残す。
         tracing::error!(
             "[markdown-view] メモ保存後の親ディレクトリsyncに失敗しました: {}",
@@ -314,14 +410,19 @@ async fn sync_parent_dir_required(parent: &Path) -> io::Result<()> {
     file.sync_all().await
 }
 
+#[cfg(windows)]
+fn sync_parent_dir_handle_required(parent: &cap_std::fs::Dir) -> io::Result<()> {
+    parent.try_clone()?.into_std_file().sync_all()
+}
+
 fn file_name_for_logging(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().escape_debug().to_string())
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-async fn cleanup_tmp_best_effort(tmp_path: &Path) {
-    match tokio::fs::remove_file(tmp_path).await {
+fn cleanup_tmp_best_effort(parent_dir: &cap_std::fs::Dir, tmp_path: &Path) {
+    match parent_dir.remove_file(tmp_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -381,39 +482,60 @@ async fn checked_atomic_replace(
     atomic_replace_checked(tmp_file, tmp_path, path, before_rename).await
 }
 
-#[cfg(not(windows))]
-async fn checked_atomic_replace(
-    tmp_path: &Path,
-    path: &Path,
-    before_rename: &BeforeRenameCheck<'_>,
-) -> Result<(), MemoWriteError> {
-    before_rename(path, tmp_path)
-        .await
-        .map_err(MemoWriteError::BeforeRename)?;
-    atomic_replace(tmp_path, path)
-        .await
-        .map_err(MemoWriteError::Io)
-}
-
-#[cfg(not(windows))]
-async fn atomic_replace(tmp_path: &Path, path: &Path) -> io::Result<()> {
-    tokio::fs::rename(tmp_path, path).await
-}
-
 #[cfg(windows)]
 async fn move_open_tmp_replace_once(tmp_file: &tokio::fs::File, path: &Path) -> io::Result<()> {
     let tmp_file = tmp_file.try_clone().await?.into_std().await;
     let path_wide = path_to_wide(path)?;
-    move_open_std_file_replace_once(tmp_file, path_wide).await
+    move_open_std_file_replace_once(tmp_file, std::ptr::null_mut(), path_wide).await
+}
+
+#[cfg(windows)]
+async fn move_open_cap_tmp_replace(
+    parent_dir: &cap_std::fs::Dir,
+    tmp_file: cap_std::fs::File,
+    tmp_path: &Path,
+    file_name: &Path,
+) -> io::Result<()> {
+    let file_name_wide = path_component_to_wide(file_name)?;
+    let no_check =
+        |_: &Path, _: &Path| before_rename_future(async { Ok::<(), MemoBeforeRenameError>(()) });
+
+    replace_with_retry_and_revalidation(
+        tmp_path,
+        file_name,
+        &no_check,
+        || move_open_cap_tmp_replace_once(parent_dir, &tmp_file, &file_name_wide),
+        |delay_ms| tokio::time::sleep(std::time::Duration::from_millis(delay_ms)),
+    )
+    .await?;
+    sync_parent_dir_handle_required(parent_dir)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn move_open_cap_tmp_replace_once(
+    parent_dir: &cap_std::fs::Dir,
+    tmp_file: &cap_std::fs::File,
+    file_name_wide: &[u16],
+) -> io::Result<()> {
+    let tmp_file = tmp_file.try_clone()?.into_std();
+    let root_dir = parent_dir.try_clone()?.into_std_file();
+    move_open_std_file_replace_once(
+        tmp_file,
+        root_dir.as_raw_handle().cast(),
+        file_name_wide.to_vec(),
+    )
+    .await
 }
 
 #[cfg(windows)]
 async fn move_open_std_file_replace_once(
     tmp_file: std::fs::File,
+    root_directory: windows_sys::Win32::Foundation::HANDLE,
     path_wide: Vec<u16>,
 ) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
-        let rename_info = build_file_rename_info(&path_wide)?;
+        let rename_info = build_file_rename_info(root_directory, &path_wide)?;
         // SAFETY: handleは生存中のtmp file objectを指し、rename_infoはFILE_RENAME_INFO layoutの
         // 可変長bufferとしてこの呼び出し中は生存する。
         let result = unsafe {
@@ -440,7 +562,10 @@ async fn move_open_std_file_replace_once(
 }
 
 #[cfg(windows)]
-fn build_file_rename_info(path_wide: &[u16]) -> io::Result<Vec<u8>> {
+fn build_file_rename_info(
+    root_directory: windows_sys::Win32::Foundation::HANDLE,
+    path_wide: &[u16],
+) -> io::Result<Vec<u8>> {
     let file_name_length = path_wide
         .len()
         .checked_mul(std::mem::size_of::<u16>())
@@ -457,7 +582,7 @@ fn build_file_rename_info(path_wide: &[u16]) -> io::Result<Vec<u8>> {
     unsafe {
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         (*info).Anonymous.ReplaceIfExists = true;
-        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).RootDirectory = root_directory;
         (*info).FileNameLength = file_name_length;
         std::ptr::copy_nonoverlapping(
             path_wide.as_ptr().cast::<u8>(),
@@ -575,6 +700,18 @@ fn path_to_wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 #[cfg(windows)]
+fn path_component_to_wide(path: &Path) -> io::Result<Vec<u16>> {
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => path_to_wide(path),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path must be a single file name",
+        )),
+    }
+}
+
+#[cfg(windows)]
 fn path_to_wide_null(path: &Path) -> io::Result<Vec<u16>> {
     let mut wide = path_to_wide(path)?;
     wide.push(0);
@@ -587,14 +724,18 @@ impl MemoFs for TokioMemoFs {
         tokio::fs::try_exists(path).await
     }
 
-    async fn metadata(&self, path: &Path) -> std::io::Result<Metadata> {
-        tokio::fs::metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
-        let file = tokio::fs::File::open(path)
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        let checked = before_read(path)
             .await
-            .map_err(MemoReadError::Open)?;
+            .map_err(MemoReadError::BeforeAccess)?;
+        let file = open_relative_file_nofollow(checked.parent_dir(), checked.file_name())
+            .map_err(MemoReadError::Open)?
+            .into_std();
+        let file = tokio::fs::File::from_std(file);
         read_bytes_with_limit(file)
             .await
             .map_err(|error| match error {
@@ -606,22 +747,26 @@ impl MemoFs for TokioMemoFs {
             })
     }
 
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        tokio::fs::create_dir_all(path).await
-    }
-
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError> {
         let counter = ATOMIC_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        write_atomic_with_counter(path, content, before_rename, counter).await
+        write_atomic_with_counter(path, content, before_write, counter).await
     }
 
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        tokio::fs::remove_file(path).await
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        let checked = before_remove(path).await?;
+        checked
+            .parent_dir()
+            .remove_file(checked.file_name())
+            .map_err(MemoRemoveError::Io)
     }
 }
 
@@ -979,7 +1124,9 @@ mod tests {
             .await
             .unwrap();
 
-        let result = TokioMemoFs.read_with_limit(&path).await;
+        let result = TokioMemoFs
+            .read_with_limit(&path, &always_ok_before_access)
+            .await;
 
         assert!(matches!(result, Err(MemoReadError::TooLarge)));
     }
@@ -1000,46 +1147,27 @@ mod tests {
         tokio::fs::write(&path, b"old")
             .await
             .expect("initial memo should be written");
-        let observed_tmp = Arc::new(Mutex::new(None));
-        let observed_tmp_for_check = Arc::clone(&observed_tmp);
         let path_for_check = path.clone();
 
         TokioMemoFs
-            .write_atomic(&path, b"new", &move |final_path, tmp_path| {
-                let observed_tmp_for_check = Arc::clone(&observed_tmp_for_check);
+            .write_atomic(&path, b"new", &move |final_path| {
                 let final_path = final_path.to_path_buf();
-                let tmp_path = tmp_path.to_path_buf();
                 let path_for_check = path_for_check.clone();
-                before_rename_future(async move {
+                before_access_future(async move {
                     assert_eq!(final_path.as_path(), path_for_check.as_path());
-                    assert!(tmp_path.exists(), "tmp file should exist before rename");
                     assert_eq!(
                         std::fs::read(&final_path).expect("final path should still be readable"),
                         b"old"
                     );
-                    *observed_tmp_for_check
-                        .lock()
-                        .expect("observed tmp mutex should not be poisoned") =
-                        Some(tmp_path.to_path_buf());
-                    Ok(())
+                    checked_path_from_absolute_for_test(&final_path)
                 })
             })
             .await
             .expect("atomic write should succeed");
 
-        let tmp_path = observed_tmp
-            .lock()
-            .expect("observed tmp mutex should not be poisoned")
-            .clone()
-            .expect("tmp path should be observed");
         assert_eq!(
             tokio::fs::read(&path).await.expect("memo should be read"),
             b"new"
-        );
-        assert_eq!(tmp_path.parent(), path.parent());
-        assert!(
-            !tmp_path.exists(),
-            "tmp path should disappear after successful rename"
         );
     }
 
@@ -1058,7 +1186,7 @@ mod tests {
             let path = path.clone();
             let content = format!("parallel-memo-{index:02}-{}", "x".repeat(index + 1));
             handles.push(tokio::spawn(async move {
-                fs.write_atomic(&path, content.as_bytes(), &always_ok_before_rename)
+                fs.write_atomic(&path, content.as_bytes(), &always_ok_before_access)
                     .await
                     .expect("parallel atomic write should succeed");
                 content.into_bytes()
@@ -1096,30 +1224,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_atomicはbefore_rename失敗時にtmpを削除して元内容を残す() {
+    async fn write_atomicはbefore_write失敗時にtmpを作らず元内容を残す() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let path = workspace.path().join("memo.md");
         tokio::fs::write(&path, b"old")
             .await
             .expect("initial memo should be written");
-        let observed_tmp = Arc::new(Mutex::new(None));
-        let observed_tmp_for_check = Arc::clone(&observed_tmp);
 
         let err = TokioMemoFs
-            .write_atomic(&path, b"new", &move |_, tmp_path| {
-                let observed_tmp_for_check = Arc::clone(&observed_tmp_for_check);
-                let tmp_path = tmp_path.to_path_buf();
-                before_rename_future(async move {
-                    assert!(tmp_path.exists(), "tmp file should exist before check");
-                    *observed_tmp_for_check
-                        .lock()
-                        .expect("observed tmp mutex should not be poisoned") =
-                        Some(tmp_path.to_path_buf());
-                    Err(MemoBeforeRenameError::new("conflict"))
-                })
+            .write_atomic(&path, b"new", &move |_| {
+                before_access_future(async move { Err(MemoBeforeRenameError::new("conflict")) })
             })
             .await
-            .expect_err("before_rename error should be returned");
+            .expect_err("before_write error should be returned");
 
         match err {
             MemoWriteError::BeforeRename(error) => {
@@ -1128,18 +1245,15 @@ mod tests {
             MemoWriteError::Io(error) => panic!("unexpected io error: {error}"),
         }
 
-        let tmp_path = observed_tmp
-            .lock()
-            .expect("observed tmp mutex should not be poisoned")
-            .clone()
-            .expect("tmp path should be observed");
         assert_eq!(
             tokio::fs::read(&path).await.expect("memo should be read"),
             b"old"
         );
-        assert!(
-            !tmp_path.exists(),
-            "tmp path should be cleaned after before_rename failure"
+        let entries = std::fs::read_dir(workspace.path()).expect("workspace entries should list");
+        assert_eq!(
+            entries.count(),
+            1,
+            "tmp file should not be created before validation"
         );
     }
 
@@ -1148,70 +1262,46 @@ mod tests {
     async fn write_atomicはtmpを所有者のみ読み書き可能で作成する() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let path = workspace.path().join("memo.md");
-        let observed_mode = Arc::new(Mutex::new(None));
-        let observed_mode_for_check = Arc::clone(&observed_mode);
-
         TokioMemoFs
-            .write_atomic(&path, b"secret", &move |_, tmp_path| {
-                let observed_mode_for_check = Arc::clone(&observed_mode_for_check);
-                let tmp_path = tmp_path.to_path_buf();
-                before_rename_future(async move {
-                    let mode = std::fs::metadata(&tmp_path)
-                        .expect("tmp metadata should be readable")
-                        .permissions()
-                        .mode()
-                        & 0o777;
-                    *observed_mode_for_check
-                        .lock()
-                        .expect("observed mode mutex should not be poisoned") = Some(mode);
-                    Ok(())
-                })
-            })
+            .write_atomic(&path, b"secret", &always_ok_before_access)
             .await
             .expect("atomic write should succeed");
 
         assert_eq!(
-            observed_mode
-                .lock()
-                .expect("observed mode mutex should not be poisoned")
-                .expect("tmp mode should be observed"),
+            std::fs::metadata(&path)
+                .expect("final memo metadata should be readable")
+                .permissions()
+                .mode()
+                & 0o777,
             0o600
         );
     }
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn write_atomicはwindowsでreplace完了までtmpの外部書き込みを拒否する() {
+    async fn windows_atomic_tmp_optionsは外部書き込みopenを拒否する() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
-        let path = workspace.path().join("memo.md");
-        let observed_error = Arc::new(Mutex::new(None));
-        let observed_error_for_check = Arc::clone(&observed_error);
+        let parent_dir =
+            cap_std::fs::Dir::open_ambient_dir(workspace.path(), cap_std::ambient_authority())
+                .expect("workspace should open as cap dir");
+        let tmp_name = Path::new("memo.md.tmp");
+        let tmp_path = workspace.path().join(tmp_name);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        configure_windows_cap_atomic_tmp_options(&mut options);
+        let _tmp_file = parent_dir
+            .open_with(tmp_name, &options)
+            .expect("protected tmp should be created");
 
-        TokioMemoFs
-            .write_atomic(&path, b"secret", &move |_, tmp_path| {
-                let observed_error_for_check = Arc::clone(&observed_error_for_check);
-                let tmp_path = tmp_path.to_path_buf();
-                before_rename_future(async move {
-                    let error = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&tmp_path)
-                        .await
-                        .expect_err("tmp should reject external write open while protected");
-                    *observed_error_for_check
-                        .lock()
-                        .expect("observed error mutex should not be poisoned") = Some(error.kind());
-                    Ok(())
-                })
-            })
+        let error = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
             .await
-            .expect("atomic write should succeed");
+            .expect_err("tmp should reject external write open while protected");
 
         assert!(
             matches!(
-                observed_error
-                    .lock()
-                    .expect("observed error mutex should not be poisoned")
-                    .expect("write-open error should be observed"),
+                error.kind(),
                 io::ErrorKind::PermissionDenied | io::ErrorKind::Other
             ),
             "Windows should reject concurrent tmp write open while memo save owns the handle"
@@ -1232,34 +1322,34 @@ mod tests {
     #[tokio::test]
     async fn write_atomicはwindowsで成功後のtmp_path差し替えファイルを削除しない() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
+        let parent_dir =
+            cap_std::fs::Dir::open_ambient_dir(workspace.path(), cap_std::ambient_authority())
+                .expect("workspace should open as cap dir");
         let path = workspace.path().join("memo.md");
-        let observed_tmp_path = Arc::new(Mutex::new(None));
-        let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path);
+        let tmp_name = Path::new("memo.md.tmp");
+        let tmp_path = workspace.path().join(tmp_name);
+        let swapped_path = workspace.path().join("memo.md.tmp.swapped");
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        configure_windows_cap_atomic_tmp_options(&mut options);
+        let mut tmp_file = parent_dir
+            .open_with(tmp_name, &options)
+            .expect("protected tmp should be created");
+        tmp_file
+            .write_all(b"trusted")
+            .expect("trusted tmp content should be written");
+        tmp_file.flush().expect("tmp content should be flushed");
+        tmp_file.sync_data().expect("tmp content should be synced");
 
-        TokioMemoFs
-            .write_atomic(&path, b"trusted", &move |_, tmp_path| {
-                let observed_tmp_path_for_check = Arc::clone(&observed_tmp_path_for_check);
-                let tmp_path = tmp_path.to_path_buf();
-                before_rename_future(async move {
-                    let swapped_path = tmp_path.with_extension("tmp.swapped");
-                    std::fs::rename(&tmp_path, &swapped_path)
-                        .expect("delete-shared tmp path should be swappable before rename");
-                    std::fs::write(&tmp_path, b"attacker")
-                        .expect("attacker replacement tmp should be writable");
-                    *observed_tmp_path_for_check
-                        .lock()
-                        .expect("observed tmp path mutex should not be poisoned") = Some(tmp_path);
-                    Ok(())
-                })
-            })
+        std::fs::rename(&tmp_path, &swapped_path)
+            .expect("delete-shared tmp path should be swappable before replace");
+        std::fs::write(&tmp_path, b"attacker")
+            .expect("attacker replacement tmp should be writable");
+
+        move_open_cap_tmp_replace(&parent_dir, tmp_file, tmp_name, Path::new("memo.md"))
             .await
             .expect("atomic write should succeed with the held tmp handle");
 
-        let tmp_path = observed_tmp_path
-            .lock()
-            .expect("observed tmp path mutex should not be poisoned")
-            .clone()
-            .expect("tmp path should be observed");
         assert_eq!(
             tokio::fs::read(&path).await.expect("memo should be read"),
             b"trusted"
@@ -1389,7 +1479,7 @@ mod tests {
         }
 
         // counter 0 の全 attempt を占有し、retry 枯渇時も最終ファイルを壊さないことを固定する。
-        let err = write_atomic_with_counter(&path, b"new", &always_ok_before_rename, counter)
+        let err = write_atomic_with_counter(&path, b"new", &always_ok_before_access, counter)
             .await
             .expect_err("occupied tmp attempts should exhaust");
 

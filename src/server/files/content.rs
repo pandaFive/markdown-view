@@ -6,8 +6,8 @@ use axum::Json;
 use tokio::io::AsyncReadExt;
 
 use super::resolve::{
-    file_display_name, resolve_change_target, resolve_single_file_target, ResolveFileError,
-    ResolvedTarget, RouteTargetRequest,
+    file_display_name, resolve_change_target_blocking, resolve_single_file_target_blocking,
+    ResolveFileError, ResolvedTarget, RouteTargetRequest,
 };
 use crate::renderer::render_document;
 use crate::server::log_path::sanitize_path_for_logging;
@@ -18,6 +18,67 @@ use crate::template::{error_message_json, UpdateMessage};
 /// ファイルサイズ上限: OOM防止
 pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const FILE_SIZE_LIMIT_ERROR_MESSAGE: &str = "ファイルサイズが上限（10MB）を超えています";
+
+#[cfg(test)]
+type ContentBeforeReadHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static CONTENT_BEFORE_READ_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<ContentBeforeReadHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static CONTENT_TEST_OVERRIDE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+type ContentTestOverrideLockGuard = std::sync::MutexGuard<'static, ()>;
+
+#[cfg(test)]
+pub(in crate::server) struct ContentBeforeReadHookGuard {
+    _lock: ContentTestOverrideLockGuard,
+}
+
+#[cfg(test)]
+fn lock_content_test_override() -> ContentTestOverrideLockGuard {
+    CONTENT_TEST_OVERRIDE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+impl Drop for ContentBeforeReadHookGuard {
+    fn drop(&mut self) {
+        let hook = CONTENT_BEFORE_READ_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_content_before_read_hook_for_test(
+    hook: ContentBeforeReadHook,
+) -> ContentBeforeReadHookGuard {
+    let lock = lock_content_test_override();
+    let slot = CONTENT_BEFORE_READ_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    ContentBeforeReadHookGuard { _lock: lock }
+}
+
+#[cfg(test)]
+fn notify_content_before_read_for_test(file_path: &Path) {
+    let hook = CONTENT_BEFORE_READ_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(file_path);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_content_before_read_for_test(_file_path: &Path) {}
 
 #[derive(Debug, Clone)]
 /// WebSocket初期化時のエラー。closeフレームのコードと理由を保持する。
@@ -48,7 +109,7 @@ pub(in crate::server) async fn load_route_update(
     target: &ResolvedTarget,
     request: RouteTargetRequest<'_>,
 ) -> Result<UpdateMessage, ApiError> {
-    read_and_render_file(target.file_path())
+    read_and_render_target(target)
         .await
         .map(|update| target.attach_file_info(update))
         .map_err(|error| {
@@ -89,7 +150,7 @@ async fn validate_and_render(
         Ok(None) => return ValidateRenderOutcome::NoTarget,
         Err(error) => return ValidateRenderOutcome::ResolveFailed(error),
     };
-    match read_and_render_file(target.file_path()).await {
+    match read_and_render_target(&target).await {
         Ok(update) => {
             let stamped = target.attach_file_info(update);
             ValidateRenderOutcome::Rendered(target, stamped)
@@ -106,7 +167,8 @@ pub(in crate::server) async fn load_initial_socket_update(
     state: &AppState,
 ) -> Result<Option<UpdateMessage>, SocketInitError> {
     let resolve_result =
-        resolve_single_file_target(state, "WebSocket初期ターゲットの相対パス算出失敗");
+        resolve_single_file_target_blocking(state, "WebSocket初期ターゲットの相対パス算出失敗")
+            .await;
     match validate_and_render(resolve_result).await {
         ValidateRenderOutcome::NoTarget => Ok(None),
         ValidateRenderOutcome::Rendered(_, update) => Ok(Some(update)),
@@ -127,7 +189,8 @@ pub(in crate::server) async fn load_initial_socket_update(
 /// ディレクトリモード: Refreshを返す（クライアント側で再取得させる）。
 pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -> BroadcastMessage {
     let resolve_result =
-        resolve_single_file_target(state, "WebSocket再送信ターゲットの相対パス算出失敗");
+        resolve_single_file_target_blocking(state, "WebSocket再送信ターゲットの相対パス算出失敗")
+            .await;
     match validate_and_render(resolve_result).await {
         ValidateRenderOutcome::NoTarget => BroadcastMessage::Refresh,
         ValidateRenderOutcome::Rendered(target, update) => {
@@ -139,7 +202,7 @@ pub(in crate::server) async fn build_lagged_recovery_message(state: &AppState) -
                 "[markdown-view] WebSocket再送信時のファイル検証失敗: {}",
                 error
             );
-            BroadcastMessage::Error(format!("ファイル検証エラー: {}", error))
+            BroadcastMessage::Error(format!("ファイル検証エラー: {}", error.user_message()))
         }
         ValidateRenderOutcome::ReadFailed(target, error) => {
             tracing::warn!(
@@ -169,7 +232,7 @@ pub(in crate::server) async fn build_change_broadcast_message(
     state: &AppState,
     changed_file: &Path,
 ) -> Option<BroadcastMessage> {
-    let resolve_result = resolve_change_target(state, changed_file);
+    let resolve_result = resolve_change_target_blocking(state, changed_file).await;
     match validate_and_render(resolve_result).await {
         ValidateRenderOutcome::NoTarget => None,
         ValidateRenderOutcome::Rendered(_, update) => Some(BroadcastMessage::Update(update)),
@@ -193,7 +256,8 @@ pub(in crate::server) async fn build_change_broadcast_message(
             );
             Some(BroadcastMessage::Error(format!(
                 "ファイル検証エラー ({}): {}",
-                file_label, error
+                file_label,
+                error.user_message()
             )))
         }
         ValidateRenderOutcome::ResolveFailed(ResolveFileError::InvalidPath) => {
@@ -214,7 +278,8 @@ pub(in crate::server) async fn build_change_broadcast_message(
             );
             Some(BroadcastMessage::Error(format!(
                 "ファイル検証エラー ({}): {}",
-                file_label, error
+                file_label,
+                error.user_message()
             )))
         }
         ValidateRenderOutcome::ResolveFailed(
@@ -233,7 +298,8 @@ pub(in crate::server) async fn build_change_broadcast_message(
             );
             Some(BroadcastMessage::Error(format!(
                 "ファイル検証エラー ({}): {}",
-                file_label, error
+                file_label,
+                error.user_message()
             )))
         }
         ValidateRenderOutcome::ReadFailed(target, error) => {
@@ -267,10 +333,32 @@ fn change_error_file_label(state: &AppState, changed_file: &Path) -> String {
 }
 
 /// 本文読込や描画の前に、存在・サイズ・open可否だけを確認する。
-async fn check_readable_before_render(file_path: &Path) -> Result<(), ReadMarkdownError> {
+///
+/// 解決済みhandleがある場合はcurrent pathを再openせず、そのhandleのmetadataだけを
+/// 検証する。handleがないディレクトリモードのフォールバック経路だけpathをopenする。
+pub(super) async fn check_readable_before_render(
+    target: &ResolvedTarget,
+) -> Result<(), ReadMarkdownError> {
+    if let Some(file) = target.read_file().map_err(ReadMarkdownError::Io)? {
+        let file = tokio::fs::File::from_std(file);
+        let metadata = file.metadata().await.map_err(ReadMarkdownError::Io)?;
+        return validate_readable_metadata(metadata);
+    }
+
+    let file_path = target.file_path();
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
+    validate_readable_metadata(metadata)?;
+
+    // 読み込み本体は避けつつ、権限やロックなどでopenできない状態を検出する。
+    let _file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(ReadMarkdownError::Io)?;
+    Ok(())
+}
+
+fn validate_readable_metadata(metadata: std::fs::Metadata) -> Result<(), ReadMarkdownError> {
     if !metadata.is_file() {
         return Err(ReadMarkdownError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -280,11 +368,6 @@ async fn check_readable_before_render(file_path: &Path) -> Result<(), ReadMarkdo
     if metadata.len() > MAX_FILE_SIZE {
         return Err(ReadMarkdownError::TooLarge);
     }
-
-    // 読み込み本体は避けつつ、権限やロックなどでopenできない状態を検出する。
-    let _file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(ReadMarkdownError::Io)?;
     Ok(())
 }
 
@@ -293,7 +376,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
     state: &AppState,
     changed_file: &Path,
 ) -> Option<String> {
-    let resolve_result = resolve_change_target(state, changed_file);
+    let resolve_result = resolve_change_target_blocking(state, changed_file).await;
     let target = match resolve_result {
         Ok(Some(target)) => target,
         Ok(None) => return None,
@@ -307,7 +390,7 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
         }
     };
 
-    match check_readable_before_render(target.file_path()).await {
+    match check_readable_before_render(&target).await {
         Ok(()) => None,
         Err(ReadMarkdownError::NotUtf8) => None,
         Err(error) => Some(format!(
@@ -318,9 +401,20 @@ pub(in crate::server) async fn build_change_error_log_message_without_receivers(
     }
 }
 
-fn map_socket_validation_error(error: ResolveFileError) -> SocketInitError {
+pub(super) fn map_socket_validation_error(error: ResolveFileError) -> SocketInitError {
+    if matches!(error, ResolveFileError::InternalState) {
+        tracing::error!(
+            "[markdown-view] WebSocket初期ファイル検証で内部状態不整合を検出: {}",
+            error
+        );
+        return SocketInitError::new(1011, "内部エラーが発生しました");
+    }
+
     tracing::warn!("[markdown-view] WebSocket初期ファイル検証失敗: {}", error);
-    SocketInitError::new(1008, format!("ファイル検証に失敗しました: {}", error))
+    SocketInitError::new(
+        1008,
+        format!("ファイル検証に失敗しました: {}", error.user_message()),
+    )
 }
 
 #[derive(Debug)]
@@ -390,6 +484,7 @@ impl IntoResponse for ReadMarkdownError {
 pub(super) async fn read_markdown_with_limit(
     file_path: &Path,
 ) -> Result<String, ReadMarkdownError> {
+    notify_content_before_read_for_test(file_path);
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(ReadMarkdownError::Io)?;
@@ -402,6 +497,22 @@ pub(super) async fn read_markdown_with_limit(
         .map_err(ReadMarkdownError::Io)?;
     let buffer = read_bytes_with_limit(file).await?;
 
+    markdown_from_utf8(buffer)
+}
+
+async fn read_markdown_from_open_file(
+    file_path: &Path,
+    file: std::fs::File,
+) -> Result<String, ReadMarkdownError> {
+    notify_content_before_read_for_test(file_path);
+    let file = tokio::fs::File::from_std(file);
+    let metadata = file.metadata().await.map_err(ReadMarkdownError::Io)?;
+    validate_readable_metadata(metadata)?;
+    let buffer = read_bytes_with_limit(file).await?;
+    markdown_from_utf8(buffer)
+}
+
+fn markdown_from_utf8(buffer: Vec<u8>) -> Result<String, ReadMarkdownError> {
     String::from_utf8(buffer).map_err(|error| {
         tracing::warn!(
             "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
@@ -426,9 +537,17 @@ pub(super) async fn read_bytes_with_limit(
     Ok(buffer)
 }
 
-/// ファイルを読み込み、Markdown→HTML変換とTOC生成を行いUpdateMessageとして返す
-async fn read_and_render_file(file_path: &Path) -> Result<UpdateMessage, ReadMarkdownError> {
-    let markdown = read_markdown_with_limit(file_path).await?;
-    let document = render_document(&markdown);
+async fn read_and_render_target(
+    target: &ResolvedTarget,
+) -> Result<UpdateMessage, ReadMarkdownError> {
+    let markdown = match target.read_file().map_err(ReadMarkdownError::Io)? {
+        Some(file) => read_markdown_from_open_file(target.file_path(), file).await?,
+        None => read_markdown_with_limit(target.file_path()).await?,
+    };
+    render_markdown_update(&markdown)
+}
+
+fn render_markdown_update(markdown: &str) -> Result<UpdateMessage, ReadMarkdownError> {
+    let document = render_document(markdown);
     Ok(UpdateMessage::new(document.content, document.toc, None))
 }

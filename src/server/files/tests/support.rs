@@ -26,6 +26,28 @@ pub(super) fn create_markdown_fixture(name: &str, content: &str) -> (tempfile::T
     (dir, file_path)
 }
 
+pub(super) fn hard_link_or_skip(source: &Path, linked: &Path) -> bool {
+    assert!(
+        source.is_file(),
+        "hardlink元は通常ファイルである必要があります"
+    );
+    assert!(
+        !linked.exists(),
+        "hardlink先は事前に存在しない必要があります"
+    );
+    match std::fs::hard_link(source, linked) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            eprintln!(
+                "hardlink非対応環境のためテストをスキップします: kind={:?}",
+                error.kind()
+            );
+            false
+        }
+        Err(error) => panic!("hardlink作成に失敗しました: kind={:?}", error.kind()),
+    }
+}
+
 #[cfg(unix)]
 pub(super) struct PermissionGuard {
     path: PathBuf,

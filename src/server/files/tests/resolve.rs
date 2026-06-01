@@ -1,3 +1,7 @@
+use std::io::Read;
+
+use axum::http::StatusCode;
+
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(unix)]
@@ -5,10 +9,14 @@ use std::os::unix::fs::symlink;
 
 use super::support::{
     create_directory_state, create_markdown_fixture, create_single_file_state, create_test_dir,
-    make_dir_unsearchable,
+    hard_link_or_skip, make_dir_unsearchable,
 };
-use crate::server::files::resolve::{resolve_change_target, revalidate_single_file_target};
+use crate::server::files::resolve::{
+    map_file_resolve_error_for_test, resolve_change_target, resolve_change_target_blocking,
+    revalidate_single_file_target, set_directory_file_after_open_hook_for_test,
+};
 use crate::server::files::*;
+use crate::server::state::CanonicalPath;
 
 #[test]
 fn test_resolve_file_正常なパス() {
@@ -386,6 +394,232 @@ fn test_resolve_change_target_単一ファイル変更は再検証済みpathを�
 }
 
 #[test]
+fn test_resolve_change_target_単一ファイル通常ファイル差し替えは再解決する() {
+    let parent = tempfile::tempdir().unwrap();
+    let target = parent.path().join("target.md");
+    let replacement = parent.path().join("replacement.md");
+    std::fs::write(&target, "# target").unwrap();
+    std::fs::write(&replacement, "# replacement").unwrap();
+    let state = create_single_file_state(&target);
+    std::fs::remove_file(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+
+    let resolved = resolve_change_target(&state, &target)
+        .expect("single file replacement should resolve")
+        .expect("single file watcher change should produce a target");
+    let mut markdown = String::new();
+    resolved
+        .read_file()
+        .expect("resolved file handle should clone")
+        .expect("single file target should keep open handle")
+        .read_to_string(&mut markdown)
+        .expect("resolved file should be readable");
+
+    assert_eq!(resolved.file_path(), target.canonicalize().unwrap());
+    assert_eq!(markdown, "# replacement");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn test_resolve_change_target_単一ファイルhardlink差し替えは通常ファイルとして許可する() {
+    let parent = tempfile::tempdir().unwrap();
+    let target = parent.path().join("target.md");
+    let linked_source = parent.path().join("linked-source.md");
+    std::fs::write(&target, "# target").unwrap();
+    std::fs::write(&linked_source, "# linked").unwrap();
+    let state = create_single_file_state(&target);
+    std::fs::remove_file(&target).unwrap();
+    if !hard_link_or_skip(&linked_source, &target) {
+        return;
+    }
+
+    let resolved = resolve_change_target(&state, &target)
+        .expect("hardlink差し替えも通常ファイルとして解決する")
+        .expect("single file watcher change should produce a target");
+    let mut markdown = String::new();
+    resolved
+        .read_file()
+        .expect("resolved file handle should clone")
+        .expect("single file target should keep open handle")
+        .read_to_string(&mut markdown)
+        .expect("resolved file should be readable");
+
+    assert_eq!(markdown, "# linked");
+}
+
+#[tokio::test]
+async fn test_resolve_change_target_blocking_単一ファイル通常ファイル差し替えは再解決する() {
+    let parent = tempfile::tempdir().unwrap();
+    let target = parent.path().join("target.md");
+    let replacement = parent.path().join("replacement.md");
+    std::fs::write(&target, "# target").unwrap();
+    std::fs::write(&replacement, "# replacement").unwrap();
+    let state = create_single_file_state(&target);
+    std::fs::remove_file(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+
+    let resolved = resolve_change_target_blocking(&state, &target)
+        .await
+        .expect("single file replacement should resolve")
+        .expect("single file watcher change should produce a target");
+    let mut markdown = String::new();
+    resolved
+        .read_file()
+        .expect("resolved file handle should clone")
+        .expect("single file target should keep open handle")
+        .read_to_string(&mut markdown)
+        .expect("resolved file should be readable");
+
+    assert_eq!(resolved.file_path(), target.canonicalize().unwrap());
+    assert_eq!(markdown, "# replacement");
+}
+
+#[tokio::test]
+async fn test_resolve_change_target_blocking_単一ファイル親ディレクトリ差し替えは拒否する() {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let target = parent.join("target.md");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_single_file_state(&target);
+
+    std::fs::rename(&parent, &moved_parent).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# replaced parent").unwrap();
+
+    let result = resolve_change_target_blocking(&state, &target).await;
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_単一ファイル親ディレクトリ差し替えは拒否する() {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let target = parent.join("target.md");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_single_file_state(&target);
+
+    std::fs::rename(&parent, &moved_parent).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# replaced parent").unwrap();
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_単一ファイル親ディレクトリ差し替えでtarget不在でもtraversalを返す() {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let target = parent.join("target.md");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_single_file_state(&target);
+
+    std::fs::rename(&parent, &moved_parent).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_単一ファイル親検証直後の親ディレクトリ差し替えは拒否する() {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let target = parent.join("target.md");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_single_file_state(&target);
+
+    let parent_for_hook = parent.clone();
+    let moved_parent_for_hook = moved_parent.clone();
+    let target_for_hook = target.clone();
+    let expected_target = target.clone();
+    let _guard =
+        set_single_file_after_parent_verification_hook_for_test(std::sync::Arc::new(move |path| {
+            if path != expected_target {
+                return;
+            }
+            std::fs::rename(&parent_for_hook, &moved_parent_for_hook).unwrap();
+            std::fs::create_dir(&parent_for_hook).unwrap();
+            std::fs::write(&target_for_hook, "# replaced parent").unwrap();
+        }));
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[tokio::test]
+async fn test_resolve_change_target_blocking_単一ファイル親検証直後の親ディレクトリ差し替えは拒否する(
+) {
+    let workspace = tempfile::tempdir().unwrap();
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let target = parent.join("target.md");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_single_file_state(&target);
+
+    let parent_for_hook = parent.clone();
+    let moved_parent_for_hook = moved_parent.clone();
+    let target_for_hook = target.clone();
+    let expected_target = target.clone();
+    let _guard =
+        set_single_file_after_parent_verification_hook_for_test(std::sync::Arc::new(move |path| {
+            if path != expected_target {
+                return;
+            }
+            std::fs::rename(&parent_for_hook, &moved_parent_for_hook).unwrap();
+            std::fs::create_dir(&parent_for_hook).unwrap();
+            std::fs::write(&target_for_hook, "# replaced parent").unwrap();
+        }));
+
+    let result = resolve_change_target_blocking(&state, &target).await;
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
+fn test_resolve_change_target_ディレクトリ親open後の親差し替えは拒否する() {
+    let workspace = tempfile::tempdir().unwrap();
+    let base = workspace.path().join("base");
+    let parent = base.join("sub");
+    let moved_parent = workspace.path().join("sub-moved");
+    let target = parent.join("note.md");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::write(&target, "# original").unwrap();
+    let state = create_directory_state(&base);
+
+    let parent_for_hook = parent.clone();
+    let moved_parent_for_hook = moved_parent.clone();
+    let target_for_hook = target.clone();
+    let expected_target = target.clone();
+    let _guard = set_directory_file_after_open_hook_for_test(std::sync::Arc::new(move |path| {
+        if path != expected_target {
+            return;
+        }
+        std::fs::rename(&parent_for_hook, &moved_parent_for_hook).unwrap();
+        std::fs::create_dir(&parent_for_hook).unwrap();
+        std::fs::write(&target_for_hook, "# replaced parent").unwrap();
+    }));
+
+    let result = resolve_change_target(&state, &target);
+
+    assert!(matches!(result, Err(ResolveFileError::Traversal)));
+}
+
+#[test]
 fn test_resolve_file_mdディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("folder.md")).unwrap();
@@ -420,21 +654,63 @@ fn test_resolve_file_error_hidden_displayは除外対象を含む() {
 }
 
 #[test]
+fn test_resolve_file_error_status_codeはinternalstateのみ500を返す() {
+    assert_eq!(
+        ResolveFileError::InternalState.status_code(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    for error in [
+        ResolveFileError::EmptyPath,
+        ResolveFileError::InvalidPath,
+        ResolveFileError::NotFound,
+        ResolveFileError::NotFile,
+        ResolveFileError::Traversal,
+        ResolveFileError::NotMarkdown,
+        ResolveFileError::Hidden,
+        ResolveFileError::Io(std::io::ErrorKind::PermissionDenied),
+    ] {
+        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[test]
+fn test_resolve_file_error_traversal_displayは安全でない参照として説明する() {
+    assert!(ResolveFileError::Traversal
+        .to_string()
+        .contains("安全でないファイル参照"));
+}
+
+#[test]
+fn test_map_file_resolve_error_internalstateはファイル解決失敗を返す() {
+    let (status, message) = map_file_resolve_error_for_test(
+        ResolveFileError::InternalState,
+        RouteTargetRequest::page(None),
+    );
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(message, "ファイル解決に失敗しました");
+}
+
+#[test]
 fn test_revalidate_single_file_target_正常なファイルを許可する() {
     let (dir, file_path) = create_markdown_fixture("test.md", "# test");
-    let canonical = file_path.canonicalize().unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    let expected_path = canonical.as_path().to_path_buf();
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &base_dir);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), canonical);
+    assert_eq!(result.unwrap(), expected_path);
 }
 
 #[test]
 fn test_revalidate_single_file_target_存在しないファイルはnotfoundを返す() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("nonexistent.md");
+    std::fs::write(&file_path, "# temporary").unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    std::fs::remove_file(&file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&file_path, &base_dir);
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFound));
 }
 
@@ -446,12 +722,13 @@ fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
     std::fs::create_dir(&locked_dir).unwrap();
     let target = locked_dir.join("secret.md");
     std::fs::write(&target, "# secret").unwrap();
+    let canonical = CanonicalPath::try_from_path(&target).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
     let Some(_guard) = make_dir_unsearchable(&locked_dir, &target) else {
         return;
     };
 
-    let result = revalidate_single_file_target(&target, &base_dir);
+    let result = revalidate_single_file_target(&canonical, &base_dir);
 
     assert!(matches!(
         result,
@@ -462,8 +739,9 @@ fn test_revalidate_single_file_target_正規化io失敗はio_kindを返す() {
 #[test]
 fn test_revalidate_single_file_target_ディレクトリはnotfileを返す() {
     let dir = tempfile::tempdir().unwrap();
-    let canonical = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&canonical, &canonical);
+    let canonical = CanonicalPath::try_from_path(dir.path()).unwrap();
+    let base_dir = dir.path().canonicalize().unwrap();
+    let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotFile));
 }
 
@@ -472,21 +750,23 @@ fn test_revalidate_single_file_target_非mdファイルはnotmarkdownを返す()
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test.txt");
     std::fs::write(&file_path, "hello").unwrap();
-    let canonical = file_path.canonicalize().unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
     let result = revalidate_single_file_target(&canonical, &base_dir);
     assert_eq!(result, Err(ResolveFileError::NotMarkdown));
 }
 
-#[cfg(unix)]
 #[test]
-fn test_revalidate_single_file_target_シンボリックリンクはtraversalを返す() {
+fn test_revalidate_single_file_target_実体差し替えは許可する() {
     let dir = tempfile::tempdir().unwrap();
-    let real_file = dir.path().join("real.md");
-    std::fs::write(&real_file, "# real").unwrap();
-    let link_path = dir.path().join("link.md");
-    std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
+    let file_path = dir.path().join("real.md");
+    let replacement = dir.path().join("replacement.md");
+    std::fs::write(&file_path, "# real").unwrap();
+    std::fs::write(&replacement, "# replacement").unwrap();
+    let canonical = CanonicalPath::try_from_path(&file_path).unwrap();
+    std::fs::remove_file(&file_path).unwrap();
+    std::fs::rename(&replacement, &file_path).unwrap();
     let base_dir = dir.path().canonicalize().unwrap();
-    let result = revalidate_single_file_target(&link_path, &base_dir);
-    assert_eq!(result, Err(ResolveFileError::Traversal));
+    let result = revalidate_single_file_target(&canonical, &base_dir);
+    assert_eq!(result, Ok(file_path.canonicalize().unwrap()));
 }

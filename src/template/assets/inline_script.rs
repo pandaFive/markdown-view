@@ -971,16 +971,16 @@ mod tests {
     }
 
     #[test]
-    fn test_file_size_display_mbはrust_1_70互換apiだけを使う() {
+    fn test_file_size_display_mbは明示的な切り上げ式を維持する() {
         let source = include_str!("inline_script.rs");
         assert!(
             !source.contains(concat!("div", "_ceil")),
             "{}",
             concat!(
-                "READMEのRust 1.70+要件を守るため、Rust 1.73+のu64::",
+                "file_size_display_mbの境界挙動を固定するため、u64::",
                 "div",
                 "_ceil",
-                "は使わない"
+                "への置き換えは専用テスト更新と合わせて行う"
             )
         );
     }

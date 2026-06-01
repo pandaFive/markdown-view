@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::{fs, os::unix::fs::symlink};
 
@@ -14,7 +14,8 @@ use super::support::{
 #[cfg(unix)]
 use crate::server::files::memo_fs::MemoBeforeRenameError;
 use crate::server::files::memo_fs::{
-    before_rename_future, BeforeRenameCheck, MemoFs, MemoReadError, MemoWriteError, TokioMemoFs,
+    before_access_future, BeforeAccessCheck, BeforeRemoveCheck, MemoFs, MemoReadError,
+    MemoRemoveError, MemoWriteError, TokioMemoFs,
 };
 use crate::server::files::memo_sidecar::SidecarMemoName;
 use crate::server::files::test_support::{
@@ -40,23 +41,6 @@ impl SymlinkBeforeRenameMemoFs {
     }
 }
 
-#[cfg(unix)]
-#[derive(Debug)]
-struct TmpSymlinkBeforeRenameMemoFs {
-    inner: TokioMemoFs,
-    link_target: PathBuf,
-}
-
-#[cfg(unix)]
-impl TmpSymlinkBeforeRenameMemoFs {
-    fn new(link_target: PathBuf) -> Arc<Self> {
-        Arc::new(Self {
-            inner: TokioMemoFs,
-            link_target,
-        })
-    }
-}
-
 #[derive(Debug)]
 struct MismatchedTmpParentMemoFs {
     inner: TokioMemoFs,
@@ -66,6 +50,47 @@ struct MismatchedTmpParentMemoFs {
 struct TooLargeOnReadMemoFs {
     inner: TokioMemoFs,
     too_large_path: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ParentReplacementBeforeRenameMemoFs {
+    original_parent: PathBuf,
+    moved_parent: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ParentReplacementBeforeRemoveMemoFs {
+    original_parent: PathBuf,
+    moved_parent: PathBuf,
+    replaced: Mutex<bool>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ParentReplacementAfterRemoveCheckMemoFs {
+    original_parent: PathBuf,
+    moved_parent: PathBuf,
+    replaced: Mutex<bool>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ParentReplacementBeforeReadMemoFs {
+    inner: TokioMemoFs,
+    original_parent: PathBuf,
+    moved_parent: PathBuf,
+    replaced: Mutex<bool>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ParentReplacementAfterWriteMemoFs {
+    inner: TokioMemoFs,
+    original_parent: PathBuf,
+    moved_parent: PathBuf,
+    replaced: Mutex<bool>,
 }
 
 impl TooLargeOnReadMemoFs {
@@ -83,45 +108,211 @@ impl MismatchedTmpParentMemoFs {
     }
 }
 
+#[cfg(unix)]
+impl ParentReplacementBeforeRenameMemoFs {
+    fn new(original_parent: PathBuf, moved_parent: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            original_parent,
+            moved_parent,
+        })
+    }
+
+    fn replace_parent(&self) -> Result<(), MemoBeforeRenameError> {
+        std::fs::rename(&self.original_parent, &self.moved_parent).map_err(|error| {
+            MemoBeforeRenameError::new(format!("テスト用parent退避に失敗しました: {error}"))
+        })?;
+        std::fs::create_dir(&self.original_parent).map_err(|error| {
+            MemoBeforeRenameError::new(format!("テスト用parent再作成に失敗しました: {error}"))
+        })?;
+        std::fs::write(self.original_parent.join("note.md"), "# replaced parent").map_err(
+            |error| {
+                MemoBeforeRenameError::new(format!(
+                    "テスト用差し替えtarget作成に失敗しました: {error}"
+                ))
+            },
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn replace_single_file_parent(
+    original_parent: &Path,
+    moved_parent: &Path,
+) -> Result<(), MemoBeforeRenameError> {
+    std::fs::rename(original_parent, moved_parent).map_err(|error| {
+        MemoBeforeRenameError::new(format!("テスト用parent退避に失敗しました: {error}"))
+    })?;
+    std::fs::create_dir(original_parent).map_err(|error| {
+        MemoBeforeRenameError::new(format!("テスト用parent再作成に失敗しました: {error}"))
+    })?;
+    std::fs::write(original_parent.join("note.md"), "# replaced parent").map_err(|error| {
+        MemoBeforeRenameError::new(format!("テスト用差し替えtarget作成に失敗しました: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+impl ParentReplacementBeforeRemoveMemoFs {
+    fn new(original_parent: PathBuf, moved_parent: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            original_parent,
+            moved_parent,
+            replaced: Mutex::new(false),
+        })
+    }
+
+    fn replace_parent_once(&self) -> Result<(), MemoBeforeRenameError> {
+        let mut replaced = self.replaced.lock().expect("replaced mutex poisoned");
+        if *replaced {
+            return Ok(());
+        }
+        replace_single_file_parent(&self.original_parent, &self.moved_parent)?;
+        std::fs::write(
+            self.original_parent.join(".note.md.memo.md"),
+            "replacement sidecar",
+        )
+        .map_err(|error| {
+            MemoBeforeRenameError::new(format!(
+                "テスト用差し替えsidecar作成に失敗しました: {error}"
+            ))
+        })?;
+        *replaced = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl ParentReplacementAfterRemoveCheckMemoFs {
+    fn new(original_parent: PathBuf, moved_parent: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            original_parent,
+            moved_parent,
+            replaced: Mutex::new(false),
+        })
+    }
+
+    fn replace_parent_once(&self) -> Result<(), MemoBeforeRenameError> {
+        let mut replaced = self.replaced.lock().expect("replaced mutex poisoned");
+        if *replaced {
+            return Ok(());
+        }
+        replace_single_file_parent(&self.original_parent, &self.moved_parent)?;
+        std::fs::write(
+            self.original_parent.join(".note.md.memo.md"),
+            "replacement sidecar",
+        )
+        .map_err(|error| {
+            MemoBeforeRenameError::new(format!(
+                "テスト用差し替えsidecar作成に失敗しました: {error}"
+            ))
+        })?;
+        *replaced = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl ParentReplacementBeforeReadMemoFs {
+    fn new(original_parent: PathBuf, moved_parent: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            original_parent,
+            moved_parent,
+            replaced: Mutex::new(false),
+        })
+    }
+
+    fn replace_parent_once(&self) -> Result<(), MemoBeforeRenameError> {
+        let mut replaced = self.replaced.lock().expect("replaced mutex poisoned");
+        if *replaced {
+            return Ok(());
+        }
+        replace_single_file_parent(&self.original_parent, &self.moved_parent)?;
+        std::fs::write(
+            self.original_parent.join(".note.md.memo.md"),
+            "replacement sidecar",
+        )
+        .map_err(|error| {
+            MemoBeforeRenameError::new(format!(
+                "テスト用差し替えsidecar作成に失敗しました: {error}"
+            ))
+        })?;
+        *replaced = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl ParentReplacementAfterWriteMemoFs {
+    fn new(original_parent: PathBuf, moved_parent: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            inner: TokioMemoFs,
+            original_parent,
+            moved_parent,
+            replaced: Mutex::new(false),
+        })
+    }
+
+    fn replace_parent_once(&self) -> Result<(), MemoBeforeRenameError> {
+        let mut replaced = self.replaced.lock().expect("replaced mutex poisoned");
+        if *replaced {
+            return Ok(());
+        }
+        replace_single_file_parent(&self.original_parent, &self.moved_parent)?;
+        let replacement_legacy = self.original_parent.join(".markdown-view/memos/note.md");
+        std::fs::create_dir_all(
+            replacement_legacy
+                .parent()
+                .expect("legacy parent should exist"),
+        )
+        .map_err(|error| {
+            MemoBeforeRenameError::new(format!(
+                "テスト用差し替えlegacy parent作成に失敗しました: {error}"
+            ))
+        })?;
+        std::fs::write(&replacement_legacy, "replacement legacy").map_err(|error| {
+            MemoBeforeRenameError::new(format!("テスト用差し替えlegacy作成に失敗しました: {error}"))
+        })?;
+        *replaced = true;
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl MemoFs for MismatchedTmpParentMemoFs {
     async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
         self.inner.try_exists(path).await
     }
 
-    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
-        self.inner.metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
-        self.inner.read_with_limit(path).await
-    }
-
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.create_dir_all(path).await
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path, before_read).await
     }
 
     async fn write_atomic(
         &self,
         path: &Path,
         _content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError> {
-        let tmp_path = path
-            .parent()
-            .expect("memo path should have a parent")
-            .join(".other-tmp-dir")
-            .join("memo.tmp");
-        match before_rename(path, &tmp_path).await {
-            Ok(()) => Err(MemoWriteError::Io(std::io::Error::other(
-                "mismatched tmp parent should be rejected before rename",
+        match before_write(path).await {
+            Ok(_) => Err(MemoWriteError::Io(std::io::Error::other(
+                "mismatched tmp parent fixture is no longer expected to pass",
             ))),
             Err(error) => Err(MemoWriteError::BeforeRename(error)),
         }
     }
 
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.remove_file(path).await
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.inner.remove_file(path, before_remove).await
     }
 }
 
@@ -131,32 +322,221 @@ impl MemoFs for TooLargeOnReadMemoFs {
         self.inner.try_exists(path).await
     }
 
-    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
-        self.inner.metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
         if path == self.too_large_path {
             return Err(MemoReadError::TooLarge);
         }
-        self.inner.read_with_limit(path).await
-    }
-
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.create_dir_all(path).await
+        self.inner.read_with_limit(path, before_read).await
     }
 
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError> {
-        self.inner.write_atomic(path, content, before_rename).await
+        self.inner.write_atomic(path, content, before_write).await
     }
 
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.remove_file(path).await
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.inner.remove_file(path, before_remove).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for ParentReplacementBeforeRenameMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        TokioMemoFs.try_exists(path).await
+    }
+
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        TokioMemoFs.read_with_limit(path, before_read).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        _content: &[u8],
+        before_write: &BeforeAccessCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        self.replace_parent()
+            .map_err(MemoWriteError::BeforeRename)?;
+        match before_write(path).await {
+            Ok(_) => Err(MemoWriteError::Io(std::io::Error::other(
+                "parent replacement should be rejected before write",
+            ))),
+            Err(error) => Err(MemoWriteError::BeforeRename(error)),
+        }
+    }
+
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        TokioMemoFs.remove_file(path, before_remove).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for ParentReplacementBeforeRemoveMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        TokioMemoFs.try_exists(path).await
+    }
+
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        TokioMemoFs.read_with_limit(path, before_read).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_write: &BeforeAccessCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        TokioMemoFs.write_atomic(path, content, before_write).await
+    }
+
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.replace_parent_once()
+            .map_err(MemoRemoveError::BeforeRemove)?;
+        TokioMemoFs.remove_file(path, before_remove).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for ParentReplacementAfterRemoveCheckMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        TokioMemoFs.try_exists(path).await
+    }
+
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        TokioMemoFs.read_with_limit(path, before_read).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_write: &BeforeAccessCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        TokioMemoFs.write_atomic(path, content, before_write).await
+    }
+
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        let checked = before_remove(path)
+            .await
+            .map_err(MemoRemoveError::BeforeRemove)?;
+        if path.file_name() == Some(std::ffi::OsStr::new(".note.md.memo.md")) {
+            self.replace_parent_once()
+                .map_err(MemoRemoveError::BeforeRemove)?;
+        }
+        checked
+            .parent_dir()
+            .remove_file(checked.file_name())
+            .map_err(MemoRemoveError::Io)
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for ParentReplacementBeforeReadMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        self.replace_parent_once()
+            .map_err(MemoReadError::BeforeAccess)?;
+        self.inner.read_with_limit(path, before_read).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_write: &BeforeAccessCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        self.inner.write_atomic(path, content, before_write).await
+    }
+
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.inner.remove_file(path, before_remove).await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl MemoFs for ParentReplacementAfterWriteMemoFs {
+    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
+        self.inner.try_exists(path).await
+    }
+
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path, before_read).await
+    }
+
+    async fn write_atomic(
+        &self,
+        path: &Path,
+        content: &[u8],
+        before_write: &BeforeAccessCheck<'_>,
+    ) -> Result<(), MemoWriteError> {
+        self.inner.write_atomic(path, content, before_write).await?;
+        self.replace_parent_once()
+            .map_err(MemoWriteError::BeforeRename)?;
+        Ok(())
+    }
+
+    async fn remove_file(
+        &self,
+        path: &Path,
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.inner.remove_file(path, before_remove).await
     }
 }
 
@@ -167,31 +547,26 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
         self.inner.try_exists(path).await
     }
 
-    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
-        self.inner.metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
-        self.inner.read_with_limit(path).await
-    }
-
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.create_dir_all(path).await
+    async fn read_with_limit(
+        &self,
+        path: &Path,
+        before_read: &BeforeAccessCheck<'_>,
+    ) -> Result<Vec<u8>, MemoReadError> {
+        self.inner.read_with_limit(path, before_read).await
     }
 
     async fn write_atomic(
         &self,
         path: &Path,
         content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
+        before_write: &BeforeAccessCheck<'_>,
     ) -> Result<(), MemoWriteError> {
         let link_target = self.link_target.clone();
         self.inner
-            .write_atomic(path, content, &move |final_path, tmp_path| {
+            .write_atomic(path, content, &move |final_path| {
                 let final_path = final_path.to_path_buf();
-                let tmp_path = tmp_path.to_path_buf();
                 let link_target = link_target.clone();
-                before_rename_future(async move {
+                before_access_future(async move {
                     match std::fs::remove_file(&final_path) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -206,71 +581,18 @@ impl MemoFs for SymlinkBeforeRenameMemoFs {
                             "テスト用メモsymlink作成に失敗しました: {error}"
                         ))
                     })?;
-                    before_rename(&final_path, &tmp_path).await
+                    before_write(&final_path).await
                 })
             })
             .await
     }
 
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.remove_file(path).await
-    }
-}
-
-#[cfg(unix)]
-#[async_trait::async_trait]
-impl MemoFs for TmpSymlinkBeforeRenameMemoFs {
-    async fn try_exists(&self, path: &Path) -> std::io::Result<bool> {
-        self.inner.try_exists(path).await
-    }
-
-    async fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
-        self.inner.metadata(path).await
-    }
-
-    async fn read_with_limit(&self, path: &Path) -> Result<Vec<u8>, MemoReadError> {
-        self.inner.read_with_limit(path).await
-    }
-
-    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.create_dir_all(path).await
-    }
-
-    async fn write_atomic(
+    async fn remove_file(
         &self,
         path: &Path,
-        content: &[u8],
-        before_rename: &BeforeRenameCheck<'_>,
-    ) -> Result<(), MemoWriteError> {
-        let link_target = self.link_target.clone();
-        self.inner
-            .write_atomic(path, content, &move |final_path, tmp_path| {
-                let final_path = final_path.to_path_buf();
-                let tmp_path = tmp_path.to_path_buf();
-                let link_target = link_target.clone();
-                before_rename_future(async move {
-                    match std::fs::remove_file(&tmp_path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(MemoBeforeRenameError::new(format!(
-                                "テスト用tmp差し替えに失敗しました: {error}"
-                            )));
-                        }
-                    }
-                    symlink(&link_target, &tmp_path).map_err(|error| {
-                        MemoBeforeRenameError::new(format!(
-                            "テスト用tmp symlink作成に失敗しました: {error}"
-                        ))
-                    })?;
-                    before_rename(&final_path, &tmp_path).await
-                })
-            })
-            .await
-    }
-
-    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        self.inner.remove_file(path).await
+        before_remove: &BeforeRemoveCheck<'_>,
+    ) -> Result<(), MemoRemoveError> {
+        self.inner.remove_file(path, before_remove).await
     }
 }
 
@@ -394,7 +716,7 @@ async fn test_save_route_memo_単一ファイルモードで同階層sidecarへ�
 }
 
 #[tokio::test]
-async fn test_save_route_memo_tmp親不一致は内部状態エラーを返す() {
+async fn test_save_route_memo_tmp親不一致fixtureは内部ioエラーを返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
         .write_md(Path::new("note.md"), "# note")
@@ -413,13 +735,10 @@ async fn test_save_route_memo_tmp親不一致は内部状態エラーを返す()
     )
     .await;
 
-    let (status, body) = result.expect_err("mismatched tmp parent should be rejected");
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = result.expect_err("mismatched tmp parent fixture should fail");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(
-        json["error"],
-        "メモ保存の内部状態が不正なため操作を中止しました"
-    );
+    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
 }
 
 #[tokio::test]
@@ -1124,7 +1443,7 @@ async fn test_load_route_memo_compat優先_legacy存在でも新compatを返す(
 }
 
 #[tokio::test]
-async fn test_load_route_memo_sidecarがmetadata前に消えたらlegacyへフォールバックする() {
+async fn test_load_route_memo_sidecarがread前に消えたらlegacyへフォールバックする() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
         .write_md(Path::new("note.md"), "# note")
@@ -1136,7 +1455,7 @@ async fn test_load_route_memo_sidecarがmetadata前に消えたらlegacyへフ�
         .write_file(Path::new(".markdown-view/memos/note.md"), "legacy memo")
         .expect("legacy memo should be written");
     let memo_fs = MockMemoFs::new();
-    memo_fs.fail_at(Op::Metadata, &sidecar_path, std::io::ErrorKind::NotFound);
+    memo_fs.fail_at(Op::Read, &sidecar_path, std::io::ErrorKind::NotFound);
     let mode = AppMode::new_single_file(&file_path).unwrap();
     let state = make_test_app_state(mode, memo_fs);
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
@@ -1246,6 +1565,36 @@ async fn test_load_route_memo_全て不在なら空メモ() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn test_load_route_memo_単一ファイル親差し替え後のsidecarは拒否する() {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, Arc::new(TokioMemoFs));
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("target should resolve before parent replacement");
+
+    std::fs::rename(&parent, &moved_parent).expect("parent should be moved away");
+    std::fs::create_dir(&parent).expect("replacement parent should be created");
+    std::fs::write(parent.join("note.md"), "# replaced parent")
+        .expect("replacement target should be written");
+    std::fs::write(parent.join(".note.md.memo.md"), "replaced memo")
+        .expect("replacement sidecar should be written");
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("replaced parent memo sidecar should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_save_route_memo_単一ファイルモードでpermission_deniedなら500を返す() {
     let workspace = TempWorkspace::new().expect("workspace should be created");
     let file_path = workspace
@@ -1277,6 +1626,44 @@ async fn test_save_route_memo_単一ファイルモードでpermission_deniedな
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモファイルの操作に失敗しました");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_単一ファイル親差し替え後はsidecarを書き込まない() {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(mode, Arc::new(TokioMemoFs));
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .expect("target should resolve before parent replacement");
+
+    std::fs::rename(&parent, &moved_parent).expect("parent should be moved away");
+    std::fs::create_dir(&parent).expect("replacement parent should be created");
+    std::fs::write(parent.join("note.md"), "# replaced parent")
+        .expect("replacement target should be written");
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("save into replaced parent should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert!(
+        !parent.join(".note.md.memo.md").exists(),
+        "replacement parent must not receive a sidecar memo"
+    );
 }
 
 #[tokio::test]
@@ -1440,19 +1827,21 @@ async fn test_save_route_memo_rename直前にsidecarがsymlinkへ差し替わる
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると403を返す() {
-    let workspace = TempWorkspace::new().expect("workspace should be created");
-    let file_path = workspace
-        .write_md(Path::new("note.md"), "# note")
-        .expect("target markdown should be written");
-    let sidecar_path = workspace.path().join(".note.md.memo.md");
+async fn test_save_route_memo_rename直前に単一ファイル親が差し替わると403を返す() {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let sidecar_path = parent.join(".note.md.memo.md");
     std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
-    let outside_dir = tempfile::tempdir().expect("outside dir should be created");
-    let outside_tmp = outside_dir.path().join("outside.tmp");
-    std::fs::write(&outside_tmp, "outside tmp").expect("outside tmp should be written");
 
     let mode = AppMode::new_single_file(&file_path).unwrap();
-    let state = make_test_app_state(mode, TmpSymlinkBeforeRenameMemoFs::new(outside_tmp.clone()));
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeRenameMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
     let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
         .await
         .unwrap();
@@ -1465,20 +1854,348 @@ async fn test_save_route_memo_rename直前にtmpがsymlinkへ差し替わると4
     )
     .await;
 
-    let (status, body) = result.expect_err("tmp precheck should reject symlink replacement");
+    let (status, body) = result.expect_err("parent replacement should be rejected");
     assert_eq!(status, StatusCode::FORBIDDEN);
     let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
     assert_eq!(
-        json["error"],
-        "メモ保存先にシンボリックリンクが含まれているため操作できません"
+        std::fs::read_to_string(moved_parent.join(".note.md.memo.md"))
+            .expect("original sidecar should remain in moved parent"),
+        "old memo"
     );
+    assert!(
+        !parent.join(".note.md.memo.md").exists(),
+        "replacement parent must not receive a sidecar memo"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_空保存の削除直前に単一ファイル親が差し替わると403を返す() {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let sidecar_path = parent.join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeRemoveMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "   ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("parent replacement before remove should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
     assert_eq!(
-        std::fs::read_to_string(&sidecar_path).expect("existing sidecar should remain readable"),
+        std::fs::read_to_string(moved_parent.join(".note.md.memo.md"))
+            .expect("original sidecar should remain in moved parent"),
         "old memo"
     );
     assert_eq!(
-        std::fs::read_to_string(&outside_tmp).expect("outside tmp should remain readable"),
-        "outside tmp"
+        std::fs::read_to_string(parent.join(".note.md.memo.md"))
+            .expect("replacement sidecar should not be deleted"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_削除検査後に単一ファイル親が差し替わってもreplacement_sidecarを削除しない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let sidecar_path = parent.join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementAfterRemoveCheckMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "   ".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("checked parent-relative remove should delete original sidecar");
+
+    assert_eq!(memo.raw(), "");
+    assert!(
+        !moved_parent.join(".note.md.memo.md").exists(),
+        "original sidecar should be deleted via checked parent handle"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent.join(".note.md.memo.md"))
+            .expect("replacement sidecar should not be deleted"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_読み込み直前に単一ファイル親が差し替わるとreplacement_sidecarを読まない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let sidecar_path = parent.join(".note.md.memo.md");
+    std::fs::write(&sidecar_path, "old memo").expect("existing sidecar should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeReadMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("parent replacement before read should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(
+        std::fs::read_to_string(parent.join(".note.md.memo.md"))
+            .expect("replacement sidecar should remain readable"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_読み込み直前にディレクトリbaseが差し替わるとreplacement_sidecarを読まない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let base = workspace.path().join("base");
+    let moved_base = workspace.path().join("base-moved");
+    let file_path = base.join("note.md");
+    std::fs::create_dir(&base).expect("base should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    std::fs::write(base.join(".note.md.memo.md"), "old memo")
+        .expect("existing sidecar should be written");
+
+    let mode = AppMode::new_directory(&base).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeReadMemoFs::new(base.clone(), moved_base.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = load_route_memo(&state, &target, RouteTargetRequest::api_memo(None)).await;
+
+    let (status, body) = result.expect_err("base replacement before read should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(
+        std::fs::read_to_string(base.join(".note.md.memo.md"))
+            .expect("replacement sidecar should remain readable"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_load_route_memo_読み込み直前にディレクトリ配下親が差し替わるとreplacement_sidecarを読まない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let base = workspace.path().join("base");
+    let parent = base.join("sub");
+    let moved_parent = workspace.path().join("sub-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&base).expect("base should be created");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    std::fs::write(parent.join(".note.md.memo.md"), "old memo")
+        .expect("existing sidecar should be written");
+
+    let mode = AppMode::new_directory(&base).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeReadMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("sub/note.md")))
+        .await
+        .unwrap();
+
+    let result = load_route_memo(
+        &state,
+        &target,
+        RouteTargetRequest::api_memo(Some("sub/note.md")),
+    )
+    .await;
+
+    let (status, body) =
+        result.expect_err("nested parent replacement before read should be rejected");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert_eq!(
+        std::fs::read_to_string(parent.join(".note.md.memo.md"))
+            .expect("replacement sidecar should remain readable"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_削除検査後にディレクトリ配下親が差し替わってもreplacement_sidecarを削除しない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let base = workspace.path().join("base");
+    let parent = base.join("sub");
+    let moved_parent = workspace.path().join("sub-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&base).expect("base should be created");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    std::fs::write(parent.join(".note.md.memo.md"), "old memo")
+        .expect("existing sidecar should be written");
+
+    let mode = AppMode::new_directory(&base).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementAfterRemoveCheckMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(Some("sub/note.md")))
+        .await
+        .unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "   ".to_string(),
+        RouteTargetRequest::api_memo(Some("sub/note.md")),
+    )
+    .await
+    .expect("checked parent-relative remove should delete original sidecar");
+
+    assert_eq!(memo.raw(), "");
+    assert!(
+        !moved_parent.join(".note.md.memo.md").exists(),
+        "original sidecar should be deleted via checked parent handle"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent.join(".note.md.memo.md"))
+            .expect("replacement sidecar should not be deleted"),
+        "replacement sidecar"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_rename直前にディレクトリbaseが差し替わるとreplacement側へ保存しない()
+{
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let base = workspace.path().join("base");
+    let moved_base = workspace.path().join("base-moved");
+    let file_path = base.join("note.md");
+    std::fs::create_dir(&base).expect("base should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+
+    let mode = AppMode::new_directory(&base).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementBeforeRenameMemoFs::new(base.clone(), moved_base.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let result = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await;
+
+    let (status, body) = result.expect_err("base replacement should be rejected before rename");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = serde_json::to_value(body.0).unwrap();
+    assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
+    assert!(
+        !base.join(".note.md.memo.md").exists(),
+        "replacement base must not receive a sidecar memo"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_save_route_memo_保存後cleanup直前に単一ファイル親が差し替わってもreplacement_legacyを削除しない(
+) {
+    let workspace = tempfile::tempdir().expect("workspace should be created");
+    let parent = workspace.path().join("parent");
+    let moved_parent = workspace.path().join("parent-moved");
+    let file_path = parent.join("note.md");
+    std::fs::create_dir(&parent).expect("parent should be created");
+    std::fs::write(&file_path, "# note").expect("target markdown should be written");
+    let legacy_path = parent.join(".markdown-view/memos/note.md");
+    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent should exist"))
+        .expect("legacy parent should be created");
+    std::fs::write(&legacy_path, "old legacy").expect("legacy memo should be written");
+
+    let mode = AppMode::new_single_file(&file_path).unwrap();
+    let state = make_test_app_state(
+        mode,
+        ParentReplacementAfterWriteMemoFs::new(parent.clone(), moved_parent.clone()),
+    );
+    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
+        .await
+        .unwrap();
+
+    let memo = save_route_memo(
+        &state,
+        &target,
+        "new memo".to_string(),
+        RouteTargetRequest::api_memo(None),
+    )
+    .await
+    .expect("save should succeed while best-effort cleanup is skipped");
+
+    assert_eq!(memo.raw(), "new memo");
+    assert_eq!(
+        std::fs::read_to_string(moved_parent.join(".note.md.memo.md"))
+            .expect("new sidecar should remain in moved parent"),
+        "new memo"
+    );
+    assert_eq!(
+        std::fs::read_to_string(parent.join(".markdown-view/memos/note.md"))
+            .expect("replacement legacy should not be deleted"),
+        "replacement legacy"
     );
 }
 
@@ -1510,40 +2227,6 @@ async fn test_save_route_memo_安全確認io失敗は500を返す() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let json = serde_json::to_value(body.0).unwrap();
     assert_eq!(json["error"], "メモ保存先の安全確認に失敗しました");
-}
-
-#[tokio::test]
-async fn test_save_route_memo_create_dir_all失敗で500を返す() {
-    let workspace = TempWorkspace::new().expect("workspace should be created");
-    let file_path = workspace
-        .write_md(Path::new("note.md"), "# note")
-        .expect("target markdown should be written");
-    let sidecar_parent = workspace.path().to_path_buf();
-
-    let memo_fs = MockMemoFs::new();
-    memo_fs.fail_at(
-        Op::CreateDirAll,
-        &sidecar_parent,
-        std::io::ErrorKind::PermissionDenied,
-    );
-    let mode = AppMode::new_single_file(&file_path).unwrap();
-    let state = make_test_app_state(mode, memo_fs);
-    let target = resolve_route_target(&state, RouteTargetRequest::api_memo(None))
-        .await
-        .unwrap();
-
-    let result = save_route_memo(
-        &state,
-        &target,
-        "memo".to_string(),
-        RouteTargetRequest::api_memo(None),
-    )
-    .await;
-
-    let (status, body) = result.expect_err("sidecar parent creation failure should be fatal");
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let json = serde_json::to_value(body.0).unwrap();
-    assert_eq!(json["error"], "メモファイルの操作に失敗しました");
 }
 
 #[tokio::test]

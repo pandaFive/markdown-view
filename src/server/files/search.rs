@@ -1,16 +1,20 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Component, Path};
 
+use cap_std::fs::Dir;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tokio::sync::OwnedSemaphorePermit;
 
-use super::catalog::list_markdown_files_from_canonical_base_until_cancelled;
+use super::catalog::{
+    list_markdown_files_from_verified_base_until_cancelled, open_relative_file_nofollow,
+    open_verified_base_dir,
+};
 use super::content::MAX_FILE_SIZE;
-use super::resolve::resolve_file;
 use crate::markdown::{markdown_options, MarkdownProfile};
 use crate::server::{CanonicalPath, SearchGeneration};
+use crate::workspace_exclusion::exclusion_reason_for_relative_path;
 
 const MAX_SEARCH_RESULTS: usize = 100;
 const MAX_SEARCH_FILES: usize = 1000;
@@ -26,16 +30,35 @@ const SEARCH_QUERY_TOO_LONG_MESSAGE: &str = "検索クエリが長すぎます";
 type SearchProgressHook = std::sync::Arc<dyn Fn(&str, usize) + Send + Sync + 'static>;
 
 #[cfg(test)]
+type SearchListingProgressHook = std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
+
+#[cfg(test)]
 static SEARCH_PROGRESS_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<SearchProgressHook>>> =
     std::sync::OnceLock::new();
+
+#[cfg(test)]
+static SEARCH_LISTING_PROGRESS_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<SearchListingProgressHook>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 pub(in crate::server) struct SearchProgressHookGuard;
 
 #[cfg(test)]
+pub(in crate::server) struct SearchListingProgressHookGuard;
+
+#[cfg(test)]
 impl Drop for SearchProgressHookGuard {
     fn drop(&mut self) {
         let hook = SEARCH_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+        *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+impl Drop for SearchListingProgressHookGuard {
+    fn drop(&mut self) {
+        let hook = SEARCH_LISTING_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
         *hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
@@ -47,6 +70,15 @@ pub(in crate::server) fn set_search_progress_hook_for_test(
     let slot = SEARCH_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     SearchProgressHookGuard
+}
+
+#[cfg(test)]
+pub(in crate::server) fn set_search_listing_progress_hook_for_test(
+    hook: SearchListingProgressHook,
+) -> SearchListingProgressHookGuard {
+    let slot = SEARCH_LISTING_PROGRESS_HOOK.get_or_init(|| std::sync::Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    SearchListingProgressHookGuard
 }
 
 #[cfg(test)]
@@ -65,6 +97,21 @@ fn notify_search_progress_for_test(relative: &str, searched_files: usize) {
 fn notify_search_progress_for_test(_relative: &str, _searched_files: usize) {}
 
 #[cfg(test)]
+fn notify_search_listing_progress_for_test(relative: &str) {
+    let hook = SEARCH_LISTING_PROGRESS_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(relative);
+    }
+}
+
+#[cfg(not(test))]
+fn notify_search_listing_progress_for_test(_relative: &str) {}
+
+#[cfg(test)]
 type SearchContextBuildHook = Box<dyn FnMut(usize)>;
 
 #[cfg(test)]
@@ -75,6 +122,21 @@ type SearchBeforeResponseHook = Box<dyn FnMut()>;
 
 #[cfg(test)]
 type SearchLargeBlockFindHook = Box<dyn FnMut(usize)>;
+
+#[cfg(test)]
+type SearchAfterResolveHook = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
+type SearchAfterCanonicalizeHook = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
+type SearchAfterBaseIdentityValidationHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
+type SearchAfterByteLimitHook = Box<dyn FnMut()>;
+
+#[cfg(test)]
+type SearchAfterMetadataHook = Box<dyn FnMut(&str)>;
 
 #[cfg(test)]
 std::thread_local! {
@@ -89,7 +151,18 @@ std::thread_local! {
     static SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_LARGE_BLOCK_FIND_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchLargeBlockFindHook>> =
         const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_RESOLVE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterResolveHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_CANONICALIZE_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterCanonicalizeHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterBaseIdentityValidationHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterByteLimitHook>> =
+        const { std::cell::RefCell::new(None) };
+    static SEARCH_AFTER_METADATA_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterMetadataHook>> =
+        const { std::cell::RefCell::new(None) };
     static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_MARKDOWN_READ_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -104,6 +177,27 @@ fn reset_search_context_build_count_for_test() -> usize {
 fn search_context_build_count_for_test() -> usize {
     SEARCH_CONTEXT_BUILD_COUNT_FOR_TEST.with(std::cell::Cell::get)
 }
+
+#[cfg(test)]
+fn reset_search_markdown_read_count_for_test() -> usize {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_markdown_read_count_for_test() -> usize {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_markdown_read_for_test() {
+    SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_markdown_read_for_test() {}
 
 #[cfg(test)]
 struct SearchContextBuildHookGuard;
@@ -219,6 +313,176 @@ fn notify_search_before_response_for_test() {
 fn notify_search_before_response_for_test() {}
 
 #[cfg(test)]
+struct SearchAfterBaseIdentityValidationHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterBaseIdentityValidationHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_base_identity_validation_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchAfterBaseIdentityValidationHookGuard {
+    SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterBaseIdentityValidationHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_base_identity_validation_for_test() {
+    SEARCH_AFTER_BASE_IDENTITY_VALIDATION_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_base_identity_validation_for_test() {}
+
+#[cfg(test)]
+struct SearchAfterByteLimitHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterByteLimitHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_byte_limit_hook_for_test(
+    hook: impl FnMut() + 'static,
+) -> SearchAfterByteLimitHookGuard {
+    SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterByteLimitHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_byte_limit_for_test() {
+    SEARCH_AFTER_BYTE_LIMIT_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_byte_limit_for_test() {}
+
+#[cfg(test)]
+struct SearchAfterMetadataHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterMetadataHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_metadata_hook_for_test(
+    hook: impl FnMut(&str) + 'static,
+) -> SearchAfterMetadataHookGuard {
+    SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterMetadataHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_metadata_for_test(relative: &str) {
+    SEARCH_AFTER_METADATA_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_metadata_for_test(_relative: &str) {}
+
+#[cfg(test)]
+struct SearchAfterResolveHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterResolveHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_RESOLVE_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+struct SearchAfterCanonicalizeHookGuard;
+
+#[cfg(test)]
+impl Drop for SearchAfterCanonicalizeHookGuard {
+    fn drop(&mut self) {
+        SEARCH_AFTER_CANONICALIZE_HOOK_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_search_after_resolve_hook_for_test(
+    hook: impl FnMut(&str) + 'static,
+) -> SearchAfterResolveHookGuard {
+    SEARCH_AFTER_RESOLVE_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterResolveHookGuard
+}
+
+#[cfg(test)]
+fn set_search_after_canonicalize_hook_for_test(
+    hook: impl FnMut(&str) + 'static,
+) -> SearchAfterCanonicalizeHookGuard {
+    SEARCH_AFTER_CANONICALIZE_HOOK_FOR_TEST.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    SearchAfterCanonicalizeHookGuard
+}
+
+#[cfg(test)]
+fn notify_search_after_resolve_for_test(relative: &str) {
+    SEARCH_AFTER_RESOLVE_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_resolve_for_test(_relative: &str) {}
+
+#[cfg(test)]
+fn notify_search_after_canonicalize_for_test(relative: &str) {
+    SEARCH_AFTER_CANONICALIZE_HOOK_FOR_TEST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn notify_search_after_canonicalize_for_test(_relative: &str) {}
+
+#[cfg(test)]
 fn reset_search_case_fold_char_count_for_test() {
     SEARCH_CASE_FOLD_CHAR_COUNT_FOR_TEST.with(|count| count.set(0));
 }
@@ -325,6 +589,7 @@ struct SearchStats {
     searched_files: usize,
     skipped_files: usize,
     searched_bytes: usize,
+    budgeted_bytes: usize,
     truncated_reasons: Vec<SearchTruncationReason>,
 }
 
@@ -334,6 +599,7 @@ impl SearchStats {
             searched_files: 0,
             skipped_files: 0,
             searched_bytes: 0,
+            budgeted_bytes: 0,
             truncated_reasons: Vec::new(),
         }
     }
@@ -346,6 +612,10 @@ impl SearchStats {
 
     fn truncated(&self) -> bool {
         !self.truncated_reasons.is_empty()
+    }
+
+    fn clear_truncation(&mut self) {
+        self.truncated_reasons.clear();
     }
 }
 
@@ -519,6 +789,19 @@ struct SearchBlockEntry {
     sentences: Vec<Range<usize>>,
 }
 
+#[derive(Debug)]
+enum SearchMarkdownRead {
+    Markdown {
+        markdown: String,
+        bytes_read: usize,
+    },
+    Skipped {
+        error: std::io::Error,
+        bytes_read: usize,
+    },
+    ByteLimit,
+}
+
 #[derive(Debug, Clone)]
 struct SearchContext {
     before: String,
@@ -592,17 +875,26 @@ fn search_directory_with_limits_blocking(
         ));
     }
 
-    let files = list_markdown_files_from_canonical_base_until_cancelled(
-        base_dir,
+    let search_base_dir = open_verified_base_dir(base_dir, "検索base directory")?;
+    notify_search_after_base_identity_validation_for_test();
+    validate_search_base_path_identity(base_dir)?;
+
+    let catalog = list_markdown_files_from_verified_base_until_cancelled(
+        &search_base_dir,
+        base_dir.as_path(),
         limits.max_files.saturating_add(1),
         &|| cancellation.is_cancelled(),
+        &|relative| {
+            let relative = path_to_search_relative(relative);
+            notify_search_listing_progress_for_test(&relative);
+        },
     )?;
-    let base_path = base_dir.as_path();
+    let files = catalog.files;
     let mut results = Vec::new();
     let mut stats = SearchStats::new();
     let mut read_files = 0usize;
 
-    if files.len() > limits.max_files {
+    if catalog.truncated || files.len() > limits.max_files {
         stats.mark_truncated(SearchTruncationReason::File);
     }
 
@@ -619,21 +911,47 @@ fn search_directory_with_limits_blocking(
             break;
         }
 
-        let file_path = match resolve_file(base_path, &relative) {
-            Ok(file_path) => file_path,
-            Err(error) => {
+        notify_search_after_resolve_for_test(&relative);
+        let markdown = match read_search_markdown_with_byte_budget(
+            &search_base_dir,
+            &relative,
+            stats.budgeted_bytes,
+            limits.max_bytes,
+        ) {
+            Ok(SearchMarkdownRead::ByteLimit) => {
+                notify_search_after_byte_limit_for_test();
+                if cancellation.is_cancelled() {
+                    results.clear();
+                    break;
+                }
+                tracing::debug!(
+                    "[markdown-view] ディレクトリ検索がbyte-limitに到達しました: file={} searched_bytes={} budgeted_bytes={} max_bytes={} result_count={}",
+                    log_safe_search_relative(&relative),
+                    stats.searched_bytes,
+                    stats.budgeted_bytes,
+                    limits.max_bytes,
+                    results.len()
+                );
+                stats.mark_truncated(SearchTruncationReason::Byte);
+                break;
+            }
+            Ok(SearchMarkdownRead::Markdown {
+                markdown,
+                bytes_read,
+            }) => {
+                stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
+                markdown
+            }
+            Ok(SearchMarkdownRead::Skipped { error, bytes_read }) => {
+                stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
                 tracing::warn!(
-                    "[markdown-view] 検索対象ファイル解決失敗（スキップ）: {} ({})",
+                    "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
                     log_safe_search_relative(&relative),
                     error
                 );
                 stats.skipped_files += 1;
                 continue;
             }
-        };
-
-        let markdown = match read_markdown_with_limit_blocking(&file_path) {
-            Ok(markdown) => markdown,
             Err(error) => {
                 tracing::warn!(
                     "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
@@ -709,9 +1027,22 @@ fn search_directory_with_limits_blocking(
     notify_search_before_response_for_test();
     if cancellation.is_cancelled() {
         results.clear();
+        stats.clear_truncation();
     }
 
     Ok(SearchResponse::from_parts(query, results, limits, stats))
+}
+
+fn validate_search_base_path_identity(base_dir: &CanonicalPath) -> std::io::Result<()> {
+    if base_dir.has_current_identity()? {
+        return Ok(());
+    }
+
+    tracing::warn!("[markdown-view] 検索base directory pathの実体差し替えを検出しました");
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "検索base directory pathが起動時と異なります",
+    ))
 }
 
 fn map_search_join_error(error: tokio::task::JoinError) -> std::io::Error {
@@ -734,6 +1065,17 @@ fn log_safe_search_relative(relative: &str) -> String {
     relative.escape_debug().to_string()
 }
 
+fn path_to_search_relative(path: &Path) -> String {
+    let mut output = String::new();
+    for component in path.components() {
+        if !output.is_empty() {
+            output.push('/');
+        }
+        output.push_str(&component.as_os_str().to_string_lossy());
+    }
+    output
+}
+
 fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: usize) {
     tracing::debug!(
         "[markdown-view] ディレクトリ検索がstale化したため中断しました: phase={} searched_files={} searched_bytes={} result_count={}",
@@ -744,13 +1086,79 @@ fn log_search_cancelled(phase: &'static str, stats: &SearchStats, result_count: 
     );
 }
 
-fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
-    let metadata = std::fs::metadata(file_path)?;
+fn read_search_markdown_with_byte_budget(
+    base_dir: &Dir,
+    relative: &str,
+    searched_bytes: usize,
+    max_bytes: usize,
+) -> std::io::Result<SearchMarkdownRead> {
+    let canonical_relative = canonical_search_relative(base_dir, relative)?;
+    notify_search_after_canonicalize_for_test(relative);
+    let file = open_relative_file_nofollow(base_dir, &canonical_relative)?;
+    let metadata = file.metadata()?;
+    notify_search_after_metadata_for_test(relative);
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "検索対象が通常ファイルではありません",
+        ));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         return Err(file_too_large_error());
     }
 
+    let file_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    let remaining_bytes = max_bytes.saturating_sub(searched_bytes);
+    if file_len > remaining_bytes {
+        return Ok(SearchMarkdownRead::ByteLimit);
+    }
+
+    let read_limit = u64::try_from(remaining_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+        .min(MAX_FILE_SIZE + 1);
+    read_markdown_from_open_file_with_byte_budget(file, read_limit, remaining_bytes)
+}
+
+#[cfg(test)]
+fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
     let file = std::fs::File::open(file_path)?;
+    read_markdown_from_open_file(file)
+}
+
+fn canonical_search_relative(
+    base_dir: &Dir,
+    relative: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let canonical_relative = base_dir.canonicalize(Path::new(relative))?;
+    if canonical_relative.is_absolute()
+        || canonical_relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象がベースディレクトリ外を指しています",
+        ));
+    }
+    if exclusion_reason_for_relative_path(&canonical_relative).is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "検索対象が除外パスを指しています",
+        ));
+    }
+    match canonical_relative.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => Ok(canonical_relative),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "検索対象がMarkdownファイルではありません",
+        )),
+    }
+}
+
+#[cfg(test)]
+fn read_markdown_from_open_file(file: impl Read) -> std::io::Result<String> {
+    notify_search_markdown_read_for_test();
     let mut limited_reader = file.take(MAX_FILE_SIZE + 1);
     let mut buffer = Vec::new();
     limited_reader.read_to_end(&mut buffer)?;
@@ -768,6 +1176,44 @@ fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String
             "ファイルがUTF-8テキストではありません",
         )
     })
+}
+
+fn read_markdown_from_open_file_with_byte_budget(
+    file: impl Read,
+    read_limit: u64,
+    remaining_bytes: usize,
+) -> std::io::Result<SearchMarkdownRead> {
+    notify_search_markdown_read_for_test();
+    let mut limited_reader = file.take(read_limit);
+    let mut buffer = Vec::new();
+    limited_reader.read_to_end(&mut buffer)?;
+    if buffer.len() as u64 > MAX_FILE_SIZE {
+        return Err(file_too_large_error());
+    }
+    if buffer.len() > remaining_bytes {
+        return Ok(SearchMarkdownRead::ByteLimit);
+    }
+
+    let bytes_read = buffer.len();
+    match String::from_utf8(buffer) {
+        Ok(markdown) => Ok(SearchMarkdownRead::Markdown {
+            markdown,
+            bytes_read,
+        }),
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+                error.utf8_error().valid_up_to()
+            );
+            Ok(SearchMarkdownRead::Skipped {
+                error: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "ファイルがUTF-8テキストではありません",
+                ),
+                bytes_read,
+            })
+        }
+    }
 }
 
 fn file_too_large_error() -> std::io::Error {
@@ -2114,6 +2560,91 @@ mod tests {
         assert!(response.results.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_base実体差し替えを拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("a.md"), "old needle").unwrap();
+        let canonical = canonical_of(&base);
+
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("a.md"), "new needle").unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+        std::fs::rename(&replacement, &base).unwrap();
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("base directoryの実体差し替えは拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_base検証後の実体差し替えを拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("a.md"), "old needle").unwrap();
+        let canonical = canonical_of(&base);
+
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("a.md"), "new needle").unwrap();
+        let base_for_hook = base.clone();
+        let replacement_for_hook = replacement.clone();
+        let _guard = set_search_after_base_identity_validation_hook_for_test(move || {
+            std::fs::remove_dir_all(&base_for_hook).unwrap();
+            std::fs::rename(&replacement_for_hook, &base_for_hook).unwrap();
+        });
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("base directory検証後の実体差し替えも拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn test_search_directory_base_identity不明なら拒否する() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        let canonical = CanonicalPath::unknown_identity_for_test(dir.path());
+
+        let error = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .expect_err("identityを取得できないbase directory検索は拒否する");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
     #[test]
     fn test_search_directory_test用ファイル数limitは結果を破棄せず後続ファイルへ進まない() {
         let dir = tempfile::tempdir().unwrap();
@@ -2617,6 +3148,176 @@ mod tests {
         assert_eq!(response.results.len(), 2);
     }
 
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_予算内なら本文を読む() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        std::fs::write(&path, "needle").unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let result =
+            read_search_markdown_with_byte_budget(&base_dir, "a.md", 0, "needle".len()).unwrap();
+
+        match result {
+            SearchMarkdownRead::Markdown {
+                markdown,
+                bytes_read,
+            } => {
+                assert_eq!(markdown, "needle");
+                assert_eq!(bytes_read, "needle".len());
+            }
+            SearchMarkdownRead::Skipped { .. } => panic!("予算内UTF-8ファイルはskipしない"),
+            SearchMarkdownRead::ByteLimit => panic!("予算内ファイルは本文を読む必要がある"),
+        }
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_予算超過なら本文構築前に停止する() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.md");
+        std::fs::write(&path, "needle should not be searched").unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let result = read_search_markdown_with_byte_budget(
+            &base_dir,
+            "b.md",
+            "needle".len(),
+            "needle".len(),
+        )
+        .unwrap();
+
+        assert!(matches!(result, SearchMarkdownRead::ByteLimit));
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_metadata後に増えた本文も残り予算で打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.md");
+        std::fs::write(&path, "needle").unwrap();
+        let path_for_hook = path.clone();
+        let _guard = set_search_after_metadata_hook_for_test(move |relative| {
+            if relative == "growing.md" {
+                std::fs::write(&path_for_hook, "needle should not be fully read").unwrap();
+            }
+        });
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+        reset_search_markdown_read_count_for_test();
+
+        let result =
+            read_search_markdown_with_byte_budget(&base_dir, "growing.md", 0, "needle".len())
+                .unwrap();
+
+        assert!(matches!(result, SearchMarkdownRead::ByteLimit));
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "残り予算+1の限定読込でbyte-limitを検出する"
+        );
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_metadata失敗はerrを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let error =
+            read_search_markdown_with_byte_budget(&base_dir, "missing.md", 0, "needle".len())
+                .expect_err("metadata失敗は呼び出し側のskip経路へ渡す");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_byte_budget_単体ファイル上限超過はerrを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.md");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_FILE_SIZE + 1)
+            .unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let error =
+            read_search_markdown_with_byte_budget(&base_dir, "oversized.md", 0, "needle".len())
+                .expect_err("単体ファイル上限超過はskip経路へ渡す");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_resolve後にbase外symlinkへ差し替わっても本文を返さない() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a.md");
+        std::fs::write(&target, "harmless").unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside-secret").unwrap();
+        let canonical = canonical_of(dir.path());
+        let target_for_hook = target.clone();
+        let outside_target = outside.path().join("secret.md");
+        let _guard = set_search_after_resolve_hook_for_test(move |relative| {
+            if relative == "a.md" {
+                std::fs::remove_file(&target_for_hook).unwrap();
+                std::os::unix::fs::symlink(&outside_target, &target_for_hook).unwrap();
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "outside-secret",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_directory_canonicalize後に中間symlinkを除外dirへ差し替えても本文を返さない() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible_dir = dir.path().join("visible");
+        std::fs::create_dir_all(&visible_dir).unwrap();
+        std::fs::write(visible_dir.join("a.md"), "harmless").unwrap();
+        let excluded_dir = dir.path().join(".git");
+        std::fs::create_dir_all(&excluded_dir).unwrap();
+        std::fs::write(excluded_dir.join("a.md"), "git-secret").unwrap();
+        let canonical = canonical_of(dir.path());
+        let visible_for_hook = visible_dir.clone();
+        let excluded_for_hook = excluded_dir.clone();
+        let _guard = set_search_after_canonicalize_hook_for_test(move |relative| {
+            if relative == "visible/a.md" {
+                std::fs::remove_dir_all(&visible_for_hook).unwrap();
+                std::os::unix::fs::symlink(&excluded_for_hook, &visible_for_hook).unwrap();
+            }
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "git-secret",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+    }
+
     #[tokio::test]
     async fn test_search_directory_総読込バイト上限到達を明示し超過ファイルは検索しない() {
         let dir = tempfile::tempdir().unwrap();
@@ -2624,6 +3325,7 @@ mod tests {
         std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
 
         let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
         let response = search_directory_with_limits_blocking(
             &canonical,
             "needle",
@@ -2645,6 +3347,157 @@ mod tests {
         assert_eq!(response.searched_bytes, "needle".len());
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].file, "a.md");
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "byte-limit超過候補ファイルは本文読込前に打ち切る"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_byte予算超過候補は本文string構築前に打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        std::fs::write(
+            dir.path().join("b.md"),
+            [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'],
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("c.md"), "needle after invalid").unwrap();
+
+        let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: "needle".len(),
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.skipped_files, 0);
+        assert_eq!(response.searched_bytes, "needle".len());
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file, "a.md");
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "byte-limit超過候補は検索用本文Stringの構築前に打ち切る"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_directory_invalid_utf8も読込予算を消費しbyte_limitで停止する() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_bytes = [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'];
+        std::fs::write(dir.path().join("a.md"), invalid_bytes).unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle").unwrap();
+
+        let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: invalid_bytes.len(),
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "invalid UTF-8で消費した読込予算により次候補は本文読込前に打ち切る"
+        );
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_byte_limit到達ログは本文とqueryを含めない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "x").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle").unwrap();
+
+        let canonical = canonical_of(dir.path());
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 1,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+        assert!(logs_contain("ディレクトリ検索がbyte-limitに到達しました"));
+        assert!(logs_contain("searched_bytes=1"));
+        assert!(logs_contain("budgeted_bytes=1"));
+        assert!(logs_contain("max_bytes=1"));
+        assert!(!logs_contain("needle"));
+    }
+
+    #[test]
+    fn test_search_directory_byte予算超過判定直後にstaleならtruncationを返さない() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "needle").unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
+        let canonical = canonical_of(dir.path());
+        let current = Arc::new(AtomicU64::new(1));
+        let generation = SearchGeneration::new(1, Arc::clone(&current));
+        let cancellation = SearchCancellation::new(generation);
+        let _guard = set_search_after_byte_limit_hook_for_test(move || {
+            current.store(2, Ordering::Release);
+        });
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: "needle".len(),
+            },
+            cancellation,
+        )
+        .unwrap();
+
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+        assert!(response.truncated_reasons.is_empty());
     }
 
     #[test]

@@ -180,6 +180,38 @@ async fn test_ディレクトリモード_api_searchは結果数打ち切りをj
     );
     assert_eq!(json["results"].as_array().unwrap().len(), 100);
 }
+
+#[tokio::test]
+async fn test_ディレクトリモード_api_searchはbyte_limitをjsonで返す() {
+    let dir = tempfile::tempdir().unwrap();
+    let markdown = "a".repeat(8 * 1024 * 1024);
+    for index in 0..9 {
+        tokio::fs::write(dir.path().join(format!("large-{index:02}.md")), &markdown)
+            .await
+            .unwrap();
+    }
+
+    let state = build_dir_state(dir.path());
+    let (addr, _server) = spawn_test_server(state).await;
+    let resp = reqwest::get(format!("http://{}/api/search?q=missingneedle", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["truncated"].as_bool().unwrap());
+    assert_eq!(json["truncated_reasons"].as_array().unwrap().len(), 1);
+    assert_eq!(json["truncated_reasons"][0].as_str().unwrap(), "byte_limit");
+    assert_eq!(json["searched_files"].as_u64().unwrap(), 8);
+    assert_eq!(json["skipped_files"].as_u64().unwrap(), 0);
+    assert_eq!(
+        json["searched_bytes"].as_u64().unwrap(),
+        json["limits"]["max_bytes"].as_u64().unwrap()
+    );
+    assert!(json.get("budgeted_bytes").is_none());
+    assert!(json["results"].as_array().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_ディレクトリモード_検索apiは巨大ファイルをスキップする() {
     let tmp_dir = tempfile::tempdir().unwrap();

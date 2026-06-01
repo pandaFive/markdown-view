@@ -2,6 +2,7 @@
 name = "markdown-view"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Markdown workspace for local preview, notes, and search"
 
 [dependencies]
@@ -9,6 +10,8 @@ anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+cap-primitives = "4.0.2"
+cap-std = "4.0.2"
 clap = { version = "4", features = ["derive"] }
 notify = "8"
 notify-debouncer-mini = "0.6"

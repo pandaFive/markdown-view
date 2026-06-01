@@ -16,9 +16,106 @@ use crate::renderer::syntax_theme_css;
 pub(crate) const MAX_SEARCH_GENERATION_CLIENTS: usize = 128;
 pub(crate) const MAX_CONCURRENT_DIRECTORY_SEARCHES: usize = 4;
 
-/// canonicalize済みの絶対パス
+/// canonicalize済みの絶対パスと生成時のファイルシステム実体
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct CanonicalPath(PathBuf);
+pub(crate) struct CanonicalPath {
+    path: PathBuf,
+    identity: PathIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PathIdentity {
+    Known {
+        device: u64,
+        file: u64,
+    },
+    #[allow(dead_code)]
+    Unknown,
+}
+
+impl PathIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        identity_from_metadata(metadata)
+    }
+
+    fn from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> Self {
+        identity_from_cap_metadata(metadata)
+    }
+
+    fn matches_metadata(&self, metadata: &std::fs::Metadata) -> bool {
+        match self {
+            PathIdentity::Known { .. } => self == &Self::from_metadata(metadata),
+            PathIdentity::Unknown => false,
+        }
+    }
+
+    fn matches_cap_metadata(&self, metadata: &cap_primitives::fs::Metadata) -> bool {
+        match self {
+            PathIdentity::Known { .. } => self == &Self::from_cap_metadata(metadata),
+            PathIdentity::Unknown => false,
+        }
+    }
+
+    fn is_supported(&self) -> bool {
+        matches!(self, PathIdentity::Known { .. })
+    }
+}
+
+#[cfg(unix)]
+fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    PathIdentity::Known {
+        device: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn identity_from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> PathIdentity {
+    use cap_primitives::fs::MetadataExt;
+
+    PathIdentity::Known {
+        device: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
+#[cfg(windows)]
+fn identity_from_metadata(metadata: &std::fs::Metadata) -> PathIdentity {
+    use std::os::windows::fs::MetadataExt;
+
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => PathIdentity::Known {
+            device: u64::from(volume),
+            file: index,
+        },
+        _ => PathIdentity::Unknown,
+    }
+}
+
+#[cfg(windows)]
+fn identity_from_cap_metadata(metadata: &cap_primitives::fs::Metadata) -> PathIdentity {
+    use cap_primitives::fs::MetadataExt;
+
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => PathIdentity::Known {
+            device: u64::from(volume),
+            file: index,
+        },
+        _ => PathIdentity::Unknown,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity_from_metadata(_: &std::fs::Metadata) -> PathIdentity {
+    PathIdentity::Unknown
+}
+
+#[cfg(not(any(unix, windows)))]
+fn identity_from_cap_metadata(_: &cap_primitives::fs::Metadata) -> PathIdentity {
+    PathIdentity::Unknown
+}
 
 impl CanonicalPath {
     /// パスをcanonicalizeして`CanonicalPath`を生成する
@@ -27,12 +124,45 @@ impl CanonicalPath {
             .as_ref()
             .canonicalize()
             .map_err(CanonicalPathError::Canonicalize)?;
-        Ok(Self(canonical))
+        let metadata = std::fs::metadata(&canonical).map_err(CanonicalPathError::Metadata)?;
+        let identity = PathIdentity::from_metadata(&metadata);
+        if !identity.is_supported() {
+            return Err(CanonicalPathError::UnsupportedIdentity);
+        }
+        Ok(Self {
+            path: canonical,
+            identity,
+        })
     }
 
     /// `Path`として参照する
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// 現在のパスが生成時と同じファイルシステム実体を指しているか確認する
+    pub(crate) fn has_current_identity(&self) -> std::io::Result<bool> {
+        if !self.identity.is_supported() {
+            return Err(unsupported_identity_error());
+        }
+        let metadata = std::fs::metadata(&self.path)?;
+        Ok(self.identity.matches_metadata(&metadata))
+    }
+
+    /// 指定されたcapability metadataが生成時と同じファイルシステム実体を指しているか確認する
+    pub(crate) fn matches_cap_metadata_identity(
+        &self,
+        metadata: &cap_primitives::fs::Metadata,
+    ) -> bool {
+        self.identity.matches_cap_metadata(metadata)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unknown_identity_for_test(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().canonicalize().unwrap(),
+            identity: PathIdentity::Unknown,
+        }
     }
 }
 
@@ -47,6 +177,10 @@ impl AsRef<Path> for CanonicalPath {
 pub enum CanonicalPathError {
     /// canonicalize失敗
     Canonicalize(std::io::Error),
+    /// メタデータ取得失敗
+    Metadata(std::io::Error),
+    /// ファイルシステム実体IDを取得できない
+    UnsupportedIdentity,
 }
 
 impl std::fmt::Display for CanonicalPathError {
@@ -55,11 +189,33 @@ impl std::fmt::Display for CanonicalPathError {
             CanonicalPathError::Canonicalize(e) => {
                 write!(f, "パスの正規化に失敗しました: {}", e)
             }
+            CanonicalPathError::Metadata(e) => {
+                write!(f, "パスのメタデータ取得に失敗しました: {}", e)
+            }
+            CanonicalPathError::UnsupportedIdentity => {
+                write!(f, "このファイルシステムではパスの実体IDを取得できません")
+            }
         }
     }
 }
 
-impl std::error::Error for CanonicalPathError {}
+impl std::error::Error for CanonicalPathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CanonicalPathError::Canonicalize(error) | CanonicalPathError::Metadata(error) => {
+                Some(error)
+            }
+            CanonicalPathError::UnsupportedIdentity => None,
+        }
+    }
+}
+
+fn unsupported_identity_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "このファイルシステムではパスの実体IDを取得できません",
+    )
+}
 
 /// `AppMode` 構築エラー
 #[derive(Debug)]
@@ -81,7 +237,7 @@ impl std::fmt::Display for AppModeBuildError {
             AppModeBuildError::NotFile(path) => {
                 write!(
                     f,
-                    "単一ファイルモードにはファイルを指定してください: {}",
+                    "単一ファイルモードには通常ファイルかつ安全なファイル参照を指定してください: {}",
                     path.display()
                 )
             }
@@ -138,7 +294,10 @@ fn ensure_canonical_directory(canonical: &CanonicalPath) -> Result<(), AppModeBu
 
 #[derive(Debug, Clone)]
 enum AppModeKind {
-    SingleFile(CanonicalPath),
+    SingleFile {
+        target: CanonicalPath,
+        parent: CanonicalPath,
+    },
     Directory(CanonicalPath),
 }
 
@@ -160,7 +319,17 @@ impl AppMode {
                 ));
             }
         }
-        Ok(Self(AppModeKind::SingleFile(canonical)))
+        let parent_path = canonical
+            .as_path()
+            .parent()
+            .ok_or_else(|| AppModeBuildError::NotDirectory(canonical.as_path().to_path_buf()))?;
+        let parent =
+            CanonicalPath::try_from_path(parent_path).map_err(AppModeBuildError::CanonicalPath)?;
+        ensure_canonical_directory(&parent)?;
+        Ok(Self(AppModeKind::SingleFile {
+            target: canonical,
+            parent,
+        }))
     }
 
     /// ディレクトリモードを生成する（canonicalize済みディレクトリのみ許可）
@@ -174,7 +343,7 @@ impl AppMode {
     /// ベースディレクトリを返す（ファイルモードは親、ディレクトリモードはそのまま）
     pub fn base_dir(&self) -> &Path {
         match &self.0 {
-            AppModeKind::SingleFile(p) => p.as_path().parent().unwrap_or(p.as_path()),
+            AppModeKind::SingleFile { parent, .. } => parent.as_path(),
             AppModeKind::Directory(p) => p.as_path(),
         }
     }
@@ -182,7 +351,7 @@ impl AppMode {
     /// 単一ファイルモードのパスを返す（ディレクトリモードはNone）
     pub fn single_file(&self) -> Option<&Path> {
         match &self.0 {
-            AppModeKind::SingleFile(p) => Some(p.as_path()),
+            AppModeKind::SingleFile { target, .. } => Some(target.as_path()),
             AppModeKind::Directory(_) => None,
         }
     }
@@ -190,7 +359,7 @@ impl AppMode {
     /// ディレクトリモードのパスを返す（単一ファイルモードはNone）
     pub fn directory(&self) -> Option<&Path> {
         match &self.0 {
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
             AppModeKind::Directory(p) => Some(p.as_path()),
         }
     }
@@ -198,7 +367,15 @@ impl AppMode {
     /// 単一ファイルモードの正規化パスを返す。ディレクトリモードの場合はNone
     pub(crate) fn single_file_canonical(&self) -> Option<&CanonicalPath> {
         match &self.0 {
-            AppModeKind::SingleFile(path) => Some(path),
+            AppModeKind::SingleFile { target, .. } => Some(target),
+            AppModeKind::Directory(_) => None,
+        }
+    }
+
+    /// 単一ファイルモードの親ディレクトリ正規化パスを返す。ディレクトリモードの場合はNone
+    pub(crate) fn single_file_parent_canonical(&self) -> Option<&CanonicalPath> {
+        match &self.0 {
+            AppModeKind::SingleFile { parent, .. } => Some(parent),
             AppModeKind::Directory(_) => None,
         }
     }
@@ -206,7 +383,7 @@ impl AppMode {
     /// ディレクトリモードの正規化パスを返す。単一ファイルモードの場合はNone
     pub(crate) fn directory_canonical(&self) -> Option<&CanonicalPath> {
         match &self.0 {
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
             AppModeKind::Directory(path) => Some(path),
         }
     }
@@ -227,7 +404,7 @@ impl AppMode {
                 .strip_prefix(base.as_path())
                 .ok()
                 .map(relative_path_to_display_string),
-            AppModeKind::SingleFile(_) => None,
+            AppModeKind::SingleFile { .. } => None,
         }
     }
 }
@@ -482,10 +659,29 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    fn hard_link_or_skip(source: &Path, linked: &Path) -> bool {
+        assert!(source.exists(), "hardlink元は存在する必要があります");
+        assert!(
+            !linked.exists(),
+            "hardlink先は事前に存在しない必要があります"
+        );
+        match std::fs::hard_link(source, linked) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                eprintln!(
+                    "hardlink非対応環境のためテストをスキップします: kind={:?}",
+                    error.kind()
+                );
+                false
+            }
+            Err(error) => panic!("hardlink作成に失敗しました: kind={:?}", error.kind()),
+        }
+    }
 
     #[test]
     fn test_app_mode_new_single_file() {
@@ -497,6 +693,11 @@ mod tests {
         assert_eq!(mode.base_dir(), canonical.parent().unwrap());
         assert_eq!(mode.single_file(), Some(canonical.as_path()));
         assert!(mode.single_file_canonical().is_some());
+        assert_eq!(
+            mode.single_file_parent_canonical()
+                .map(CanonicalPath::as_path),
+            Some(canonical.parent().unwrap())
+        );
         assert!(mode.directory().is_none());
         assert!(mode.directory_canonical().is_none());
     }
@@ -511,6 +712,7 @@ mod tests {
         assert_eq!(mode.base_dir(), canonical.as_path());
         assert!(mode.single_file().is_none());
         assert!(mode.single_file_canonical().is_none());
+        assert!(mode.single_file_parent_canonical().is_none());
         assert_eq!(mode.directory(), Some(canonical.as_path()));
         assert!(mode.directory_canonical().is_some());
     }
@@ -556,7 +758,29 @@ mod tests {
     fn test_app_mode_new_single_file_ディレクトリ指定は拒否() {
         let dir = tempfile::tempdir().unwrap();
         let result = AppMode::new_single_file(dir.path());
-        assert!(matches!(result, Err(AppModeBuildError::NotFile(_))));
+        let error = result.expect_err("ディレクトリ指定は単一ファイルとして拒否する");
+        assert!(matches!(error, AppModeBuildError::NotFile(_)));
+        assert!(error.to_string().contains("通常ファイル"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tracing_test::traced_test]
+    #[test]
+    fn test_app_mode_new_single_file_hardlink済みファイルも許可する() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.md");
+        let linked = dir.path().join("linked.md");
+        std::fs::write(&source, "# source").unwrap();
+        if !hard_link_or_skip(&source, &linked) {
+            return;
+        }
+
+        let mode = AppMode::new_single_file(&linked)
+            .expect("hardlink済みMarkdownも通常ファイルとして許可する");
+        let canonical = linked.canonicalize().unwrap();
+
+        assert_eq!(mode.single_file(), Some(canonical.as_path()));
+        assert_eq!(mode.base_dir(), canonical.parent().unwrap());
     }
 
     #[test]
@@ -570,7 +794,7 @@ mod tests {
     fn test_ensure_canonical_file_metadata失敗はnotfileへ集約する() {
         let (_dir, file_path) = create_markdown_fixture("vanish.md", "# vanish");
         let canonical = file_path.canonicalize().unwrap();
-        let canonical_path = CanonicalPath(canonical.clone());
+        let canonical_path = CanonicalPath::try_from_path(&canonical).unwrap();
         std::fs::remove_file(&file_path).unwrap();
 
         let result = ensure_canonical_file(&canonical_path);
@@ -585,7 +809,7 @@ mod tests {
     fn test_ensure_canonical_directory_metadata失敗はnotdirectoryへ集約する() {
         let dir = tempfile::tempdir().unwrap();
         let canonical = dir.path().canonicalize().unwrap();
-        let canonical_path = CanonicalPath(canonical.clone());
+        let canonical_path = CanonicalPath::try_from_path(&canonical).unwrap();
         std::fs::remove_dir(dir.path()).unwrap();
 
         let result = ensure_canonical_directory(&canonical_path);
@@ -594,6 +818,18 @@ mod tests {
             result,
             Err(AppModeBuildError::NotDirectory(path)) if path == canonical
         ));
+    }
+
+    #[test]
+    fn test_canonical_path_unknown_identityは明示的にunsupportedを返す() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_path = CanonicalPath::unknown_identity_for_test(dir.path());
+
+        let error = canonical_path
+            .has_current_identity()
+            .expect_err("identity未取得状態は明示的なunsupportedとして扱う");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     }
 
     #[test]

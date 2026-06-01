@@ -78,6 +78,7 @@ pub(crate) fn sanitize_path_for_logging_escaped(path: &Path, base: &Path) -> Str
 }
 
 /// 監査ログ用 path を字句的に相対化し、制御文字を可視化する。
+#[cfg(test)]
 pub(crate) fn sanitize_path_for_logging_lexical_escaped(path: &Path, base: &Path) -> String {
     sanitize_path_for_logging_lexical(path, base)
         .as_ref()

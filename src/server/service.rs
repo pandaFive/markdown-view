@@ -302,8 +302,8 @@ mod tests {
     use tokio::sync::{broadcast, Mutex, MutexGuard};
 
     use crate::server::files::{
-        set_catalog_progress_hook_for_test, set_search_progress_hook_for_test, MockMemoFs, Op,
-        RouteTargetKind,
+        set_search_listing_progress_hook_for_test, set_search_progress_hook_for_test, MockMemoFs,
+        Op, RouteTargetKind,
     };
     use crate::server::messages::BroadcastMessage;
     use crate::server::state::{AppMode, AppState};
@@ -798,12 +798,11 @@ mod tests {
         }
         let state = Arc::new(create_directory_state(dir.path()));
         let fired = Arc::new(AtomicBool::new(false));
-        let base_dir = dir.path().to_path_buf();
-        let _hook = set_catalog_progress_hook_for_test({
+        let _hook = set_search_listing_progress_hook_for_test({
             let state = Arc::clone(&state);
             let fired = Arc::clone(&fired);
-            Arc::new(move |display_path| {
-                if display_path.starts_with(&base_dir) && !fired.swap(true, Ordering::SeqCst) {
+            Arc::new(move |relative| {
+                if relative == "note-00.md" && !fired.swap(true, Ordering::SeqCst) {
                     state.begin_search_generation("client-a", None).unwrap();
                 }
             })
@@ -1186,6 +1185,42 @@ mod tests {
             files,
             vec!["README.md".to_string(), "guide/setup.md".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_files_起動後base差し替えは拒否する() {
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("workspace");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("old.md"), "# Old").unwrap();
+        let state = create_directory_state(&base);
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::write(replacement.join("new.md"), "# New").unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+        std::fs::rename(&replacement, &base).unwrap();
+
+        let error = list_files(&state)
+            .await
+            .expect_err("起動時と異なるbase実体のファイル一覧は拒否する");
+
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_list_files_走査上限到達は不完全一覧を返さずエラーにする() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..20 {
+            std::fs::write(dir.path().join(format!("skip-{index:02}.txt")), "skip").unwrap();
+        }
+        let state = create_directory_state(dir.path());
+        let _guard = crate::server::files::set_catalog_limits_for_test(5, 100);
+
+        let error = list_files(&state)
+            .await
+            .expect_err("走査上限で不完全な一覧になった場合は成功扱いにしない");
+
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

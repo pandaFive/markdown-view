@@ -21,8 +21,10 @@ pub use self::content::MAX_FILE_SIZE;
 pub use self::resolve::{resolve_file, ResolveFileError};
 
 #[cfg(test)]
-pub(in crate::server) use self::catalog::set_catalog_progress_hook_for_test;
+pub(in crate::server) use self::catalog::set_catalog_limits_for_test;
 pub(in crate::server) use self::catalog::{list_markdown_files_from_canonical_base, MAX_FILE_LIST};
+#[cfg(test)]
+pub(in crate::server) use self::content::set_content_before_read_hook_for_test;
 pub(in crate::server) use self::content::{
     build_change_broadcast_message, build_change_error_log_message_without_receivers,
     build_lagged_recovery_message, load_initial_socket_update, load_route_update,
@@ -33,11 +35,13 @@ pub(in crate::server) use self::resolve::{
     resolve_route_target, ResolvedTarget, RouteTargetRequest,
 };
 #[cfg(test)]
-pub(in crate::server) use self::search::set_search_progress_hook_for_test;
-#[cfg(test)]
 pub(in crate::server) use self::search::MAX_SEARCH_QUERY_CHARS;
 pub(in crate::server) use self::search::{
     normalize_search_query, search_directory, SearchCancellation, SearchResponse,
+};
+#[cfg(test)]
+pub(in crate::server) use self::search::{
+    set_search_listing_progress_hook_for_test, set_search_progress_hook_for_test,
 };
 
 pub(in crate::server) async fn run_blocking_file_task<T, F>(
@@ -66,6 +70,8 @@ where
     })
 }
 
+#[cfg(test)]
+pub(in crate::server) use self::resolve::set_single_file_after_parent_verification_hook_for_test;
 #[cfg(test)]
 pub(in crate::server) use self::resolve::RouteTargetKind;
 #[cfg(test)]
