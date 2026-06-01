@@ -374,6 +374,11 @@ function clampSidebarSize(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function parseCssPixels(value: string): number {
+  var parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function setupSidebarResizing(sidebar: HTMLElement): void {
   var widthHandle = document.getElementById('sidebar-width-resizer');
   var contentHandles = document.querySelectorAll<HTMLElement>('.sidebar-content-resizer');
@@ -403,10 +408,14 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
   function setContentHeight(panel: HTMLElement, height: number): void {
     var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
     if (!content) return;
-    var panelRect = panel.getBoundingClientRect();
     var handle = panel.querySelector<HTMLElement>('.sidebar-content-resizer');
-    var reserved = handle ? handle.getBoundingClientRect().height : 0;
-    var maxContentHeight = Math.max(minContentHeight, Math.floor(panelRect.height - reserved));
+    var panelStyle = window.getComputedStyle(panel);
+    var handleStyle = handle ? window.getComputedStyle(handle) : null;
+    var panelPadding = parseCssPixels(panelStyle.paddingTop) + parseCssPixels(panelStyle.paddingBottom);
+    var reserved = handle && handleStyle
+      ? handle.getBoundingClientRect().height + parseCssPixels(handleStyle.marginTop) + parseCssPixels(handleStyle.marginBottom)
+      : 0;
+    var maxContentHeight = Math.max(minContentHeight, Math.floor(panel.clientHeight - panelPadding - reserved));
     var nextHeight = clampSidebarSize(height, minContentHeight, maxContentHeight);
     panel.style.setProperty('--sidebar-content-height', nextHeight + 'px');
     if (handle) {

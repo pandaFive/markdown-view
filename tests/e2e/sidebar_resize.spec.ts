@@ -1,5 +1,48 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import net from 'node:net';
 import { test, expect } from '@playwright/test';
 import { resetStandardFixtures } from './helpers';
+
+async function getUnusedPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('failed to allocate port')));
+        return;
+      }
+      server.close(() => resolve(address.port));
+    });
+  });
+}
+
+async function waitForSingleFileServer(port: number, server: ChildProcess): Promise<void> {
+  const url = `http://127.0.0.1:${port}/`;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    if (server.exitCode !== null) {
+      throw new Error(`single file server exited early: ${server.exitCode}`);
+    }
+    try {
+      const response = await fetch(url);
+      await response.arrayBuffer();
+      if (response.ok) return;
+    } catch (error) {}
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error('single file server did not become ready');
+}
+
+async function stopServer(server: ChildProcess): Promise<void> {
+  if (server.exitCode !== null || server.killed) return;
+  await new Promise<void>((resolve) => {
+    server.once('exit', () => resolve());
+    server.kill();
+    setTimeout(resolve, 5000);
+  });
+}
 
 test.beforeEach(async ({ page }) => {
   await resetStandardFixtures();
@@ -99,6 +142,13 @@ test('リサイズハンドルはキーボード操作と境界clampを反映す
   await expect.poll(async () => Math.round((await sidebar.boundingBox())?.width ?? 0)).toBe(260);
   await expect(widthHandle).toHaveAttribute('aria-valuenow', '260');
 
+  const maxWidth = Number(await widthHandle.getAttribute('aria-valuemax'));
+  for (let i = 0; i < 30; i++) {
+    await page.keyboard.press('ArrowRight');
+  }
+  await expect.poll(async () => Math.round((await sidebar.boundingBox())?.width ?? 0)).toBe(maxWidth);
+  await expect(widthHandle).toHaveAttribute('aria-valuenow', String(maxWidth));
+
   await contentHandle.focus();
   const initialHeight = (await content.boundingBox())!.height;
   await page.keyboard.press('ArrowUp');
@@ -109,6 +159,13 @@ test('リサイズハンドルはキーボード操作と境界clampを反映す
   }
   await expect.poll(async () => Math.round((await content.boundingBox())?.height ?? 0)).toBe(128);
   await expect(contentHandle).toHaveAttribute('aria-valuenow', '128');
+
+  const maxHeight = Number(await contentHandle.getAttribute('aria-valuemax'));
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press('ArrowDown');
+  }
+  await expect.poll(async () => Math.round((await content.boundingBox())?.height ?? 0)).toBe(maxHeight);
+  await expect(contentHandle).toHaveAttribute('aria-valuenow', String(maxHeight));
 });
 
 test('モバイル幅ではリサイズハンドルを非表示にする', async ({ page }) => {
@@ -262,4 +319,61 @@ test('pointer capture喪失時に幅と内部リサイズの状態を片付け�
   await expect(page.locator('#sidebar')).not.toHaveClass(/resizing/);
   expect(contentResult.heightAfterPointerMove).toBe(contentResult.heightAfterLostCapture);
   expect(contentResult.ariaAfterPointerMove).toBe(contentResult.ariaAfterLostCapture);
+});
+
+test('単一ファイルモードでも内部リサイズを操作できる', async ({ page }) => {
+  const port = await getUnusedPort();
+  const server = spawn('cargo', [
+    'run',
+    '--',
+    'tests/fixtures/e2e/README.md',
+    '--port',
+    String(port),
+    '--no-open'
+  ], {
+    cwd: process.cwd(),
+    stdio: 'ignore'
+  });
+
+  try {
+    await waitForSingleFileServer(port, server);
+    await page.goto(`http://127.0.0.1:${port}/`);
+    await expect(page.locator('#sidebar')).toBeVisible();
+    await expect(page.locator('#panel-files')).toHaveCount(0);
+
+    const tocPanel = page.locator('#panel-toc');
+    const tocContent = tocPanel.locator('.sidebar-resizable-content');
+    const tocHandle = tocPanel.locator('.sidebar-content-resizer');
+    await expect(tocPanel).toHaveClass(/active/);
+    await expect(tocHandle).toHaveAttribute('aria-valuemin', '128');
+    await expect(tocHandle).toHaveAttribute('aria-valuenow', /\d+/);
+    await expect(tocHandle).toHaveAttribute('aria-valuemax', /\d+/);
+
+    await tocHandle.focus();
+    const initialTocHeight = (await tocContent.boundingBox())!.height;
+    await page.keyboard.press('ArrowUp');
+    await expect.poll(async () => (await tocContent.boundingBox())?.height ?? 0).toBeLessThan(initialTocHeight);
+
+    await page.locator('.sidebar-tab[data-tab="memo"]').click();
+    const memoPanel = page.locator('#panel-memo');
+    const memoContent = memoPanel.locator('.sidebar-resizable-content');
+    const memoHandle = memoPanel.locator('.sidebar-content-resizer');
+    await expect(memoPanel).toHaveClass(/active/);
+    await expect(memoHandle).toHaveAttribute('aria-valuemin', '128');
+    await expect(memoHandle).toHaveAttribute('aria-valuenow', /\d+/);
+    await expect(memoHandle).toHaveAttribute('aria-valuemax', /\d+/);
+
+    const memoPanelBox = await memoPanel.boundingBox();
+    const memoHandleBox = await memoHandle.boundingBox();
+    expect(memoPanelBox).not.toBeNull();
+    expect(memoHandleBox).not.toBeNull();
+    await page.mouse.move(memoHandleBox!.x + memoHandleBox!.width / 2, memoHandleBox!.y + memoHandleBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(memoHandleBox!.x + memoHandleBox!.width / 2, memoPanelBox!.y + 180);
+    await page.mouse.up();
+
+    await expect.poll(async () => (await memoContent.boundingBox())?.height ?? 0).toBeLessThan(220);
+  } finally {
+    await stopServer(server);
+  }
 });

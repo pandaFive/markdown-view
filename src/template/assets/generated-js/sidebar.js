@@ -356,6 +356,10 @@ function setupTocTracking() {
 function clampSidebarSize(value, min, max) {
     return Math.min(Math.max(value, min), max);
 }
+function parseCssPixels(value) {
+    var parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
 function setupSidebarResizing(sidebar) {
     var widthHandle = document.getElementById('sidebar-width-resizer');
     var contentHandles = document.querySelectorAll('.sidebar-content-resizer');
@@ -383,10 +387,14 @@ function setupSidebarResizing(sidebar) {
         var content = panel.querySelector('.sidebar-resizable-content');
         if (!content)
             return;
-        var panelRect = panel.getBoundingClientRect();
         var handle = panel.querySelector('.sidebar-content-resizer');
-        var reserved = handle ? handle.getBoundingClientRect().height : 0;
-        var maxContentHeight = Math.max(minContentHeight, Math.floor(panelRect.height - reserved));
+        var panelStyle = window.getComputedStyle(panel);
+        var handleStyle = handle ? window.getComputedStyle(handle) : null;
+        var panelPadding = parseCssPixels(panelStyle.paddingTop) + parseCssPixels(panelStyle.paddingBottom);
+        var reserved = handle && handleStyle
+            ? handle.getBoundingClientRect().height + parseCssPixels(handleStyle.marginTop) + parseCssPixels(handleStyle.marginBottom)
+            : 0;
+        var maxContentHeight = Math.max(minContentHeight, Math.floor(panel.clientHeight - panelPadding - reserved));
         var nextHeight = clampSidebarSize(height, minContentHeight, maxContentHeight);
         panel.style.setProperty('--sidebar-content-height', nextHeight + 'px');
         if (handle) {
