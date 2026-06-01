@@ -1,41 +1,55 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import net from 'node:net';
 import { test, expect } from '@playwright/test';
 import { resetStandardFixtures } from './helpers';
 
 const singleFileServerReadyTimeoutMs = 45000;
 const singleFileServerStopTimeoutMs = 5000;
+const singleFileServerOutputLimit = 8000;
 
-async function getUnusedPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('failed to allocate port')));
-        return;
-      }
-      server.close(() => resolve(address.port));
-    });
-  });
+type SingleFileServerOutput = {
+  spawnError: string;
+  text: string;
+};
+
+function sanitizeServerOutput(value: string): string {
+  return value
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '?');
 }
 
-async function waitForSingleFileServer(port: number, server: ChildProcess): Promise<void> {
-  const url = `http://127.0.0.1:${port}/`;
+function appendServerOutput(output: SingleFileServerOutput, chunk: Buffer): void {
+  output.text = (output.text + sanitizeServerOutput(chunk.toString('utf8'))).slice(-singleFileServerOutputLimit);
+}
+
+function serverOutputSummary(output: SingleFileServerOutput): string {
+  return output.text || '(no output)';
+}
+
+async function waitForSingleFileServer(server: ChildProcess, output: SingleFileServerOutput): Promise<string> {
   const deadline = Date.now() + singleFileServerReadyTimeoutMs;
+  let lastFetchError = '';
   while (Date.now() < deadline) {
+    if (output.spawnError) {
+      throw new Error(`single file server spawn failed: ${output.spawnError} output=${serverOutputSummary(output)}`);
+    }
     if (server.exitCode !== null || server.signalCode !== null) {
-      throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'}`);
+      throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'} output=${serverOutputSummary(output)}`);
+    }
+    const url = output.text.match(/URL:\s+(http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+    if (!url) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      continue;
     }
     try {
       const response = await fetch(url);
       await response.arrayBuffer();
-      if (response.ok) return;
-    } catch (error) {}
+      if (response.ok) return url;
+    } catch (error) {
+      lastFetchError = error instanceof Error ? error.message : String(error);
+    }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error('single file server did not become ready');
+  throw new Error(`single file server did not become ready: fetch=${lastFetchError || 'not attempted'} output=${serverOutputSummary(output)}`);
 }
 
 function hasServerExited(server: ChildProcess): boolean {
@@ -212,6 +226,33 @@ test('モバイル幅ではリサイズハンドルを非表示にする', async
   await expect(page.locator('#panel-files .sidebar-content-resizer')).toBeHidden();
 });
 
+test('狭いモバイル幅でもサイドバー幅はモバイル契約を維持する', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.locator('#sidebar-open').click();
+
+  await expect(page.locator('#sidebar')).toHaveClass(/open/);
+  await expect.poll(async () => await page.locator('#sidebar').evaluate((element) => getComputedStyle(element).maxWidth)).toBe('320px');
+  await expect.poll(async () => Math.round((await page.locator('#sidebar').boundingBox())?.width ?? 0)).toBe(320);
+});
+
+test('内部リサイズのARIA最小値はCSSのmin-heightに追従する', async ({ page }) => {
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = '20px';
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  const content = page.locator('#panel-files .sidebar-resizable-content');
+  const handle = page.locator('#panel-files .sidebar-content-resizer');
+  await handle.focus();
+  for (let i = 0; i < 30; i++) {
+    await page.keyboard.press('ArrowUp');
+  }
+
+  await expect.poll(async () => Math.round((await content.boundingBox())?.height ?? 0)).toBe(160);
+  await expect(handle).toHaveAttribute('aria-valuemin', '160');
+  await expect(handle).toHaveAttribute('aria-valuenow', '160');
+});
+
 test('低いデスクトップ表示でもサイドバー下部へスクロール到達できる', async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 160 });
 
@@ -376,23 +417,28 @@ test('pointer capture喪失時に幅と内部リサイズの状態を片付け�
 
 test('単一ファイルモードでも内部リサイズを操作できる', async ({ page }) => {
   test.setTimeout(90000);
-  const port = await getUnusedPort();
+  const serverOutput: SingleFileServerOutput = { spawnError: '', text: '' };
   const server = spawn('cargo', [
     'run',
     '--',
     'tests/fixtures/e2e/README.md',
     '--port',
-    String(port),
+    '0',
     '--no-open'
   ], {
     detached: process.platform !== 'win32',
     cwd: process.cwd(),
-    stdio: 'ignore'
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  server.stdout?.on('data', (chunk: Buffer) => appendServerOutput(serverOutput, chunk));
+  server.stderr?.on('data', (chunk: Buffer) => appendServerOutput(serverOutput, chunk));
+  server.once('error', (error: Error) => {
+    serverOutput.spawnError = sanitizeServerOutput(error.message);
   });
 
   try {
-    await waitForSingleFileServer(port, server);
-    await page.goto(`http://127.0.0.1:${port}/`);
+    const url = await waitForSingleFileServer(server, serverOutput);
+    await page.goto(url);
     await expect(page.locator('#sidebar')).toBeVisible();
     await expect(page.locator('#panel-files')).toHaveCount(0);
 

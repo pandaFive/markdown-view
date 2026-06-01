@@ -366,7 +366,7 @@ function setupSidebarResizing(sidebar) {
     var desktopQuery = window.matchMedia('(min-width: 769px)');
     var minSidebarWidth = 260;
     var maxSidebarWidth = 560;
-    var minContentHeight = 128;
+    var minContentHeightFallback = 128;
     var widthStep = 24;
     var heightStep = 24;
     function isResizableViewport() {
@@ -389,7 +389,9 @@ function setupSidebarResizing(sidebar) {
             return;
         var handle = panel.querySelector('.sidebar-content-resizer');
         var panelStyle = window.getComputedStyle(panel);
+        var contentStyle = window.getComputedStyle(content);
         var handleStyle = handle ? window.getComputedStyle(handle) : null;
+        var minContentHeight = parseCssPixels(contentStyle.minHeight) || minContentHeightFallback;
         var panelPadding = parseCssPixels(panelStyle.paddingTop) + parseCssPixels(panelStyle.paddingBottom);
         var reserved = handle && handleStyle
             ? handle.getBoundingClientRect().height + parseCssPixels(handleStyle.marginTop) + parseCssPixels(handleStyle.marginBottom)
@@ -412,7 +414,7 @@ function setupSidebarResizing(sidebar) {
         if (!activePanel)
             return;
         var content = activePanel.querySelector('.sidebar-resizable-content');
-        setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeight);
+        setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeightFallback);
     }
     syncActiveSidebarResizePanel = syncActivePanelContentHeight;
     if (widthHandle) {
@@ -515,7 +517,7 @@ function setupSidebarResizing(sidebar) {
             event.preventDefault();
             var content = panel.querySelector('.sidebar-resizable-content');
             var delta = event.key === 'ArrowDown' ? heightStep : -heightStep;
-            setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeight) + delta);
+            setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeightFallback) + delta);
         });
     });
     window.addEventListener('resize', function () {

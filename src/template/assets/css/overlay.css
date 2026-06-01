@@ -63,6 +63,7 @@
     transform: translateX(-100%);
     width: min(88vw, 320px);
     min-width: min(88vw, 320px);
+    max-width: min(88vw, 320px);
     box-shadow: 2px 0 8px rgba(0,0,0,0.15);
   }
   .sidebar-width-resizer,

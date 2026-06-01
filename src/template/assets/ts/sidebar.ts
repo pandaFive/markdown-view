@@ -385,7 +385,7 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
   var desktopQuery = window.matchMedia('(min-width: 769px)');
   var minSidebarWidth = 260;
   var maxSidebarWidth = 560;
-  var minContentHeight = 128;
+  var minContentHeightFallback = 128;
   var widthStep = 24;
   var heightStep = 24;
 
@@ -410,7 +410,9 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
     if (!content) return;
     var handle = panel.querySelector<HTMLElement>('.sidebar-content-resizer');
     var panelStyle = window.getComputedStyle(panel);
+    var contentStyle = window.getComputedStyle(content);
     var handleStyle = handle ? window.getComputedStyle(handle) : null;
+    var minContentHeight = parseCssPixels(contentStyle.minHeight) || minContentHeightFallback;
     var panelPadding = parseCssPixels(panelStyle.paddingTop) + parseCssPixels(panelStyle.paddingBottom);
     var reserved = handle && handleStyle
       ? handle.getBoundingClientRect().height + parseCssPixels(handleStyle.marginTop) + parseCssPixels(handleStyle.marginBottom)
@@ -434,7 +436,7 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
     var activePanel = document.querySelector<HTMLElement>('.sidebar-panel.active');
     if (!activePanel) return;
     var content = activePanel.querySelector<HTMLElement>('.sidebar-resizable-content');
-    setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeight);
+    setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeightFallback);
   }
 
   syncActiveSidebarResizePanel = syncActivePanelContentHeight;
@@ -541,7 +543,7 @@ function setupSidebarResizing(sidebar: HTMLElement): void {
       event.preventDefault();
       var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
       var delta = event.key === 'ArrowDown' ? heightStep : -heightStep;
-      setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeight) + delta);
+      setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeightFallback) + delta);
     });
   });
 
