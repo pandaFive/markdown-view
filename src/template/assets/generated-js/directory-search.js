@@ -88,12 +88,13 @@ function createDirectorySearchController(ctx, deps) {
         ctx.search.pendingDirectoryNavigation = null;
     }
     function scheduleDirectorySearch(query) {
+        var generation = ++ctx.search.documentFetchGeneration;
         if (ctx.search.documentDebounceTimer) {
             clearTimeout(ctx.search.documentDebounceTimer);
         }
         ctx.search.documentDebounceTimer = setTimeout(function () {
             ctx.search.documentDebounceTimer = null;
-            runDirectorySearch(query);
+            runDirectorySearch(query, generation);
         }, 300);
     }
     function nextDirectorySearchSequence() {
@@ -301,8 +302,7 @@ function createDirectorySearchController(ctx, deps) {
             queryLength: queryLength
         };
     }
-    function runDirectorySearch(query) {
-        var generation = ++ctx.search.documentFetchGeneration;
+    function runDirectorySearch(query, generation) {
         var sequence = nextDirectorySearchSequence();
         var preferredSelection = getPreferredDirectorySearchSelection();
         ctx.search.currentDirectoryLoading = true;

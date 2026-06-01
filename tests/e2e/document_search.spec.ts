@@ -1550,6 +1550,121 @@ test('ディレクトリモードではlive update再検索中も既存検索結
   }
 });
 
+test('ディレクトリモードではlive update前の未完了検索応答で再検索中状態を解除しない', async ({ page }) => {
+  let searchCallCount = 0;
+  let releaseFirstSearch: () => void = function() {};
+  let releaseSecondSearch: () => void = function() {};
+  const firstSearchPending = new Promise<void>((resolve) => {
+    releaseFirstSearch = resolve;
+  });
+  const secondSearchPending = new Promise<void>((resolve) => {
+    releaseSecondSearch = resolve;
+  });
+  let firstSearchFulfilled: Promise<void> = Promise.resolve();
+  let secondSearchFulfilled: Promise<void> = Promise.resolve();
+
+  await page.route('**/api/search**', async (route) => {
+    searchCallCount += 1;
+    if (searchCallCount === 1) {
+      let markFulfilled: () => void = function() {};
+      firstSearchFulfilled = new Promise<void>((resolve) => {
+        markFulfilled = resolve;
+      });
+      await firstSearchPending;
+      try {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(directorySearchResponse({
+            query: 'alpha note',
+            results: [{
+              file: 'README.md',
+              file_match_index: 0,
+              before: '',
+              current: 'Alpha note stale result from before update.',
+              after: ''
+            }],
+            searched_files: 1,
+            skipped_files: 0
+          }))
+        });
+      } finally {
+        markFulfilled();
+      }
+      return;
+    }
+    let markFulfilled: () => void = function() {};
+    secondSearchFulfilled = new Promise<void>((resolve) => {
+      markFulfilled = resolve;
+    });
+    await secondSearchPending;
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(directorySearchResponse({
+          query: 'alpha note',
+          results: [{
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note fresh result after update.',
+            after: ''
+          }],
+          searched_files: 1,
+          skipped_files: 0
+        }))
+      });
+    } finally {
+      markFulfilled();
+    }
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears before update.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await setDocumentSearchQuery(page, 'alpha note');
+  await expect.poll(() => searchCallCount).toBe(1);
+
+  await updateContent(page, {
+    content: '<h1 id="readme">README</h1><p>Alpha note appears after update.</p>',
+    toc: '<ul><li><a href="#readme">README</a></li></ul>'
+  });
+
+  await expect(page.locator('#document-search-summary')).toHaveText('検索中...');
+  await expect(page.locator('#document-search-results')).toHaveAttribute('aria-busy', 'true');
+
+  try {
+    releaseFirstSearch();
+    await firstSearchFulfilled;
+
+    await expect(page.locator('#document-search-results')).toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#document-search-summary')).toHaveText('検索中...');
+    await expect(page.locator('#document-search-results')).not.toContainText('stale result');
+    await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+
+    await expect.poll(() => searchCallCount).toBe(2);
+    releaseSecondSearch();
+    await secondSearchFulfilled;
+
+    await expect(page.locator('#document-search-results')).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.locator('#document-search-summary')).toHaveText('1 / 1 件');
+    await expect(page.locator('#document-search-results')).toContainText('fresh result after update');
+    await expect(page.locator('#document-search-results')).not.toContainText('stale result');
+  } finally {
+    releaseFirstSearch();
+    releaseSecondSearch();
+    await firstSearchFulfilled;
+    await secondSearchFulfilled;
+  }
+});
+
 test('ディレクトリモードではlive update再検索失敗時に更新中状態を解除して検索語を露出しない', async ({ page }) => {
   const secretQuery = 'alpha note secret';
   const results = Array.from({ length: 24 }, (_, index) => ({

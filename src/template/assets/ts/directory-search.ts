@@ -103,12 +103,13 @@ function createDirectorySearchController(
   }
 
   function scheduleDirectorySearch(query: string): void {
+    var generation = ++ctx.search.documentFetchGeneration;
     if (ctx.search.documentDebounceTimer) {
       clearTimeout(ctx.search.documentDebounceTimer);
     }
     ctx.search.documentDebounceTimer = setTimeout(function() {
       ctx.search.documentDebounceTimer = null;
-      runDirectorySearch(query);
+      runDirectorySearch(query, generation);
     }, 300);
   }
 
@@ -350,8 +351,7 @@ function createDirectorySearchController(
     };
   }
 
-  function runDirectorySearch(query: string): void {
-    var generation = ++ctx.search.documentFetchGeneration;
+  function runDirectorySearch(query: string, generation: number): void {
     var sequence = nextDirectorySearchSequence();
     var preferredSelection = getPreferredDirectorySearchSelection();
     ctx.search.currentDirectoryLoading = true;
