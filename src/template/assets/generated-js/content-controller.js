@@ -183,6 +183,14 @@ function createContentController(ctx, deps) {
         restoreNavigationFromLocation: navigation.restoreContentNavigationFromLocation,
         openDocumentSearch: documentSearch.openDocumentSearch,
         moveDocumentSearch: documentSearch.moveDocumentSearch,
+        openDirectorySearchResult: directorySearch.openDirectorySearchResult,
+        getDirectorySearchStateForTest: function () {
+            return {
+                currentDirectoryIndex: ctx.search.currentDirectoryIndex,
+                currentFile: ctx.state.currentFile,
+                hasPendingDirectoryNavigation: Boolean(ctx.search.pendingDirectoryNavigation)
+            };
+        },
         applyDocumentSearchQuery: documentSearch.applyDocumentSearchQuery,
         clearDocumentSearchQuery: documentSearch.clearDocumentSearchQuery,
         renderDirectorySearchUi: directorySearch.renderDirectorySearchUi,

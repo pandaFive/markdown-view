@@ -17,11 +17,16 @@ function createDirectorySearchController(
     if (options.preserveScroll !== false && hadRenderedResults) {
       ctx.search.currentDirectoryResultsScrollTop = preservedScrollTop;
     }
+    if (ctx.search.currentDirectoryLoading) {
+      resultsEl.setAttribute('aria-busy', 'true');
+    } else {
+      resultsEl.removeAttribute('aria-busy');
+    }
     resultsEl.innerHTML = '';
 
     if (!ctx.search.currentDocumentQuery) return;
 
-    if (ctx.search.currentDirectoryLoading) {
+    if (ctx.search.currentDirectoryLoading && !ctx.search.currentDirectoryResults.length) {
       resultsEl.appendChild(deps.createDocumentSearchEmptyState('ディレクトリを検索しています。'));
       return;
     }
@@ -48,9 +53,11 @@ function createDirectorySearchController(
 
       button.type = 'button';
       button.className = 'document-search-result';
+      button.disabled = ctx.search.currentDirectoryLoading;
       button.dataset.resultIndex = String(index);
       button.classList.toggle('active', index === ctx.search.currentDirectoryIndex);
       button.setAttribute('aria-current', index === ctx.search.currentDirectoryIndex ? 'true' : 'false');
+      button.setAttribute('aria-disabled', ctx.search.currentDirectoryLoading ? 'true' : 'false');
       button.addEventListener('click', function() {
         openDirectorySearchResult(index);
       });
@@ -96,12 +103,13 @@ function createDirectorySearchController(
   }
 
   function scheduleDirectorySearch(query: string): void {
+    var generation = ++ctx.search.documentFetchGeneration;
     if (ctx.search.documentDebounceTimer) {
       clearTimeout(ctx.search.documentDebounceTimer);
     }
     ctx.search.documentDebounceTimer = setTimeout(function() {
       ctx.search.documentDebounceTimer = null;
-      runDirectorySearch(query);
+      runDirectorySearch(query, generation);
     }, 300);
   }
 
@@ -238,6 +246,69 @@ function createDirectorySearchController(
     );
   }
 
+  function hasSearchResponseLimits(data: unknown): boolean {
+    return Boolean(
+      data &&
+      typeof data === 'object' &&
+      !Array.isArray(data) &&
+      (data as SearchResponse).limits &&
+      typeof (data as SearchResponse).limits === 'object' &&
+      Number.isFinite((data as SearchResponse).limits.max_results) &&
+      Number.isFinite((data as SearchResponse).limits.max_files) &&
+      Number.isFinite((data as SearchResponse).limits.max_bytes)
+    );
+  }
+
+  function getFirstInvalidDirectorySearchResultIndex(results: unknown): number | null {
+    var invalidIndex;
+    if (!Array.isArray(results)) return null;
+    invalidIndex = results.findIndex(function(result: unknown): boolean {
+      return !isDirectorySearchResultItem(result);
+    });
+    return invalidIndex === -1 ? null : invalidIndex;
+  }
+
+  function getDirectorySearchContractInvalidFields(data: unknown): string[] {
+    var invalidFields: string[] = [];
+    var response = data as SearchResponse;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return ['response'];
+    }
+    if (response.query !== ctx.search.currentDocumentQuery) invalidFields.push('query');
+    if (!Array.isArray(response.results) ||
+      getFirstInvalidDirectorySearchResultIndex(response.results) !== null) {
+      invalidFields.push('results');
+    }
+    if (!Number.isFinite(response.searched_files)) invalidFields.push('searched_files');
+    if (!Number.isFinite(response.skipped_files)) invalidFields.push('skipped_files');
+    if (!Number.isFinite(response.searched_bytes)) invalidFields.push('searched_bytes');
+    if (typeof response.truncated !== 'boolean') invalidFields.push('truncated');
+    if (!Array.isArray(response.truncated_reasons) ||
+      !response.truncated_reasons.every(isSearchTruncationReason)) {
+      invalidFields.push('truncated_reasons');
+    }
+    if (!hasSearchResponseLimits(data)) invalidFields.push('limits');
+    return invalidFields;
+  }
+
+  function getDirectorySearchContractLogContext(data: unknown): Record<string, unknown> {
+    var response = data as SearchResponse;
+    var hasObjectResponse = Boolean(data && typeof data === 'object' && !Array.isArray(data));
+    var hasActualQuery = Boolean(hasObjectResponse && typeof response.query === 'string');
+    var hasResults = Boolean(hasObjectResponse && Array.isArray(response.results));
+    return {
+      expectedQueryLength: ctx.search.currentDocumentQuery.length,
+      actualQueryLength: hasActualQuery ? response.query.length : null,
+      hasActualQuery: hasActualQuery,
+      queryMatches: Boolean(hasActualQuery && response.query === ctx.search.currentDocumentQuery),
+      hasResults: hasResults,
+      resultsCount: hasResults ? response.results.length : null,
+      firstInvalidResultIndex: getFirstInvalidDirectorySearchResultIndex(hasResults ? response.results : null),
+      hasLimits: hasSearchResponseLimits(data),
+      invalidFields: getDirectorySearchContractInvalidFields(data)
+    };
+  }
+
   function applyDirectorySearchContractViolation(data: unknown): void {
     ctx.search.currentDirectoryLoading = false;
     ctx.search.currentDirectoryResults = [];
@@ -246,47 +317,48 @@ function createDirectorySearchController(
     ctx.search.currentDirectoryTruncated = false;
     ctx.search.currentDirectoryTruncatedReasons = [];
     ctx.search.currentDirectoryError = 'サーバー応答の解析に失敗しました。ページを再読み込みしてください。';
-    console.warn('[markdown-view] ディレクトリ検索応答の契約違反', {
-      expectedQuery: ctx.search.currentDocumentQuery,
-      actualQuery: data && typeof data === 'object' && !Array.isArray(data) ? (data as SearchResponse).query : null,
-      hasResults: Boolean(data && typeof data === 'object' && Array.isArray((data as SearchResponse).results))
-    });
+    console.warn('[markdown-view] ディレクトリ検索応答の契約違反', getDirectorySearchContractLogContext(data));
     renderDirectorySearchUi();
   }
 
-  function isApiErrorPayload(value: unknown): value is ApiErrorPayload {
-    return Boolean(value && typeof value === 'object' && !Array.isArray(value) &&
-      typeof (value as ApiErrorPayload).error === 'string' && (value as ApiErrorPayload).error);
-  }
-
   function throwDirectorySearchHttpError(resp: Response): Promise<never> {
-    return resp.text().then(function(body: string): never {
-      var err = deps.createHttpError(resp.status);
-      if (body) {
-        try {
-          var payload: unknown = JSON.parse(body);
-          if (isApiErrorPayload(payload)) {
-            err.userMessage = payload.error;
-          }
-        } catch (_parseError) {
-          // JSON でないエラー本文は既存の HTTP status 文言へフォールバックする。
-        }
-      }
-      throw err;
-    });
+    return Promise.reject(deps.createHttpError(resp.status));
   }
 
-  function runDirectorySearch(query: string): void {
-    var generation = ++ctx.search.documentFetchGeneration;
+  function getDirectorySearchDisplayErrorMessage(err: unknown): string {
+    var typedError = err as MarkdownViewHttpError | null;
+    if (typedError && typedError.type === 'http' && typedError.status === 400) {
+      return '検索クエリが不正か長すぎます。';
+    }
+    if (typedError && typedError.type === 'http' && typedError.status === 429) {
+      return '検索が混み合っています。少し待って再度お試しください。';
+    }
+    return deps.getFileFetchErrorMessage(err);
+  }
+
+  function getDirectorySearchErrorLogContext(
+    err: unknown,
+    sequence: number,
+    generation: number,
+    queryLength: number
+  ): Record<string, unknown> {
+    var typedError = err as MarkdownViewHttpError | null;
+    return {
+      type: typedError && typeof typedError.type === 'string' ? typedError.type : null,
+      status: typedError && typeof typedError.status === 'number' ? typedError.status : null,
+      errorName: err instanceof Error ? err.name : null,
+      hasUserMessage: Boolean(typedError && typeof typedError.userMessage === 'string' && typedError.userMessage),
+      sequence: sequence,
+      generation: generation,
+      queryLength: queryLength
+    };
+  }
+
+  function runDirectorySearch(query: string, generation: number): void {
     var sequence = nextDirectorySearchSequence();
     var preferredSelection = getPreferredDirectorySearchSelection();
     ctx.search.currentDirectoryLoading = true;
     ctx.search.currentDirectoryError = '';
-    ctx.search.currentDirectoryResults = [];
-    ctx.search.currentDirectoryIndex = -1;
-    ctx.search.currentDirectorySkippedFiles = 0;
-    ctx.search.currentDirectoryTruncated = false;
-    ctx.search.currentDirectoryTruncatedReasons = [];
     renderDirectorySearchUi();
 
     fetch('/api/search?q=' + encodeURIComponent(query), {
@@ -329,13 +401,19 @@ function createDirectorySearchController(
       ctx.search.currentDirectorySkippedFiles = 0;
       ctx.search.currentDirectoryTruncated = false;
       ctx.search.currentDirectoryTruncatedReasons = [];
-      ctx.search.currentDirectoryError = deps.getFileFetchErrorMessage(err);
-      console.error('[markdown-view] ディレクトリ検索エラー:', err);
+      ctx.search.currentDirectoryError = getDirectorySearchDisplayErrorMessage(err);
+      console.error('[markdown-view] ディレクトリ検索エラー:', getDirectorySearchErrorLogContext(
+        err,
+        sequence,
+        generation,
+        query.length
+      ));
       renderDirectorySearchUi();
     });
   }
 
   function openDirectorySearchResult(index: number): void {
+    if (ctx.search.currentDirectoryLoading) return;
     if (!ctx.search.currentDirectoryResults.length) return;
     var normalizedIndex = (index + ctx.search.currentDirectoryResults.length) % ctx.search.currentDirectoryResults.length;
     var result = ctx.search.currentDirectoryResults[normalizedIndex]!;
