@@ -1270,6 +1270,13 @@ enum SearchBlockVisitOutcome {
     StoppedByResultLimit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizedSearchBlockVisit {
+    Continue,
+    Stop(SearchBlockVisitOutcome),
+    Cancelled,
+}
+
 fn visit_search_blocks_until_cancelled(
     markdown: &str,
     is_cancelled: &impl Fn() -> bool,
@@ -1326,13 +1333,14 @@ fn visit_search_blocks_until_cancelled(
                     if item_depth == 0 {
                         block_depth = block_depth.saturating_sub(1);
                         if block_depth == 0 {
-                            if let Some(outcome) =
-                                visit_finalized_search_block(&current_block, &mut visitor)?
-                            {
-                                return Some(outcome);
+                            match visit_finalized_search_block(&current_block, &mut visitor) {
+                                FinalizedSearchBlockVisit::Continue => {
+                                    current_block.clear();
+                                    inline_html_depth = 0;
+                                }
+                                FinalizedSearchBlockVisit::Stop(outcome) => return Some(outcome),
+                                FinalizedSearchBlockVisit::Cancelled => return None,
                             }
-                            current_block.clear();
-                            inline_html_depth = 0;
                         }
                     }
                 } else if is_search_block_end_tag(&tag) {
@@ -1345,12 +1353,11 @@ fn visit_search_blocks_until_cancelled(
                     }
                     inline_html_depth = 0;
                     if block_depth == 0 {
-                        if let Some(outcome) =
-                            visit_finalized_search_block(&current_block, &mut visitor)?
-                        {
-                            return Some(outcome);
+                        match visit_finalized_search_block(&current_block, &mut visitor) {
+                            FinalizedSearchBlockVisit::Continue => current_block.clear(),
+                            FinalizedSearchBlockVisit::Stop(outcome) => return Some(outcome),
+                            FinalizedSearchBlockVisit::Cancelled => return None,
                         }
-                        current_block.clear();
                     }
                 }
 
@@ -1413,8 +1420,10 @@ fn visit_search_blocks_until_cancelled(
     }
 
     if block_depth == 0 {
-        if let Some(outcome) = visit_finalized_search_block(&current_block, &mut visitor)? {
-            return Some(outcome);
+        match visit_finalized_search_block(&current_block, &mut visitor) {
+            FinalizedSearchBlockVisit::Continue => {}
+            FinalizedSearchBlockVisit::Stop(outcome) => return Some(outcome),
+            FinalizedSearchBlockVisit::Cancelled => return None,
         }
     }
 
@@ -1424,17 +1433,17 @@ fn visit_search_blocks_until_cancelled(
 fn visit_finalized_search_block(
     text: &str,
     visitor: &mut impl FnMut(&SearchBlockEntry) -> SearchBlockVisit,
-) -> Option<Option<SearchBlockVisitOutcome>> {
+) -> FinalizedSearchBlockVisit {
     let Some(block) = build_search_block_entry(text) else {
-        return Some(None);
+        return FinalizedSearchBlockVisit::Continue;
     };
 
     match visitor(&block) {
-        SearchBlockVisit::Continue => Some(None),
+        SearchBlockVisit::Continue => FinalizedSearchBlockVisit::Continue,
         SearchBlockVisit::StopResultLimit => {
-            Some(Some(SearchBlockVisitOutcome::StoppedByResultLimit))
+            FinalizedSearchBlockVisit::Stop(SearchBlockVisitOutcome::StoppedByResultLimit)
         }
-        SearchBlockVisit::StopCancelled => None,
+        SearchBlockVisit::StopCancelled => FinalizedSearchBlockVisit::Cancelled,
     }
 }
 
@@ -2255,6 +2264,23 @@ mod tests {
             extracts < 6,
             "visitor停止後に後続blockのevent streamを読み進めすぎている: {extracts}"
         );
+    }
+
+    #[test]
+    fn test_visit_search_blocks_visitor_cancelledならnoneを返す() {
+        let mut visited = Vec::new();
+
+        let outcome = visit_search_blocks_until_cancelled(
+            "needle first.\n\nneedle second.\n\nneedle third.",
+            &|| false,
+            |block| {
+                visited.push(block.text.clone());
+                SearchBlockVisit::StopCancelled
+            },
+        );
+
+        assert!(outcome.is_none());
+        assert_eq!(visited, vec!["needle first.".to_string()]);
     }
 
     #[test]
