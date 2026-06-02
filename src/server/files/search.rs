@@ -1633,6 +1633,12 @@ struct StreamingFileSearchResult {
     outcome: SearchBlockVisitOutcome,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSearchBlock {
+    previous: Option<SearchBlockEntry>,
+    current: SearchBlockEntry,
+}
+
 #[allow(dead_code)]
 fn search_file_streaming_blocks(
     file: &str,
@@ -1649,7 +1655,8 @@ fn search_file_streaming_blocks(
     }
 
     let mut results = Vec::new();
-    let mut previous_blocks: VecDeque<SearchBlockEntry> = VecDeque::new();
+    let mut pending_block: Option<PendingSearchBlock> = None;
+    let mut previous_context: Option<SearchBlockEntry> = None;
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
@@ -1658,49 +1665,129 @@ fn search_file_streaming_blocks(
             return SearchBlockVisit::StopResultLimit;
         }
 
-        previous_blocks.push_back(block.clone());
-        while previous_blocks.len() > 2 {
-            previous_blocks.pop_front();
-        }
-        let blocks_for_context: Vec<SearchBlockEntry> = previous_blocks.iter().cloned().collect();
-        let context_block_index = blocks_for_context.len().saturating_sub(1);
+        if is_large_search_block(&block.text) {
+            if let Some(pending) = pending_block.take() {
+                let previous_current = pending.current.clone();
+                let Some(block_results) = flush_pending_search_block(
+                    file,
+                    pending,
+                    Some(block),
+                    &normalized_query,
+                    file_match_index,
+                    remaining_results.saturating_sub(results.len()),
+                    is_cancelled,
+                ) else {
+                    return SearchBlockVisit::StopCancelled;
+                };
+                file_match_index += block_results.len();
+                results.extend(block_results);
+                previous_context = Some(previous_current);
 
-        let block_results = if is_large_search_block(&block.text) {
-            find_matches_for_large_block(
+                if results.len() >= remaining_results {
+                    return SearchBlockVisit::StopResultLimit;
+                }
+            }
+
+            let Some(block_results) = find_matches_for_large_block(
                 file,
                 &block.text,
                 query,
                 file_match_index,
                 remaining_results.saturating_sub(results.len()),
                 is_cancelled,
-            )
+            ) else {
+                return SearchBlockVisit::StopCancelled;
+            };
+
+            file_match_index += block_results.len();
+            results.extend(block_results);
+
+            if results.len() >= remaining_results {
+                SearchBlockVisit::StopResultLimit
+            } else {
+                SearchBlockVisit::Continue
+            }
         } else {
-            find_matches_for_block_with_context(
-                file,
-                &blocks_for_context,
-                context_block_index,
-                &normalized_query,
-                file_match_index,
-                remaining_results.saturating_sub(results.len()),
-                is_cancelled,
-            )
-        };
+            let previous_for_new = if let Some(pending) = pending_block.take() {
+                let previous_current = pending.current.clone();
+                let Some(block_results) = flush_pending_search_block(
+                    file,
+                    pending,
+                    Some(block),
+                    &normalized_query,
+                    file_match_index,
+                    remaining_results.saturating_sub(results.len()),
+                    is_cancelled,
+                ) else {
+                    return SearchBlockVisit::StopCancelled;
+                };
 
-        let Some(block_results) = block_results else {
-            return SearchBlockVisit::StopCancelled;
-        };
+                file_match_index += block_results.len();
+                results.extend(block_results);
 
-        file_match_index += block_results.len();
-        results.extend(block_results);
+                if results.len() >= remaining_results {
+                    return SearchBlockVisit::StopResultLimit;
+                }
 
-        if results.len() >= remaining_results {
-            SearchBlockVisit::StopResultLimit
-        } else {
+                Some(previous_current)
+            } else {
+                previous_context.take()
+            };
+
+            pending_block = Some(PendingSearchBlock {
+                previous: previous_for_new,
+                current: block.clone(),
+            });
             SearchBlockVisit::Continue
         }
     })?;
 
+    if matches!(outcome, SearchBlockVisitOutcome::Completed) {
+        if let Some(pending) = pending_block.take() {
+            let block_results = flush_pending_search_block(
+                file,
+                pending,
+                None,
+                &normalized_query,
+                file_match_index,
+                remaining_results.saturating_sub(results.len()),
+                is_cancelled,
+            )?;
+            results.extend(block_results);
+        }
+    }
+
     Some(StreamingFileSearchResult { results, outcome })
+}
+
+fn flush_pending_search_block(
+    file: &str,
+    pending: PendingSearchBlock,
+    next: Option<&SearchBlockEntry>,
+    normalized_query: &str,
+    file_match_index_start: usize,
+    remaining_results: usize,
+    is_cancelled: &impl Fn() -> bool,
+) -> Option<Vec<SearchResultItem>> {
+    let mut blocks = Vec::with_capacity(3);
+    if let Some(previous) = pending.previous {
+        blocks.push(previous);
+    }
+    let block_index = blocks.len();
+    blocks.push(pending.current);
+    if let Some(next) = next {
+        blocks.push(next.clone());
+    }
+
+    find_matches_for_block_with_context(
+        file,
+        &blocks,
+        block_index,
+        normalized_query,
+        file_match_index_start,
+        remaining_results,
+        is_cancelled,
+    )
 }
 
 fn find_matches_for_block_with_context(
@@ -2497,6 +2584,24 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].file_match_index, 0);
         assert_eq!(result.results[0].current, "İstanbul is here.");
+    }
+
+    #[test]
+    fn test_search_file_streaming_blocks_前後contextは既存検索と一致する() {
+        let markdown = "before sentence.\n\nneedle here.\n\nafter sentence.";
+        let blocks = extract_search_blocks(markdown);
+
+        let expected =
+            find_matches_for_file("README.md", &blocks, "needle", 100, &|| false).unwrap();
+        let result =
+            search_file_streaming_blocks("README.md", markdown, "needle", 100, &|| false).unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(expected.len(), 1);
+        assert_eq!(result.results[0].before, expected[0].before);
+        assert_eq!(result.results[0].current, expected[0].current);
+        assert_eq!(result.results[0].after, expected[0].after);
+        assert_eq!(result.results[0].after, "after sentence.");
     }
 
     #[test]
