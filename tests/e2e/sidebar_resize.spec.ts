@@ -11,6 +11,7 @@ const singleFileServerOutputLimit = 8000;
 const execFileAsync = promisify(execFile);
 
 type SingleFileServerOutput = {
+  readyUrl?: string;
   spawnError: string;
   text: string;
 };
@@ -35,8 +36,17 @@ function errorMessage(error: unknown): string {
   return sanitizeServerOutput(error instanceof Error ? error.message : String(error));
 }
 
+function extractSingleFileServerUrl(value: string): string {
+  return value.match(/URL:\s+(http:\/\/127\.0\.0\.1:\d+)/)?.[1] || '';
+}
+
 function appendServerOutput(output: SingleFileServerOutput, chunk: Buffer): void {
-  output.text = (output.text + sanitizeServerOutput(chunk.toString('utf8'))).slice(-singleFileServerOutputLimit);
+  const combined = output.text + sanitizeServerOutput(chunk.toString('utf8'));
+  if (!output.readyUrl) {
+    const readyUrl = extractSingleFileServerUrl(combined);
+    if (readyUrl) output.readyUrl = readyUrl;
+  }
+  output.text = combined.slice(-singleFileServerOutputLimit);
 }
 
 function summarizeOutputText(value: string): string {
@@ -89,7 +99,7 @@ async function waitForSingleFileServer(server: ChildProcess, output: SingleFileS
     if (server.exitCode !== null || server.signalCode !== null) {
       throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'} output=${serverOutputSummary(output)}`);
     }
-    const url = output.text.match(/URL:\s+(http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+    const url = output.readyUrl || extractSingleFileServerUrl(output.text);
     if (!url) {
       await new Promise((resolve) => setTimeout(resolve, 200));
       continue;
@@ -238,6 +248,29 @@ test('waitForSingleFileServerはHTTPエラーのステータスを診断に含�
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;
+  }
+});
+
+test('waitForSingleFileServerは診断出力からURL行が切り詰められてもready URLを保持する', async () => {
+  const originalFetch = globalThis.fetch;
+  const output: SingleFileServerOutput = { spawnError: '', text: '' };
+  const server = fakeRunningServer();
+  let fetchedUrl = '';
+
+  appendServerOutput(output, Buffer.from(`URL: http://127.0.0.1:4123\n${'x'.repeat(singleFileServerOutputLimit + 100)}`));
+
+  try {
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchedUrl = String(url);
+      return new Response('ready', { status: 200 });
+    }) as typeof fetch;
+
+    await expect(waitForSingleFileServer(server, output)).resolves.toBe('http://127.0.0.1:4123');
+    expect(fetchedUrl).toBe('http://127.0.0.1:4123');
+    expect(output.text).not.toContain('URL: http://127.0.0.1:4123');
+    expect(output.readyUrl).toBe('http://127.0.0.1:4123');
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -428,6 +461,15 @@ test('狭いモバイル幅でもサイドバー幅はモバイル契約を維�
   await expect(page.locator('#sidebar')).toHaveClass(/open/);
   await expect.poll(async () => await page.locator('#sidebar').evaluate((element) => getComputedStyle(element).maxWidth)).toBe('320px');
   await expect.poll(async () => Math.round((await page.locator('#sidebar').boundingBox())?.width ?? 0)).toBe(320);
+});
+
+test('極小モバイル幅ではサイドバー幅に88vw側を使う', async ({ page }) => {
+  const viewportWidth = 320;
+  await page.setViewportSize({ width: viewportWidth, height: 720 });
+  await page.locator('#sidebar-open').click();
+
+  await expect(page.locator('#sidebar')).toHaveClass(/open/);
+  await expect.poll(async () => Math.round((await page.locator('#sidebar').boundingBox())?.width ?? 0)).toBe(Math.round(viewportWidth * 0.88));
 });
 
 test('デスクトップで縮めた内部高さはモバイル表示へ持ち越さない', async ({ page }) => {
@@ -634,6 +676,90 @@ test('pointer capture喪失時に幅と内部リサイズの状態を片付け�
   await expect(page.locator('#sidebar')).not.toHaveClass(/resizing/);
   expect(contentResult.heightAfterPointerMove).toBe(contentResult.heightAfterLostCapture);
   expect(contentResult.ariaAfterPointerMove).toBe(contentResult.ariaAfterLostCapture);
+});
+
+test('pointer cancel時に幅と内部リサイズの状態を片付ける', async ({ page }) => {
+  const widthResult = await page.evaluate(() => {
+    const sidebar = document.getElementById('sidebar');
+    const handle = document.getElementById('sidebar-width-resizer');
+    if (!sidebar || !handle) {
+      throw new Error('sidebar width handle not found');
+    }
+    handle.setPointerCapture = function(): void {};
+    handle.hasPointerCapture = function(): boolean { return true; };
+    handle.releasePointerCapture = function(): void {};
+    handle.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      clientX: 320,
+      pointerId: 201
+    }));
+    if (!sidebar.classList.contains('resizing')) {
+      throw new Error('width resize did not start');
+    }
+    handle.dispatchEvent(new PointerEvent('pointercancel', {
+      bubbles: true,
+      pointerId: 201
+    }));
+    const widthAfterCancel = sidebar.getBoundingClientRect().width;
+    const ariaAfterCancel = handle.getAttribute('aria-valuenow');
+    handle.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true,
+      clientX: widthAfterCancel + 160,
+      pointerId: 201
+    }));
+
+    return {
+      ariaAfterCancel,
+      ariaAfterPointerMove: handle.getAttribute('aria-valuenow'),
+      widthAfterCancel,
+      widthAfterPointerMove: sidebar.getBoundingClientRect().width
+    };
+  });
+  await expect(page.locator('#sidebar')).not.toHaveClass(/resizing/);
+  expect(widthResult.widthAfterPointerMove).toBe(widthResult.widthAfterCancel);
+  expect(widthResult.ariaAfterPointerMove).toBe(widthResult.ariaAfterCancel);
+
+  const contentResult = await page.evaluate(() => {
+    const sidebar = document.getElementById('sidebar');
+    const handle = document.querySelector<HTMLElement>('#panel-files .sidebar-content-resizer');
+    const panel = document.getElementById('panel-files');
+    const content = document.querySelector<HTMLElement>('#panel-files .sidebar-resizable-content');
+    if (!sidebar || !handle || !panel || !content) {
+      throw new Error('sidebar content handle not found');
+    }
+    handle.setPointerCapture = function(): void {};
+    handle.hasPointerCapture = function(): boolean { return true; };
+    handle.releasePointerCapture = function(): void {};
+    handle.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      clientY: panel.getBoundingClientRect().top + 180,
+      pointerId: 202
+    }));
+    if (!sidebar.classList.contains('resizing')) {
+      throw new Error('content resize did not start');
+    }
+    handle.dispatchEvent(new PointerEvent('pointercancel', {
+      bubbles: true,
+      pointerId: 202
+    }));
+    const heightAfterCancel = content.getBoundingClientRect().height;
+    const ariaAfterCancel = handle.getAttribute('aria-valuenow');
+    handle.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true,
+      clientY: panel.getBoundingClientRect().top + heightAfterCancel + 120,
+      pointerId: 202
+    }));
+
+    return {
+      ariaAfterCancel,
+      ariaAfterPointerMove: handle.getAttribute('aria-valuenow'),
+      heightAfterCancel,
+      heightAfterPointerMove: content.getBoundingClientRect().height
+    };
+  });
+  await expect(page.locator('#sidebar')).not.toHaveClass(/resizing/);
+  expect(contentResult.heightAfterPointerMove).toBe(contentResult.heightAfterCancel);
+  expect(contentResult.ariaAfterPointerMove).toBe(contentResult.ariaAfterCancel);
 });
 
 test('単一ファイルモードでも内部リサイズを操作できる', async ({ page }) => {
