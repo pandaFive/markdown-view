@@ -2642,9 +2642,10 @@ mod tests {
             SearchBlockVisitOutcome::StoppedByResultLimit
         );
         assert_eq!(result.results.len(), 3);
+        let expected_max_scan = (0..3).map(|_| "needle ").collect::<String>().len();
         assert!(
-            scanned_bytes.get() < block_text.len(),
-            "巨大many-matchでresult-limit後もtailを走査している: {} bytes",
+            scanned_bytes.get() <= expected_max_scan,
+            "result-limit後に余分な巨大block tailを走査している: {} bytes",
             scanned_bytes.get()
         );
     }
@@ -2653,7 +2654,7 @@ mod tests {
     fn test_search_file_streaming_blocks_巨大ブロック正規化中staleならnoneを返す() {
         let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1));
         let cancel_checks = Cell::new(0usize);
-        reset_search_context_build_count_for_test();
+        reset_search_clip_scan_bytes_for_test();
 
         let result = search_file_streaming_blocks("many.md", &block_text, "needle", 1, &|| {
             let next = cancel_checks.get() + 1;
@@ -2662,7 +2663,8 @@ mod tests {
         });
 
         assert!(result.is_none());
-        assert_eq!(search_context_build_count_for_test(), 0);
+        assert!(cancel_checks.get() >= 3);
+        assert_eq!(search_clip_scan_bytes_for_test(), 0);
     }
 
     #[test]
