@@ -179,6 +179,19 @@ fn search_context_build_count_for_test() -> usize {
 }
 
 #[cfg(test)]
+fn reset_search_block_extract_count_for_test() -> usize {
+    SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_block_extract_count_for_test() -> usize {
+    SEARCH_BLOCK_EXTRACT_COUNT_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 fn reset_search_markdown_read_count_for_test() -> usize {
     SEARCH_MARKDOWN_READ_COUNT_FOR_TEST.with(|count| {
         count.set(0);
@@ -1234,6 +1247,34 @@ fn extract_search_blocks_until_cancelled(
     is_cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<SearchBlockEntry>> {
     let mut blocks = Vec::new();
+    let outcome = visit_search_blocks_until_cancelled(markdown, is_cancelled, |block| {
+        blocks.push(block.clone());
+        SearchBlockVisit::Continue
+    })?;
+    debug_assert_eq!(outcome, SearchBlockVisitOutcome::Completed);
+    Some(blocks)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchBlockVisit {
+    Continue,
+    #[allow(dead_code)]
+    StopResultLimit,
+    #[allow(dead_code)]
+    StopCancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchBlockVisitOutcome {
+    Completed,
+    StoppedByResultLimit,
+}
+
+fn visit_search_blocks_until_cancelled(
+    markdown: &str,
+    is_cancelled: &impl Fn() -> bool,
+    mut visitor: impl FnMut(&SearchBlockEntry) -> SearchBlockVisit,
+) -> Option<SearchBlockVisitOutcome> {
     let mut current_block = String::new();
     let mut block_depth = 0usize;
     let mut item_depth = 0usize;
@@ -1285,7 +1326,11 @@ fn extract_search_blocks_until_cancelled(
                     if item_depth == 0 {
                         block_depth = block_depth.saturating_sub(1);
                         if block_depth == 0 {
-                            finalize_search_block(&mut blocks, &current_block);
+                            if let Some(outcome) =
+                                visit_finalized_search_block(&current_block, &mut visitor)?
+                            {
+                                return Some(outcome);
+                            }
                             current_block.clear();
                             inline_html_depth = 0;
                         }
@@ -1300,7 +1345,11 @@ fn extract_search_blocks_until_cancelled(
                     }
                     inline_html_depth = 0;
                     if block_depth == 0 {
-                        finalize_search_block(&mut blocks, &current_block);
+                        if let Some(outcome) =
+                            visit_finalized_search_block(&current_block, &mut visitor)?
+                        {
+                            return Some(outcome);
+                        }
                         current_block.clear();
                     }
                 }
@@ -1364,10 +1413,29 @@ fn extract_search_blocks_until_cancelled(
     }
 
     if block_depth == 0 {
-        finalize_search_block(&mut blocks, &current_block);
+        if let Some(outcome) = visit_finalized_search_block(&current_block, &mut visitor)? {
+            return Some(outcome);
+        }
     }
 
-    Some(blocks)
+    Some(SearchBlockVisitOutcome::Completed)
+}
+
+fn visit_finalized_search_block(
+    text: &str,
+    visitor: &mut impl FnMut(&SearchBlockEntry) -> SearchBlockVisit,
+) -> Option<Option<SearchBlockVisitOutcome>> {
+    let Some(block) = build_search_block_entry(text) else {
+        return Some(None);
+    };
+
+    match visitor(&block) {
+        SearchBlockVisit::Continue => Some(None),
+        SearchBlockVisit::StopResultLimit => {
+            Some(Some(SearchBlockVisitOutcome::StoppedByResultLimit))
+        }
+        SearchBlockVisit::StopCancelled => None,
+    }
 }
 
 fn should_capture_text(
@@ -1456,19 +1524,19 @@ fn is_search_block_end_tag(tag: &TagEnd) -> bool {
     )
 }
 
-fn finalize_search_block(blocks: &mut Vec<SearchBlockEntry>, text: &str) {
+fn build_search_block_entry(text: &str) -> Option<SearchBlockEntry> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return;
+        return None;
     }
-    blocks.push(SearchBlockEntry {
+    Some(SearchBlockEntry {
         text: trimmed.to_string(),
         sentences: if is_large_search_block(trimmed) {
             Vec::new()
         } else {
             split_text_into_sentence_ranges(trimmed)
         },
-    });
+    })
 }
 
 fn find_matches_for_file(
@@ -2141,6 +2209,77 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "parent");
         assert_eq!(blocks[1].text, "sibling beta");
+    }
+
+    #[test]
+    fn test_visit_search_blocks_抽出契約を維持する() {
+        let mut visited = Vec::new();
+
+        let outcome = visit_search_blocks_until_cancelled(
+            "# 表示見出し {#custom-id}\n\n本文 [link](https://example.com) visible\n\n```sh\nignored\n```\n\n| col |\n| --- |\n| セル |\n",
+            &|| false,
+            |block| {
+                visited.push(block.clone());
+                SearchBlockVisit::Continue
+            },
+        )
+        .expect("キャンセルなしのvisitorは完了する");
+
+        assert_eq!(outcome, SearchBlockVisitOutcome::Completed);
+        assert_eq!(visited.len(), 4);
+        assert_eq!(visited[0].text, "表示見出し");
+        assert_eq!(visited[1].text, "本文  visible");
+        assert_eq!(visited[2].text, "col");
+        assert_eq!(visited[3].text, "セル");
+    }
+
+    #[test]
+    fn test_visit_search_blocks_visitor停止後は後続blockを抽出しない() {
+        let mut visited = Vec::new();
+        let before_extracts = reset_search_block_extract_count_for_test();
+
+        let outcome = visit_search_blocks_until_cancelled(
+            "needle first.\n\nneedle second.\n\nneedle third.",
+            &|| false,
+            |block| {
+                visited.push(block.text.clone());
+                SearchBlockVisit::StopResultLimit
+            },
+        )
+        .expect("visitor停止はキャンセルではない");
+        let extracts = search_block_extract_count_for_test() - before_extracts;
+
+        assert_eq!(outcome, SearchBlockVisitOutcome::StoppedByResultLimit);
+        assert_eq!(visited, vec!["needle first.".to_string()]);
+        assert!(
+            extracts < 6,
+            "visitor停止後に後続blockのevent streamを読み進めすぎている: {extracts}"
+        );
+    }
+
+    #[test]
+    fn test_visit_search_blocks_途中staleならnoneを返す() {
+        let checks = Cell::new(0usize);
+        let mut visited = Vec::new();
+
+        let outcome = visit_search_blocks_until_cancelled(
+            "# title\n\nfirst paragraph\n\nsecond paragraph",
+            &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 3
+            },
+            |block| {
+                visited.push(block.text.clone());
+                SearchBlockVisit::Continue
+            },
+        );
+
+        assert!(outcome.is_none());
+        assert!(
+            visited.len() <= 1,
+            "stale後にblock visitorが処理を続けている: {visited:?}"
+        );
     }
 
     #[test]
