@@ -7,6 +7,7 @@ import { resetStandardFixtures } from './helpers';
 
 const singleFileServerReadyTimeoutMs = 45000;
 const singleFileServerStopTimeoutMs = 5000;
+const singleFileServerFetchTimeoutMs = 5000;
 const singleFileServerOutputLimit = 8000;
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +61,10 @@ function serverOutputSummary(output: SingleFileServerOutput): string {
   return summarizeOutputText(output.text);
 }
 
+function readyUrlSummary(output: SingleFileServerOutput): string {
+  return output.readyUrl || extractSingleFileServerUrl(output.text) || '(none)';
+}
+
 function fakeRunningServer(kill: () => boolean = () => true): ChildProcess {
   return Object.assign(new EventEmitter(), {
     exitCode: null,
@@ -89,15 +94,36 @@ async function buildSingleFileServerBinary(): Promise<string> {
   return singleFileServerBinaryPath();
 }
 
-async function waitForSingleFileServer(server: ChildProcess, output: SingleFileServerOutput): Promise<string> {
+async function fetchSingleFileServerReady(url: string, timeoutMs: number = singleFileServerFetchTimeoutMs): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`fetch timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitForSingleFileServer(
+  server: ChildProcess,
+  output: SingleFileServerOutput,
+  fetchTimeoutMs: number = singleFileServerFetchTimeoutMs
+): Promise<string> {
   const deadline = Date.now() + singleFileServerReadyTimeoutMs;
   let lastFetchError = '';
   while (Date.now() < deadline) {
     if (output.spawnError) {
-      throw new Error(`single file server spawn failed: ${output.spawnError} output=${serverOutputSummary(output)}`);
+      throw new Error(`single file server spawn failed: ${output.spawnError} readyUrl=${readyUrlSummary(output)} output=${serverOutputSummary(output)}`);
     }
     if (server.exitCode !== null || server.signalCode !== null) {
-      throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'} output=${serverOutputSummary(output)}`);
+      throw new Error(`single file server exited early: code=${server.exitCode ?? 'null'} signal=${server.signalCode ?? 'null'} readyUrl=${readyUrlSummary(output)} output=${serverOutputSummary(output)}`);
     }
     const url = output.readyUrl || extractSingleFileServerUrl(output.text);
     if (!url) {
@@ -105,7 +131,7 @@ async function waitForSingleFileServer(server: ChildProcess, output: SingleFileS
       continue;
     }
     try {
-      const response = await fetch(url);
+      const response = await fetchSingleFileServerReady(url, fetchTimeoutMs);
       if (!response.ok) {
         lastFetchError = `HTTP ${response.status} ${response.statusText}`;
       } else {
@@ -117,7 +143,7 @@ async function waitForSingleFileServer(server: ChildProcess, output: SingleFileS
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error(`single file server did not become ready: fetch=${lastFetchError || 'not attempted'} output=${serverOutputSummary(output)}`);
+  throw new Error(`single file server did not become ready: fetch=${lastFetchError || 'not attempted'} readyUrl=${readyUrlSummary(output)} output=${serverOutputSummary(output)}`);
 }
 
 function hasServerExited(server: ChildProcess): boolean {
@@ -244,7 +270,42 @@ test('waitForSingleFileServerはHTTPエラーのステータスを診断に含�
         statusText: 'Service Unavailable'
       });
     }) as typeof fetch;
-    await expect(waitForSingleFileServer(server, output)).rejects.toThrow(/fetch=HTTP 503 Service Unavailable/);
+    await expect(waitForSingleFileServer(server, output)).rejects.toThrow(/fetch=HTTP 503 Service Unavailable[\s\S]*readyUrl=http:\/\/127\.0\.0\.1:4123/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+  }
+});
+
+test('waitForSingleFileServerはfetch timeoutとready URLを診断に含める', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  const output: SingleFileServerOutput = { spawnError: '', text: '' };
+  const server = fakeRunningServer();
+  let now = originalDateNow();
+  let sawAbortSignal = false;
+
+  appendServerOutput(output, Buffer.from(`URL: http://127.0.0.1:4123\n${'x'.repeat(singleFileServerOutputLimit + 100)}`));
+
+  try {
+    Date.now = () => now;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error('fetch signal missing');
+      }
+      sawAbortSignal = true;
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          now += singleFileServerReadyTimeoutMs + 1;
+          reject(new DOMException('aborted', 'AbortError'));
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    await expect(waitForSingleFileServer(server, output, 1)).rejects.toThrow(/fetch=fetch timeout after 1ms[\s\S]*readyUrl=http:\/\/127\.0\.0\.1:4123/);
+    expect(sawAbortSignal).toBe(true);
+    expect(output.text).not.toContain('URL: http://127.0.0.1:4123');
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;
