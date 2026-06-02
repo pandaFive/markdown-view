@@ -100,7 +100,11 @@ async function fetchSingleFileServerReady(url: string, timeoutMs: number = singl
     controller.abort();
   }, timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: controller.signal });
+    if (response.ok) {
+      await response.arrayBuffer();
+    }
+    return response;
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(`fetch timeout after ${timeoutMs}ms`);
@@ -135,7 +139,6 @@ async function waitForSingleFileServer(
       if (!response.ok) {
         lastFetchError = `HTTP ${response.status} ${response.statusText}`;
       } else {
-        await response.arrayBuffer();
         return url;
       }
     } catch (error) {
@@ -231,16 +234,7 @@ async function withStoppedServer<T>(
   }
 }
 
-test.beforeEach(async ({ page }) => {
-  await resetStandardFixtures();
-  await page.goto('/');
-  await expect(page.locator('#sidebar')).toBeVisible();
-});
-
-test.afterEach(async () => {
-  await resetStandardFixtures();
-});
-
+test.describe('single file server diagnostics', () => {
 test('command output summaryは長いstdout/stderrを末尾に制限する', () => {
   const error = new Error('build failed') as CommandError;
   error.stdout = `stdout-${'a'.repeat(singleFileServerOutputLimit)}`;
@@ -295,12 +289,14 @@ test('waitForSingleFileServerはfetch timeoutとready URLを診断に含める',
         throw new Error('fetch signal missing');
       }
       sawAbortSignal = true;
-      return await new Promise<Response>((_resolve, reject) => {
-        signal.addEventListener('abort', () => {
-          now += singleFileServerReadyTimeoutMs + 1;
-          reject(new DOMException('aborted', 'AbortError'));
-        }, { once: true });
-      });
+      return new Response(new ReadableStream({
+        start(controller): void {
+          signal.addEventListener('abort', () => {
+            now += singleFileServerReadyTimeoutMs + 1;
+            controller.error(new DOMException('aborted', 'AbortError'));
+          }, { once: true });
+        }
+      }), { status: 200 });
     }) as typeof fetch;
 
     await expect(waitForSingleFileServer(server, output, 1)).rejects.toThrow(/fetch=fetch timeout after 1ms[\s\S]*readyUrl=http:\/\/127\.0\.0\.1:4123/);
@@ -357,6 +353,19 @@ test('withStoppedServerは本体失敗とcleanup失敗をAggregateErrorのmessag
     ],
     message: expect.stringMatching(/run=assertion failed[\s\S]*cleanup=single file server did not stop/)
   });
+});
+
+});
+
+test.describe('sidebar resize UI', () => {
+test.beforeEach(async ({ page }) => {
+  await resetStandardFixtures();
+  await page.goto('/');
+  await expect(page.locator('#sidebar')).toBeVisible();
+});
+
+test.afterEach(async () => {
+  await resetStandardFixtures();
 });
 
 test('サイドバー幅はドラッグで伸び縮みできる', async ({ page }) => {
@@ -881,4 +890,5 @@ test('単一ファイルモードでも内部リサイズを操作できる', as
 
     await expect.poll(async () => (await memoContent.boundingBox())?.height ?? 0).toBeLessThan(220);
   });
+});
 });
