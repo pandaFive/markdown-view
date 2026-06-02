@@ -1001,22 +1001,24 @@ fn search_directory_with_limits_blocking(
             stats.mark_truncated(SearchTruncationReason::Result);
             break;
         }
-        let Some(blocks) =
-            extract_search_blocks_until_cancelled(&markdown, &|| cancellation.is_cancelled())
-        else {
-            log_search_cancelled("extract_blocks", &stats, results.len());
+        let Some(file_search) = search_file_streaming_blocks(
+            &relative,
+            &markdown,
+            &query,
+            remaining_results,
+            &|| cancellation.is_cancelled(),
+        ) else {
+            log_search_cancelled("streaming_find_matches", &stats, results.len());
             results.clear();
             break;
         };
-        let Some(file_results) =
-            find_matches_for_file(&relative, &blocks, &query, remaining_results, &|| {
-                cancellation.is_cancelled()
-            })
-        else {
-            log_search_cancelled("find_matches", &stats, results.len());
-            results.clear();
-            break;
-        };
+        let file_results = file_search.results;
+        if matches!(
+            file_search.outcome,
+            SearchBlockVisitOutcome::StoppedByResultLimit
+        ) {
+            stats.mark_truncated(SearchTruncationReason::Result);
+        }
         for item in file_results {
             results.push(item);
             if results.len() >= limits.max_results {
@@ -1242,6 +1244,7 @@ fn extract_search_blocks(markdown: &str) -> Vec<SearchBlockEntry> {
         .expect("キャンセルなしの検索ブロック抽出は常に完了する")
 }
 
+#[allow(dead_code)]
 fn extract_search_blocks_until_cancelled(
     markdown: &str,
     is_cancelled: &impl Fn() -> bool,
@@ -1548,6 +1551,7 @@ fn build_search_block_entry(text: &str) -> Option<SearchBlockEntry> {
     })
 }
 
+#[allow(dead_code)]
 fn find_matches_for_file(
     file: &str,
     blocks: &[SearchBlockEntry],
@@ -3229,7 +3233,7 @@ mod tests {
         assert!(logs_contain(
             "ディレクトリ検索がstale化したため中断しました"
         ));
-        assert!(logs_contain("phase=find_matches"));
+        assert!(logs_contain("phase=streaming_find_matches"));
         assert!(logs_contain("searched_files=1"));
         assert!(!logs_contain("needle"));
         assert!(!logs_contain("many.md"));
@@ -3273,7 +3277,7 @@ mod tests {
         assert_eq!(response.searched_files, 2);
         assert!(response.results.is_empty());
         assert!(!response.truncated);
-        assert!(logs_contain("phase=find_matches"));
+        assert!(logs_contain("phase=streaming_find_matches"));
         assert!(!logs_contain("needle"));
         assert!(!logs_contain("a.md"));
         assert!(!logs_contain("b.md"));
@@ -3315,7 +3319,7 @@ mod tests {
         assert_eq!(response.searched_files, 2);
         assert!(response.results.is_empty());
         assert!(!response.truncated);
-        assert!(logs_contain("phase=extract_blocks"));
+        assert!(logs_contain("phase=streaming_find_matches"));
         assert!(!logs_contain("needle"));
         assert!(!logs_contain("a.md"));
         assert!(!logs_contain("b.md"));
@@ -3383,6 +3387,43 @@ mod tests {
             search_case_fold_char_count_for_test() < 64 * 1024,
             "巨大tailまでcase-foldしている: {} chars",
             search_case_fold_char_count_for_test()
+        );
+    }
+
+    #[test]
+    fn test_search_directory_result_limit到達後に同一ファイルの後続blockを抽出しない() {
+        let dir = tempfile::tempdir().unwrap();
+        let markdown = (0..120)
+            .map(|index| format!("needle sentence {index}."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        std::fs::write(dir.path().join("many.md"), markdown).unwrap();
+        let canonical = canonical_of(dir.path());
+        let before_extracts = reset_search_block_extract_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 3,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+        let extracts = search_block_extract_count_for_test() - before_extracts;
+
+        assert_eq!(response.results.len(), 3);
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(response.searched_files, 1);
+        assert!(
+            extracts < 30,
+            "directory searchがresult-limit後もblock抽出を続けている: {extracts}"
         );
     }
 
