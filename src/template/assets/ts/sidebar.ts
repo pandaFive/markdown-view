@@ -81,6 +81,8 @@ function setupTabs(): void {
   });
 }
 
+var syncActiveSidebarResizePanel: (() => void) | null = null;
+
 function activateSidebarTab(target: string): void {
   var tabs = document.querySelectorAll<HTMLElement>('.sidebar-tab');
   tabs.forEach(function(tab: HTMLElement): void {
@@ -90,6 +92,9 @@ function activateSidebarTab(target: string): void {
   panels.forEach(function(panel: HTMLElement): void {
     panel.classList.toggle('active', panel.id === 'panel-' + target);
   });
+  if (syncActiveSidebarResizePanel) {
+    syncActiveSidebarResizePanel();
+  }
 }
 
 // URL エンコード差を吸収して比較するためのヘルパー。location.hash と
@@ -365,6 +370,203 @@ function setupTocTracking(): void {
   }
 }
 
+function clampSidebarSize(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function parseCssPixels(value: string): number {
+  var parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function setupSidebarResizing(sidebar: HTMLElement): void {
+  var widthHandle = document.getElementById('sidebar-width-resizer');
+  var contentHandles = document.querySelectorAll<HTMLElement>('.sidebar-content-resizer');
+  var desktopQuery = window.matchMedia('(min-width: 769px)');
+  var minContentHeightFallback = 128;
+  var widthStep = 24;
+  var heightStep = 24;
+
+  function isResizableViewport(): boolean {
+    return desktopQuery.matches;
+  }
+
+  function getSidebarWidthBounds(): { min: number; max: number } {
+    var sidebarStyle = window.getComputedStyle(sidebar);
+    var minSidebarWidth = parseCssPixels(sidebarStyle.minWidth) || 260;
+    var maxSidebarWidth = parseCssPixels(sidebarStyle.maxWidth) || 560;
+    return {
+      min: minSidebarWidth,
+      max: Math.max(minSidebarWidth, maxSidebarWidth)
+    };
+  }
+
+  function setSidebarWidth(width: number): void {
+    var bounds = getSidebarWidthBounds();
+    var nextWidth = clampSidebarSize(width, bounds.min, bounds.max);
+    sidebar.style.setProperty('--sidebar-width', nextWidth + 'px');
+    if (widthHandle) {
+      widthHandle.setAttribute('aria-valuenow', String(Math.round(nextWidth)));
+      widthHandle.setAttribute('aria-valuemin', String(Math.round(bounds.min)));
+      widthHandle.setAttribute('aria-valuemax', String(Math.round(bounds.max)));
+    }
+    scheduleTocTrackingUpdate();
+  }
+
+  function setContentHeight(panel: HTMLElement, height: number): void {
+    var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
+    if (!content) return;
+    var handle = panel.querySelector<HTMLElement>('.sidebar-content-resizer');
+    var panelStyle = window.getComputedStyle(panel);
+    var contentStyle = window.getComputedStyle(content);
+    var handleStyle = handle ? window.getComputedStyle(handle) : null;
+    var minContentHeight = parseCssPixels(contentStyle.minHeight) || minContentHeightFallback;
+    var panelPadding = parseCssPixels(panelStyle.paddingTop) + parseCssPixels(panelStyle.paddingBottom);
+    var reserved = handle && handleStyle
+      ? handle.getBoundingClientRect().height + parseCssPixels(handleStyle.marginTop) + parseCssPixels(handleStyle.marginBottom)
+      : 0;
+    var maxContentHeight = Math.max(minContentHeight, Math.floor(panel.clientHeight - panelPadding - reserved));
+    var nextHeight = clampSidebarSize(height, minContentHeight, maxContentHeight);
+    panel.style.setProperty('--sidebar-content-height', nextHeight + 'px');
+    if (handle) {
+      handle.setAttribute('aria-valuenow', String(Math.round(nextHeight)));
+      handle.setAttribute('aria-valuemin', String(minContentHeight));
+      handle.setAttribute('aria-valuemax', String(maxContentHeight));
+    }
+  }
+
+  function activePanelFromHandle(handle: HTMLElement): HTMLElement | null {
+    var panel = handle.closest<HTMLElement>('.sidebar-panel');
+    return panel && panel.classList.contains('active') ? panel : null;
+  }
+
+  function syncActivePanelContentHeight(): void {
+    var activePanel = document.querySelector<HTMLElement>('.sidebar-panel.active');
+    if (!activePanel) return;
+    var content = activePanel.querySelector<HTMLElement>('.sidebar-resizable-content');
+    setContentHeight(activePanel, content ? content.getBoundingClientRect().height : minContentHeightFallback);
+  }
+
+  syncActiveSidebarResizePanel = syncActivePanelContentHeight;
+
+  if (widthHandle) {
+    var widthHandleEl = widthHandle;
+    widthHandleEl.addEventListener('pointerdown', function(event: PointerEvent): void {
+      if (!isResizableViewport()) return;
+      event.preventDefault();
+      var startX = event.clientX;
+      var startWidth = sidebar.getBoundingClientRect().width;
+
+      function onPointerMove(moveEvent: PointerEvent): void {
+        setSidebarWidth(startWidth + (moveEvent.clientX - startX));
+      }
+
+      function cleanup(pointerId: number): void {
+        sidebar.classList.remove('resizing');
+        widthHandleEl.removeEventListener('pointermove', onPointerMove);
+        widthHandleEl.removeEventListener('pointerup', onPointerEnd);
+        widthHandleEl.removeEventListener('pointercancel', onPointerEnd);
+        widthHandleEl.removeEventListener('lostpointercapture', onLostPointerCapture);
+        if (widthHandleEl.hasPointerCapture(pointerId)) {
+          try { widthHandleEl.releasePointerCapture(pointerId); } catch (e) {}
+        }
+      }
+
+      function onPointerEnd(upEvent: PointerEvent): void {
+        cleanup(upEvent.pointerId);
+      }
+
+      function onLostPointerCapture(lostEvent: PointerEvent): void {
+        cleanup(lostEvent.pointerId);
+      }
+
+      sidebar.classList.add('resizing');
+      try {
+        widthHandleEl.setPointerCapture(event.pointerId);
+      } catch (e) {
+        cleanup(event.pointerId);
+        return;
+      }
+      widthHandleEl.addEventListener('pointermove', onPointerMove);
+      widthHandleEl.addEventListener('pointerup', onPointerEnd);
+      widthHandleEl.addEventListener('pointercancel', onPointerEnd);
+      widthHandleEl.addEventListener('lostpointercapture', onLostPointerCapture);
+    });
+
+    widthHandleEl.addEventListener('keydown', function(event: KeyboardEvent): void {
+      if (!isResizableViewport() || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+      event.preventDefault();
+      var delta = event.key === 'ArrowRight' ? widthStep : -widthStep;
+      setSidebarWidth(sidebar.getBoundingClientRect().width + delta);
+    });
+
+    setSidebarWidth(sidebar.getBoundingClientRect().width || 320);
+  }
+
+  contentHandles.forEach(function(handle: HTMLElement): void {
+    handle.addEventListener('pointerdown', function(event: PointerEvent): void {
+      var panel = activePanelFromHandle(handle);
+      if (!panel || !isResizableViewport()) return;
+      event.preventDefault();
+      var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
+      var startY = event.clientY;
+      var startHeight = content ? content.getBoundingClientRect().height : minContentHeightFallback;
+
+      function onPointerMove(moveEvent: PointerEvent): void {
+        setContentHeight(panel!, startHeight + (moveEvent.clientY - startY));
+      }
+
+      function cleanup(pointerId: number): void {
+        sidebar.classList.remove('resizing');
+        handle.removeEventListener('pointermove', onPointerMove);
+        handle.removeEventListener('pointerup', onPointerEnd);
+        handle.removeEventListener('pointercancel', onPointerEnd);
+        handle.removeEventListener('lostpointercapture', onLostPointerCapture);
+        if (handle.hasPointerCapture(pointerId)) {
+          try { handle.releasePointerCapture(pointerId); } catch (e) {}
+        }
+      }
+
+      function onPointerEnd(upEvent: PointerEvent): void {
+        cleanup(upEvent.pointerId);
+      }
+
+      function onLostPointerCapture(lostEvent: PointerEvent): void {
+        cleanup(lostEvent.pointerId);
+      }
+
+      sidebar.classList.add('resizing');
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch (e) {
+        cleanup(event.pointerId);
+        return;
+      }
+      handle.addEventListener('pointermove', onPointerMove);
+      handle.addEventListener('pointerup', onPointerEnd);
+      handle.addEventListener('pointercancel', onPointerEnd);
+      handle.addEventListener('lostpointercapture', onLostPointerCapture);
+    });
+
+    handle.addEventListener('keydown', function(event: KeyboardEvent): void {
+      var panel = activePanelFromHandle(handle);
+      if (!panel || !isResizableViewport() || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+      event.preventDefault();
+      var content = panel.querySelector<HTMLElement>('.sidebar-resizable-content');
+      var delta = event.key === 'ArrowDown' ? heightStep : -heightStep;
+      setContentHeight(panel, (content ? content.getBoundingClientRect().height : minContentHeightFallback) + delta);
+    });
+  });
+
+  window.addEventListener('resize', function(): void {
+    if (!isResizableViewport()) return;
+    setSidebarWidth(sidebar.getBoundingClientRect().width || 320);
+    syncActivePanelContentHeight();
+  });
+
+  syncActivePanelContentHeight();
+}
+
 function setupSidebarInteractions(): void {
   var sidebarToggle = document.getElementById('sidebar-toggle');
   var sidebarOpen = document.getElementById('sidebar-open');
@@ -382,6 +584,10 @@ function setupSidebarInteractions(): void {
     sidebarOpen.addEventListener('click', function(): void {
       sidebarElForOpen.classList.add('open');
     });
+  }
+
+  if (sidebar) {
+    setupSidebarResizing(sidebar);
   }
 
   if (appContext.elements.backToTop) {
