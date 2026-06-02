@@ -1001,13 +1001,11 @@ fn search_directory_with_limits_blocking(
             stats.mark_truncated(SearchTruncationReason::Result);
             break;
         }
-        let Some(file_search) = search_file_streaming_blocks(
-            &relative,
-            &markdown,
-            &query,
-            remaining_results,
-            &|| cancellation.is_cancelled(),
-        ) else {
+        let Some(file_search) =
+            search_file_streaming_blocks(&relative, &markdown, &query, remaining_results, &|| {
+                cancellation.is_cancelled()
+            })
+        else {
             log_search_cancelled("streaming_find_matches", &stats, results.len());
             results.clear();
             break;
@@ -2620,6 +2618,51 @@ mod tests {
         });
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_search_file_streaming_blocks_巨大many_matchはresult_limit後にtailを走査しない() {
+        let block_text = format!(
+            "{}{}{}",
+            (0..3).map(|_| "needle ").collect::<String>(),
+            "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 20_000),
+            (0..100).map(|_| " needle").collect::<String>()
+        );
+        let scanned_bytes = std::rc::Rc::new(Cell::new(0usize));
+        let scanned_bytes_for_hook = std::rc::Rc::clone(&scanned_bytes);
+        let _guard = set_search_large_block_find_hook_for_test(move |search_bytes| {
+            scanned_bytes_for_hook.set(scanned_bytes_for_hook.get() + search_bytes);
+        });
+
+        let result =
+            search_file_streaming_blocks("many.md", &block_text, "needle", 3, &|| false).unwrap();
+
+        assert_eq!(
+            result.outcome,
+            SearchBlockVisitOutcome::StoppedByResultLimit
+        );
+        assert_eq!(result.results.len(), 3);
+        assert!(
+            scanned_bytes.get() < block_text.len(),
+            "巨大many-matchでresult-limit後もtailを走査している: {} bytes",
+            scanned_bytes.get()
+        );
+    }
+
+    #[test]
+    fn test_search_file_streaming_blocks_巨大ブロック正規化中staleならnoneを返す() {
+        let block_text = format!("{}needle", "a".repeat(LARGE_SEARCH_BLOCK_BYTES + 1));
+        let cancel_checks = Cell::new(0usize);
+        reset_search_context_build_count_for_test();
+
+        let result = search_file_streaming_blocks("many.md", &block_text, "needle", 1, &|| {
+            let next = cancel_checks.get() + 1;
+            cancel_checks.set(next);
+            next >= 3
+        });
+
+        assert!(result.is_none());
+        assert_eq!(search_context_build_count_for_test(), 0);
     }
 
     #[test]
