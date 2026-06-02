@@ -96,8 +96,12 @@ async function waitForSingleFileServer(server: ChildProcess, output: SingleFileS
     }
     try {
       const response = await fetch(url);
-      await response.arrayBuffer();
-      if (response.ok) return url;
+      if (!response.ok) {
+        lastFetchError = `HTTP ${response.status} ${response.statusText}`;
+      } else {
+        await response.arrayBuffer();
+        return url;
+      }
     } catch (error) {
       lastFetchError = error instanceof Error ? error.message : String(error);
     }
@@ -212,6 +216,29 @@ test('command output summaryは長いstdout/stderrを末尾に制限する', () 
   expect(summary).toContain('truncated to last');
   expect(summary).not.toContain('stdout-');
   expect(summary).toContain('stderr-');
+});
+
+test('waitForSingleFileServerはHTTPエラーのステータスを診断に含める', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let now = originalDateNow();
+  const output: SingleFileServerOutput = { spawnError: '', text: 'URL: http://127.0.0.1:4123\nready' };
+  const server = fakeRunningServer();
+
+  try {
+    Date.now = () => now;
+    globalThis.fetch = (async () => {
+      now += singleFileServerReadyTimeoutMs + 1;
+      return new Response('', {
+        status: 503,
+        statusText: 'Service Unavailable'
+      });
+    }) as typeof fetch;
+    await expect(waitForSingleFileServer(server, output)).rejects.toThrow(/fetch=HTTP 503 Service Unavailable/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+  }
 });
 
 test('stopServerの停止失敗は診断情報を含む', async () => {
