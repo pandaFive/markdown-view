@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::ops::Range;
 use std::path::{Component, Path};
 
@@ -807,6 +807,7 @@ enum SearchMarkdownRead {
     Markdown {
         markdown: String,
         bytes_read: usize,
+        complete: bool,
     },
     Skipped {
         error: std::io::Error,
@@ -925,11 +926,13 @@ fn search_directory_with_limits_blocking(
         }
 
         notify_search_after_resolve_for_test(&relative);
-        let markdown = match read_search_markdown_with_byte_budget(
+        let (markdown, markdown_complete) = match read_search_markdown_with_search_budget(
             &search_base_dir,
             &relative,
             stats.budgeted_bytes,
             limits.max_bytes,
+            &query,
+            limits.max_results.saturating_sub(results.len()),
         ) {
             Ok(SearchMarkdownRead::ByteLimit) => {
                 notify_search_after_byte_limit_for_test();
@@ -951,9 +954,10 @@ fn search_directory_with_limits_blocking(
             Ok(SearchMarkdownRead::Markdown {
                 markdown,
                 bytes_read,
+                complete,
             }) => {
                 stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
-                markdown
+                (markdown, complete)
             }
             Ok(SearchMarkdownRead::Skipped { error, bytes_read }) => {
                 stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
@@ -1001,7 +1005,7 @@ fn search_directory_with_limits_blocking(
             stats.mark_truncated(SearchTruncationReason::Result);
             break;
         }
-        let Some(file_search) =
+        let Some(mut file_search) =
             search_file_streaming_blocks(&relative, &markdown, &query, remaining_results, &|| {
                 cancellation.is_cancelled()
             })
@@ -1010,6 +1014,59 @@ fn search_directory_with_limits_blocking(
             results.clear();
             break;
         };
+        if !markdown_complete
+            && !matches!(
+                file_search.outcome,
+                SearchBlockVisitOutcome::StoppedByResultLimit
+            )
+        {
+            let prefix_len = markdown.len();
+            let (full_markdown, full_bytes_read) = match read_search_markdown_with_byte_budget(
+                &search_base_dir,
+                &relative,
+                stats.budgeted_bytes.saturating_sub(markdown.len()),
+                limits.max_bytes,
+            ) {
+                Ok(SearchMarkdownRead::Markdown {
+                    markdown,
+                    bytes_read,
+                    ..
+                }) => (markdown, bytes_read),
+                Ok(SearchMarkdownRead::ByteLimit) => {
+                    stats.mark_truncated(SearchTruncationReason::Byte);
+                    break;
+                }
+                Ok(SearchMarkdownRead::Skipped { error, .. }) | Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
+                        log_safe_search_relative(&relative),
+                        error
+                    );
+                    stats.skipped_files += 1;
+                    continue;
+                }
+            };
+            stats.budgeted_bytes = stats
+                .budgeted_bytes
+                .saturating_sub(prefix_len)
+                .saturating_add(full_bytes_read);
+            stats.searched_bytes = stats
+                .searched_bytes
+                .saturating_sub(prefix_len)
+                .saturating_add(full_markdown.len());
+            let Some(full_file_search) = search_file_streaming_blocks(
+                &relative,
+                &full_markdown,
+                &query,
+                remaining_results,
+                &|| cancellation.is_cancelled(),
+            ) else {
+                log_search_cancelled("streaming_find_matches", &stats, results.len());
+                results.clear();
+                break;
+            };
+            file_search = full_file_search;
+        }
         let file_results = file_search.results;
         if matches!(
             file_search.outcome,
@@ -1105,6 +1162,17 @@ fn read_search_markdown_with_byte_budget(
     searched_bytes: usize,
     max_bytes: usize,
 ) -> std::io::Result<SearchMarkdownRead> {
+    read_search_markdown_with_search_budget(base_dir, relative, searched_bytes, max_bytes, "", 0)
+}
+
+fn read_search_markdown_with_search_budget(
+    base_dir: &Dir,
+    relative: &str,
+    searched_bytes: usize,
+    max_bytes: usize,
+    query: &str,
+    remaining_results: usize,
+) -> std::io::Result<SearchMarkdownRead> {
     let canonical_relative = canonical_search_relative(base_dir, relative)?;
     notify_search_after_canonicalize_for_test(relative);
     let file = open_relative_file_nofollow(base_dir, &canonical_relative)?;
@@ -1130,6 +1198,18 @@ fn read_search_markdown_with_byte_budget(
         .unwrap_or(u64::MAX)
         .saturating_add(1)
         .min(MAX_FILE_SIZE + 1);
+
+    if let Some(read) = read_search_markdown_prefix_with_match_budget(
+        file,
+        read_limit,
+        remaining_bytes,
+        query,
+        remaining_results,
+    )? {
+        return Ok(read);
+    }
+
+    let file = open_relative_file_nofollow(base_dir, &canonical_relative)?;
     read_markdown_from_open_file_with_byte_budget(file, read_limit, remaining_bytes)
 }
 
@@ -1137,6 +1217,88 @@ fn read_search_markdown_with_byte_budget(
 fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String> {
     let file = std::fs::File::open(file_path)?;
     read_markdown_from_open_file(file)
+}
+
+fn read_search_markdown_prefix_with_match_budget(
+    file: impl Read,
+    read_limit: u64,
+    remaining_bytes: usize,
+    query: &str,
+    remaining_results: usize,
+) -> std::io::Result<Option<SearchMarkdownRead>> {
+    if remaining_results == 0 || query.is_empty() || !query.is_ascii() {
+        return Ok(None);
+    }
+
+    notify_search_markdown_read_for_test();
+    let target_matches = remaining_results.saturating_add(1);
+    let query = query.as_bytes();
+    let mut reader = BufReader::new(file.take(read_limit));
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut match_count = 0usize;
+
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            return decode_search_markdown_buffer(buffer, remaining_bytes, true).map(Some);
+        }
+
+        let scan_start = buffer.len().saturating_sub(query.len().saturating_sub(1));
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() as u64 > MAX_FILE_SIZE {
+            return Err(file_too_large_error());
+        }
+        if buffer.len() > remaining_bytes {
+            return Ok(Some(SearchMarkdownRead::ByteLimit));
+        }
+
+        if let Some(match_end) = ascii_case_insensitive_match_end_after_count(
+            &buffer,
+            query,
+            scan_start,
+            &mut match_count,
+            target_matches,
+        ) {
+            if let Some(boundary) = buffer[match_end..]
+                .windows(2)
+                .position(|window| window == b"\n\n")
+            {
+                buffer.truncate(match_end + boundary + 2);
+                return decode_search_markdown_buffer(buffer, remaining_bytes, false).map(Some);
+            }
+        }
+    }
+}
+
+fn ascii_case_insensitive_match_end_after_count(
+    buffer: &[u8],
+    query: &[u8],
+    start: usize,
+    count: &mut usize,
+    limit: usize,
+) -> Option<usize> {
+    if query.is_empty() || buffer.len() < query.len() {
+        return None;
+    }
+
+    let mut index = start.min(buffer.len().saturating_sub(query.len()));
+    while index + query.len() <= buffer.len() {
+        let matches = buffer[index..index + query.len()]
+            .iter()
+            .zip(query)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right));
+        if matches {
+            *count += 1;
+            if *count >= limit {
+                return Some(index + query.len());
+            }
+            index += query.len();
+        } else {
+            index += 1;
+        }
+    }
+    None
 }
 
 fn canonical_search_relative(
@@ -1200,6 +1362,14 @@ fn read_markdown_from_open_file_with_byte_budget(
     let mut limited_reader = file.take(read_limit);
     let mut buffer = Vec::new();
     limited_reader.read_to_end(&mut buffer)?;
+    decode_search_markdown_buffer(buffer, remaining_bytes, true)
+}
+
+fn decode_search_markdown_buffer(
+    buffer: Vec<u8>,
+    remaining_bytes: usize,
+    complete: bool,
+) -> std::io::Result<SearchMarkdownRead> {
     if buffer.len() as u64 > MAX_FILE_SIZE {
         return Err(file_too_large_error());
     }
@@ -1212,6 +1382,7 @@ fn read_markdown_from_open_file_with_byte_budget(
         Ok(markdown) => Ok(SearchMarkdownRead::Markdown {
             markdown,
             bytes_read,
+            complete,
         }),
         Err(error) => {
             tracing::warn!(
@@ -3707,12 +3878,47 @@ mod tests {
             SearchMarkdownRead::Markdown {
                 markdown,
                 bytes_read,
+                complete,
             } => {
                 assert_eq!(markdown, "needle");
                 assert_eq!(bytes_read, "needle".len());
+                assert!(complete);
             }
             SearchMarkdownRead::Skipped { .. } => panic!("予算内UTF-8ファイルはskipしない"),
             SearchMarkdownRead::ByteLimit => panic!("予算内ファイルは本文を読む必要がある"),
+        }
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_search_budget_many_matchはprefixで止まる() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.md");
+        let paragraph = "needle sentence for many match measurement.\n\n";
+        std::fs::write(&path, paragraph.repeat(10_000)).unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let result = read_search_markdown_with_search_budget(
+            &base_dir,
+            "many.md",
+            0,
+            64 * 1024 * 1024,
+            "needle",
+            100,
+        )
+        .unwrap();
+
+        match result {
+            SearchMarkdownRead::Markdown {
+                markdown,
+                bytes_read,
+                complete,
+            } => {
+                assert!(!complete);
+                assert!(bytes_read < paragraph.len() * 10_000);
+                assert!(markdown.matches("needle").count() >= 101);
+            }
+            SearchMarkdownRead::Skipped { .. } => panic!("many-match prefixはskipしない"),
+            SearchMarkdownRead::ByteLimit => panic!("byte limitには到達しない"),
         }
     }
 
