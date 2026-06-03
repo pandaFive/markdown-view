@@ -162,6 +162,7 @@ std::thread_local! {
     static SEARCH_AFTER_METADATA_HOOK_FOR_TEST: std::cell::RefCell<Option<SearchAfterMetadataHook>> =
         const { std::cell::RefCell::new(None) };
     static SEARCH_CLIP_SCAN_BYTES_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEARCH_PREFIX_SCAN_COMPARISONS_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SEARCH_MARKDOWN_READ_COUNT_FOR_TEST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -569,6 +570,27 @@ fn notify_search_clip_scan_for_test(bytes: usize) {
 
 #[cfg(not(test))]
 fn notify_search_clip_scan_for_test(_bytes: usize) {}
+
+#[cfg(test)]
+fn reset_search_prefix_scan_comparisons_for_test() -> usize {
+    SEARCH_PREFIX_SCAN_COMPARISONS_FOR_TEST.with(|count| {
+        count.set(0);
+        count.get()
+    })
+}
+
+#[cfg(test)]
+fn search_prefix_scan_comparisons_for_test() -> usize {
+    SEARCH_PREFIX_SCAN_COMPARISONS_FOR_TEST.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn notify_search_prefix_scan_comparison_for_test() {
+    SEARCH_PREFIX_SCAN_COMPARISONS_FOR_TEST.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+fn notify_search_prefix_scan_comparison_for_test() {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::server) struct SearchLimits {
@@ -1055,10 +1077,39 @@ fn search_directory_with_limits_blocking(
                 Ok(SearchMarkdownRead::ByteLimit) => {
                     stats.searched_files = stats.searched_files.saturating_sub(1);
                     stats.searched_bytes = stats.searched_bytes.saturating_sub(markdown_bytes_read);
+                    tracing::debug!(
+                        "[markdown-view] 検索prefix fallbackがbyte-limitに到達しました: file={} searched_bytes={} budgeted_bytes={} previous_bytes={} max_bytes={} result_count={}",
+                        log_safe_search_relative(&relative),
+                        stats.searched_bytes,
+                        stats.budgeted_bytes.saturating_sub(markdown_bytes_read),
+                        markdown_bytes_read,
+                        limits.max_bytes,
+                        results.len()
+                    );
                     stats.mark_truncated(SearchTruncationReason::Byte);
                     break;
                 }
-                Ok(SearchMarkdownRead::Skipped { error, .. }) | Err(error) => {
+                Ok(SearchMarkdownRead::Skipped { error, bytes_read }) => {
+                    if bytes_read > markdown_bytes_read {
+                        stats.budgeted_bytes = stats
+                            .budgeted_bytes
+                            .saturating_add(bytes_read - markdown_bytes_read);
+                    } else if bytes_read < markdown_bytes_read {
+                        stats.budgeted_bytes = stats
+                            .budgeted_bytes
+                            .saturating_sub(markdown_bytes_read - bytes_read);
+                    }
+                    stats.searched_files = stats.searched_files.saturating_sub(1);
+                    stats.searched_bytes = stats.searched_bytes.saturating_sub(markdown_bytes_read);
+                    tracing::warn!(
+                        "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
+                        log_safe_search_relative(&relative),
+                        error
+                    );
+                    stats.skipped_files += 1;
+                    continue;
+                }
+                Err(error) => {
                     stats.searched_files = stats.searched_files.saturating_sub(1);
                     stats.searched_bytes = stats.searched_bytes.saturating_sub(markdown_bytes_read);
                     tracing::warn!(
@@ -1217,6 +1268,7 @@ fn read_search_markdown_with_search_budget(
 
     if let Some(read) = read_search_markdown_prefix_with_match_budget(
         file,
+        relative,
         read_limit,
         remaining_bytes,
         query,
@@ -1237,6 +1289,7 @@ fn read_markdown_with_limit_blocking(file_path: &Path) -> std::io::Result<String
 
 fn read_search_markdown_prefix_with_match_budget(
     file: impl Read,
+    relative: &str,
     read_limit: u64,
     remaining_bytes: usize,
     query: &str,
@@ -1244,7 +1297,8 @@ fn read_search_markdown_prefix_with_match_budget(
 ) -> std::io::Result<Option<SearchMarkdownRead>> {
     if remaining_results == 0 || query.is_empty() || !query.is_ascii() {
         tracing::debug!(
-            "[markdown-view] 検索prefix読みを無効化しました: reason={} remaining_results={} query_ascii={}",
+            "[markdown-view] 検索prefix読みを無効化しました: file={} reason={} remaining_results={} query_ascii={}",
+            log_safe_search_relative(relative),
             if remaining_results == 0 {
                 "no_remaining_results"
             } else if query.is_empty() {
@@ -1261,6 +1315,8 @@ fn read_search_markdown_prefix_with_match_budget(
     notify_search_markdown_read_for_test();
     let target_matches = remaining_results.saturating_add(1);
     let query = query.as_bytes();
+    let pattern: Vec<u8> = query.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+    let prefix_table = build_kmp_prefix_table(&pattern);
     let mut reader = BufReader::new(file.take(read_limit));
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
@@ -1279,7 +1335,8 @@ fn read_search_markdown_prefix_with_match_budget(
             }
             if let Some(valid_up_to) = invalid_utf8_at {
                 tracing::debug!(
-                    "[markdown-view] 検索prefix読みを破棄しました: reason=invalid_utf8 validated_bytes={} valid_up_to={}",
+                    "[markdown-view] 検索prefix読みを破棄しました: file={} reason=invalid_utf8 validated_bytes={} valid_up_to={}",
+                    log_safe_search_relative(relative),
                     total_bytes,
                     valid_up_to
                 );
@@ -1291,7 +1348,8 @@ fn read_search_markdown_prefix_with_match_budget(
             if let Some(prefix_end) = prefix_end {
                 buffer.truncate(prefix_end);
                 tracing::debug!(
-                    "[markdown-view] 検索prefix読みを採用しました: validated_bytes={} prefix_bytes={} remaining_results={}",
+                    "[markdown-view] 検索prefix読みを採用しました: file={} validated_bytes={} prefix_bytes={} remaining_results={}",
+                    log_safe_search_relative(relative),
                     total_bytes,
                     prefix_end,
                     remaining_results
@@ -1300,7 +1358,8 @@ fn read_search_markdown_prefix_with_match_budget(
             }
             if let Some(match_end) = prefix_match_end {
                 tracing::debug!(
-                    "[markdown-view] 検索prefix読みを全文読みに戻しました: reason=no_safe_boundary validated_bytes={} raw_match_end={} remaining_results={}",
+                    "[markdown-view] 検索prefix読みを全文読みに戻しました: file={} reason=no_safe_boundary validated_bytes={} raw_match_end={} remaining_results={}",
+                    log_safe_search_relative(relative),
                     total_bytes,
                     match_end,
                     remaining_results
@@ -1317,7 +1376,8 @@ fn read_search_markdown_prefix_with_match_budget(
         }
         if total_bytes > remaining_bytes {
             tracing::debug!(
-                "[markdown-view] 検索prefix読みがbyte-limitに到達しました: validated_bytes={} remaining_bytes={}",
+                "[markdown-view] 検索prefix読みがbyte-limitに到達しました: file={} validated_bytes={} remaining_bytes={}",
+                log_safe_search_relative(relative),
                 total_bytes,
                 remaining_bytes
             );
@@ -1335,7 +1395,8 @@ fn read_search_markdown_prefix_with_match_budget(
             if prefix_match_end.is_none() {
                 prefix_match_end = ascii_case_insensitive_match_end_after_count(
                     &buffer,
-                    query,
+                    &pattern,
+                    &prefix_table,
                     scan_start,
                     &mut match_count,
                     target_matches,
@@ -1379,29 +1440,32 @@ fn validate_utf8_chunk_for_search(
 
 fn ascii_case_insensitive_match_end_after_count(
     buffer: &[u8],
-    query: &[u8],
+    pattern: &[u8],
+    prefix_table: &[usize],
     start: usize,
     count: &mut usize,
     limit: usize,
 ) -> Option<usize> {
-    if query.is_empty() || buffer.len() < query.len() {
+    if pattern.is_empty() || buffer.len() < pattern.len() {
         return None;
     }
 
-    let mut index = start.min(buffer.len().saturating_sub(query.len()));
-    while index + query.len() <= buffer.len() {
-        let matches = buffer[index..index + query.len()]
-            .iter()
-            .zip(query)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right));
-        if matches {
+    let mut matched_bytes = 0usize;
+    for (index, byte) in buffer.iter().enumerate().skip(start.min(buffer.len())) {
+        let folded_byte = byte.to_ascii_lowercase();
+        notify_search_prefix_scan_comparison_for_test();
+        while matched_bytes > 0 && folded_byte != pattern[matched_bytes] {
+            matched_bytes = prefix_table[matched_bytes - 1];
+        }
+        if folded_byte == pattern[matched_bytes] {
+            matched_bytes += 1;
+        }
+        if matched_bytes == pattern.len() {
             *count += 1;
             if *count >= limit {
-                return Some(index + query.len());
+                return Some(index + 1);
             }
-            index += query.len();
-        } else {
-            index += 1;
+            matched_bytes = 0;
         }
     }
     None
@@ -2027,6 +2091,7 @@ fn search_file_streaming_blocks(
             if results.len() >= remaining_results {
                 SearchBlockVisit::StopResultLimit
             } else {
+                previous_context = Some(block.clone());
                 SearchBlockVisit::Continue
             }
         } else {
@@ -2927,6 +2992,20 @@ mod tests {
     }
 
     #[test]
+    fn test_search_file_streaming_blocks_巨大block後は非隣接beforeを使わない() {
+        let large_block = "x".repeat(LARGE_SEARCH_BLOCK_BYTES + 1);
+        let markdown = format!("before sentence.\n\n{large_block}\n\nneedle after large block.");
+
+        let result =
+            search_file_streaming_blocks("many.md", &markdown, "needle", 100, &|| false).unwrap();
+
+        assert_eq!(result.outcome, SearchBlockVisitOutcome::Completed);
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].current, "needle after large block.");
+        assert_eq!(result.results[0].before, "");
+    }
+
+    #[test]
     fn test_search_file_streaming_blocks_staleならnoneを返す() {
         let checks = Cell::new(0usize);
         let markdown = "# title\n\nneedle first.\n\nneedle second.";
@@ -3175,6 +3254,33 @@ mod tests {
         assert!(results[0].current.contains(&query));
         assert!(scanned_bytes.get() > 0);
         assert!(scanned_bytes.get() <= max_scanned_bytes);
+    }
+
+    #[test]
+    fn test_ascii_case_insensitive_match_end_after_count_長いquery_no_matchは線形に走査する() {
+        let buffer = "a".repeat(200_000);
+        let mut query = "a".repeat(MAX_SEARCH_QUERY_CHARS - 1).into_bytes();
+        query.push(b'b');
+        let prefix_table = build_kmp_prefix_table(&query);
+        let mut count = 0usize;
+        reset_search_prefix_scan_comparisons_for_test();
+
+        let match_end = ascii_case_insensitive_match_end_after_count(
+            buffer.as_bytes(),
+            &query,
+            &prefix_table,
+            0,
+            &mut count,
+            1,
+        );
+
+        assert!(match_end.is_none());
+        assert_eq!(count, 0);
+        let comparisons = search_prefix_scan_comparisons_for_test();
+        assert!(
+            comparisons <= buffer.len() * 8,
+            "prefix scanがquery長ぶん再比較している: {comparisons} comparisons"
+        );
     }
 
     #[test]
@@ -3601,7 +3707,6 @@ mod tests {
         assert!(logs_contain("phase=streaming_find_matches"));
         assert!(logs_contain("searched_files=1"));
         assert!(!logs_contain("needle"));
-        assert!(!logs_contain("many.md"));
     }
 
     #[traced_test]
@@ -3644,8 +3749,6 @@ mod tests {
         assert!(!response.truncated);
         assert!(logs_contain("phase=streaming_find_matches"));
         assert!(!logs_contain("needle"));
-        assert!(!logs_contain("a.md"));
-        assert!(!logs_contain("b.md"));
     }
 
     #[traced_test]
@@ -3686,8 +3789,6 @@ mod tests {
         assert!(!response.truncated);
         assert!(logs_contain("phase=streaming_find_matches"));
         assert!(!logs_contain("needle"));
-        assert!(!logs_contain("a.md"));
-        assert!(!logs_contain("b.md"));
     }
 
     #[test]
@@ -4237,6 +4338,56 @@ mod tests {
     }
 
     #[test]
+    fn test_search_directory_prefix_fallback_skipは読込予算を消費し後続fileを打ち切る() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        let hidden_markdown = "<span>needle</span>\n\n".repeat(120);
+        let mut invalid_bytes = hidden_markdown.clone().into_bytes();
+        invalid_bytes.extend(std::iter::repeat_n(b'x', 4096));
+        invalid_bytes.push(0xff);
+        let invalid_len = invalid_bytes.len();
+        std::fs::write(&path, hidden_markdown).unwrap();
+        std::fs::write(dir.path().join("b.md"), "needle should not be searched").unwrap();
+        let rewrite_count = std::rc::Rc::new(Cell::new(0usize));
+        let rewrite_count_for_hook = std::rc::Rc::clone(&rewrite_count);
+        let path_for_hook = path.clone();
+        let invalid_for_hook = invalid_bytes.clone();
+        let _guard = set_search_after_canonicalize_hook_for_test(move |relative| {
+            if relative == "a.md" {
+                let next = rewrite_count_for_hook.get() + 1;
+                rewrite_count_for_hook.set(next);
+                if next == 2 {
+                    std::fs::write(&path_for_hook, &invalid_for_hook).unwrap();
+                }
+            }
+        });
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: invalid_len,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(rewrite_count.get(), 2);
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+    }
+
+    #[test]
     fn test_read_search_markdown_with_byte_budget_予算超過なら本文構築前に停止する() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("b.md");
@@ -4528,6 +4679,62 @@ mod tests {
         assert!(logs_contain("budgeted_bytes=1"));
         assert!(logs_contain("max_bytes=1"));
         assert!(!logs_contain("needle"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_prefix_fallback_byte_limitログは本文とqueryを含めない() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.md");
+        let hidden_markdown = "<span>needle</span>\n\n".repeat(120);
+        std::fs::write(&path, hidden_markdown).unwrap();
+        let rewrite_count = std::rc::Rc::new(Cell::new(0usize));
+        let rewrite_count_for_hook = std::rc::Rc::clone(&rewrite_count);
+        let path_for_hook = path.clone();
+        let _guard = set_search_after_canonicalize_hook_for_test(move |relative| {
+            if relative == "many.md" {
+                let next = rewrite_count_for_hook.get() + 1;
+                rewrite_count_for_hook.set(next);
+                if next == 2 {
+                    std::fs::write(
+                        &path_for_hook,
+                        format!(
+                            "{}{}",
+                            "<span>needle</span>\n\n".repeat(120),
+                            "needle visible after fallback"
+                        ),
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: "<span>needle</span>\n\n".repeat(120).len(),
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(rewrite_count.get(), 2);
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Byte]
+        );
+        assert!(logs_contain(
+            "検索prefix fallbackがbyte-limitに到達しました"
+        ));
+        assert!(logs_contain("file=many.md"));
+        assert!(logs_contain("max_bytes="));
+        assert!(!logs_contain("needle"));
+        assert!(!logs_contain("visible after fallback"));
     }
 
     #[test]

@@ -1067,10 +1067,10 @@ Before committing, expand the measurement sentence so it contains the concrete r
 Run:
 
 ```bash
-rg -n "/tmp/markdown-view-search-many-match-streaming\\.[A-Za-z0-9]+|target/(debug|release)/markdown-view .*--port|/home/propan/personal_dev/markdown-view|elapsed \\[|RSS \\[" docs/todo/TODO.md docs/superpowers/plans/2026-06-03-search-many-match-streaming-budget.md
+rg -n "/tmp/markdown-view-search-many-match-streaming\\.[A-Za-z0-9]+|target/(debug|release)/markdown-view .*--port|/home/propan/personal_dev/markdown-view|elapsed \\[|RSS \\[" docs/todo/TODO.md
 ```
 
-Expected: no output. The docs may mention `/tmp/markdown-view-search-many-match-streaming.XXXXXX` or `/tmp/markdown-view-search-many-match-streaming.***`, but must not include the exact temp suffix, full process args from measurement logs, or bracketed unresolved measurement ranges.
+Expected: no output. The TODO may mention `/tmp/markdown-view-search-many-match-streaming.XXXXXX` or `/tmp/markdown-view-search-many-match-streaming.***`, but must not include the exact temp suffix, full process args from measurement logs, or bracketed unresolved measurement ranges. This plan intentionally contains command examples, so process-args leak scanning is limited to the committed TODO output.
 
 - [ ] **Step 3: Commit TODO update**
 
