@@ -1051,16 +1051,16 @@ Expected: each response has `results` at or below the max result count, `truncat
 
 Edit the item `ディレクトリ検索 many-match の cold run と RSS plateau を切り分ける`.
 
-If implementation and measurement satisfy the acceptance criteria, move it into Done Summary with this structure. Replace the example measurement sentence with the actual elapsed and RSS ranges collected in Task 6 before committing:
+Keep this item open unless the full dev/release, cold/warm, single/multi measurement matrix has actually been collected. The implementation can be recorded as partial progress, but the full RSS plateau measurement remains a follow-up until concrete ranges are available:
 
 ```markdown
 - [x] ディレクトリ検索 many-match の cold run と RSS plateau を切り分け、逐次処理で抑制する
   - 完了根拠: ディレクトリ検索のファイル内検索を、Markdown 全体の `Vec<SearchBlockEntry>` 一括抽出から block 逐次抽出・逐次照合へ変更した。result-limit 到達時は同一ファイルの残り Markdown parse、後続 block allocation、巨大 block tail 探索を停止する。`/api/search` の JSON 契約、`truncated_reasons=["result_limit"]`、`searched_files`、`searched_bytes`、Host/Origin 検証、path validation、HTML sanitize、CSP、ファイルサイズ上限は変更していない。構造回帰は result-limit 後の block 抽出停止、巨大 many-match tail 探索停止、stale cancellation、Unicode case-fold offset、bounded context snippet、既存 HTTP 契約で固定した。
-  - 計測: 2026-06-03 に dev/release、cold/warm、単一 10MiB 近傍 many-match、複数ファイル many-match を分けて測定した。fixture は `/tmp/markdown-view-search-many-match-streaming.***` に生成し、repo へ追加していない。debug single、debug multi、release single、release multi のそれぞれについて elapsed、request 中 peak RSS、request 後 after RSS、5秒後 settled RSS の範囲を記録した。HTTP response は `truncated=true`、`truncated_reasons=["result_limit"]`、`results=100` を維持した。
+  - 計測: 2026-06-03 時点では完全な dev/release、cold/warm、単一/複数ファイル many-match matrix は未測定。既存の単発測定と構造テストで実装回帰は抑えているが、request 中 peak RSS、request 後 after RSS、5秒後 settled RSS の concrete range 記録は follow-up として残す。HTTP response は `truncated=true`、`truncated_reasons=["result_limit"]`、`results=100` を維持する必要がある。
   - 残余リスク: allocator の RSS plateau は実行環境に依存するため、CI では固定秒数・固定 RSS 上限を置かず、構造テストとローカル測定記録で保証する。
 ```
 
-Before committing, expand the measurement sentence so it contains the concrete ranges from Task 6 for each matrix entry.
+Move the item to Done Summary only after expanding the measurement sentence with concrete ranges for each matrix entry.
 
 - [ ] **Step 2: Scan docs for leaked paths and placeholders**
 
