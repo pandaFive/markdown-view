@@ -1296,19 +1296,6 @@ fn read_search_markdown_prefix_with_match_budget(
     remaining_results: usize,
 ) -> std::io::Result<Option<SearchMarkdownRead>> {
     if remaining_results == 0 || query.is_empty() || !query.is_ascii() {
-        tracing::debug!(
-            "[markdown-view] 検索prefix読みを無効化しました: file={} reason={} remaining_results={} query_ascii={}",
-            log_safe_search_relative(relative),
-            if remaining_results == 0 {
-                "no_remaining_results"
-            } else if query.is_empty() {
-                "empty_query"
-            } else {
-                "non_ascii_query"
-            },
-            remaining_results,
-            query.is_ascii()
-        );
         return Ok(None);
     }
 
@@ -2046,7 +2033,7 @@ fn search_file_streaming_blocks(
     let normalized_query = query.to_lowercase();
     let mut file_match_index = 0usize;
 
-    let outcome = visit_search_blocks_until_cancelled(markdown, is_cancelled, |block| {
+    let mut outcome = visit_search_blocks_until_cancelled(markdown, is_cancelled, |block| {
         if results.len() >= remaining_results {
             return SearchBlockVisit::StopResultLimit;
         }
@@ -2141,6 +2128,9 @@ fn search_file_streaming_blocks(
                 is_cancelled,
             )?;
             results.extend(block_results);
+            if results.len() >= remaining_results {
+                outcome = SearchBlockVisitOutcome::StoppedByResultLimit;
+            }
         }
     }
 
@@ -4282,6 +4272,46 @@ mod tests {
     }
 
     #[test]
+    fn test_search_directory_prefix最終flush_result_limitは全文fallbackしない() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible_markdown = "needle visible.\n\n".repeat(100);
+        let hidden_tail = "<span>needle hidden raw only</span>\n\n";
+        std::fs::write(
+            dir.path().join("many.md"),
+            format!("{visible_markdown}{hidden_tail}"),
+        )
+        .unwrap();
+        let canonical = canonical_of(dir.path());
+        reset_search_markdown_read_count_for_test();
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 1);
+        assert_eq!(response.skipped_files, 0);
+        assert_eq!(response.results.len(), 100);
+        assert!(response.truncated);
+        assert_eq!(
+            response.truncated_reasons,
+            vec![SearchTruncationReason::Result]
+        );
+        assert_eq!(
+            search_markdown_read_count_for_test(),
+            1,
+            "prefix内の最終block flushでresult-limitへ到達したら全文fallbackしない"
+        );
+    }
+
+    #[test]
     fn test_search_directory_prefix_result_limit後のinvalid_utf8_tailはskipする() {
         let dir = tempfile::tempdir().unwrap();
         let mut bytes = "needle sentence for many match measurement.\n\n"
@@ -4735,6 +4765,33 @@ mod tests {
         assert!(logs_contain("max_bytes="));
         assert!(!logs_contain("needle"));
         assert!(!logs_contain("visible after fallback"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_search_directory_non_ascii_queryはprefix無効化をfile単位でログしない() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "検索語 first").unwrap();
+        std::fs::write(dir.path().join("b.md"), "検索語 second").unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "検索語",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.results.len(), 2);
+        assert!(!logs_contain("検索prefix読みを無効化しました"));
+        assert!(!logs_contain("検索語"));
+        assert!(!logs_contain("first"));
+        assert!(!logs_contain("second"));
     }
 
     #[test]
