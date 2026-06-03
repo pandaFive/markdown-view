@@ -926,21 +926,22 @@ fn search_directory_with_limits_blocking(
         }
 
         notify_search_after_resolve_for_test(&relative);
-        let (markdown, markdown_complete) = match read_search_markdown_with_search_budget(
-            &search_base_dir,
-            &relative,
-            stats.budgeted_bytes,
-            limits.max_bytes,
-            &query,
-            limits.max_results.saturating_sub(results.len()),
-        ) {
-            Ok(SearchMarkdownRead::ByteLimit) => {
-                notify_search_after_byte_limit_for_test();
-                if cancellation.is_cancelled() {
-                    results.clear();
-                    break;
-                }
-                tracing::debug!(
+        let (markdown, markdown_complete, markdown_bytes_read) =
+            match read_search_markdown_with_search_budget(
+                &search_base_dir,
+                &relative,
+                stats.budgeted_bytes,
+                limits.max_bytes,
+                &query,
+                limits.max_results.saturating_sub(results.len()),
+            ) {
+                Ok(SearchMarkdownRead::ByteLimit) => {
+                    notify_search_after_byte_limit_for_test();
+                    if cancellation.is_cancelled() {
+                        results.clear();
+                        break;
+                    }
+                    tracing::debug!(
                     "[markdown-view] ディレクトリ検索がbyte-limitに到達しました: file={} searched_bytes={} budgeted_bytes={} max_bytes={} result_count={}",
                     log_safe_search_relative(&relative),
                     stats.searched_bytes,
@@ -948,37 +949,37 @@ fn search_directory_with_limits_blocking(
                     limits.max_bytes,
                     results.len()
                 );
-                stats.mark_truncated(SearchTruncationReason::Byte);
-                break;
-            }
-            Ok(SearchMarkdownRead::Markdown {
-                markdown,
-                bytes_read,
-                complete,
-            }) => {
-                stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
-                (markdown, complete)
-            }
-            Ok(SearchMarkdownRead::Skipped { error, bytes_read }) => {
-                stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
-                tracing::warn!(
-                    "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
-                    log_safe_search_relative(&relative),
-                    error
-                );
-                stats.skipped_files += 1;
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
-                    log_safe_search_relative(&relative),
-                    error
-                );
-                stats.skipped_files += 1;
-                continue;
-            }
-        };
+                    stats.mark_truncated(SearchTruncationReason::Byte);
+                    break;
+                }
+                Ok(SearchMarkdownRead::Markdown {
+                    markdown,
+                    bytes_read,
+                    complete,
+                }) => {
+                    stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
+                    (markdown, complete, bytes_read)
+                }
+                Ok(SearchMarkdownRead::Skipped { error, bytes_read }) => {
+                    stats.budgeted_bytes = stats.budgeted_bytes.saturating_add(bytes_read);
+                    tracing::warn!(
+                        "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
+                        log_safe_search_relative(&relative),
+                        error
+                    );
+                    stats.skipped_files += 1;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
+                        log_safe_search_relative(&relative),
+                        error
+                    );
+                    stats.skipped_files += 1;
+                    continue;
+                }
+            };
         read_files += 1;
         if cancellation.is_cancelled() {
             results.clear();
@@ -988,13 +989,13 @@ fn search_directory_with_limits_blocking(
             break;
         }
 
-        if stats.searched_bytes.saturating_add(markdown.len()) > limits.max_bytes {
+        if stats.searched_bytes.saturating_add(markdown_bytes_read) > limits.max_bytes {
             stats.mark_truncated(SearchTruncationReason::Byte);
             break;
         }
 
         stats.searched_files += 1;
-        stats.searched_bytes += markdown.len();
+        stats.searched_bytes += markdown_bytes_read;
         notify_search_progress_for_test(&relative, stats.searched_files);
         if cancellation.is_cancelled() {
             results.clear();
@@ -1020,23 +1021,22 @@ fn search_directory_with_limits_blocking(
                 SearchBlockVisitOutcome::StoppedByResultLimit
             )
         {
-            let prefix_len = markdown.len();
-            let (full_markdown, full_bytes_read) = match read_search_markdown_with_byte_budget(
+            let full_markdown = match read_search_markdown_with_byte_budget(
                 &search_base_dir,
                 &relative,
-                stats.budgeted_bytes.saturating_sub(markdown.len()),
+                stats.budgeted_bytes.saturating_sub(markdown_bytes_read),
                 limits.max_bytes,
             ) {
-                Ok(SearchMarkdownRead::Markdown {
-                    markdown,
-                    bytes_read,
-                    ..
-                }) => (markdown, bytes_read),
+                Ok(SearchMarkdownRead::Markdown { markdown, .. }) => markdown,
                 Ok(SearchMarkdownRead::ByteLimit) => {
+                    stats.searched_files = stats.searched_files.saturating_sub(1);
+                    stats.searched_bytes = stats.searched_bytes.saturating_sub(markdown_bytes_read);
                     stats.mark_truncated(SearchTruncationReason::Byte);
                     break;
                 }
                 Ok(SearchMarkdownRead::Skipped { error, .. }) | Err(error) => {
+                    stats.searched_files = stats.searched_files.saturating_sub(1);
+                    stats.searched_bytes = stats.searched_bytes.saturating_sub(markdown_bytes_read);
                     tracing::warn!(
                         "[markdown-view] 検索対象ファイル読込失敗（スキップ）: {} ({})",
                         log_safe_search_relative(&relative),
@@ -1046,14 +1046,6 @@ fn search_directory_with_limits_blocking(
                     continue;
                 }
             };
-            stats.budgeted_bytes = stats
-                .budgeted_bytes
-                .saturating_sub(prefix_len)
-                .saturating_add(full_bytes_read);
-            stats.searched_bytes = stats
-                .searched_bytes
-                .saturating_sub(prefix_len)
-                .saturating_add(full_markdown.len());
             let Some(full_file_search) = search_file_streaming_blocks(
                 &relative,
                 &full_markdown,
@@ -1237,37 +1229,83 @@ fn read_search_markdown_prefix_with_match_budget(
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     let mut match_count = 0usize;
+    let mut total_bytes = 0usize;
+    let mut prefix_end = None;
+    let mut utf8_pending = Vec::new();
+    let mut invalid_utf8_at = None;
 
     loop {
         let read = reader.read(&mut chunk)?;
         if read == 0 {
+            if invalid_utf8_at.is_none() && !utf8_pending.is_empty() {
+                invalid_utf8_at = Some(total_bytes.saturating_sub(utf8_pending.len()));
+            }
+            if let Some(valid_up_to) = invalid_utf8_at {
+                return Ok(Some(skipped_search_markdown_invalid_utf8(
+                    total_bytes,
+                    valid_up_to,
+                )));
+            }
+            if let Some(prefix_end) = prefix_end {
+                buffer.truncate(prefix_end);
+                return decode_search_markdown_prefix_buffer(buffer, total_bytes).map(Some);
+            }
             return decode_search_markdown_buffer(buffer, remaining_bytes, true).map(Some);
         }
 
-        let scan_start = buffer.len().saturating_sub(query.len().saturating_sub(1));
-        buffer.extend_from_slice(&chunk[..read]);
-        if buffer.len() as u64 > MAX_FILE_SIZE {
+        let chunk = &chunk[..read];
+        let chunk_start = total_bytes;
+        total_bytes = total_bytes.saturating_add(read);
+        if total_bytes as u64 > MAX_FILE_SIZE {
             return Err(file_too_large_error());
         }
-        if buffer.len() > remaining_bytes {
+        if total_bytes > remaining_bytes {
             return Ok(Some(SearchMarkdownRead::ByteLimit));
         }
 
-        if let Some(match_end) = ascii_case_insensitive_match_end_after_count(
-            &buffer,
-            query,
-            scan_start,
-            &mut match_count,
-            target_matches,
-        ) {
-            if let Some(boundary) = buffer[match_end..]
-                .windows(2)
-                .position(|window| window == b"\n\n")
-            {
-                buffer.truncate(match_end + boundary + 2);
-                return decode_search_markdown_buffer(buffer, remaining_bytes, false).map(Some);
+        if invalid_utf8_at.is_none() {
+            invalid_utf8_at = validate_utf8_chunk_for_search(&mut utf8_pending, chunk, chunk_start);
+        }
+
+        if prefix_end.is_none() {
+            let scan_start = buffer.len().saturating_sub(query.len().saturating_sub(1));
+            buffer.extend_from_slice(chunk);
+            if let Some(match_end) = ascii_case_insensitive_match_end_after_count(
+                &buffer,
+                query,
+                scan_start,
+                &mut match_count,
+                target_matches,
+            ) {
+                let boundary_end = buffer[match_end..]
+                    .windows(2)
+                    .position(|window| window == b"\n\n")
+                    .map(|boundary| match_end + boundary + 2);
+                prefix_end = Some(boundary_end.unwrap_or(match_end));
+                buffer.truncate(prefix_end.expect("prefix end is set"));
             }
         }
+    }
+}
+
+fn validate_utf8_chunk_for_search(
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+    chunk_start: usize,
+) -> Option<usize> {
+    let combined_start = chunk_start.saturating_sub(pending.len());
+    pending.extend_from_slice(chunk);
+    match std::str::from_utf8(pending) {
+        Ok(_) => {
+            pending.clear();
+            None
+        }
+        Err(error) if error.error_len().is_none() => {
+            let valid_up_to = error.valid_up_to();
+            pending.drain(..valid_up_to);
+            None
+        }
+        Err(error) => Some(combined_start.saturating_add(error.valid_up_to())),
     }
 }
 
@@ -1397,6 +1435,49 @@ fn decode_search_markdown_buffer(
                 bytes_read,
             })
         }
+    }
+}
+
+fn decode_search_markdown_prefix_buffer(
+    buffer: Vec<u8>,
+    bytes_read: usize,
+) -> std::io::Result<SearchMarkdownRead> {
+    match String::from_utf8(buffer) {
+        Ok(markdown) => Ok(SearchMarkdownRead::Markdown {
+            markdown,
+            bytes_read,
+            complete: false,
+        }),
+        Err(error) => {
+            tracing::warn!(
+                "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+                error.utf8_error().valid_up_to()
+            );
+            Ok(SearchMarkdownRead::Skipped {
+                error: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "ファイルがUTF-8テキストではありません",
+                ),
+                bytes_read,
+            })
+        }
+    }
+}
+
+fn skipped_search_markdown_invalid_utf8(
+    bytes_read: usize,
+    valid_up_to: usize,
+) -> SearchMarkdownRead {
+    tracing::warn!(
+        "[markdown-view] UTF-8デコード失敗: バイトオフセット {} で無効なバイト列",
+        valid_up_to
+    );
+    SearchMarkdownRead::Skipped {
+        error: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ファイルがUTF-8テキストではありません",
+        ),
+        bytes_read,
     }
 }
 
@@ -3914,12 +3995,103 @@ mod tests {
                 complete,
             } => {
                 assert!(!complete);
-                assert!(bytes_read < paragraph.len() * 10_000);
+                assert_eq!(bytes_read, paragraph.len() * 10_000);
+                assert!(markdown.len() < bytes_read);
                 assert!(markdown.matches("needle").count() >= 101);
             }
             SearchMarkdownRead::Skipped { .. } => panic!("many-match prefixはskipしない"),
             SearchMarkdownRead::ByteLimit => panic!("byte limitには到達しない"),
         }
+    }
+
+    #[test]
+    fn test_read_search_markdown_with_search_budget_巨大単一blockもprefixで止まる() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.md");
+        let markdown = format!("{}{}", "needle ".repeat(120), "a".repeat(200_000));
+        std::fs::write(&path, &markdown).unwrap();
+        let base_dir = Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap();
+
+        let result = read_search_markdown_with_search_budget(
+            &base_dir,
+            "many.md",
+            0,
+            64 * 1024 * 1024,
+            "needle",
+            100,
+        )
+        .unwrap();
+
+        match result {
+            SearchMarkdownRead::Markdown {
+                markdown: prefix,
+                bytes_read,
+                complete,
+            } => {
+                assert!(!complete);
+                assert_eq!(bytes_read, markdown.len());
+                assert!(prefix.len() < markdown.len());
+                assert!(prefix.matches("needle").count() >= 101);
+            }
+            SearchMarkdownRead::Skipped { .. } => panic!("巨大単一block prefixはskipしない"),
+            SearchMarkdownRead::ByteLimit => panic!("byte limitには到達しない"),
+        }
+    }
+
+    #[test]
+    fn test_search_directory_prefix_result_limit後のinvalid_utf8_tailはskipする() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = "needle sentence for many match measurement.\n\n"
+            .repeat(120)
+            .into_bytes();
+        bytes.push(0xff);
+        std::fs::write(dir.path().join("many.md"), bytes).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
+    }
+
+    #[test]
+    fn test_search_directory_prefix_fallback_skipはsearched統計を増やさない() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = "<span>needle</span>\n\n".repeat(120).into_bytes();
+        bytes.push(0xff);
+        std::fs::write(dir.path().join("many.md"), bytes).unwrap();
+        let canonical = canonical_of(dir.path());
+
+        let response = search_directory_with_limits_blocking(
+            &canonical,
+            "needle",
+            SearchLimits {
+                max_results: 100,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+            },
+            SearchCancellation::none(),
+        )
+        .unwrap();
+
+        assert_eq!(response.searched_files, 0);
+        assert_eq!(response.skipped_files, 1);
+        assert_eq!(response.searched_bytes, 0);
+        assert!(response.results.is_empty());
+        assert!(!response.truncated);
     }
 
     #[test]
