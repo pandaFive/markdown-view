@@ -10,6 +10,12 @@ const DEFAULT_QUERY = 'needle';
 const TEMP_PREFIX = 'markdown-view-search-rss-plateau-';
 const MASKED_TEMP = '/tmp/markdown-view-search-rss-plateau.***';
 const DEFAULT_PORT = 3109;
+const ALLOCATOR_PROFILES = new Map([
+  ['default', {}],
+  ['arena1', { MALLOC_ARENA_MAX: '1' }],
+  ['arena2', { MALLOC_ARENA_MAX: '2' }],
+]);
+const DEFAULT_ALLOCATOR_PROFILES = ['default'];
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SAMPLE_INTERVAL_MS = 50;
@@ -49,6 +55,7 @@ function parseArgs(argv) {
     fixtures: ['prefix'],
     runs: ['cold'],
     fixtureScale: 'short',
+    allocatorProfiles: DEFAULT_ALLOCATOR_PROFILES,
     output: 'json',
   };
   const explicitMatrixOptions = new Set();
@@ -65,6 +72,7 @@ function parseArgs(argv) {
       options.modes = ['dev'];
       options.fixtures = ['prefix'];
       options.runs = ['cold'];
+      options.allocatorProfiles = DEFAULT_ALLOCATOR_PROFILES;
     } else if (arg === '--keep-temp') {
       options.keepTemp = true;
     } else if (arg === '--port') {
@@ -83,6 +91,9 @@ function parseArgs(argv) {
     } else if (arg === '--fixture-scale') {
       explicitMatrixOptions.add(arg);
       options.fixtureScale = parseChoice(readValue(argv, ++index, arg), ['short', 'full'], arg);
+    } else if (arg === '--allocator-profiles') {
+      explicitMatrixOptions.add(arg);
+      options.allocatorProfiles = parseAllocatorProfiles(readValue(argv, ++index, arg));
     } else if (arg === '--output') {
       options.output = parseChoice(readValue(argv, ++index, arg), ['json'], arg);
     } else {
@@ -91,7 +102,7 @@ function parseArgs(argv) {
   }
 
   if (options.smoke && explicitMatrixOptions.size > 0) {
-    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, or --fixture-scale');
+    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles');
   }
 
   return options;
@@ -134,6 +145,19 @@ function parseList(raw, allowed, optionName) {
   return values;
 }
 
+function parseAllocatorProfiles(raw) {
+  const values = raw.split(',').map((value) => value.trim()).filter(Boolean);
+  if (values.length === 0) {
+    throw new Error('--allocator-profiles requires at least one value');
+  }
+  for (const value of values) {
+    if (!ALLOCATOR_PROFILES.has(value)) {
+      throw new Error(`--allocator-profiles must be one of: ${Array.from(ALLOCATOR_PROFILES.keys()).join(', ')}`);
+    }
+  }
+  return values;
+}
+
 function parseChoice(value, allowed, optionName) {
   if (!allowed.includes(value)) {
     throw new Error(`${optionName} must be one of: ${allowed.join(', ')}`);
@@ -148,12 +172,14 @@ Options:
   --help                         Show this help.
   --self-test-sanitization       Run local sanitization checks without starting the server.
   --smoke                        Run a short dev/prefix/cold measurement.
-                                 Cannot be combined with --modes, --fixtures, --runs, or --fixture-scale.
+                                 Cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
                                  Fixture kinds to measure. Default: prefix.
   --runs cold,warm               Run kinds to measure. Default: cold.
   --fixture-scale short,full     Fixture size. Default: short.
+  --allocator-profiles default,arena1,arena2
+                                 Allocator profiles for measured server process. Default: default.
   --port <number>                Local port. Default: ${DEFAULT_PORT}.
   --query <query>                Search query. Default: ${DEFAULT_QUERY}.
   --keep-temp                    Keep temp fixture directory for local debugging.
@@ -217,12 +243,23 @@ function runSanitizationSelfTest() {
   assert.throws(() => parseArgs(['--port', '0']), /positive integer/);
   assert.throws(() => parseArgs(['--port', '70000']), /between 1 and 65535/);
   assert.equal(parseArgs(['--port', '65535', '--self-test-sanitization']).port, 65535);
+  assert.deepEqual(parseArgs(['--allocator-profiles', 'default,arena1']).allocatorProfiles, ['default', 'arena1']);
+  assert.deepEqual(parseArgs(['--allocator-profiles', 'arena2']).allocatorProfiles, ['arena2']);
+  assert.throws(
+    () => parseArgs(['--allocator-profiles', 'jemalloc']),
+    /--allocator-profiles must be one of/
+  );
+  assert.throws(
+    () => parseArgs(['--allocator-profiles', '']),
+    /requires at least one value/
+  );
 
   const matrixOptionPairs = [
     ['--modes', 'release'],
     ['--fixtures', 'prefix'],
     ['--runs', 'cold'],
     ['--fixture-scale', 'short'],
+    ['--allocator-profiles', 'default'],
   ];
   for (const [optionName, optionValue] of matrixOptionPairs) {
     assert.throws(
@@ -240,6 +277,7 @@ function runSanitizationSelfTest() {
   assert.deepEqual(smokeOptions.fixtures, ['prefix']);
   assert.deepEqual(smokeOptions.runs, ['cold']);
   assert.equal(smokeOptions.fixtureScale, 'short');
+  assert.deepEqual(smokeOptions.allocatorProfiles, ['default']);
 
   const anonymous = parseMapsLine('7f0000000000-7f0000100000 rw-p 00000000 00:00 0');
   const fileBacked = parseMapsLine('7f0000200000-7f0000300000 r--p 00000000 08:01 123 /usr/lib/libc.so');
