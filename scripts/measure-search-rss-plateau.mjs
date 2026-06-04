@@ -38,6 +38,7 @@ function parseArgs(argv) {
     fixtureScale: 'short',
     output: 'json',
   };
+  const explicitMatrixOptions = new Set();
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -54,22 +55,30 @@ function parseArgs(argv) {
     } else if (arg === '--keep-temp') {
       options.keepTemp = true;
     } else if (arg === '--port') {
-      options.port = parsePositiveInt(readValue(argv, ++index, arg), arg);
+      options.port = parsePort(readValue(argv, ++index, arg), arg);
     } else if (arg === '--query') {
       options.query = readValue(argv, ++index, arg);
     } else if (arg === '--modes') {
+      explicitMatrixOptions.add(arg);
       options.modes = parseList(readValue(argv, ++index, arg), ['dev', 'release'], arg);
     } else if (arg === '--fixtures') {
+      explicitMatrixOptions.add(arg);
       options.fixtures = parseList(readValue(argv, ++index, arg), ['prefix', 'multifile', 'fallback'], arg);
     } else if (arg === '--runs') {
+      explicitMatrixOptions.add(arg);
       options.runs = parseList(readValue(argv, ++index, arg), ['cold', 'warm'], arg);
     } else if (arg === '--fixture-scale') {
+      explicitMatrixOptions.add(arg);
       options.fixtureScale = parseChoice(readValue(argv, ++index, arg), ['short', 'full'], arg);
     } else if (arg === '--output') {
       options.output = parseChoice(readValue(argv, ++index, arg), ['json'], arg);
     } else {
       throw new Error(`unknown option: ${arg}`);
     }
+  }
+
+  if (options.smoke && explicitMatrixOptions.size > 0) {
+    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, or --fixture-scale');
   }
 
   return options;
@@ -83,9 +92,20 @@ function readValue(argv, index, optionName) {
 }
 
 function parsePositiveInt(raw, optionName) {
-  const value = Number.parseInt(raw, 10);
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+  const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${optionName} must be a positive integer`);
+  }
+  return value;
+}
+
+function parsePort(raw, optionName) {
+  const value = parsePositiveInt(raw, optionName);
+  if (value > 65535) {
+    throw new Error(`${optionName} must be between 1 and 65535`);
   }
   return value;
 }
@@ -115,6 +135,7 @@ Options:
   --help                         Show this help.
   --self-test-sanitization       Run local sanitization checks without starting the server.
   --smoke                        Run a short dev/prefix/cold measurement.
+                                 Cannot be combined with --modes, --fixtures, --runs, or --fixture-scale.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
                                  Fixture kinds to measure. Default: prefix.
@@ -167,7 +188,7 @@ async function runMeasurement(_options) {
   throw new Error('run with --help or --self-test-sanitization until measurement support is added');
 }
 
-main().then((code) => {
+Promise.resolve().then(() => main()).then((code) => {
   process.exitCode = code;
 }).catch((error) => {
   console.error(sanitizePath(error.message));
