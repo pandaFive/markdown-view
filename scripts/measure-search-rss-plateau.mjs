@@ -440,6 +440,8 @@ function runSanitizationSelfTest() {
   const context = buildMeasurementContext(parseArgs(['--query', 'needle']));
   assert.equal(Object.hasOwn(context.cliOptions, 'queryLength'), false);
   assert.equal(Object.hasOwn(context.cliOptions, 'querySha256'), false);
+  const allocatorContext = buildMeasurementContext(parseArgs(['--allocator-profiles', 'default,arena1']));
+  assert.deepEqual(allocatorContext.cliOptions.allocatorProfiles, ['default', 'arena1']);
 
   assert.deepEqual(readMapsSummaryFromText('invalid maps line'), {
     available: false,
@@ -1152,31 +1154,34 @@ async function runMeasurement(options) {
     for (const fixtureKind of options.fixtures) {
       const fixture = createFixture(root, fixtureKind, options.fixtureScale);
       for (const mode of options.modes) {
-        for (const runKind of options.runs) {
-          const baseReport = {
-            fixtureKind,
-            fixture: {
-              fileCount: fixture.fileCount,
-              bytes: fixture.bytes,
-              workspace: fixture.maskedWorkspace,
-            },
-            mode,
-            runKind,
-          };
-          try {
-            const scenario = await runMeasuredScenario(options, fixture, mode, runKind, options.allocatorProfiles[0]);
-            reports.push({
-              ...baseReport,
-              status: 'ok',
-              ...scenario,
-            });
-          } catch (error) {
-            failed = true;
-            reports.push({
-              ...baseReport,
-              status: 'failed',
-              ...errorReportFields(error),
-            });
+        for (const allocatorProfile of options.allocatorProfiles) {
+          for (const runKind of options.runs) {
+            const baseReport = {
+              fixtureKind,
+              fixture: {
+                fileCount: fixture.fileCount,
+                bytes: fixture.bytes,
+                workspace: fixture.maskedWorkspace,
+              },
+              mode,
+              runKind,
+              allocatorProfile: allocatorProfileReport(allocatorProfile),
+            };
+            try {
+              const scenario = await runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile);
+              reports.push({
+                ...baseReport,
+                status: 'ok',
+                ...scenario,
+              });
+            } catch (error) {
+              failed = true;
+              reports.push({
+                ...baseReport,
+                status: 'failed',
+                ...errorReportFields(error),
+              });
+            }
           }
         }
       }
@@ -1266,6 +1271,7 @@ function buildMeasurementContext(options) {
       modes: options.modes,
       fixtures: options.fixtures,
       runs: options.runs,
+      allocatorProfiles: options.allocatorProfiles,
       port: options.port,
     },
   };
