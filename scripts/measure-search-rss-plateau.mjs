@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { release as osRelease, tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -10,8 +10,12 @@ const TEMP_PREFIX = 'markdown-view-search-rss-plateau-';
 const MASKED_TEMP = '/tmp/markdown-view-search-rss-plateau.***';
 const DEFAULT_PORT = 3109;
 const REQUEST_TIMEOUT_MS = 120_000;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SAMPLE_INTERVAL_MS = 50;
 const MAX_SAMPLES = Math.ceil(REQUEST_TIMEOUT_MS / SAMPLE_INTERVAL_MS) + 20;
+const REDACTED = '<redacted>';
+const TEMP_ROOTS = new Set();
+const SENSITIVE_REPORT_KEYS = new Set(['body', 'content', 'context', 'results', 'snippet', 'text']);
 
 function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
@@ -155,9 +159,12 @@ function sanitizePath(value) {
   if (typeof value !== 'string') {
     return value;
   }
-  return value
-    .replaceAll(process.cwd(), '<repo>')
-    .replace(/\/tmp\/markdown-view-search-rss-plateau[.\-][^/\s"']+/g, MASKED_TEMP)
+  let sanitized = value.replaceAll(process.cwd(), '<repo>');
+  for (const root of TEMP_ROOTS) {
+    sanitized = sanitized.replaceAll(root, MASKED_TEMP);
+  }
+  return sanitized
+    .replace(/(?:\/[^\s/"']+)*\/markdown-view-search-rss-plateau[.\-][^/\s"']+/g, MASKED_TEMP)
     .replace(/\/home\/[^\s"']+/g, '<home-path>');
 }
 
@@ -167,7 +174,10 @@ function sanitizeReport(value) {
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, sanitizeReport(nested)])
+      Object.entries(value).map(([key, nested]) => [
+        key,
+        SENSITIVE_REPORT_KEYS.has(key.toLowerCase()) ? REDACTED : sanitizeReport(nested),
+      ])
     );
   }
   return sanitizePath(value);
@@ -176,15 +186,25 @@ function sanitizeReport(value) {
 function runSanitizationSelfTest() {
   const raw = {
     temp: '/tmp/markdown-view-search-rss-plateau.abcd1234/workspace/prefix.md',
+    hyphenTemp: '/tmp/markdown-view-search-rss-plateau-abcd1234/workspace/prefix.md',
+    customTemp: '/var/tmp/markdown-view-search-rss-plateau-xyz789/workspace/prefix.md',
     repo: `${process.cwd()}/target/debug/markdown-view`,
     home: '/home/example/secret/file.md',
     body: 'needle paragraph body should not be passed into reports',
+    nested: {
+      snippet: 'needle paragraph 42',
+      results: [{ context: 'needle_inside_single_large_block secret' }],
+    },
   };
   const sanitized = sanitizeReport(raw);
   assert.equal(sanitized.temp, `${MASKED_TEMP}/workspace/prefix.md`);
+  assert.equal(sanitized.hyphenTemp, `${MASKED_TEMP}/workspace/prefix.md`);
+  assert.equal(sanitized.customTemp, `${MASKED_TEMP}/workspace/prefix.md`);
   assert.equal(sanitized.repo, '<repo>/target/debug/markdown-view');
   assert.equal(sanitized.home, '<home-path>');
-  assert.equal(sanitized.body, 'needle paragraph body should not be passed into reports');
+  assert.equal(sanitized.body, '<redacted>');
+  assert.equal(sanitized.nested.snippet, '<redacted>');
+  assert.equal(sanitized.nested.results, '<redacted>');
 
   assert.throws(() => parseArgs(['--port', '123abc']), /positive integer/);
   assert.throws(() => parseArgs(['--port', '1.5']), /positive integer/);
@@ -231,8 +251,59 @@ function runSanitizationSelfTest() {
   assert.deepEqual(emptyStatus.parsed, {});
   assert.equal(peakRssKb([{ status: { available: false, reason: 'missing' } }]), null);
   assert.deepEqual(
-    summarizeProcCompleteness([{ status: { available: false, reason: 'permission_denied', code: 'EACCES' } }]),
-    { procComplete: false, partialMeasurementReasons: ['permission_denied:EACCES'] }
+    summarizeProcCompleteness([{
+      status: { available: false, reason: 'permission_denied', code: 'EACCES' },
+      smapsRollup: { available: false, reason: 'missing' },
+      maps: { available: false, reason: 'parse_empty' },
+    }]),
+    {
+      procComplete: false,
+      partialMeasurementReasons: [
+        'status:permission_denied:EACCES',
+        'smapsRollup:missing',
+        'maps:parse_empty',
+      ],
+    }
+  );
+
+  assert.throws(
+    () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
+    /search request failed/
+  );
+  assert.throws(
+    () => summarizeSearchResponse({ ok: true, status: 200 }, 'not json'),
+    /search response was not valid JSON/
+  );
+  assert.throws(
+    () => summarizeSearchResponse({ ok: true, status: 200 }, '{"results":[]}'),
+    /search response missing searched_files/
+  );
+  const validSearchBody = JSON.stringify({
+    query: 'needle',
+    results: [{ title: 'hidden' }],
+    searched_files: 1,
+    skipped_files: 0,
+    searched_bytes: 123,
+    truncated: true,
+    truncated_reasons: ['result_limit'],
+    limits: { max_results: 100, max_files: 1000, max_bytes: 10485760 },
+  });
+  assert.deepEqual(
+    summarizeSearchResponse({ ok: true, status: 200 }, validSearchBody),
+    {
+      httpStatus: 200,
+      responseBytes: Buffer.byteLength(validSearchBody),
+      searched_files: 1,
+      skipped_files: 0,
+      searched_bytes: 123,
+      truncated: true,
+      truncated_reasons: ['result_limit'],
+      resultsLength: 1,
+    }
+  );
+  assert.equal(
+    outputIndicatesPortFallback('[markdown-view] ポート 3109 は使用中のため、空きポート 3110 を使用します'),
+    true
   );
 
   const root = createFixtureRoot();
@@ -252,13 +323,21 @@ function runSanitizationSelfTest() {
     assert.equal(fallback.fixtureKind, 'fallback');
     assert.equal(fallback.fileCount, 1);
     assert.ok(fallback.bytes > 0);
+
+    const fullFallback = createFixture(root, 'fallback', 'full');
+    assert.equal(fullFallback.fixtureKind, 'fallback');
+    assert.equal(fullFallback.fileCount, 1);
+    assert.ok(fullFallback.bytes > fallback.bytes * 10);
+    assert.ok(fullFallback.bytes < 10 * 1024 * 1024);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
 function createFixtureRoot() {
-  return mkdtempSync(path.join(tmpdir(), TEMP_PREFIX));
+  const root = mkdtempSync(path.join(tmpdir(), TEMP_PREFIX));
+  TEMP_ROOTS.add(root);
+  return root;
 }
 
 function createFixture(root, fixtureKind, scale) {
@@ -303,7 +382,7 @@ function createMultifileFixture(workspace, scale) {
 }
 
 function createFallbackFixture(workspace, scale) {
-  const repeatCount = scale === 'full' ? 700_000 : 4_000;
+  const repeatCount = scale === 'full' ? 300_000 : 4_000;
   const filePath = path.join(workspace, 'fallback.md');
   const chunk = 'needle_inside_single_large_block ';
   writeFileSync(filePath, `# fallback\n\n${chunk.repeat(repeatCount)}\n`, 'utf8');
@@ -485,7 +564,7 @@ function parseMapsLine(line) {
 async function runMeasuredScenario(options, fixture, mode, runKind) {
   const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
   try {
-    await waitForServer(options.port);
+    await waitForServer(server, options.port);
     let warmupResponse = null;
     if (runKind === 'warm') {
       warmupResponse = await requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS);
@@ -566,6 +645,7 @@ async function startServer({ mode, workspace, port }) {
     const stderr = sanitizeProcessOutput(stderrChunks.join('').slice(0, 500));
     throw new Error(`server exited early with code ${child.exitCode ?? child.signalCode ?? 'UNKNOWN'}: ${stderr}`);
   }
+  child.stderrText = () => stderrChunks.join('');
   return child;
 }
 
@@ -590,21 +670,35 @@ function sanitizeProcessOutput(value) {
     .join('\n');
 }
 
-async function waitForServer(port) {
+async function waitForServer(child, port) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
+    if (outputIndicatesPortFallback(child.stderrText?.() ?? '')) {
+      throw new Error('server used a fallback port; choose an unused measurement port');
+    }
+    if (isChildExited(child)) {
+      throw new Error(`server exited before readiness with code ${child.exitCode ?? child.signalCode ?? 'UNKNOWN'}`);
+    }
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/`, {
-        headers: { Host: `127.0.0.1:${port}` },
-      });
-      if (response.status < 500) {
+      await requestSearch(port, '', 2_000);
+      if (outputIndicatesPortFallback(child.stderrText?.() ?? '')) {
+        throw new Error('server used a fallback port; choose an unused measurement port');
+      }
+      if (!isChildExited(child)) {
         return;
       }
-    } catch (_error) {
+    } catch (error) {
+      if (error.message.includes('fallback port')) {
+        throw error;
+      }
       await delay(200);
     }
   }
   throw new Error('server did not become ready');
+}
+
+function outputIndicatesPortFallback(output) {
+  return /ポート\s+\d+\s+は使用中のため、空きポート\s+\d+\s+を使用します/.test(output);
 }
 
 function requestSearch(port, query, timeoutMs) {
@@ -618,28 +712,83 @@ function requestSearch(port, query, timeoutMs) {
         headers: { Host: `127.0.0.1:${port}` },
         signal: controller.signal,
       });
-      const body = await response.text();
-      let json = null;
-      try {
-        json = JSON.parse(body);
-      } catch (_error) {
-        json = null;
-      }
-      return {
-        httpStatus: response.status,
-        responseBytes: Buffer.byteLength(body),
-        searched_files: json?.searched_files,
-        searched_bytes: json?.searched_bytes,
-        truncated: json?.truncated,
-        truncated_reasons: json?.truncated_reasons,
-        resultsLength: Array.isArray(json?.results) ? json.results.length : null,
-      };
+      const body = await readResponseTextWithLimit(response, MAX_RESPONSE_BYTES);
+      return summarizeSearchResponse(response, body);
     } finally {
       clearTimeout(timeout);
     }
   })();
   promise.abort = () => controller.abort();
   return promise;
+}
+
+async function readResponseTextWithLimit(response, byteLimit) {
+  if (!response.body) {
+    const body = await response.text();
+    if (Buffer.byteLength(body) > byteLimit) {
+      throw new Error(`search response exceeded ${byteLimit} bytes`);
+    }
+    return body;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > byteLimit) {
+        await reader.cancel();
+        throw new Error(`search response exceeded ${byteLimit} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+}
+
+function summarizeSearchResponse(response, body) {
+  const responseBytes = Buffer.byteLength(body);
+  if (responseBytes > MAX_RESPONSE_BYTES) {
+    throw new Error(`search response exceeded ${MAX_RESPONSE_BYTES} bytes`);
+  }
+  if (!response.ok) {
+    throw new Error(`search request failed with status ${response.status}`);
+  }
+  let json;
+  try {
+    json = JSON.parse(body);
+  } catch (_error) {
+    throw new Error('search response was not valid JSON');
+  }
+  const expectedFields = [
+    ['searched_files', Number.isFinite],
+    ['skipped_files', Number.isFinite],
+    ['searched_bytes', Number.isFinite],
+    ['truncated', (value) => typeof value === 'boolean'],
+    ['truncated_reasons', Array.isArray],
+    ['results', Array.isArray],
+  ];
+  for (const [fieldName, predicate] of expectedFields) {
+    if (!predicate(json?.[fieldName])) {
+      throw new Error(`search response missing ${fieldName}`);
+    }
+  }
+  return {
+    httpStatus: response.status,
+    responseBytes,
+    searched_files: json.searched_files,
+    skipped_files: json.skipped_files,
+    searched_bytes: json.searched_bytes,
+    truncated: json.truncated,
+    truncated_reasons: json.truncated_reasons,
+    resultsLength: json.results.length,
+  };
 }
 
 function peakRssKb(snapshots) {
@@ -655,9 +804,14 @@ function peakRssKb(snapshots) {
 function summarizeProcCompleteness(snapshots) {
   const reasons = new Set();
   for (const snapshot of snapshots) {
-    const status = snapshot?.status;
-    if (status && status.available === false) {
-      reasons.add(status.code ? `${status.reason}:${status.code}` : status.reason);
+    for (const [probeName, probe] of Object.entries({
+      status: snapshot?.status,
+      smapsRollup: snapshot?.smapsRollup,
+      maps: snapshot?.maps,
+    })) {
+      if (probe && probe.available === false) {
+        reasons.add(probe.code ? `${probeName}:${probe.reason}:${probe.code}` : `${probeName}:${probe.reason}`);
+      }
     }
   }
   return {
@@ -711,30 +865,94 @@ async function runMeasurement(options) {
   const root = createFixtureRoot();
   try {
     const reports = [];
+    let failed = false;
     for (const fixtureKind of options.fixtures) {
       const fixture = createFixture(root, fixtureKind, options.fixtureScale);
       for (const mode of options.modes) {
         for (const runKind of options.runs) {
-          const scenario = await runMeasuredScenario(options, fixture, mode, runKind);
-          reports.push({
+          const baseReport = {
             fixtureKind,
             fixture: {
               fileCount: fixture.fileCount,
               bytes: fixture.bytes,
               workspace: fixture.maskedWorkspace,
             },
-            ...scenario,
-          });
+            mode,
+            runKind,
+          };
+          try {
+            const scenario = await runMeasuredScenario(options, fixture, mode, runKind);
+            reports.push({
+              ...baseReport,
+              status: 'ok',
+              ...scenario,
+            });
+          } catch (error) {
+            failed = true;
+            reports.push({
+              ...baseReport,
+              status: 'failed',
+              errorKind: classifyError(error),
+              sanitizedMessage: sanitizeProcessOutput(error.message),
+            });
+          }
         }
       }
     }
-    console.log(JSON.stringify(sanitizeReport({ tempRoot: root, reports }), null, 2));
-    return 0;
+    console.log(JSON.stringify(sanitizeReport({
+      measurementContext: buildMeasurementContext(),
+      tempRoot: root,
+      reports,
+    }), null, 2));
+    return failed ? 1 : 0;
   } finally {
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
     }
   }
+}
+
+function classifyError(error) {
+  const name = error && typeof error.name === 'string' ? error.name : 'Error';
+  const message = error && typeof error.message === 'string' ? error.message : String(error);
+  if (name === 'AbortError') {
+    return 'timeout';
+  }
+  if (message.includes('fallback port')) {
+    return 'port_fallback';
+  }
+  if (message.includes('search request failed')) {
+    return 'http_failed';
+  }
+  if (message.includes('search response')) {
+    return 'schema_failed';
+  }
+  if (message.includes('server')) {
+    return 'server_failed';
+  }
+  return 'measurement_failed';
+}
+
+function buildMeasurementContext() {
+  return {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: osRelease(),
+    head: currentGitHead(),
+  };
+}
+
+function currentGitHead() {
+  const result = spawnSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    return 'unknown';
+  }
+  return result.stdout.trim();
 }
 
 Promise.resolve().then(() => main()).then((code) => {

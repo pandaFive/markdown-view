@@ -1,5 +1,7 @@
 # Search RSS Plateau Implementation Plan
 
+> **Status note:** この文書は 2026-06-04 時点の履歴・参考計画であり、現在の user instruction、`AGENTS.md`、runtime permission rules を上位として扱う。ここに含まれる実行手順、sub-skill 指示、`git add` / `git commit` 例は、再利用時にも都度の承認と現行ルール確認を前提にする。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** ディレクトリ検索 many-match 後の RSS plateau を再現可能に測定し、支配要因を分類して `TODO.md` に結果を残す。
@@ -792,7 +794,7 @@ Expected: exit code `0`; JSON contains one report with `httpStatus: 200`, `trunc
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 | rg '/tmp/markdown-view-search-rss-plateau\\.[A-Za-z0-9]|/home/|target/debug/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/debug/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
 ```
 
 Expected: `rg` exits `1`. If the smoke run fails because the port is busy, rerun with a different port and record that in the final report.
@@ -833,7 +835,7 @@ node scripts/measure-search-rss-plateau.mjs --fixture-scale full --modes dev --f
 
 Use these rules:
 
-- If `RssAnon` and `maps.anonymousKb` dominate while elapsed is low and response JSON is normal, classify as `glibc allocator arena / retained anonymous memory` or `WSL2 / proc characteristic` depending on whether repeated warm runs stabilize.
+- If `RssAnon` and `smaps_rollup Anonymous` dominate while elapsed is low and response JSON is normal, classify as `glibc allocator arena / retained anonymous memory` or `WSL2 / proc characteristic` depending on whether repeated warm runs stabilize. Treat `maps.anonymousKb` as virtual address range context only; do not use it as the primary RSS plateau signal.
 - If release `prefix` is low elapsed but `fallback` is materially slower or higher RSS, classify `安全境界なし巨大 block fallback` as a remaining performance path.
 - If `before` to `settled` grows mainly after server start before search, classify `Tokio runtime / process initialization` as a contributor.
 - If `smaps_rollup` is unavailable and `status` is insufficient, classify as `未特定` and list the missing measurement.
@@ -885,7 +887,7 @@ Expected: both commands exit `0`.
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --smoke --port 3125 | rg '/tmp/markdown-view-search-rss-plateau\\.[A-Za-z0-9]|/home/|target/(debug|release)/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3125 | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/(debug|release)/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
 ```
 
 Expected: `rg` exits `1`.
