@@ -315,7 +315,7 @@ function createMultifileFixture(workspace, scale) {
 }
 
 function createFallbackFixture(workspace, scale) {
-  const repeatCount = scale === 'full' ? 700_000 : 4_000;
+  const repeatCount = scale === 'full' ? 300_000 : 4_000;
   const filePath = path.join(workspace, 'fallback.md');
   const chunk = 'needle_inside_single_large_block ';
   writeFileSync(filePath, `# fallback\n\n${chunk.repeat(repeatCount)}\n`, 'utf8');
@@ -409,7 +409,7 @@ Expected: exit code `0`; JSON contains three `fixture-created` entries and uses 
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --fixtures prefix --fixture-scale short | rg '/tmp/markdown-view-search-rss-plateau\\.[A-Za-z0-9]'
+node scripts/measure-search-rss-plateau.mjs --fixtures prefix --fixture-scale short | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+'
 ```
 
 Expected: `rg` exits `1` because exact temp names are not printed.
@@ -794,10 +794,11 @@ Expected: exit code `0`; JSON contains one report with `httpStatus: 200`, `trunc
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/debug/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/debug/markdown-view .*--port|needle paragraph|needle_inside_single_large_block' /tmp/markdown-view-search-rss-plateau-smoke.json
 ```
 
-Expected: `rg` exits `1`. If the smoke run fails because the port is busy, rerun with a different port and record that in the final report.
+Expected: the `node` command exits `0`; `rg` exits `1`. If the smoke run fails because the port is busy, rerun with a different port and record that in the final report.
 
 - [ ] **Step 6: Commit**
 
@@ -887,10 +888,11 @@ Expected: both commands exit `0`.
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --smoke --port 3125 | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/(debug|release)/markdown-view .*--port|needle paragraph|needle_inside_single_large_block'
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3125 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/(debug|release)/markdown-view .*--port|needle paragraph|needle_inside_single_large_block' /tmp/markdown-view-search-rss-plateau-smoke.json
 ```
 
-Expected: `rg` exits `1`.
+Expected: the `node` command exits `0`; `rg` exits `1`.
 
 - [ ] **Step 3: Run required verification**
 

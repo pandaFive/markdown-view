@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { release as osRelease, tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,6 +15,11 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SAMPLE_INTERVAL_MS = 50;
 const MAX_SAMPLES = Math.ceil(REQUEST_TIMEOUT_MS / SAMPLE_INTERVAL_MS) + 20;
+const EXPECTED_SEARCH_LIMITS = {
+  max_results: 100,
+  max_files: 1000,
+  max_bytes: 64 * 1024 * 1024,
+};
 const REDACTED = '<redacted>';
 const TEMP_ROOTS = new Set();
 const SENSITIVE_REPORT_KEYS = new Set(['body', 'content', 'context', 'results', 'snippet', 'text']);
@@ -275,8 +282,42 @@ function runSanitizationSelfTest() {
     /search response was not valid JSON/
   );
   assert.throws(
-    () => summarizeSearchResponse({ ok: true, status: 200 }, '{"results":[]}'),
-    /search response missing searched_files/
+    () => summarizeSearchResponse({ ok: true, status: 200 }, '{"results":[]}', 'needle'),
+    /search response missing query/
+  );
+  assert.throws(
+    () => summarizeSearchResponse(
+      { ok: true, status: 200 },
+      JSON.stringify({
+        query: 'other',
+        results: [],
+        searched_files: 1,
+        skipped_files: 0,
+        searched_bytes: 123,
+        truncated: false,
+        truncated_reasons: [],
+        limits: EXPECTED_SEARCH_LIMITS,
+      }),
+      'needle'
+    ),
+    /search response query mismatch/
+  );
+  assert.throws(
+    () => summarizeSearchResponse(
+      { ok: true, status: 200 },
+      JSON.stringify({
+        query: 'needle',
+        results: [],
+        searched_files: 1,
+        skipped_files: 0,
+        searched_bytes: 123,
+        truncated: false,
+        truncated_reasons: [],
+        limits: { max_results: 99, max_files: 1000, max_bytes: 64 * 1024 * 1024 },
+      }),
+      'needle'
+    ),
+    /search response limits mismatch/
   );
   const validSearchBody = JSON.stringify({
     query: 'needle',
@@ -286,10 +327,10 @@ function runSanitizationSelfTest() {
     searched_bytes: 123,
     truncated: true,
     truncated_reasons: ['result_limit'],
-    limits: { max_results: 100, max_files: 1000, max_bytes: 10485760 },
+    limits: EXPECTED_SEARCH_LIMITS,
   });
   assert.deepEqual(
-    summarizeSearchResponse({ ok: true, status: 200 }, validSearchBody),
+    summarizeSearchResponse({ ok: true, status: 200 }, validSearchBody, 'needle'),
     {
       httpStatus: 200,
       responseBytes: Buffer.byteLength(validSearchBody),
@@ -301,10 +342,49 @@ function runSanitizationSelfTest() {
       resultsLength: 1,
     }
   );
+  assert.doesNotThrow(() => validateScenarioResult('prefix', summarizeSearchResponse(
+    { ok: true, status: 200 },
+    JSON.stringify({
+      query: 'needle',
+      results: new Array(100).fill({ title: 'hidden' }),
+      searched_files: 1,
+      skipped_files: 0,
+      searched_bytes: 123,
+      truncated: true,
+      truncated_reasons: ['result_limit'],
+      limits: EXPECTED_SEARCH_LIMITS,
+    }),
+    'needle'
+  )));
+  assert.throws(
+    () => validateScenarioResult('fallback', {
+      searched_files: 0,
+      searched_bytes: 0,
+      resultsLength: 0,
+      truncated_reasons: [],
+    }),
+    /invalid scenario/
+  );
   assert.equal(
     outputIndicatesPortFallback('[markdown-view] ポート 3109 は使用中のため、空きポート 3110 を使用します'),
     true
   );
+  assert.equal(outputServerUrlPort('URL: http://127.0.0.1:3125'), 3125);
+  assert.equal(outputServerUrlPort('URL: http://127.0.0.1:3126'), 3126);
+  assert.equal(outputServerUrlPort('ready'), null);
+  assert.equal(isPortUnavailableError(Object.assign(new Error('busy'), { code: 'EADDRINUSE' })), true);
+  assert.equal(isPortUnavailableError(Object.assign(new Error('denied'), { code: 'EACCES' })), true);
+  assert.deepEqual(queryFingerprint('needle'), {
+    queryLength: 6,
+    querySha256: '09881f6ed93360a2f6ad81f435a8ca51ca4575d0f954f197ff8f7d16c6565562',
+  });
+
+  assert.deepEqual(readMapsSummaryFromText('invalid maps line'), {
+    available: false,
+    reason: 'parse_failed',
+    malformedLineCount: 1,
+    mappingCount: 0,
+  });
 
   const root = createFixtureRoot();
   try {
@@ -475,6 +555,10 @@ function readMapsSummary(pid) {
   if (!procFile.ok) {
     return unavailableProcResult(procFile);
   }
+  return readMapsSummaryFromText(procFile.text);
+}
+
+function readMapsSummaryFromText(text) {
   const summary = {
     available: true,
     anonymousKb: 0,
@@ -483,13 +567,15 @@ function readMapsSummary(pid) {
     stackKb: 0,
     otherSpecialKb: 0,
     mappingCount: 0,
+    malformedLineCount: 0,
   };
-  for (const line of procFile.text.split('\n')) {
+  for (const line of text.split('\n')) {
     if (line.trim() === '') {
       continue;
     }
     const entry = parseMapsLine(line);
     if (!entry) {
+      summary.malformedLineCount += 1;
       continue;
     }
     summary.mappingCount += 1;
@@ -504,6 +590,22 @@ function readMapsSummary(pid) {
     } else {
       summary.fileBackedKb += entry.sizeKb;
     }
+  }
+  if (summary.mappingCount === 0) {
+    return {
+      available: false,
+      reason: summary.malformedLineCount > 0 ? 'parse_failed' : 'parse_empty',
+      malformedLineCount: summary.malformedLineCount,
+      mappingCount: summary.mappingCount,
+    };
+  }
+  if (summary.malformedLineCount > 0) {
+    return {
+      available: false,
+      reason: 'parse_failed',
+      malformedLineCount: summary.malformedLineCount,
+      mappingCount: summary.mappingCount,
+    };
   }
   return summary;
 }
@@ -563,11 +665,13 @@ function parseMapsLine(line) {
 
 async function runMeasuredScenario(options, fixture, mode, runKind) {
   const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
+  let scenarioError = null;
   try {
     await waitForServer(server, options.port);
     let warmupResponse = null;
     if (runKind === 'warm') {
       warmupResponse = await requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS);
+      validateScenarioResult(fixture.fixtureKind, warmupResponse);
     }
     const before = readProcSnapshot(server.pid);
     const startedAt = process.hrtime.bigint();
@@ -582,6 +686,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
       throw new Error('request sampling limit exceeded');
     }
     const response = await requestPromise;
+    validateScenarioResult(fixture.fixtureKind, response);
     const endedAt = process.hrtime.bigint();
     const after = readProcSnapshot(server.pid);
     await delay(5000);
@@ -602,8 +707,14 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
       ...(warmupResponse ? { warmupResponse } : {}),
       response,
     };
+  } catch (error) {
+    scenarioError = error;
+    throw error;
   } finally {
-    await stopServer(server);
+    const stopped = await stopServer(server);
+    if (!stopped && !scenarioError) {
+      throw new Error(`server stop failed for pid ${server.pid}`);
+    }
   }
 }
 
@@ -621,11 +732,13 @@ function trackPromise(promise) {
 }
 
 async function startServer({ mode, workspace, port }) {
+  await assertPortAvailable(port);
   const binaryPath = ensureBuiltBinary(mode);
   const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const stdoutChunks = [];
   const stderrChunks = [];
   let startError = null;
   child.on('error', (error) => {
@@ -634,7 +747,9 @@ async function startServer({ mode, workspace, port }) {
   child.stderr.on('data', (chunk) => {
     stderrChunks.push(chunk.toString('utf8'));
   });
-  child.stdout.resume();
+  child.stdout.on('data', (chunk) => {
+    stdoutChunks.push(chunk.toString('utf8'));
+  });
   child.stderr.resume();
   await delay(250);
   if (startError) {
@@ -645,8 +760,35 @@ async function startServer({ mode, workspace, port }) {
     const stderr = sanitizeProcessOutput(stderrChunks.join('').slice(0, 500));
     throw new Error(`server exited early with code ${child.exitCode ?? child.signalCode ?? 'UNKNOWN'}: ${stderr}`);
   }
-  child.stderrText = () => stderrChunks.join('');
+  child.outputText = () => `${stdoutChunks.join('')}${stderrChunks.join('')}`;
   return child;
+}
+
+function assertPortAvailable(port) {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    const cleanup = () => {
+      server.removeAllListeners();
+    };
+    server.once('error', (error) => {
+      cleanup();
+      const code = error && typeof error.code === 'string' ? error.code : 'UNKNOWN';
+      const wrapped = new Error(`measurement port ${port} is not available: ${code}`);
+      wrapped.code = code;
+      reject(wrapped);
+    });
+    server.once('listening', () => {
+      server.close((error) => {
+        cleanup();
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+    server.listen(port, '127.0.0.1');
+  });
 }
 
 function ensureBuiltBinary(mode) {
@@ -672,29 +814,51 @@ function sanitizeProcessOutput(value) {
 
 async function waitForServer(child, port) {
   const deadline = Date.now() + 60_000;
+  let lastProbeError = null;
   while (Date.now() < deadline) {
-    if (outputIndicatesPortFallback(child.stderrText?.() ?? '')) {
+    const output = child.outputText?.() ?? '';
+    if (outputIndicatesPortFallback(output)) {
       throw new Error('server used a fallback port; choose an unused measurement port');
+    }
+    const outputPort = outputServerUrlPort(output);
+    if (outputPort !== null && outputPort !== port) {
+      throw new Error(`server bound unexpected port ${outputPort}; expected ${port}`);
     }
     if (isChildExited(child)) {
       throw new Error(`server exited before readiness with code ${child.exitCode ?? child.signalCode ?? 'UNKNOWN'}`);
     }
-    try {
-      await requestSearch(port, '', 2_000);
-      if (outputIndicatesPortFallback(child.stderrText?.() ?? '')) {
-        throw new Error('server used a fallback port; choose an unused measurement port');
+    if (outputPort === port) {
+      try {
+        await requestSearch(port, '', 2_000);
+        if (!isChildExited(child)) {
+          return;
+        }
+      } catch (error) {
+        if (error.message.includes('fallback port')) {
+          throw error;
+        }
+        lastProbeError = error;
       }
-      if (!isChildExited(child)) {
-        return;
-      }
-    } catch (error) {
-      if (error.message.includes('fallback port')) {
-        throw error;
-      }
-      await delay(200);
     }
+    await delay(200);
   }
-  throw new Error('server did not become ready');
+  const output = sanitizeProcessOutput((child.outputText?.() ?? '').slice(-500));
+  const probe = lastProbeError ? ` last probe: ${lastProbeError.message}` : '';
+  throw new Error(`server did not become ready:${probe} ${output}`);
+}
+
+function outputServerUrlPort(output) {
+  const plainOutput = output.replace(/\x1b\[[0-9;]*m/g, '');
+  const match = /URL:\s+http:\/\/127\.0\.0\.1:(\d+)/.exec(plainOutput);
+  if (!match) {
+    return null;
+  }
+  const port = Number.parseInt(match[1], 10);
+  return Number.isFinite(port) ? port : null;
+}
+
+function isPortUnavailableError(error) {
+  return error && (error.code === 'EADDRINUSE' || error.code === 'EACCES' || error.code === 'EPERM');
 }
 
 function outputIndicatesPortFallback(output) {
@@ -713,7 +877,7 @@ function requestSearch(port, query, timeoutMs) {
         signal: controller.signal,
       });
       const body = await readResponseTextWithLimit(response, MAX_RESPONSE_BYTES);
-      return summarizeSearchResponse(response, body);
+      return summarizeSearchResponse(response, body, query);
     } finally {
       clearTimeout(timeout);
     }
@@ -752,7 +916,26 @@ async function readResponseTextWithLimit(response, byteLimit) {
   return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
 }
 
-function summarizeSearchResponse(response, body) {
+function validateScenarioResult(fixtureKind, response) {
+  const reasons = [];
+  if (!(response.searched_files > 0)) {
+    reasons.push('searched_files must be greater than 0');
+  }
+  if (!(response.searched_bytes > 0)) {
+    reasons.push('searched_bytes must be greater than 0');
+  }
+  if (response.resultsLength !== EXPECTED_SEARCH_LIMITS.max_results) {
+    reasons.push(`resultsLength must be ${EXPECTED_SEARCH_LIMITS.max_results}`);
+  }
+  if (!response.truncated_reasons.includes('result_limit')) {
+    reasons.push('truncated_reasons must include result_limit');
+  }
+  if (reasons.length > 0) {
+    throw new Error(`invalid scenario for ${fixtureKind}: ${reasons.join('; ')}`);
+  }
+}
+
+function summarizeSearchResponse(response, body, expectedQuery) {
   const responseBytes = Buffer.byteLength(body);
   if (responseBytes > MAX_RESPONSE_BYTES) {
     throw new Error(`search response exceeded ${MAX_RESPONSE_BYTES} bytes`);
@@ -767,16 +950,26 @@ function summarizeSearchResponse(response, body) {
     throw new Error('search response was not valid JSON');
   }
   const expectedFields = [
+    ['query', (value) => typeof value === 'string'],
     ['searched_files', Number.isFinite],
     ['skipped_files', Number.isFinite],
     ['searched_bytes', Number.isFinite],
     ['truncated', (value) => typeof value === 'boolean'],
     ['truncated_reasons', Array.isArray],
     ['results', Array.isArray],
+    ['limits', (value) => value && typeof value === 'object'],
   ];
   for (const [fieldName, predicate] of expectedFields) {
     if (!predicate(json?.[fieldName])) {
       throw new Error(`search response missing ${fieldName}`);
+    }
+  }
+  if (json.query !== expectedQuery) {
+    throw new Error('search response query mismatch');
+  }
+  for (const [key, expectedValue] of Object.entries(EXPECTED_SEARCH_LIMITS)) {
+    if (json.limits[key] !== expectedValue) {
+      throw new Error(`search response limits mismatch: ${key}`);
     }
   }
   return {
@@ -822,14 +1015,14 @@ function summarizeProcCompleteness(snapshots) {
 
 async function stopServer(child) {
   if (!child || isChildExited(child)) {
-    return;
+    return true;
   }
   child.kill('SIGTERM');
   if (await waitForChildExit(child, 5_000)) {
-    return;
+    return true;
   }
   child.kill('SIGKILL');
-  await waitForChildExit(child, 1_000);
+  return waitForChildExit(child, 1_000);
 }
 
 async function waitForChildExit(child, timeoutMs) {
@@ -900,7 +1093,7 @@ async function runMeasurement(options) {
       }
     }
     console.log(JSON.stringify(sanitizeReport({
-      measurementContext: buildMeasurementContext(),
+      measurementContext: buildMeasurementContext(options),
       tempRoot: root,
       reports,
     }), null, 2));
@@ -918,8 +1111,17 @@ function classifyError(error) {
   if (name === 'AbortError') {
     return 'timeout';
   }
+  if (isPortUnavailableError(error)) {
+    return 'port_unavailable';
+  }
   if (message.includes('fallback port')) {
     return 'port_fallback';
+  }
+  if (message.includes('invalid scenario')) {
+    return 'invalid_scenario';
+  }
+  if (message.includes('server stop failed')) {
+    return 'server_stop_failed';
   }
   if (message.includes('search request failed')) {
     return 'http_failed';
@@ -933,13 +1135,29 @@ function classifyError(error) {
   return 'measurement_failed';
 }
 
-function buildMeasurementContext() {
+function buildMeasurementContext(options) {
   return {
     node: process.version,
     platform: process.platform,
     arch: process.arch,
     osRelease: osRelease(),
     head: currentGitHead(),
+    cliOptions: {
+      smoke: options.smoke,
+      fixtureScale: options.fixtureScale,
+      modes: options.modes,
+      fixtures: options.fixtures,
+      runs: options.runs,
+      port: options.port,
+      ...queryFingerprint(options.query),
+    },
+  };
+}
+
+function queryFingerprint(query) {
+  return {
+    queryLength: query.length,
+    querySha256: createHash('sha256').update(query, 'utf8').digest('hex'),
   };
 }
 

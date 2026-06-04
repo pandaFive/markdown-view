@@ -31,7 +31,7 @@
 script の責務:
 
 - `/tmp/markdown-view-search-rss-plateau.***` に測定 fixture を作る。
-- dev は `cargo run -- ...`、release は既存 release binary または `cargo run --release -- ...` で server を起動する。
+- dev/release とも `cargo build` 後の `target/debug|release/markdown-view` を直接起動し、実 server PID を測定する。起動時は `--no-open` を付ける。
 - localhost の `/api/search?q=needle` へ検索リクエストを投げる。
 - request 前、request 中 peak、request 後、5秒後 settled の RSS / status を採る。
 - `/proc/<pid>/status`、可能なら `smaps_rollup`、`maps` の概要を読む。

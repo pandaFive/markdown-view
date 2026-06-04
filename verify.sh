@@ -80,6 +80,11 @@ check_search_rss_measurement_script() {
   node scripts/measure-search-rss-plateau.mjs --self-test-sanitization >/dev/null
 }
 
+run_search_rss_measurement_smoke() {
+  local port="${MV_VERIFY_SEARCH_RSS_SMOKE_PORT:-3130}"
+  node scripts/measure-search-rss-plateau.mjs --smoke --port "$port" >/dev/null
+}
+
 check_appmode_toctou_regression() {
   local pattern='\.is_(file|dir)\(\)'
   local allowed_pattern='(^|[^[:alnum:]_])metadata\.file_type\(\)\.is_(file|dir)\(\)'
@@ -128,6 +133,9 @@ run_step "フォーマットチェック" cargo fmt --all -- --check
 run_step "Lint (clippy)" cargo clippy --all-targets --all-features -- -D warnings
 run_step "AppMode TOCTOU回帰チェック" check_appmode_toctou_regression
 run_step "検索RSS計測スクリプトチェック" check_search_rss_measurement_script
+if [[ "${MV_VERIFY_SEARCH_RSS_SMOKE:-}" == "1" ]]; then
+  run_step "検索RSS計測HTTP smoke" run_search_rss_measurement_smoke
+fi
 run_step "テスト実行" cargo test --all-targets --all-features
 run_step "リリースビルドテスト実行" cargo test --all-targets --all-features --release
 run_step "E2E型チェック (tsc)" typecheck_e2e
