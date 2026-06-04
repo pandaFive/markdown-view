@@ -82,7 +82,15 @@ check_search_rss_measurement_script() {
 
 run_search_rss_measurement_smoke() {
   local port="${MV_VERIFY_SEARCH_RSS_SMOKE_PORT:-3130}"
-  node scripts/measure-search-rss-plateau.mjs --smoke --port "$port" >/dev/null
+  local output
+  output="$(mktemp)"
+  if node scripts/measure-search-rss-plateau.mjs --smoke --port "$port" >"$output"; then
+    rm -f "$output"
+    return 0
+  fi
+  cat "$output" >&2
+  rm -f "$output"
+  return 1
 }
 
 check_appmode_toctou_regression() {

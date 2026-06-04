@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { release as osRelease, tmpdir } from 'node:os';
@@ -374,10 +373,9 @@ function runSanitizationSelfTest() {
   assert.equal(outputServerUrlPort('ready'), null);
   assert.equal(isPortUnavailableError(Object.assign(new Error('busy'), { code: 'EADDRINUSE' })), true);
   assert.equal(isPortUnavailableError(Object.assign(new Error('denied'), { code: 'EACCES' })), true);
-  assert.deepEqual(queryFingerprint('needle'), {
-    queryLength: 6,
-    querySha256: '09881f6ed93360a2f6ad81f435a8ca51ca4575d0f954f197ff8f7d16c6565562',
-  });
+  const context = buildMeasurementContext(parseArgs(['--query', 'needle']));
+  assert.equal(Object.hasOwn(context.cliOptions, 'queryLength'), false);
+  assert.equal(Object.hasOwn(context.cliOptions, 'querySha256'), false);
 
   assert.deepEqual(readMapsSummaryFromText('invalid maps line'), {
     available: false,
@@ -412,6 +410,19 @@ function runSanitizationSelfTest() {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+
+  const cleanupError = attachCleanupFailure(new Error('measurement failed'), 12345);
+  assert.equal(cleanupError.cleanupFailed, true);
+  assert.equal(cleanupError.cleanupErrorKind, 'server_stop_failed');
+  assert.match(cleanupError.cleanupMessage, /server stop failed/);
+  const cleanupReport = errorReportFields(cleanupError);
+  assert.deepEqual(cleanupReport, {
+    errorKind: 'measurement_failed',
+    sanitizedMessage: 'measurement failed',
+    cleanupFailed: true,
+    cleanupErrorKind: 'server_stop_failed',
+    cleanupMessage: 'server stop failed for pid 12345',
+  });
 }
 
 function createFixtureRoot() {
@@ -708,12 +719,16 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
       response,
     };
   } catch (error) {
-    scenarioError = error;
-    throw error;
+    scenarioError = normalizeError(error);
+    throw scenarioError;
   } finally {
     const stopped = await stopServer(server);
-    if (!stopped && !scenarioError) {
-      throw new Error(`server stop failed for pid ${server.pid}`);
+    if (!stopped) {
+      if (scenarioError) {
+        attachCleanupFailure(scenarioError, server.pid);
+      } else {
+        throw new Error(`server stop failed for pid ${server.pid}`);
+      }
     }
   }
 }
@@ -834,7 +849,7 @@ async function waitForServer(child, port) {
           return;
         }
       } catch (error) {
-        if (error.message.includes('fallback port')) {
+        if (errorMessage(error).includes('fallback port')) {
           throw error;
         }
         lastProbeError = error;
@@ -1085,8 +1100,7 @@ async function runMeasurement(options) {
             reports.push({
               ...baseReport,
               status: 'failed',
-              errorKind: classifyError(error),
-              sanitizedMessage: sanitizeProcessOutput(error.message),
+              ...errorReportFields(error),
             });
           }
         }
@@ -1107,7 +1121,7 @@ async function runMeasurement(options) {
 
 function classifyError(error) {
   const name = error && typeof error.name === 'string' ? error.name : 'Error';
-  const message = error && typeof error.message === 'string' ? error.message : String(error);
+  const message = errorMessage(error);
   if (name === 'AbortError') {
     return 'timeout';
   }
@@ -1135,6 +1149,35 @@ function classifyError(error) {
   return 'measurement_failed';
 }
 
+function errorReportFields(error) {
+  const report = {
+    errorKind: classifyError(error),
+    sanitizedMessage: sanitizeProcessOutput(errorMessage(error)),
+  };
+  if (error && error.cleanupFailed === true) {
+    report.cleanupFailed = true;
+    report.cleanupErrorKind = error.cleanupErrorKind ?? 'server_stop_failed';
+    report.cleanupMessage = sanitizeProcessOutput(error.cleanupMessage ?? '');
+  }
+  return report;
+}
+
+function attachCleanupFailure(error, pid) {
+  const target = normalizeError(error);
+  target.cleanupFailed = true;
+  target.cleanupErrorKind = 'server_stop_failed';
+  target.cleanupMessage = `server stop failed for pid ${pid}`;
+  return target;
+}
+
+function normalizeError(error) {
+  return error && typeof error === 'object' ? error : new Error(errorMessage(error));
+}
+
+function errorMessage(error) {
+  return error && typeof error.message === 'string' ? error.message : String(error);
+}
+
 function buildMeasurementContext(options) {
   return {
     node: process.version,
@@ -1149,15 +1192,7 @@ function buildMeasurementContext(options) {
       fixtures: options.fixtures,
       runs: options.runs,
       port: options.port,
-      ...queryFingerprint(options.query),
     },
-  };
-}
-
-function queryFingerprint(query) {
-  return {
-    queryLength: query.length,
-    querySha256: createHash('sha256').update(query, 'utf8').digest('hex'),
   };
 }
 
@@ -1176,6 +1211,6 @@ function currentGitHead() {
 Promise.resolve().then(() => main()).then((code) => {
   process.exitCode = code;
 }).catch((error) => {
-  console.error(sanitizePath(error.message));
+  console.error(sanitizePath(errorMessage(error)));
   process.exitCode = 1;
 });

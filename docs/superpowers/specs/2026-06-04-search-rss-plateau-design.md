@@ -83,7 +83,7 @@ Rust 本体は原則変更しない。必要になった場合でも、計測安
 - full process args。
 - Markdown 本文断片。
 - raw `/proc/<pid>/maps` 行。
-- query 以外の任意入力文字列。
+- query を含む任意入力文字列。
 
 fixture は repo 外の `/tmp/markdown-view-search-rss-plateau.***` に作成し、repository へ追加しない。committed docs には exact temp path ではなく masked path だけを残す。
 

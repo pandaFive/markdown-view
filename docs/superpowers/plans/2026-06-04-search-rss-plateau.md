@@ -394,25 +394,26 @@ async function runMeasurement(options) {
 }
 ```
 
-- [ ] **Step 3: Run fixture smoke**
+- [ ] **Step 3: Run current self-test**
 
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --fixtures prefix,multifile,fallback --fixture-scale short
+node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
 ```
 
-Expected: exit code `0`; JSON contains three `fixture-created` entries and uses `/tmp/markdown-view-search-rss-plateau.***`.
+Expected: exit code `0`; output is `sanitization self-test: ok`. The current CLI no longer has a fixture-only mode; fixture generation is covered by this self-test.
 
-- [ ] **Step 4: Check exact temp paths are masked**
+- [ ] **Step 4: Run current HTTP smoke and check exact temp paths are masked**
 
 Run:
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --fixtures prefix --fixture-scale short | rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+'
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|needle paragraph|needle_inside_single_large_block|querySha256|queryLength' /tmp/markdown-view-search-rss-plateau-smoke.json
 ```
 
-Expected: `rg` exits `1` because exact temp names are not printed.
+Expected: `node` exits `0`; `rg` exits `1` because exact temp names, body fragments, and query fingerprints are not printed.
 
 - [ ] **Step 5: Commit**
 
