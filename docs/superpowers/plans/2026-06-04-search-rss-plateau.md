@@ -208,12 +208,18 @@ function runSanitizationSelfTest() {
     repo: `${process.cwd()}/target/debug/markdown-view`,
     home: '/home/example/secret/file.md',
     body: 'needle paragraph body should not be passed into reports',
+    nested: {
+      snippet: 'needle paragraph 42',
+      results: [{ context: 'needle_inside_single_large_block secret' }],
+    },
   };
   const sanitized = sanitizeReport(raw);
   assert.equal(sanitized.temp, `${MASKED_TEMP}/workspace/prefix.md`);
   assert.equal(sanitized.repo, '<repo>/target/debug/markdown-view');
   assert.equal(sanitized.home, '<home-path>');
-  assert.equal(sanitized.body, 'needle paragraph body should not be passed into reports');
+  assert.equal(sanitized.body, '<redacted>');
+  assert.equal(sanitized.nested.snippet, '<redacted>');
+  assert.equal(sanitized.nested.results, '<redacted>');
 }
 
 async function runMeasurement(_options) {
@@ -440,221 +446,21 @@ Expected: commit succeeds.
 ## Task 4: Server Lifecycle And HTTP Measurement
 
 **Files:**
-- Modify: `scripts/measure-search-rss-plateau.mjs`
+- Verify: `scripts/measure-search-rss-plateau.mjs`
 
-- [ ] **Step 1: Add server and HTTP helpers before `runMeasurement()`**
+- [ ] **Step 1: Confirm the current server lifecycle contract**
 
-Insert:
+The current measurement script must keep these properties:
 
-```js
-async function runMeasuredScenario(options, fixture, mode, runKind) {
-  const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
-  try {
-    await waitForServer(options.port);
-    const before = readProcSnapshot(server.pid);
-    const startedAt = process.hrtime.bigint();
-    const requestPromise = requestSearch(options.port, options.query);
-    const samples = [];
-    while (!isPromiseSettled(requestPromise)) {
-      samples.push(readProcSnapshot(server.pid));
-      await delay(50);
-    }
-    const response = await requestPromise;
-    const endedAt = process.hrtime.bigint();
-    const after = readProcSnapshot(server.pid);
-    await delay(5000);
-    const settled = readProcSnapshot(server.pid);
-    return {
-      mode,
-      runKind,
-      pid: server.pid,
-      elapsedMs: Number(endedAt - startedAt) / 1_000_000,
-      peakRssKb: peakRssKb([before, ...samples, after, settled]),
-      before,
-      after,
-      settled,
-      response,
-    };
-  } finally {
-    await stopServer(server);
-  }
-}
+- Build with `cargo build` / `cargo build --release`, then spawn `target/debug/markdown-view` or `target/release/markdown-view` directly.
+- Start the server with `--no-open` and the requested `--port`.
+- Preflight the requested port before spawning the server.
+- Wait for the child process to print the expected `127.0.0.1:<port>` URL before probing readiness.
+- Validate search response schema, limits, query echo, and result-limit scenario before accepting a report.
+- Emit structured failed reports with `errorKind` and sanitized messages.
+- Report server cleanup failure without hiding the original measurement error.
 
-function isPromiseSettled(promise) {
-  return promise.settled === true;
-}
-
-function trackPromise(promise) {
-  promise.settled = false;
-  promise.then(
-    () => { promise.settled = true; },
-    () => { promise.settled = true; }
-  );
-  return promise;
-}
-
-async function startServer({ mode, workspace, port }) {
-  const args = mode === 'release'
-    ? ['run', '--release', '--', workspace, '--port', String(port)]
-    : ['run', '--', workspace, '--port', String(port)];
-  const child = spawn('cargo', args, {
-    cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const stderrChunks = [];
-  child.stderr.on('data', (chunk) => {
-    stderrChunks.push(chunk.toString('utf8'));
-  });
-  child.stdout.resume();
-  child.stderr.resume();
-  await delay(250);
-  if (child.exitCode !== null) {
-    throw new Error(`server exited early with code ${child.exitCode}: ${sanitizePath(stderrChunks.join('').slice(0, 500))}`);
-  }
-  return child;
-}
-
-async function waitForServer(port) {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/`, {
-        headers: { Host: `127.0.0.1:${port}` },
-      });
-      if (response.status < 500) {
-        return;
-      }
-    } catch (_error) {
-      await delay(200);
-    }
-  }
-  throw new Error('server did not become ready');
-}
-
-async function requestSearch(port, query) {
-  return trackPromise((async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}`, {
-      headers: { Host: `127.0.0.1:${port}` },
-    });
-    const body = await response.text();
-    let json = null;
-    try {
-      json = JSON.parse(body);
-    } catch (_error) {
-      json = null;
-    }
-    return {
-      httpStatus: response.status,
-      responseBytes: Buffer.byteLength(body),
-      searched_files: json?.searched_files,
-      searched_bytes: json?.searched_bytes,
-      truncated: json?.truncated,
-      truncated_reasons: json?.truncated_reasons,
-      resultsLength: Array.isArray(json?.results) ? json.results.length : null,
-    };
-  })());
-}
-
-function peakRssKb(snapshots) {
-  return Math.max(
-    0,
-    ...snapshots.map((snapshot) => snapshot?.status?.VmRSS ?? 0)
-  );
-}
-
-async function stopServer(child) {
-  if (!child || child.exitCode !== null) {
-    return;
-  }
-  child.kill('SIGTERM');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      return;
-    }
-    await delay(100);
-  }
-  child.kill('SIGKILL');
-}
-```
-
-- [ ] **Step 2: Fix request tracking**
-
-Replace this line in `runMeasuredScenario()`:
-
-```js
-    const requestPromise = requestSearch(options.port, options.query);
-```
-
-with:
-
-```js
-    const requestPromise = trackPromise(requestSearch(options.port, options.query));
-```
-
-Then replace `requestSearch()` with a plain promise-returning function:
-
-```js
-async function requestSearch(port, query) {
-  const response = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}`, {
-    headers: { Host: `127.0.0.1:${port}` },
-  });
-  const body = await response.text();
-  let json = null;
-  try {
-    json = JSON.parse(body);
-  } catch (_error) {
-    json = null;
-  }
-  return {
-    httpStatus: response.status,
-    responseBytes: Buffer.byteLength(body),
-    searched_files: json?.searched_files,
-    searched_bytes: json?.searched_bytes,
-    truncated: json?.truncated,
-    truncated_reasons: json?.truncated_reasons,
-    resultsLength: Array.isArray(json?.results) ? json.results.length : null,
-  };
-}
-```
-
-- [ ] **Step 3: Wire scenarios into `runMeasurement()`**
-
-Replace `runMeasurement()` with:
-
-```js
-async function runMeasurement(options) {
-  const root = createFixtureRoot();
-  try {
-    const reports = [];
-    for (const fixtureKind of options.fixtures) {
-      const fixture = createFixture(root, fixtureKind, options.fixtureScale);
-      for (const mode of options.modes) {
-        for (const runKind of options.runs) {
-          const scenario = await runMeasuredScenario(options, fixture, mode, runKind);
-          reports.push({
-            fixtureKind,
-            fixture: {
-              fileCount: fixture.fileCount,
-              bytes: fixture.bytes,
-              workspace: fixture.maskedWorkspace,
-            },
-            ...scenario,
-          });
-        }
-      }
-    }
-    console.log(JSON.stringify(sanitizeReport({ tempRoot: root, reports }), null, 2));
-    return 0;
-  } finally {
-    if (!options.keepTemp) {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-}
-```
-
-- [ ] **Step 4: Run smoke measurement**
+- [ ] **Step 2: Run smoke measurement**
 
 Run:
 
@@ -664,7 +470,7 @@ node scripts/measure-search-rss-plateau.mjs --smoke --port 3119
 
 Expected: exit code `0`; JSON contains one report with `httpStatus: 200`, `truncated_reasons`, `peakRssKb`, `before`, `after`, and `settled`.
 
-- [ ] **Step 5: Check sanitization in smoke output**
+- [ ] **Step 3: Check sanitization in smoke output**
 
 Run:
 
@@ -675,13 +481,13 @@ rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/debug/
 
 Expected: the `node` command exits `0`; `rg` exits `1`. If the smoke run fails because the port is busy, rerun with a different port and record that in the final report.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 Run:
 
 ```bash
-git add scripts/measure-search-rss-plateau.mjs
-git commit -m "chore: 検索RSS計測のHTTP測定を追加"
+git add docs/superpowers/plans/2026-06-04-search-rss-plateau.md
+git commit -m "docs: 検索RSS計測計画の旧実装手順を整理"
 ```
 
 Expected: commit succeeds.
