@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,9 @@ const DEFAULT_QUERY = 'needle';
 const TEMP_PREFIX = 'markdown-view-search-rss-plateau-';
 const MASKED_TEMP = '/tmp/markdown-view-search-rss-plateau.***';
 const DEFAULT_PORT = 3109;
+const REQUEST_TIMEOUT_MS = 120_000;
+const SAMPLE_INTERVAL_MS = 50;
+const MAX_SAMPLES = Math.ceil(REQUEST_TIMEOUT_MS / SAMPLE_INTERVAL_MS) + 20;
 
 function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
@@ -226,6 +229,11 @@ function runSanitizationSelfTest() {
   const emptyStatus = parseProcKeyValues('not status', ['VmRSS']);
   assert.equal(emptyStatus.parsedFieldCount, 0);
   assert.deepEqual(emptyStatus.parsed, {});
+  assert.equal(peakRssKb([{ status: { available: false, reason: 'missing' } }]), null);
+  assert.deepEqual(
+    summarizeProcCompleteness([{ status: { available: false, reason: 'permission_denied', code: 'EACCES' } }]),
+    { procComplete: false, partialMeasurementReasons: ['permission_denied:EACCES'] }
+  );
 
   const root = createFixtureRoot();
   try {
@@ -478,28 +486,41 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
   const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
   try {
     await waitForServer(options.port);
+    let warmupResponse = null;
+    if (runKind === 'warm') {
+      warmupResponse = await requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS);
+    }
     const before = readProcSnapshot(server.pid);
     const startedAt = process.hrtime.bigint();
-    const requestPromise = trackPromise(requestSearch(options.port, options.query));
+    const requestPromise = trackPromise(requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS));
     const samples = [];
-    while (!isPromiseSettled(requestPromise)) {
+    while (!isPromiseSettled(requestPromise) && samples.length < MAX_SAMPLES) {
       samples.push(readProcSnapshot(server.pid));
-      await delay(50);
+      await delay(SAMPLE_INTERVAL_MS);
+    }
+    if (!isPromiseSettled(requestPromise)) {
+      requestPromise.abort?.();
+      throw new Error('request sampling limit exceeded');
     }
     const response = await requestPromise;
     const endedAt = process.hrtime.bigint();
     const after = readProcSnapshot(server.pid);
     await delay(5000);
     const settled = readProcSnapshot(server.pid);
+    const snapshots = [before, ...samples, after, settled];
+    const procCompleteness = summarizeProcCompleteness(snapshots);
     return {
       mode,
       runKind,
       pid: server.pid,
       elapsedMs: Number(endedAt - startedAt) / 1_000_000,
-      peakRssKb: peakRssKb([before, ...samples, after, settled]),
+      peakRssKb: peakRssKb(snapshots),
+      procComplete: procCompleteness.procComplete,
+      partialMeasurementReasons: procCompleteness.partialMeasurementReasons,
       before,
       after,
       settled,
+      ...(warmupResponse ? { warmupResponse } : {}),
       response,
     };
   } finally {
@@ -521,25 +542,45 @@ function trackPromise(promise) {
 }
 
 async function startServer({ mode, workspace, port }) {
-  const args = mode === 'release'
-    ? ['run', '--release', '--', workspace, '--port', String(port)]
-    : ['run', '--', workspace, '--port', String(port)];
-  const child = spawn('cargo', args, {
+  const binaryPath = ensureBuiltBinary(mode);
+  const child = spawn(binaryPath, [workspace, '--port', String(port)], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stderrChunks = [];
+  let startError = null;
+  child.on('error', (error) => {
+    startError = error;
+  });
   child.stderr.on('data', (chunk) => {
     stderrChunks.push(chunk.toString('utf8'));
   });
   child.stdout.resume();
   child.stderr.resume();
   await delay(250);
-  if (child.exitCode !== null) {
+  if (startError) {
+    const code = startError && typeof startError.code === 'string' ? startError.code : 'UNKNOWN';
+    throw new Error(`server spawn failed: ${code}`);
+  }
+  if (isChildExited(child)) {
     const stderr = sanitizeProcessOutput(stderrChunks.join('').slice(0, 500));
-    throw new Error(`server exited early with code ${child.exitCode}: ${stderr}`);
+    throw new Error(`server exited early with code ${child.exitCode ?? child.signalCode ?? 'UNKNOWN'}: ${stderr}`);
   }
   return child;
+}
+
+function ensureBuiltBinary(mode) {
+  const buildArgs = mode === 'release' ? ['build', '--release'] : ['build'];
+  const result = spawnSync('cargo', buildArgs, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    const output = sanitizeProcessOutput(`${result.stdout ?? ''}${result.stderr ?? ''}`.slice(0, 500));
+    throw new Error(`build failed with code ${result.status ?? 'UNKNOWN'}: ${output}`);
+  }
+  return path.join(process.cwd(), mode === 'release' ? 'target/release/markdown-view' : 'target/debug/markdown-view');
 }
 
 function sanitizeProcessOutput(value) {
@@ -566,48 +607,104 @@ async function waitForServer(port) {
   throw new Error('server did not become ready');
 }
 
-async function requestSearch(port, query) {
-  const response = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}`, {
-    headers: { Host: `127.0.0.1:${port}` },
-  });
-  const body = await response.text();
-  let json = null;
-  try {
-    json = JSON.parse(body);
-  } catch (_error) {
-    json = null;
-  }
-  return {
-    httpStatus: response.status,
-    responseBytes: Buffer.byteLength(body),
-    searched_files: json?.searched_files,
-    searched_bytes: json?.searched_bytes,
-    truncated: json?.truncated,
-    truncated_reasons: json?.truncated_reasons,
-    resultsLength: Array.isArray(json?.results) ? json.results.length : null,
-  };
+function requestSearch(port, query, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  const promise = (async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}`, {
+        headers: { Host: `127.0.0.1:${port}` },
+        signal: controller.signal,
+      });
+      const body = await response.text();
+      let json = null;
+      try {
+        json = JSON.parse(body);
+      } catch (_error) {
+        json = null;
+      }
+      return {
+        httpStatus: response.status,
+        responseBytes: Buffer.byteLength(body),
+        searched_files: json?.searched_files,
+        searched_bytes: json?.searched_bytes,
+        truncated: json?.truncated,
+        truncated_reasons: json?.truncated_reasons,
+        resultsLength: Array.isArray(json?.results) ? json.results.length : null,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+  promise.abort = () => controller.abort();
+  return promise;
 }
 
 function peakRssKb(snapshots) {
-  return Math.max(
-    0,
-    ...snapshots.map((snapshot) => snapshot?.status?.VmRSS ?? 0)
-  );
+  const rssValues = snapshots
+    .map((snapshot) => snapshot?.status?.VmRSS)
+    .filter((value) => Number.isFinite(value));
+  if (rssValues.length === 0) {
+    return null;
+  }
+  return Math.max(...rssValues);
+}
+
+function summarizeProcCompleteness(snapshots) {
+  const reasons = new Set();
+  for (const snapshot of snapshots) {
+    const status = snapshot?.status;
+    if (status && status.available === false) {
+      reasons.add(status.code ? `${status.reason}:${status.code}` : status.reason);
+    }
+  }
+  return {
+    procComplete: reasons.size === 0,
+    partialMeasurementReasons: [...reasons],
+  };
 }
 
 async function stopServer(child) {
-  if (!child || child.exitCode !== null) {
+  if (!child || isChildExited(child)) {
     return;
   }
   child.kill('SIGTERM');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      return;
-    }
-    await delay(100);
+  if (await waitForChildExit(child, 5_000)) {
+    return;
   }
   child.kill('SIGKILL');
+  await waitForChildExit(child, 1_000);
+}
+
+async function waitForChildExit(child, timeoutMs) {
+  if (!child || isChildExited(child)) {
+    return true;
+  }
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.off('exit', onExit);
+      child.off('close', onExit);
+      child.off('error', onExit);
+    };
+    const onExit = () => {
+      cleanup();
+      resolve(true);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
+    child.once('close', onExit);
+    child.once('error', onExit);
+  });
+}
+
+function isChildExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 async function runMeasurement(options) {
