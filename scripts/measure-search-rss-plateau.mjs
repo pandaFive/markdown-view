@@ -212,6 +212,14 @@ function runSanitizationSelfTest() {
   assert.deepEqual(smokeOptions.runs, ['cold']);
   assert.equal(smokeOptions.fixtureScale, 'short');
 
+  const anonymous = parseMapsLine('7f0000000000-7f0000100000 rw-p 00000000 00:00 0');
+  const fileBacked = parseMapsLine('7f0000200000-7f0000300000 r--p 00000000 08:01 123 /usr/lib/libc.so');
+  assert.equal(anonymous.sizeKb, 1024);
+  assert.equal(anonymous.name, '');
+  assert.equal(fileBacked.sizeKb, 1024);
+  assert.equal(fileBacked.name, '/usr/lib/libc.so');
+  assert.equal(parseMapsLine('invalid maps line'), null);
+
   const root = createFixtureRoot();
   try {
     const prefix = createFixture(root, 'prefix', 'short');
@@ -325,6 +333,98 @@ function readdirRecursive(directory) {
 
 function readFileNames(directory) {
   return readdirSync(directory).sort();
+}
+
+function readProcSnapshot(pid) {
+  return {
+    status: readProcStatus(pid),
+    smapsRollup: readSmapsRollup(pid),
+    maps: readMapsSummary(pid),
+  };
+}
+
+function readProcStatus(pid) {
+  const filePath = `/proc/${pid}/status`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const parsed = {};
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    const match = /^(VmRSS|RssAnon|RssFile|RssShmem):\s+(\d+)\s+kB$/.exec(line);
+    if (match) {
+      parsed[match[1]] = Number.parseInt(match[2], 10);
+    }
+  }
+  return { available: true, ...parsed };
+}
+
+function readSmapsRollup(pid) {
+  const filePath = `/proc/${pid}/smaps_rollup`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const parsed = {};
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    const match = /^(Rss|Pss|Private_Clean|Private_Dirty|Shared_Clean|Shared_Dirty|Anonymous):\s+(\d+)\s+kB$/.exec(line);
+    if (match) {
+      parsed[match[1]] = Number.parseInt(match[2], 10);
+    }
+  }
+  return { available: true, ...parsed };
+}
+
+function readMapsSummary(pid) {
+  const filePath = `/proc/${pid}/maps`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const summary = {
+    available: true,
+    anonymousKb: 0,
+    fileBackedKb: 0,
+    heapKb: 0,
+    stackKb: 0,
+    otherSpecialKb: 0,
+    mappingCount: 0,
+  };
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    if (line.trim() === '') {
+      continue;
+    }
+    const entry = parseMapsLine(line);
+    if (!entry) {
+      continue;
+    }
+    summary.mappingCount += 1;
+    if (entry.name === '[heap]') {
+      summary.heapKb += entry.sizeKb;
+    } else if (entry.name.startsWith('[stack')) {
+      summary.stackKb += entry.sizeKb;
+    } else if (entry.name.startsWith('[')) {
+      summary.otherSpecialKb += entry.sizeKb;
+    } else if (entry.name === '') {
+      summary.anonymousKb += entry.sizeKb;
+    } else {
+      summary.fileBackedKb += entry.sizeKb;
+    }
+  }
+  return summary;
+}
+
+function parseMapsLine(line) {
+  const match = /^([0-9a-f]+)-([0-9a-f]+)\s+\S+\s+\S+\s+\S+\s+\S+\s*(.*)$/.exec(line);
+  if (!match) {
+    return null;
+  }
+  const start = Number.parseInt(match[1], 16);
+  const end = Number.parseInt(match[2], 16);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return null;
+  }
+  return {
+    sizeKb: Math.round((end - start) / 1024),
+    name: match[3].trim(),
+  };
 }
 
 async function runMeasurement(options) {
