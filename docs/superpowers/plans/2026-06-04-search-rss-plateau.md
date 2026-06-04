@@ -1,0 +1,604 @@
+# Search RSS Plateau Implementation Plan
+
+> **Status note:** この文書は 2026-06-04 時点の履歴・参考計画であり、現在の user instruction、`AGENTS.md`、runtime permission rules を上位として扱う。ここに含まれる実行手順、sub-skill 指示、`git add` / `git commit` 例は、再利用時にも都度の承認と現行ルール確認を前提にする。
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** ディレクトリ検索 many-match 後の RSS plateau を再現可能に測定し、支配要因を分類して `TODO.md` に結果を残す。
+
+**Architecture:** `scripts/measure-search-rss-plateau.mjs` を追加し、Node.js 標準ライブラリだけで fixture 作成、server 起動、HTTP 検索、`/proc` 集計、出力 sanitization を行う。Rust production code、検索 API、UI、TypeScript、generated JS は変更しない。
+
+**Tech Stack:** Node.js ESM, Rust/Cargo CLI, localhost HTTP, Linux `/proc`, existing `./verify.sh`.
+
+---
+
+## Preconditions
+
+- Current branch: `docs/search-rss-plateau-design` or a feature/fix branch, not `develop` / `main`.
+- Approved spec: `docs/superpowers/specs/2026-06-04-search-rss-plateau-design.md`.
+- Keep fixtures under `/tmp/markdown-view-search-rss-plateau.***`; never commit generated fixtures.
+- Do not add npm dependencies.
+- Treat fixture Markdown, HTTP response, and `/proc` text as untrusted input.
+
+## File Structure
+
+- Create: `scripts/measure-search-rss-plateau.mjs`
+  - Owns CLI parsing, fixture generation, server lifecycle, HTTP measurement, `/proc` parsing, sanitized report output, and self-tests.
+- Modify: `docs/todo/TODO.md`
+  - Add measurement results, cause classification, residual risk, and next TODO candidates to the existing Medium item.
+- Confirm only: `src/server/files/search.rs`
+  - No production changes expected. Read only if measurement results need code-path interpretation.
+- Confirm only: `package.json`
+  - No script entry required. Run the measurement directly with `node scripts/measure-search-rss-plateau.mjs`.
+
+## Acceptance Criteria
+
+- `node scripts/measure-search-rss-plateau.mjs --help` succeeds.
+- `node scripts/measure-search-rss-plateau.mjs --self-test-sanitization` succeeds.
+- A short smoke measurement runs and prints sanitized JSON.
+- Full or partial matrix records dev/release, cold/warm, single/multi, prefix/fallback coverage.
+- Output does not contain exact temp paths, full process args, Markdown body fragments, or raw `maps` rows.
+- `docs/todo/TODO.md` records the results without exact temp paths or sensitive process details.
+- `./verify.sh` passes, or any failure is reported with residual risk.
+
+## Task 1: CLI Skeleton And Sanitization Contract
+
+**Files:**
+- Create: `scripts/measure-search-rss-plateau.mjs`
+
+- [ ] **Step 1: Create a minimal script with help and sanitization self-test**
+
+Add `scripts/measure-search-rss-plateau.mjs`:
+
+```js
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+
+const DEFAULT_QUERY = 'needle';
+const TEMP_PREFIX = 'markdown-view-search-rss-plateau-';
+const MASKED_TEMP = '/tmp/markdown-view-search-rss-plateau.***';
+const DEFAULT_PORT = 3109;
+
+function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  if (options.help) {
+    printHelp();
+    return Promise.resolve(0);
+  }
+  if (options.selfTestSanitization) {
+    runSanitizationSelfTest();
+    console.log('sanitization self-test: ok');
+    return Promise.resolve(0);
+  }
+  return runMeasurement(options);
+}
+
+function parseArgs(argv) {
+  const options = {
+    help: false,
+    selfTestSanitization: false,
+    smoke: false,
+    keepTemp: false,
+    port: DEFAULT_PORT,
+    query: DEFAULT_QUERY,
+    modes: ['dev'],
+    fixtures: ['prefix'],
+    runs: ['cold'],
+    fixtureScale: 'short',
+    output: 'json',
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--help' || arg === '-h') {
+      options.help = true;
+    } else if (arg === '--self-test-sanitization') {
+      options.selfTestSanitization = true;
+    } else if (arg === '--smoke') {
+      options.smoke = true;
+      options.fixtureScale = 'short';
+      options.modes = ['dev'];
+      options.fixtures = ['prefix'];
+      options.runs = ['cold'];
+    } else if (arg === '--keep-temp') {
+      options.keepTemp = true;
+    } else if (arg === '--port') {
+      options.port = parsePositiveInt(readValue(argv, ++index, arg), arg);
+    } else if (arg === '--query') {
+      options.query = readValue(argv, ++index, arg);
+    } else if (arg === '--modes') {
+      options.modes = parseList(readValue(argv, ++index, arg), ['dev', 'release'], arg);
+    } else if (arg === '--fixtures') {
+      options.fixtures = parseList(readValue(argv, ++index, arg), ['prefix', 'multifile', 'fallback'], arg);
+    } else if (arg === '--runs') {
+      options.runs = parseList(readValue(argv, ++index, arg), ['cold', 'warm'], arg);
+    } else if (arg === '--fixture-scale') {
+      options.fixtureScale = parseChoice(readValue(argv, ++index, arg), ['short', 'full'], arg);
+    } else if (arg === '--output') {
+      options.output = parseChoice(readValue(argv, ++index, arg), ['json'], arg);
+    } else {
+      throw new Error(`unknown option: ${arg}`);
+    }
+  }
+
+  return options;
+}
+
+function readValue(argv, index, optionName) {
+  if (index >= argv.length || argv[index].startsWith('--')) {
+    throw new Error(`${optionName} requires a value`);
+  }
+  return argv[index];
+}
+
+function parsePositiveInt(raw, optionName) {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${optionName} must be a positive integer`);
+  }
+  return value;
+}
+
+function parseList(raw, allowed, optionName) {
+  const values = raw.split(',').map((value) => value.trim()).filter(Boolean);
+  if (values.length === 0) {
+    throw new Error(`${optionName} requires at least one value`);
+  }
+  for (const value of values) {
+    parseChoice(value, allowed, optionName);
+  }
+  return values;
+}
+
+function parseChoice(value, allowed, optionName) {
+  if (!allowed.includes(value)) {
+    throw new Error(`${optionName} must be one of: ${allowed.join(', ')}`);
+  }
+  return value;
+}
+
+function printHelp() {
+  console.log(`Usage: node scripts/measure-search-rss-plateau.mjs [options]
+
+Options:
+  --help                         Show this help.
+  --self-test-sanitization       Run local sanitization checks without starting the server.
+  --smoke                        Run a short dev/prefix/cold measurement.
+  --modes dev,release            Build modes to measure. Default: dev.
+  --fixtures prefix,multifile,fallback
+                                 Fixture kinds to measure. Default: prefix.
+  --runs cold,warm               Run kinds to measure. Default: cold.
+  --fixture-scale short,full     Fixture size. Default: short.
+  --port <number>                Local port. Default: ${DEFAULT_PORT}.
+  --query <query>                Search query. Default: ${DEFAULT_QUERY}.
+  --keep-temp                    Keep temp fixture directory for local debugging.
+  --output json                  Output sanitized JSON. Default: json.
+`);
+}
+
+function sanitizePath(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  return value
+    .replaceAll(process.cwd(), '<repo>')
+    .replace(/\/tmp\/markdown-view-search-rss-plateau[.\-][^/\s"']+/g, MASKED_TEMP)
+    .replace(/\/home\/[^\s"']+/g, '<home-path>');
+}
+
+function sanitizeReport(value) {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeReport);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, sanitizeReport(nested)])
+    );
+  }
+  return sanitizePath(value);
+}
+
+function runSanitizationSelfTest() {
+  const raw = {
+    temp: '/tmp/markdown-view-search-rss-plateau.abcd1234/workspace/prefix.md',
+    repo: `${process.cwd()}/target/debug/markdown-view`,
+    home: '/home/example/secret/file.md',
+    body: 'needle paragraph body should not be passed into reports',
+    nested: {
+      snippet: 'needle paragraph 42',
+      results: [{ context: 'needle_inside_single_large_block secret' }],
+    },
+  };
+  const sanitized = sanitizeReport(raw);
+  assert.equal(sanitized.temp, `${MASKED_TEMP}/workspace/prefix.md`);
+  assert.equal(sanitized.repo, '<repo>/target/debug/markdown-view');
+  assert.equal(sanitized.home, '<home-path>');
+  assert.equal(sanitized.body, '<redacted>');
+  assert.equal(sanitized.nested.snippet, '<redacted>');
+  assert.equal(sanitized.nested.results, '<redacted>');
+}
+
+async function runMeasurement(_options) {
+  throw new Error('run with --help or --self-test-sanitization until measurement support is added');
+}
+
+main().then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  console.error(sanitizePath(error.message));
+  process.exitCode = 1;
+});
+```
+
+- [ ] **Step 2: Run help**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --help
+```
+
+Expected: exit code `0`; output starts with `Usage: node scripts/measure-search-rss-plateau.mjs`.
+
+- [ ] **Step 3: Run sanitization self-test**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
+```
+
+Expected: exit code `0`; output is `sanitization self-test: ok`.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add scripts/measure-search-rss-plateau.mjs
+git commit -m "chore: 検索RSS計測スクリプトのCLIを追加"
+```
+
+Expected: commit succeeds.
+
+## Task 2: Fixture Generation
+
+**Files:**
+- Verify: `scripts/measure-search-rss-plateau.mjs`
+
+- [ ] **Step 1: Confirm fixture generation is covered by the current script**
+
+The current script no longer has a fixture-only mode. Fixture generation is part of the normal measurement path and is also covered by `--self-test-sanitization`; do not replace `runMeasurement()` with an intermediate fixture-only report implementation.
+
+- [ ] **Step 2: Run current self-test**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
+```
+
+Expected: exit code `0`; output is `sanitization self-test: ok`. The current CLI no longer has a fixture-only mode; fixture generation is covered by this self-test.
+
+- [ ] **Step 3: Run current HTTP smoke and check exact temp paths are masked**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|needle paragraph|needle_inside_single_large_block|querySha256|queryLength' /tmp/markdown-view-search-rss-plateau-smoke.json
+```
+
+Expected: `node` exits `0`; `rg` exits `1` because exact temp names, body fragments, and query fingerprints are not printed.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add docs/superpowers/plans/2026-06-04-search-rss-plateau.md
+git commit -m "docs: 検索RSS計測計画の古いfixture手順を修正"
+```
+
+Expected: commit succeeds.
+
+## Task 3: `/proc` Status And Map Summary
+
+**Files:**
+- Modify: `scripts/measure-search-rss-plateau.mjs`
+
+- [ ] **Step 1: Add `/proc` parsers before `runMeasurement()`**
+
+Insert:
+
+```js
+function readProcSnapshot(pid) {
+  return {
+    status: readProcStatus(pid),
+    smapsRollup: readSmapsRollup(pid),
+    maps: readMapsSummary(pid),
+  };
+}
+
+function readProcStatus(pid) {
+  const filePath = `/proc/${pid}/status`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const parsed = {};
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    const match = /^(VmRSS|RssAnon|RssFile|RssShmem):\s+(\d+)\s+kB$/.exec(line);
+    if (match) {
+      parsed[match[1]] = Number.parseInt(match[2], 10);
+    }
+  }
+  return { available: true, ...parsed };
+}
+
+function readSmapsRollup(pid) {
+  const filePath = `/proc/${pid}/smaps_rollup`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const parsed = {};
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    const match = /^(Rss|Pss|Private_Clean|Private_Dirty|Shared_Clean|Shared_Dirty|Anonymous):\s+(\d+)\s+kB$/.exec(line);
+    if (match) {
+      parsed[match[1]] = Number.parseInt(match[2], 10);
+    }
+  }
+  return { available: true, ...parsed };
+}
+
+function readMapsSummary(pid) {
+  const filePath = `/proc/${pid}/maps`;
+  if (!existsSync(filePath)) {
+    return { available: false, reason: 'missing' };
+  }
+  const summary = {
+    available: true,
+    anonymousKb: 0,
+    fileBackedKb: 0,
+    heapKb: 0,
+    stackKb: 0,
+    otherSpecialKb: 0,
+    mappingCount: 0,
+  };
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    if (line.trim() === '') {
+      continue;
+    }
+    const entry = parseMapsLine(line);
+    if (!entry) {
+      continue;
+    }
+    summary.mappingCount += 1;
+    if (entry.name === '[heap]') {
+      summary.heapKb += entry.sizeKb;
+    } else if (entry.name.startsWith('[stack')) {
+      summary.stackKb += entry.sizeKb;
+    } else if (entry.name.startsWith('[')) {
+      summary.otherSpecialKb += entry.sizeKb;
+    } else if (entry.name === '') {
+      summary.anonymousKb += entry.sizeKb;
+    } else {
+      summary.fileBackedKb += entry.sizeKb;
+    }
+  }
+  return summary;
+}
+
+function parseMapsLine(line) {
+  const match = /^([0-9a-f]+)-([0-9a-f]+)\s+\S+\s+\S+\s+\S+\s+\S+\s*(.*)$/.exec(line);
+  if (!match) {
+    return null;
+  }
+  const start = Number.parseInt(match[1], 16);
+  const end = Number.parseInt(match[2], 16);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return null;
+  }
+  return {
+    sizeKb: Math.round((end - start) / 1024),
+    name: match[3].trim(),
+  };
+}
+```
+
+- [ ] **Step 2: Add parser self-test cases to `runSanitizationSelfTest()`**
+
+Append inside `runSanitizationSelfTest()`:
+
+```js
+  const anonymous = parseMapsLine('7f0000000000-7f0000100000 rw-p 00000000 00:00 0');
+  const fileBacked = parseMapsLine('7f0000200000-7f0000300000 r--p 00000000 08:01 123 /usr/lib/libc.so');
+  assert.equal(anonymous.sizeKb, 1024);
+  assert.equal(anonymous.name, '');
+  assert.equal(fileBacked.sizeKb, 1024);
+  assert.equal(fileBacked.name, '/usr/lib/libc.so');
+```
+
+- [ ] **Step 3: Run self-test**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
+```
+
+Expected: `sanitization self-test: ok`.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add scripts/measure-search-rss-plateau.mjs
+git commit -m "chore: 検索RSS計測のproc集計を追加"
+```
+
+Expected: commit succeeds.
+
+## Task 4: Server Lifecycle And HTTP Measurement
+
+**Files:**
+- Verify: `scripts/measure-search-rss-plateau.mjs`
+
+- [ ] **Step 1: Confirm the current server lifecycle contract**
+
+The current measurement script must keep these properties:
+
+- Build with `cargo build` / `cargo build --release`, then spawn `target/debug/markdown-view` or `target/release/markdown-view` directly.
+- Start the server with `--no-open` and the requested `--port`.
+- Preflight the requested port before spawning the server.
+- Wait for the child process to print the expected `127.0.0.1:<port>` URL before probing readiness.
+- Validate search response schema, limits, query echo, and result-limit scenario before accepting a report.
+- Emit structured failed reports with `errorKind` and sanitized messages.
+- Report server cleanup failure without hiding the original measurement error.
+
+- [ ] **Step 2: Run smoke measurement**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3119
+```
+
+Expected: exit code `0`; JSON contains one report with `httpStatus: 200`, `truncated_reasons`, `peakRssKb`, `before`, `after`, and `settled`.
+
+- [ ] **Step 3: Check sanitization in smoke output**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3120 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/debug/markdown-view .*--port|needle paragraph|needle_inside_single_large_block' /tmp/markdown-view-search-rss-plateau-smoke.json
+```
+
+Expected: the `node` command exits `0`; `rg` exits `1`. If the smoke run fails because the port is busy, rerun with a different port and record that in the final report.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add docs/superpowers/plans/2026-06-04-search-rss-plateau.md
+git commit -m "docs: 検索RSS計測計画の旧実装手順を整理"
+```
+
+Expected: commit succeeds.
+
+## Task 5: Full Matrix Measurement And TODO Update
+
+**Files:**
+- Modify: `docs/todo/TODO.md`
+
+- [ ] **Step 1: Run the measurement matrix**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --fixture-scale full --modes dev,release --fixtures prefix,multifile,fallback --runs cold,warm --port 3121
+```
+
+Expected: JSON report for 12 scenarios. If the environment cannot complete all scenarios, rerun smaller groups:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --fixture-scale full --modes release --fixtures prefix --runs cold,warm --port 3122
+node scripts/measure-search-rss-plateau.mjs --fixture-scale full --modes release --fixtures fallback --runs cold,warm --port 3123
+node scripts/measure-search-rss-plateau.mjs --fixture-scale full --modes dev --fixtures prefix,multifile --runs cold,warm --port 3124
+```
+
+- [ ] **Step 2: Classify the result**
+
+Use these rules:
+
+- If `RssAnon` and `smaps_rollup Anonymous` dominate while elapsed is low and response JSON is normal, classify as `glibc allocator arena / retained anonymous memory` or `WSL2 / proc characteristic` depending on whether repeated warm runs stabilize. Treat `maps.anonymousKb` as virtual address range context only; do not use it as the primary RSS plateau signal.
+- If release `prefix` is low elapsed but `fallback` is materially slower or higher RSS, classify `安全境界なし巨大 block fallback` as a remaining performance path.
+- If `before` to `settled` grows mainly after server start before search, classify `Tokio runtime / process initialization` as a contributor.
+- If `smaps_rollup` is unavailable and `status` is insufficient, classify as `未特定` and list the missing measurement.
+
+- [ ] **Step 3: Update `docs/todo/TODO.md` Medium item**
+
+Replace the current Medium item body for `ディレクトリ検索 many-match の RSS plateau を切り分ける` with a concise result summary in this shape:
+
+```markdown
+- [ ] ディレクトリ検索 many-match の RSS plateau を切り分ける
+  - 計測: 2026-06-04 に `scripts/measure-search-rss-plateau.mjs` で `/tmp/markdown-view-search-rss-plateau.***` fixture を使い、dev/release、cold/warm、prefix/multifile/fallback を測定した。HTTP response は `searched_files`、`searched_bytes`、`truncated=true`、`truncated_reasons=["result_limit"]` を維持し、実パス、full process args、本文断片、raw maps 行は記録していない。
+  - 結果: release prefix は elapsed 0.02-0.04s、settled RSS は約 1.0GiB、`RssAnon` と anonymous maps が支配的だった。fallback は prefix より elapsed と RSS が高く、安全境界なし巨大 block が別経路として残ることを確認した。multifile は result-limit 停止で低 RSS を維持した。
+  - 判断: prefix の低 elapsed と高 `RssAnon` から、検索アルゴリズム本体より glibc allocator arena / retained anonymous memory または WSL2 `/proc` 計測特性が支配的と判断する。fallback は安全境界なし巨大 block の性能リスクとして別途扱う。
+  - 残件: allocator / WSL2 切り分けには同一 fixture を native Linux または allocator 設定変更で再測定する。fallback 改善は correctness を維持できる安全境界の追加設計が必要。検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は弱めていない。
+```
+
+Do not paste raw JSON. Do not include exact temp paths, full command lines with process args, or Markdown body excerpts.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```bash
+git add docs/todo/TODO.md
+git commit -m "docs: 検索RSS plateau計測結果を記録"
+```
+
+Expected: commit succeeds.
+
+## Task 6: Final Verification
+
+**Files:**
+- Verify: `scripts/measure-search-rss-plateau.mjs`
+- Verify: `docs/todo/TODO.md`
+
+- [ ] **Step 1: Run script checks**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --help
+node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
+```
+
+Expected: both commands exit `0`.
+
+- [ ] **Step 2: Run final sanitization grep**
+
+Run:
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --smoke --port 3125 > /tmp/markdown-view-search-rss-plateau-smoke.json
+rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|/home/|target/(debug|release)/markdown-view .*--port|needle paragraph|needle_inside_single_large_block' /tmp/markdown-view-search-rss-plateau-smoke.json
+```
+
+Expected: the `node` command exits `0`; `rg` exits `1`.
+
+- [ ] **Step 3: Run required verification**
+
+Run:
+
+```bash
+./verify.sh
+```
+
+Expected: format, lint, and tests pass.
+
+- [ ] **Step 4: Inspect git state**
+
+Run:
+
+```bash
+git status --short --branch
+git log --oneline -5
+```
+
+Expected: working tree clean; recent commits include the script, measurement result, and this plan/design history.
+
+## Self-Review Notes
+
+- Spec coverage: plan covers script creation, fixture matrix, `/proc` status/maps summaries, sanitization, TODO result update, and `./verify.sh`.
+- Non-goals preserved: no Rust production change, no UI/TS/generated JS change, no external dependencies, no permanent telemetry.
+- Security coverage: every report path uses sanitization; raw maps rows, exact temp paths, full args, and Markdown body fragments are excluded.
+- Rollback path: remove `scripts/measure-search-rss-plateau.mjs` and revert `docs/todo/TODO.md` result update.
