@@ -185,17 +185,26 @@ function runSanitizationSelfTest() {
 
   assert.throws(() => parseArgs(['--port', '123abc']), /positive integer/);
   assert.throws(() => parseArgs(['--port', '1.5']), /positive integer/);
+  assert.throws(() => parseArgs(['--port', '0']), /positive integer/);
   assert.throws(() => parseArgs(['--port', '70000']), /between 1 and 65535/);
   assert.equal(parseArgs(['--port', '65535', '--self-test-sanitization']).port, 65535);
 
-  assert.throws(
-    () => parseArgs(['--smoke', '--modes', 'release']),
-    /--smoke cannot be combined/
-  );
-  assert.throws(
-    () => parseArgs(['--modes', 'release', '--smoke']),
-    /--smoke cannot be combined/
-  );
+  const matrixOptionPairs = [
+    ['--modes', 'release'],
+    ['--fixtures', 'prefix'],
+    ['--runs', 'cold'],
+    ['--fixture-scale', 'short'],
+  ];
+  for (const [optionName, optionValue] of matrixOptionPairs) {
+    assert.throws(
+      () => parseArgs(['--smoke', optionName, optionValue]),
+      /--smoke cannot be combined/
+    );
+    assert.throws(
+      () => parseArgs([optionName, optionValue, '--smoke']),
+      /--smoke cannot be combined/
+    );
+  }
 
   const smokeOptions = parseArgs(['--smoke']);
   assert.deepEqual(smokeOptions.modes, ['dev']);
