@@ -182,6 +182,26 @@ function runSanitizationSelfTest() {
   assert.equal(sanitized.repo, '<repo>/target/debug/markdown-view');
   assert.equal(sanitized.home, '<home-path>');
   assert.equal(sanitized.body, 'needle paragraph body should not be passed into reports');
+
+  assert.throws(() => parseArgs(['--port', '123abc']), /positive integer/);
+  assert.throws(() => parseArgs(['--port', '1.5']), /positive integer/);
+  assert.throws(() => parseArgs(['--port', '70000']), /between 1 and 65535/);
+  assert.equal(parseArgs(['--port', '65535', '--self-test-sanitization']).port, 65535);
+
+  assert.throws(
+    () => parseArgs(['--smoke', '--modes', 'release']),
+    /--smoke cannot be combined/
+  );
+  assert.throws(
+    () => parseArgs(['--modes', 'release', '--smoke']),
+    /--smoke cannot be combined/
+  );
+
+  const smokeOptions = parseArgs(['--smoke']);
+  assert.deepEqual(smokeOptions.modes, ['dev']);
+  assert.deepEqual(smokeOptions.fixtures, ['prefix']);
+  assert.deepEqual(smokeOptions.runs, ['cold']);
+  assert.equal(smokeOptions.fixtureScale, 'short');
 }
 
 async function runMeasurement(_options) {
