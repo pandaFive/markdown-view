@@ -262,139 +262,13 @@ Expected: commit succeeds.
 ## Task 2: Fixture Generation
 
 **Files:**
-- Modify: `scripts/measure-search-rss-plateau.mjs`
+- Verify: `scripts/measure-search-rss-plateau.mjs`
 
-- [ ] **Step 1: Add fixture generation before `runMeasurement()`**
+- [ ] **Step 1: Confirm fixture generation is covered by the current script**
 
-Insert these functions before `runMeasurement()`:
+The current script no longer has a fixture-only mode. Fixture generation is part of the normal measurement path and is also covered by `--self-test-sanitization`; do not replace `runMeasurement()` with an intermediate fixture-only report implementation.
 
-```js
-function createFixtureRoot() {
-  return mkdtempSync(path.join(tmpdir(), TEMP_PREFIX));
-}
-
-function createFixture(root, fixtureKind, scale) {
-  const workspace = path.join(root, `${fixtureKind}-workspace`);
-  mkdirSync(workspace, { recursive: true });
-
-  if (fixtureKind === 'prefix') {
-    return createPrefixFixture(workspace, scale);
-  }
-  if (fixtureKind === 'multifile') {
-    return createMultifileFixture(workspace, scale);
-  }
-  if (fixtureKind === 'fallback') {
-    return createFallbackFixture(workspace, scale);
-  }
-  throw new Error(`unsupported fixture kind: ${fixtureKind}`);
-}
-
-function createPrefixFixture(workspace, scale) {
-  const repeatCount = scale === 'full' ? 180_000 : 1_200;
-  const filePath = path.join(workspace, 'prefix.md');
-  const paragraphs = [];
-  for (let index = 0; index < repeatCount; index += 1) {
-    paragraphs.push(`needle paragraph ${index}`);
-  }
-  writeFileSync(filePath, `${paragraphs.join('\n\n')}\n`, 'utf8');
-  return summarizeFixture(workspace, 'prefix');
-}
-
-function createMultifileFixture(workspace, scale) {
-  const fileCount = scale === 'full' ? 120 : 8;
-  const repeatCount = scale === 'full' ? 240 : 16;
-  for (let fileIndex = 0; fileIndex < fileCount; fileIndex += 1) {
-    const filePath = path.join(workspace, `multi-${String(fileIndex).padStart(3, '0')}.md`);
-    const lines = [];
-    for (let lineIndex = 0; lineIndex < repeatCount; lineIndex += 1) {
-      lines.push(`needle multi ${fileIndex} ${lineIndex}`);
-    }
-    writeFileSync(filePath, `${lines.join('\n\n')}\n`, 'utf8');
-  }
-  return summarizeFixture(workspace, 'multifile');
-}
-
-function createFallbackFixture(workspace, scale) {
-  const repeatCount = scale === 'full' ? 300_000 : 4_000;
-  const filePath = path.join(workspace, 'fallback.md');
-  const chunk = 'needle_inside_single_large_block ';
-  writeFileSync(filePath, `# fallback\n\n${chunk.repeat(repeatCount)}\n`, 'utf8');
-  return summarizeFixture(workspace, 'fallback');
-}
-
-function summarizeFixture(workspace, fixtureKind) {
-  const files = collectMarkdownFiles(workspace);
-  const bytes = files.reduce((sum, filePath) => sum + statSync(filePath).size, 0);
-  return {
-    fixtureKind,
-    workspace,
-    fileCount: files.length,
-    bytes,
-    maskedWorkspace: sanitizePath(workspace),
-  };
-}
-
-function collectMarkdownFiles(directory) {
-  const entries = [];
-  for (const entry of readdirRecursive(directory)) {
-    if (entry.endsWith('.md')) {
-      entries.push(entry);
-    }
-  }
-  return entries.sort();
-}
-
-function readdirRecursive(directory) {
-  const output = [];
-  for (const entryName of readFileNames(directory)) {
-    const entryPath = path.join(directory, entryName);
-    const stat = statSync(entryPath);
-    if (stat.isDirectory()) {
-      output.push(...readdirRecursive(entryPath));
-    } else if (stat.isFile()) {
-      output.push(entryPath);
-    }
-  }
-  return output;
-}
-
-function readFileNames(directory) {
-  return readdirSync(directory).sort();
-}
-```
-
-- [ ] **Step 2: Wire fixture creation into `runMeasurement()`**
-
-Replace `runMeasurement()` with:
-
-```js
-async function runMeasurement(options) {
-  const root = createFixtureRoot();
-  try {
-    const reports = [];
-    for (const fixtureKind of options.fixtures) {
-      const fixture = createFixture(root, fixtureKind, options.fixtureScale);
-      reports.push({
-        fixtureKind,
-        fixture: {
-          fileCount: fixture.fileCount,
-          bytes: fixture.bytes,
-          workspace: fixture.maskedWorkspace,
-        },
-        status: 'fixture-created',
-      });
-    }
-    console.log(JSON.stringify(sanitizeReport({ tempRoot: root, reports }), null, 2));
-    return 0;
-  } finally {
-    if (!options.keepTemp) {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-}
-```
-
-- [ ] **Step 3: Run current self-test**
+- [ ] **Step 2: Run current self-test**
 
 Run:
 
@@ -404,7 +278,7 @@ node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
 
 Expected: exit code `0`; output is `sanitization self-test: ok`. The current CLI no longer has a fixture-only mode; fixture generation is covered by this self-test.
 
-- [ ] **Step 4: Run current HTTP smoke and check exact temp paths are masked**
+- [ ] **Step 3: Run current HTTP smoke and check exact temp paths are masked**
 
 Run:
 
@@ -415,13 +289,13 @@ rg '/tmp/markdown-view-search-rss-plateau[.-][A-Za-z0-9_-]+|needle paragraph|nee
 
 Expected: `node` exits `0`; `rg` exits `1` because exact temp names, body fragments, and query fingerprints are not printed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 Run:
 
 ```bash
-git add scripts/measure-search-rss-plateau.mjs
-git commit -m "chore: 検索RSS計測fixture生成を追加"
+git add docs/superpowers/plans/2026-06-04-search-rss-plateau.md
+git commit -m "docs: 検索RSS計測計画の古いfixture手順を修正"
 ```
 
 Expected: commit succeeds.
