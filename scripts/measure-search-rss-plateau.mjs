@@ -543,7 +543,7 @@ function trackPromise(promise) {
 
 async function startServer({ mode, workspace, port }) {
   const binaryPath = ensureBuiltBinary(mode);
-  const child = spawn(binaryPath, [workspace, '--port', String(port)], {
+  const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
