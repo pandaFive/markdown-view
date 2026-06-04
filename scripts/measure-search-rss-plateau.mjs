@@ -55,7 +55,7 @@ function parseArgs(argv) {
     fixtures: ['prefix'],
     runs: ['cold'],
     fixtureScale: 'short',
-    allocatorProfiles: DEFAULT_ALLOCATOR_PROFILES,
+    allocatorProfiles: [...DEFAULT_ALLOCATOR_PROFILES],
     output: 'json',
   };
   const explicitMatrixOptions = new Set();
@@ -72,7 +72,7 @@ function parseArgs(argv) {
       options.modes = ['dev'];
       options.fixtures = ['prefix'];
       options.runs = ['cold'];
-      options.allocatorProfiles = DEFAULT_ALLOCATOR_PROFILES;
+      options.allocatorProfiles = [...DEFAULT_ALLOCATOR_PROFILES];
     } else if (arg === '--keep-temp') {
       options.keepTemp = true;
     } else if (arg === '--port') {
@@ -156,6 +156,22 @@ function parseAllocatorProfiles(raw) {
     }
   }
   return values;
+}
+
+function allocatorProfileEnv(profileName) {
+  const env = ALLOCATOR_PROFILES.get(profileName);
+  if (!env) {
+    throw new Error(`unsupported allocator profile: ${profileName}`);
+  }
+  return { ...env };
+}
+
+function allocatorProfileReport(profileName) {
+  const env = allocatorProfileEnv(profileName);
+  return {
+    name: profileName,
+    env,
+  };
 }
 
 function parseChoice(value, allowed, optionName) {
@@ -245,6 +261,16 @@ function runSanitizationSelfTest() {
   assert.equal(parseArgs(['--port', '65535', '--self-test-sanitization']).port, 65535);
   assert.deepEqual(parseArgs(['--allocator-profiles', 'default,arena1']).allocatorProfiles, ['default', 'arena1']);
   assert.deepEqual(parseArgs(['--allocator-profiles', 'arena2']).allocatorProfiles, ['arena2']);
+  assert.deepEqual(allocatorProfileEnv('default'), {});
+  assert.deepEqual(allocatorProfileEnv('arena1'), { MALLOC_ARENA_MAX: '1' });
+  assert.deepEqual(allocatorProfileReport('arena2'), {
+    name: 'arena2',
+    env: { MALLOC_ARENA_MAX: '2' },
+  });
+  assert.throws(
+    () => allocatorProfileEnv('unsupported'),
+    /unsupported allocator profile/
+  );
   assert.throws(
     () => parseArgs(['--allocator-profiles', 'jemalloc']),
     /--allocator-profiles must be one of/
@@ -712,8 +738,14 @@ function parseMapsLine(line) {
   };
 }
 
-async function runMeasuredScenario(options, fixture, mode, runKind) {
-  const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
+async function runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile) {
+  const allocator = allocatorProfileReport(allocatorProfile);
+  const server = await startServer({
+    mode,
+    workspace: fixture.workspace,
+    port: options.port,
+    allocatorEnv: allocator.env,
+  });
   let scenarioError = null;
   try {
     await waitForServer(server, options.port);
@@ -745,6 +777,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
     return {
       mode,
       runKind,
+      allocatorProfile: allocator,
       pid: server.pid,
       elapsedMs: Number(endedAt - startedAt) / 1_000_000,
       peakRssKb: peakRssKb(snapshots),
@@ -784,11 +817,15 @@ function trackPromise(promise) {
   return promise;
 }
 
-async function startServer({ mode, workspace, port }) {
+async function startServer({ mode, workspace, port, allocatorEnv = {} }) {
   await assertPortAvailable(port);
   const binaryPath = ensureBuiltBinary(mode);
   const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
     cwd: process.cwd(),
+    env: {
+      ...process.env,
+      ...allocatorEnv,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdoutChunks = [];
@@ -1127,7 +1164,7 @@ async function runMeasurement(options) {
             runKind,
           };
           try {
-            const scenario = await runMeasuredScenario(options, fixture, mode, runKind);
+            const scenario = await runMeasuredScenario(options, fixture, mode, runKind, options.allocatorProfiles[0]);
             reports.push({
               ...baseReport,
               status: 'ok',
