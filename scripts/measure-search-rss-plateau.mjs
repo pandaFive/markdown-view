@@ -211,10 +211,145 @@ function runSanitizationSelfTest() {
   assert.deepEqual(smokeOptions.fixtures, ['prefix']);
   assert.deepEqual(smokeOptions.runs, ['cold']);
   assert.equal(smokeOptions.fixtureScale, 'short');
+
+  const root = createFixtureRoot();
+  try {
+    const prefix = createFixture(root, 'prefix', 'short');
+    assert.equal(prefix.fixtureKind, 'prefix');
+    assert.equal(prefix.fileCount, 1);
+    assert.ok(prefix.bytes > 0);
+    assert.equal(prefix.maskedWorkspace.startsWith(MASKED_TEMP), true);
+
+    const multifile = createFixture(root, 'multifile', 'short');
+    assert.equal(multifile.fixtureKind, 'multifile');
+    assert.equal(multifile.fileCount, 8);
+    assert.ok(multifile.bytes > 0);
+
+    const fallback = createFixture(root, 'fallback', 'short');
+    assert.equal(fallback.fixtureKind, 'fallback');
+    assert.equal(fallback.fileCount, 1);
+    assert.ok(fallback.bytes > 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
-async function runMeasurement(_options) {
-  throw new Error('run with --help or --self-test-sanitization until measurement support is added');
+function createFixtureRoot() {
+  return mkdtempSync(path.join(tmpdir(), TEMP_PREFIX));
+}
+
+function createFixture(root, fixtureKind, scale) {
+  const workspace = path.join(root, `${fixtureKind}-workspace`);
+  mkdirSync(workspace, { recursive: true });
+
+  if (fixtureKind === 'prefix') {
+    return createPrefixFixture(workspace, scale);
+  }
+  if (fixtureKind === 'multifile') {
+    return createMultifileFixture(workspace, scale);
+  }
+  if (fixtureKind === 'fallback') {
+    return createFallbackFixture(workspace, scale);
+  }
+  throw new Error(`unsupported fixture kind: ${fixtureKind}`);
+}
+
+function createPrefixFixture(workspace, scale) {
+  const repeatCount = scale === 'full' ? 180_000 : 1_200;
+  const filePath = path.join(workspace, 'prefix.md');
+  const paragraphs = [];
+  for (let index = 0; index < repeatCount; index += 1) {
+    paragraphs.push(`needle paragraph ${index}`);
+  }
+  writeFileSync(filePath, `${paragraphs.join('\n\n')}\n`, 'utf8');
+  return summarizeFixture(workspace, 'prefix');
+}
+
+function createMultifileFixture(workspace, scale) {
+  const fileCount = scale === 'full' ? 120 : 8;
+  const repeatCount = scale === 'full' ? 240 : 16;
+  for (let fileIndex = 0; fileIndex < fileCount; fileIndex += 1) {
+    const filePath = path.join(workspace, `multi-${String(fileIndex).padStart(3, '0')}.md`);
+    const lines = [];
+    for (let lineIndex = 0; lineIndex < repeatCount; lineIndex += 1) {
+      lines.push(`needle multi ${fileIndex} ${lineIndex}`);
+    }
+    writeFileSync(filePath, `${lines.join('\n\n')}\n`, 'utf8');
+  }
+  return summarizeFixture(workspace, 'multifile');
+}
+
+function createFallbackFixture(workspace, scale) {
+  const repeatCount = scale === 'full' ? 700_000 : 4_000;
+  const filePath = path.join(workspace, 'fallback.md');
+  const chunk = 'needle_inside_single_large_block ';
+  writeFileSync(filePath, `# fallback\n\n${chunk.repeat(repeatCount)}\n`, 'utf8');
+  return summarizeFixture(workspace, 'fallback');
+}
+
+function summarizeFixture(workspace, fixtureKind) {
+  const files = collectMarkdownFiles(workspace);
+  const bytes = files.reduce((sum, filePath) => sum + statSync(filePath).size, 0);
+  return {
+    fixtureKind,
+    workspace,
+    fileCount: files.length,
+    bytes,
+    maskedWorkspace: sanitizePath(workspace),
+  };
+}
+
+function collectMarkdownFiles(directory) {
+  const entries = [];
+  for (const entry of readdirRecursive(directory)) {
+    if (entry.endsWith('.md')) {
+      entries.push(entry);
+    }
+  }
+  return entries.sort();
+}
+
+function readdirRecursive(directory) {
+  const output = [];
+  for (const entryName of readFileNames(directory)) {
+    const entryPath = path.join(directory, entryName);
+    const stat = statSync(entryPath);
+    if (stat.isDirectory()) {
+      output.push(...readdirRecursive(entryPath));
+    } else if (stat.isFile()) {
+      output.push(entryPath);
+    }
+  }
+  return output;
+}
+
+function readFileNames(directory) {
+  return readdirSync(directory).sort();
+}
+
+async function runMeasurement(options) {
+  const root = createFixtureRoot();
+  try {
+    const reports = [];
+    for (const fixtureKind of options.fixtures) {
+      const fixture = createFixture(root, fixtureKind, options.fixtureScale);
+      reports.push({
+        fixtureKind,
+        fixture: {
+          fileCount: fixture.fileCount,
+          bytes: fixture.bytes,
+          workspace: fixture.maskedWorkspace,
+        },
+        status: 'fixture-created',
+      });
+    }
+    console.log(JSON.stringify(sanitizeReport({ tempRoot: root, reports }), null, 2));
+    return 0;
+  } finally {
+    if (!options.keepTemp) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 }
 
 Promise.resolve().then(() => main()).then((code) => {
