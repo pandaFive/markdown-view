@@ -219,6 +219,13 @@ function runSanitizationSelfTest() {
   assert.equal(fileBacked.sizeKb, 1024);
   assert.equal(fileBacked.name, '/usr/lib/libc.so');
   assert.equal(parseMapsLine('invalid maps line'), null);
+  const missingProcFile = readProcFile(path.join(tmpdir(), `markdown-view-missing-proc-${process.pid}`));
+  assert.equal(missingProcFile.ok, false);
+  assert.equal(missingProcFile.reason, 'missing');
+
+  const emptyStatus = parseProcKeyValues('not status', ['VmRSS']);
+  assert.equal(emptyStatus.parsedFieldCount, 0);
+  assert.deepEqual(emptyStatus.parsed, {});
 
   const root = createFixtureRoot();
   try {
@@ -345,38 +352,41 @@ function readProcSnapshot(pid) {
 
 function readProcStatus(pid) {
   const filePath = `/proc/${pid}/status`;
-  if (!existsSync(filePath)) {
-    return { available: false, reason: 'missing' };
+  const procFile = readProcFile(filePath);
+  if (!procFile.ok) {
+    return unavailableProcResult(procFile);
   }
-  const parsed = {};
-  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
-    const match = /^(VmRSS|RssAnon|RssFile|RssShmem):\s+(\d+)\s+kB$/.exec(line);
-    if (match) {
-      parsed[match[1]] = Number.parseInt(match[2], 10);
-    }
+  const { parsed, parsedFieldCount } = parseProcKeyValues(
+    procFile.text,
+    ['VmRSS', 'RssAnon', 'RssFile', 'RssShmem']
+  );
+  if (parsedFieldCount === 0) {
+    return { available: false, reason: 'parse_empty' };
   }
-  return { available: true, ...parsed };
+  return { available: true, parsedFieldCount, ...parsed };
 }
 
 function readSmapsRollup(pid) {
   const filePath = `/proc/${pid}/smaps_rollup`;
-  if (!existsSync(filePath)) {
-    return { available: false, reason: 'missing' };
+  const procFile = readProcFile(filePath);
+  if (!procFile.ok) {
+    return unavailableProcResult(procFile);
   }
-  const parsed = {};
-  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
-    const match = /^(Rss|Pss|Private_Clean|Private_Dirty|Shared_Clean|Shared_Dirty|Anonymous):\s+(\d+)\s+kB$/.exec(line);
-    if (match) {
-      parsed[match[1]] = Number.parseInt(match[2], 10);
-    }
+  const { parsed, parsedFieldCount } = parseProcKeyValues(
+    procFile.text,
+    ['Rss', 'Pss', 'Private_Clean', 'Private_Dirty', 'Shared_Clean', 'Shared_Dirty', 'Anonymous']
+  );
+  if (parsedFieldCount === 0) {
+    return { available: false, reason: 'parse_empty' };
   }
-  return { available: true, ...parsed };
+  return { available: true, parsedFieldCount, ...parsed };
 }
 
 function readMapsSummary(pid) {
   const filePath = `/proc/${pid}/maps`;
-  if (!existsSync(filePath)) {
-    return { available: false, reason: 'missing' };
+  const procFile = readProcFile(filePath);
+  if (!procFile.ok) {
+    return unavailableProcResult(procFile);
   }
   const summary = {
     available: true,
@@ -387,7 +397,7 @@ function readMapsSummary(pid) {
     otherSpecialKb: 0,
     mappingCount: 0,
   };
-  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+  for (const line of procFile.text.split('\n')) {
     if (line.trim() === '') {
       continue;
     }
@@ -409,6 +419,43 @@ function readMapsSummary(pid) {
     }
   }
   return summary;
+}
+
+function readProcFile(filePath) {
+  if (!existsSync(filePath)) {
+    return { ok: false, reason: 'missing' };
+  }
+  try {
+    return { ok: true, text: readFileSync(filePath, 'utf8') };
+  } catch (error) {
+    const code = error && typeof error.code === 'string' ? error.code : 'UNKNOWN';
+    if (code === 'EACCES' || code === 'EPERM') {
+      return { ok: false, reason: 'permission_denied', code };
+    }
+    return { ok: false, reason: 'read_failed', code };
+  }
+}
+
+function unavailableProcResult(procFile) {
+  const result = { available: false, reason: procFile.reason };
+  if (procFile.code) {
+    result.code = procFile.code;
+  }
+  return result;
+}
+
+function parseProcKeyValues(text, allowedKeys) {
+  const allowed = new Set(allowedKeys);
+  const parsed = {};
+  let parsedFieldCount = 0;
+  for (const line of text.split('\n')) {
+    const match = /^([A-Za-z_]+):\s+(\d+)\s+kB$/.exec(line);
+    if (match && allowed.has(match[1])) {
+      parsed[match[1]] = Number.parseInt(match[2], 10);
+      parsedFieldCount += 1;
+    }
+  }
+  return { parsedFieldCount, parsed };
 }
 
 function parseMapsLine(line) {
