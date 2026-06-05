@@ -34,7 +34,7 @@ node scripts/measure-search-rss-plateau.mjs \
 
 想定 profile は次の通り。
 
-- `default`: 環境変数を変えない現状基準。
+- `default`: 測定対象 server process へ渡す親環境変数を最小 allowlist に限定し、allocator / `LD_PRELOAD` 系の親環境を scrub した基準。
 - `arena1`: server process 起動時に `MALLOC_ARENA_MAX=1` を追加する。
 - `arena2`: 必要時に `MALLOC_ARENA_MAX=2` を追加する。
 
@@ -44,6 +44,8 @@ node scripts/measure-search-rss-plateau.mjs \
 
 - allocator profile 名。
 - 許可された allocator 環境変数名と値。
+- 親環境に存在し、測定対象 server process へ渡さず scrub した allocator / `LD_PRELOAD` 系の key 名。値は出さない。
+- 測定対象 server process の env policy。継承し得る allowlist key と scrub 対象 key を記録し、親環境の値は出さない。
 - build mode、fixture kind、run kind、fixture scale。
 - HTTP status と検索 API 契約値。
 - elapsed。

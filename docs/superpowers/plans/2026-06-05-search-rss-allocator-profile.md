@@ -214,15 +214,12 @@ Change `spawn()` options to:
 ```js
 const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
   cwd: process.cwd(),
-  env: {
-    ...process.env,
-    ...allocatorEnv,
-  },
+  env: buildMeasuredServerEnv(allocatorEnv),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 ```
 
-This passes only the allowlisted additions from the selected profile. Do not report `process.env`.
+This passes only the measured-server env allowlist and the selected profile's allocator env. Do not spread or report `process.env`.
 
 - [ ] **Step 5: Add self-test for env helper**
 
