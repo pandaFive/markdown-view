@@ -15,6 +15,15 @@ const ALLOCATOR_PROFILES = new Map([
   ['arena1', { MALLOC_ARENA_MAX: '1' }],
   ['arena2', { MALLOC_ARENA_MAX: '2' }],
 ]);
+const ALLOCATOR_ENV_KEYS = [
+  'MALLOC_ARENA_MAX',
+  'MALLOC_MMAP_THRESHOLD_',
+  'MALLOC_TRIM_THRESHOLD_',
+  'MALLOC_TOP_PAD_',
+  'MALLOC_MMAP_MAX_',
+  'GLIBC_TUNABLES',
+  'LD_PRELOAD',
+];
 const DEFAULT_ALLOCATOR_PROFILES = ['default'];
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -174,6 +183,17 @@ function allocatorProfileReport(profileName) {
   };
 }
 
+function buildMeasuredServerEnv(allocatorEnv, baseEnv = process.env) {
+  const serverEnv = { ...baseEnv };
+  for (const key of ALLOCATOR_ENV_KEYS) {
+    delete serverEnv[key];
+  }
+  return {
+    ...serverEnv,
+    ...allocatorEnv,
+  };
+}
+
 function parseChoice(value, allowed, optionName) {
   if (!allowed.includes(value)) {
     throw new Error(`${optionName} must be one of: ${allowed.join(', ')}`);
@@ -267,6 +287,22 @@ function runSanitizationSelfTest() {
     name: 'arena2',
     env: { MALLOC_ARENA_MAX: '2' },
   });
+  assert.deepEqual(
+    buildMeasuredServerEnv({}, {
+      PATH: '/usr/bin',
+      MALLOC_ARENA_MAX: '8',
+      GLIBC_TUNABLES: 'glibc.malloc.arena_max=8',
+      LD_PRELOAD: '/tmp/not-reported.so',
+    }),
+    { PATH: '/usr/bin' }
+  );
+  assert.deepEqual(
+    buildMeasuredServerEnv({ MALLOC_ARENA_MAX: '1' }, {
+      PATH: '/usr/bin',
+      MALLOC_ARENA_MAX: '8',
+    }),
+    { PATH: '/usr/bin', MALLOC_ARENA_MAX: '1' }
+  );
   assert.throws(
     () => allocatorProfileEnv('unsupported'),
     /unsupported allocator profile/
@@ -824,10 +860,7 @@ async function startServer({ mode, workspace, port, allocatorEnv = {} }) {
   const binaryPath = ensureBuiltBinary(mode);
   const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      ...allocatorEnv,
-    },
+    env: buildMeasuredServerEnv(allocatorEnv),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdoutChunks = [];

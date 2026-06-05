@@ -1,5 +1,7 @@
 # Search RSS Allocator Profile Implementation Plan
 
+> **Status note:** この文書は 2026-06-05 時点の履歴・参考計画であり、現在の user instruction、`AGENTS.md`、runtime permission rules を上位として扱う。ここに含まれる実行手順、sub-skill 指示、`git add` / `git commit` 例は、再利用時にも都度の承認と現行ルール確認を前提にする。`develop` / `main` 上では停止し、通常ブランチ上で作業する。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the search RSS plateau measurement script so it can compare allocator profiles and record the result in `TODO.md` without changing production Rust behavior.
@@ -427,9 +429,9 @@ mode
 run kind
 elapsedMs
 peakRssKb
-settled.status.parsed.VmRSS
-settled.status.parsed.RssAnon
-settled.smapsRollup.parsed.Anonymous
+settled.status.VmRSS
+settled.status.RssAnon
+settled.smapsRollup.Anonymous
 response.searched_files
 response.searched_bytes
 response.truncated

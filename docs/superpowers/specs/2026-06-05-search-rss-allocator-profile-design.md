@@ -156,7 +156,7 @@ server process に追加する環境変数は、profile 定義で許可された
 
 - `scripts/measure-search-rss-plateau.mjs` が allocator profile matrix を実行できる。
 - self-test が allocator profile parsing と sanitization を固定している。
-- 少なくとも release/prefix/full/cold、または短縮 smoke の allocator 比較結果を得る。
+- 少なくとも release/prefix/full/cold で 2 profile 以上の allocator 比較結果を得る。`--smoke` は default profile の smoke 契約確認に限定する。
 - `docs/todo/TODO.md` に、どの profile で RSS が下がったか、または下がらなかったか、主因候補、次にやるべきことが追記される。
 - 検索 API 契約、Host/Origin/path validation、HTML sanitize、CSP、検索上限契約を弱めていないことが記録される。
 - `./verify.sh` が pass する。未実行または失敗がある場合は、理由と残リスクを報告する。
