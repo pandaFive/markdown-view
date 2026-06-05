@@ -191,7 +191,8 @@ function allocatorProfileReport(profileName, baseEnv = process.env) {
   return {
     name: profileName,
     env,
-    scrubbedAllocatorEnvKeys: scrubbedAllocatorEnvKeys(baseEnv),
+    scrubbedAllocatorEnvKeys: scrubbedAllocatorEnvKeys(baseEnv, env),
+    overriddenAllocatorEnvKeys: overriddenAllocatorEnvKeys(baseEnv, env),
   };
 }
 
@@ -208,8 +209,18 @@ function buildMeasuredServerEnv(allocatorEnv, baseEnv = process.env) {
   };
 }
 
-function scrubbedAllocatorEnvKeys(baseEnv = process.env) {
-  return ALLOCATOR_ENV_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(baseEnv, key));
+function scrubbedAllocatorEnvKeys(baseEnv = process.env, allocatorEnv = {}) {
+  return ALLOCATOR_ENV_KEYS.filter((key) => (
+    Object.prototype.hasOwnProperty.call(baseEnv, key)
+    && !Object.prototype.hasOwnProperty.call(allocatorEnv, key)
+  ));
+}
+
+function overriddenAllocatorEnvKeys(baseEnv = process.env, allocatorEnv = {}) {
+  return ALLOCATOR_ENV_KEYS.filter((key) => (
+    Object.prototype.hasOwnProperty.call(baseEnv, key)
+    && Object.prototype.hasOwnProperty.call(allocatorEnv, key)
+  ));
 }
 
 function parseChoice(value, allowed, optionName) {
@@ -305,34 +316,25 @@ function runSanitizationSelfTest() {
     name: 'arena2',
     env: { MALLOC_ARENA_MAX: '2' },
     scrubbedAllocatorEnvKeys: [],
+    overriddenAllocatorEnvKeys: [],
   });
+  const inheritedEnvFixture = Object.fromEntries(
+    MEASURED_SERVER_ENV_ALLOWLIST.map((key) => [key, `allowed-${key}`])
+  );
+  const allocatorEnvFixture = Object.fromEntries(
+    ALLOCATOR_ENV_KEYS.map((key) => [key, `allocator-${key}`])
+  );
   assert.deepEqual(
     buildMeasuredServerEnv({}, {
-      PATH: '/usr/bin',
-      HOME: '/home/example',
-      TMPDIR: '/tmp/example',
-      LANG: 'C.UTF-8',
-      RUST_BACKTRACE: '1',
-      MALLOC_ARENA_MAX: '8',
-      MALLOC_MMAP_THRESHOLD_: '131072',
-      MALLOC_TRIM_THRESHOLD_: '131072',
-      MALLOC_TOP_PAD_: '0',
-      MALLOC_MMAP_MAX_: '65536',
-      GLIBC_TUNABLES: 'glibc.malloc.arena_max=8',
-      LD_PRELOAD: '/tmp/not-reported.so',
+      ...inheritedEnvFixture,
+      ...allocatorEnvFixture,
       GITHUB_TOKEN: 'secret-token',
       HTTP_PROXY: 'http://proxy.example',
       HTTPS_PROXY: 'https://proxy.example',
       CI: 'true',
       SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
     }),
-    {
-      PATH: '/usr/bin',
-      HOME: '/home/example',
-      TMPDIR: '/tmp/example',
-      LANG: 'C.UTF-8',
-      RUST_BACKTRACE: '1',
-    }
+    inheritedEnvFixture
   );
   assert.deepEqual(
     buildMeasuredServerEnv({ MALLOC_ARENA_MAX: '1' }, {
@@ -344,15 +346,27 @@ function runSanitizationSelfTest() {
   assert.deepEqual(
     allocatorProfileReport('default', {
       PATH: '/usr/bin',
-      MALLOC_ARENA_MAX: '8',
-      GLIBC_TUNABLES: 'glibc.malloc.arena_max=8',
-      LD_PRELOAD: '/tmp/not-reported.so',
+      ...allocatorEnvFixture,
       GITHUB_TOKEN: 'secret-token',
     }),
     {
       name: 'default',
       env: {},
-      scrubbedAllocatorEnvKeys: ['MALLOC_ARENA_MAX', 'GLIBC_TUNABLES', 'LD_PRELOAD'],
+      scrubbedAllocatorEnvKeys: ALLOCATOR_ENV_KEYS,
+      overriddenAllocatorEnvKeys: [],
+    }
+  );
+  assert.deepEqual(
+    allocatorProfileReport('arena1', {
+      PATH: '/usr/bin',
+      ...allocatorEnvFixture,
+      GITHUB_TOKEN: 'secret-token',
+    }),
+    {
+      name: 'arena1',
+      env: { MALLOC_ARENA_MAX: '1' },
+      scrubbedAllocatorEnvKeys: ALLOCATOR_ENV_KEYS.filter((key) => key !== 'MALLOC_ARENA_MAX'),
+      overriddenAllocatorEnvKeys: ['MALLOC_ARENA_MAX'],
     }
   );
   assert.deepEqual(buildMeasurementContext({
@@ -365,8 +379,8 @@ function runSanitizationSelfTest() {
     port: 65535,
   }).measuredServerEnvPolicy, {
     inheritedEnvKeys: ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'RUST_BACKTRACE'],
-    scrubbedAllocatorEnvKeys: ALLOCATOR_ENV_KEYS,
-    reportPolicy: 'reports env key names needed for allocator interpretation, never parent env values',
+    allocatorEnvScrubTargetKeys: ALLOCATOR_ENV_KEYS,
+    reportPolicy: 'reports allocator env key names needed for interpretation, never parent env values',
   });
   assert.throws(
     () => allocatorProfileEnv('unsupported'),
@@ -1374,8 +1388,8 @@ function buildMeasurementContext(options) {
     },
     measuredServerEnvPolicy: {
       inheritedEnvKeys: [...MEASURED_SERVER_ENV_ALLOWLIST],
-      scrubbedAllocatorEnvKeys: [...ALLOCATOR_ENV_KEYS],
-      reportPolicy: 'reports env key names needed for allocator interpretation, never parent env values',
+      allocatorEnvScrubTargetKeys: [...ALLOCATOR_ENV_KEYS],
+      reportPolicy: 'reports allocator env key names needed for interpretation, never parent env values',
     },
   };
 }

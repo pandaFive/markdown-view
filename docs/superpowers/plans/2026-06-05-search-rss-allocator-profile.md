@@ -231,6 +231,8 @@ assert.deepEqual(allocatorProfileEnv('arena1'), { MALLOC_ARENA_MAX: '1' });
 assert.deepEqual(allocatorProfileReport('arena2'), {
   name: 'arena2',
   env: { MALLOC_ARENA_MAX: '2' },
+  scrubbedAllocatorEnvKeys: [],
+  overriddenAllocatorEnvKeys: [],
 });
 assert.throws(
   () => allocatorProfileEnv('unsupported'),
@@ -378,9 +380,13 @@ Expected: sanitized JSON with one `reports` entry containing:
 ```json
 "allocatorProfile": {
   "name": "default",
-  "env": {}
+  "env": {},
+  "scrubbedAllocatorEnvKeys": [],
+  "overriddenAllocatorEnvKeys": []
 }
 ```
+
+The top-level `measurementContext.measuredServerEnvPolicy` should include `allocatorEnvScrubTargetKeys`.
 
 If this fails with loopback bind or server startup restriction, rerun the same command with approved escalation and record the reason in the completion report.
 

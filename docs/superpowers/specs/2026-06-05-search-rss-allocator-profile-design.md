@@ -45,7 +45,8 @@ node scripts/measure-search-rss-plateau.mjs \
 - allocator profile 名。
 - 許可された allocator 環境変数名と値。
 - 親環境に存在し、測定対象 server process へ渡さず scrub した allocator / `LD_PRELOAD` 系の key 名。値は出さない。
-- 測定対象 server process の env policy。継承し得る allowlist key と scrub 対象 key を記録し、親環境の値は出さない。
+- 親環境に存在し、profile env で明示上書きして測定対象 server process へ渡した allocator key 名。値は profile 定義に限定し、親環境の値は出さない。
+- 測定対象 server process の env policy。継承し得る allowlist key と allocator scrub 対象 key を記録し、親環境の値は出さない。
 - build mode、fixture kind、run kind、fixture scale。
 - HTTP status と検索 API 契約値。
 - elapsed。
