@@ -216,8 +216,8 @@ Expected output contains:
 ```text
  M docs/todo/TODO.md
  M docs/todo/BACKLOG.md
-A  docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
-A  docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
+?? docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
+?? docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
 ```
 
 No production source files should be modified.
