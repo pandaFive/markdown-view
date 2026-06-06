@@ -36,7 +36,7 @@
 
 未完了 Medium 項目を Done Summary へ移し、完了根拠を圧縮して記録する。High / Medium Priority に未完了項目がなくなる場合は、現時点で実行候補がないことが読み取れるように短い説明を残す。
 
-新規の backlog 項目は追加しない。native Linux、別 allocator、prefix live allocation の追加検証は残候補として記録するが、今回の完了判定を妨げる未完了タスクにはしない。
+native Linux、別 allocator、prefix live allocation の追加検証は、今回の完了判定を妨げる未完了 High / Medium タスクにはしない。ただし残診断候補が不可視にならないよう、低優先の将来候補として `BACKLOG.md` P2 に残す。
 
 ## エラー処理
 
@@ -80,7 +80,7 @@ production Rust code、測定スクリプト、UI、TypeScript、generated JS �
 - `TODO.md` の RSS plateau 未完了項目が Done Summary へ移っている。
 - 完了根拠に既存測定値、主因候補、残候補、セキュリティ境界維持が含まれている。
 - High / Medium Priority の未完了項目が意図せず残っていない。
-- native Linux、別 allocator、prefix live allocation の追加検証を今回の必須残件にしていない。
+- native Linux、別 allocator、prefix live allocation の追加検証を今回の必須残件にせず、`BACKLOG.md` P2 の低優先候補として明示している。
 - `git diff --check` と文書 validation が成功する。
 - `./verify.sh` を実行しない場合は、docs-only 変更であることと残リスクを completion report に残す。
 
@@ -98,7 +98,7 @@ production Rust code、測定スクリプト、UI、TypeScript、generated JS �
 ```bash
 rg -n "RSS plateau|glibc allocator arena|WSL2|Host/Origin|SearchResponse|CSP" docs/todo/TODO.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
 rg -n "^- \\[ \\]" docs/todo/TODO.md
-placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O[:：]|未[定]' docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
+placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O[:：]|未[定]' docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 git diff --check
 ```

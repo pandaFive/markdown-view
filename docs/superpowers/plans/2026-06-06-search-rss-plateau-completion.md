@@ -15,7 +15,9 @@
 - Modify: `docs/todo/TODO.md`
   - Remove the open Medium Priority checkbox for the RSS plateau item.
   - Add a short note that there are currently no High / Medium open execution candidates.
-  - Add a Done Summary entry with completion basis, security boundary notes, residual risk, and next TODO candidates.
+  - Add a Done Summary entry with completion basis, security boundary notes, and residual candidates recorded in `BACKLOG.md` without reopening High / Medium.
+- Modify: `docs/todo/BACKLOG.md`
+  - Add a P2 item for optional future native Linux, allocator, or prefix live allocation diagnosis.
 - Read-only reference: `docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md`
   - Use this as the acceptance source.
 - Read-only reference: `docs/superpowers/specs/2026-06-04-search-rss-plateau-design.md`
@@ -29,6 +31,7 @@
 
 **Files:**
 - Modify: `docs/todo/TODO.md`
+- Modify: `docs/todo/BACKLOG.md`
 
 - [ ] **Step 1: Re-read the current Medium item**
 
@@ -45,6 +48,8 @@ Expected: output includes one open Medium checkbox:
 ```
 
 - [ ] **Step 2: Move the open RSS plateau item to Done Summary**
+
+Confirm before editing that the user has approved the implementation scope: move the RSS plateau item out of High / Medium, keep the completion judgment, and record optional future diagnosis in `BACKLOG.md` P2. If approval is missing, stop and ask for it.
 
 Edit `docs/todo/TODO.md` with `apply_patch`.
 
@@ -81,7 +86,7 @@ with:
   - 完了根拠: 2026-06-04 と 2026-06-05 の測定で、plateau は server 起動直後や multifile result-limit の基礎コストではなく、単一ファイル prefix many-match 経路で response 完了後に残る anonymous memory が支配的と判断できた。full prefix fixture は 1 file / 4,388,889 bytes、HTTP response は dev/release とも `searched_files=1`, `searched_bytes=4388889`, `truncated=true`, `truncated_reasons=["result_limit"]`, `resultsLength=100` を維持した。release prefix は cold/warm とも elapsed 約 51ms だが、5秒後 settled RSS は 705,580→781,404 KiB、`RssAnon` は 699,060→774,516 KiB、`smaps_rollup Anonymous` は 699,616→774,964 KiB まで残った。一方、multifile fixture は release settled RSS 13,280→13,200 KiB、dev settled RSS 18,480→22,964 KiB に留まり、short fallback も release settled RSS 15,084→16,880 KiB に留まった。
   - 追加切り分け: full fallback fixture を 10MiB 未満へ調整した後、release/cold 単発では 1 file / 9,900,013 bytes、`searched_files=1`, `searched_bytes=9900013`, `truncated=true`, `truncated_reasons=["result_limit"]`, `resultsLength=100` となり、skip ではなく安全境界なし巨大 block fallback 経路を測れた。elapsed は約 307ms、5秒後 settled RSS は 319,472 KiB、`RssAnon` は 313,128 KiB、`smaps_rollup Anonymous` は 313,788 KiB だった。これにより fallback は prefix とは別の性能経路として扱える。
   - allocator 判断: `scripts/measure-search-rss-plateau.mjs` の allocator profile 比較では、release/full prefix の `default` / `arena1` / `arena2` 各 profile と cold/warm で HTTP response の `searched_files=1`、`searched_bytes=4388889`、`truncated=true`、`truncated_reasons=["result_limit"]`、`resultsLength=100` を維持した。`MALLOC_ARENA_MAX=1` で settled anonymous RSS が `default` 比で cold は `RssAnon` 109,952 KiB / `smaps_rollup Anonymous` 110,304 KiB、warm は `RssAnon` 151,500 KiB / `smaps_rollup Anonymous` 151,552 KiB 下がったため、glibc allocator arena retained memory を主因候補として扱う。ただし `arena1` でも settled `RssAnon` は 538,872-546,248 KiB 残るため、WSL2 RSS/accounting 特性または prefix 経路の live allocation は残候補として記録する。
-  - 完了判断: Medium Priority の「切り分ける」目的は、支配候補、非支配経路、残候補、検索契約維持を分類できたため達成済みとする。native Linux、別 allocator、prefix 経路の live allocation 追加検証は、RSS の絶対値改善や環境差検証を行う場合の新規テーマであり、この完了判定の必須残件にはしない。
+  - 完了判断: Medium Priority の「切り分ける」目的は、支配候補、非支配経路、残候補、検索契約維持を分類できたため達成済みとする。native Linux、別 allocator、prefix 経路の live allocation 追加検証は、RSS の絶対値改善や環境差検証を行う場合の新規テーマであり、この完了判定の必須残件にはしない。必要時に再開できるよう、低優先の将来候補として `BACKLOG.md` P2 へ移した。
   - 検証とセキュリティ: 既存検証では `node scripts/measure-search-rss-plateau.mjs --self-test-sanitization`、`node scripts/measure-search-rss-plateau.mjs --help`、`git diff --check`、`./verify.sh` が成功し、`node scripts/measure-search-rss-plateau.mjs --smoke` は sandbox 内 `EPERM` 後に承認付き再実行で成功した。測定出力には実パス、full process args、本文断片、raw maps 行、親環境の値を含めていない。検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は弱めていない。
 ```
 
@@ -105,18 +110,24 @@ rg -n "ディレクトリ検索 many-match の RSS plateau を切り分ける|gl
 
 Expected: output includes the Done Summary checkbox and the security boundary sentence.
 
+- [ ] **Step 5: Add the residual diagnosis candidate to BACKLOG**
+
+Edit `docs/todo/BACKLOG.md` with `apply_patch`. Under `## P2: 保守性・局所回帰検知`, add a low-priority item for optional future native Linux, allocator, or prefix live allocation diagnosis. The item must state that it does not reopen High / Medium and must preserve the same output sanitization and security boundary constraints.
+
 ## Task 2: Validate Documentation Consistency
 
 **Files:**
 - Validate: `docs/todo/TODO.md`
+- Validate: `docs/todo/BACKLOG.md`
 - Validate: `docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md`
+- Validate: `docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md`
 
 - [ ] **Step 1: Check for accidental placeholders**
 
 Run:
 
 ```bash
-placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O[:：]|未[定]' docs/todo/TODO.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
+placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O[:：]|未[定]' docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 ```
 
@@ -142,7 +153,27 @@ git diff -- docs/todo/TODO.md
 
 Expected: diff removes the open Medium item, keeps the measurement facts, and adds a Done Summary completion entry. It must not add real temp paths, Markdown body snippets, raw `/proc/maps` rows, full process args, or parent environment variable values.
 
-- [ ] **Step 4: Record verification scope**
+- [ ] **Step 4: Confirm the residual diagnosis is visible in BACKLOG**
+
+Run:
+
+```bash
+rg -n "prefix many-match RSS plateau|native Linux|別 allocator|live allocation" docs/todo/BACKLOG.md
+```
+
+Expected: output includes the new P2 backlog item and its diagnosis scope.
+
+- [ ] **Step 5: Confirm obsolete Medium follow-up wording is gone**
+
+Run:
+
+```bash
+rg -n "Medium Priority の follow-up として継続する" docs/todo/TODO.md
+```
+
+Expected: no output and exit code 1.
+
+- [ ] **Step 6: Record verification scope**
 
 Do not run `./verify.sh` for this docs-only update unless the execution owner chooses stricter final verification. If it is not run, the completion report must say:
 
@@ -154,6 +185,9 @@ Do not run `./verify.sh` for this docs-only update unless the execution owner ch
 
 **Files:**
 - Commit: `docs/todo/TODO.md`
+- Commit: `docs/todo/BACKLOG.md`
+- Commit: `docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md`
+- Commit: `docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md`
 
 - [ ] **Step 1: Confirm branch is not develop or main**
 
@@ -169,7 +203,7 @@ Expected:
 docs/search-rss-plateau-completion-design
 ```
 
-- [ ] **Step 2: Confirm only TODO.md is modified for implementation**
+- [ ] **Step 2: Confirm only documentation files are modified**
 
 Run:
 
@@ -181,20 +215,25 @@ Expected output contains:
 
 ```text
  M docs/todo/TODO.md
+ M docs/todo/BACKLOG.md
+ M docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
+ M docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
 ```
 
 No production source files should be modified.
 
-- [ ] **Step 3: Commit the TODO completion update**
+- [ ] **Step 3: Commit the documentation update**
+
+Confirm before committing that the user has approved creating a commit for the reviewed docs-only changes. If approval is missing, stop and ask for it.
 
 Run:
 
 ```bash
-git add docs/todo/TODO.md
-git commit -m "docs: 検索RSS plateau切り分けを完了扱いに整理"
+git add docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
+git commit -m "docs: 検索RSS plateau完了整理のレビュー指摘を反映"
 ```
 
-Expected: commit succeeds with one modified file.
+Expected: commit succeeds with four modified files.
 
 - [ ] **Step 4: Confirm clean worktree**
 
@@ -211,7 +250,7 @@ Expected: no output.
 - [ ] Every spec acceptance criterion maps to a task:
   - `TODO.md` open RSS item moves to Done Summary: Task 1.
   - Measurement values, main candidate, residual candidates, security boundaries are preserved: Task 1.
-  - No required native Linux / allocator follow-up is created: Task 1.
+  - Native Linux / allocator / prefix live allocation follow-up is visible in BACKLOG P2 without reopening High / Medium: Task 1 and Task 2.
   - Validation succeeds: Task 2.
   - Commit is isolated: Task 3.
 - [ ] No placeholder text remains in this plan.
