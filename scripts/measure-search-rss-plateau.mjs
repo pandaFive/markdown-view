@@ -10,6 +10,32 @@ const DEFAULT_QUERY = 'needle';
 const TEMP_PREFIX = 'markdown-view-search-rss-plateau-';
 const MASKED_TEMP = '/tmp/markdown-view-search-rss-plateau.***';
 const DEFAULT_PORT = 3109;
+const ALLOCATOR_PROFILES = new Map([
+  ['default', {}],
+  ['arena1', { MALLOC_ARENA_MAX: '1' }],
+  ['arena2', { MALLOC_ARENA_MAX: '2' }],
+]);
+const ALLOCATOR_ENV_KEYS = [
+  'MALLOC_ARENA_MAX',
+  'MALLOC_MMAP_THRESHOLD_',
+  'MALLOC_TRIM_THRESHOLD_',
+  'MALLOC_TOP_PAD_',
+  'MALLOC_MMAP_MAX_',
+  'GLIBC_TUNABLES',
+  'LD_PRELOAD',
+];
+const MEASURED_SERVER_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'RUST_BACKTRACE',
+];
+const DEFAULT_ALLOCATOR_PROFILES = ['default'];
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SAMPLE_INTERVAL_MS = 50;
@@ -49,6 +75,7 @@ function parseArgs(argv) {
     fixtures: ['prefix'],
     runs: ['cold'],
     fixtureScale: 'short',
+    allocatorProfiles: [...DEFAULT_ALLOCATOR_PROFILES],
     output: 'json',
   };
   const explicitMatrixOptions = new Set();
@@ -65,6 +92,7 @@ function parseArgs(argv) {
       options.modes = ['dev'];
       options.fixtures = ['prefix'];
       options.runs = ['cold'];
+      options.allocatorProfiles = [...DEFAULT_ALLOCATOR_PROFILES];
     } else if (arg === '--keep-temp') {
       options.keepTemp = true;
     } else if (arg === '--port') {
@@ -83,6 +111,9 @@ function parseArgs(argv) {
     } else if (arg === '--fixture-scale') {
       explicitMatrixOptions.add(arg);
       options.fixtureScale = parseChoice(readValue(argv, ++index, arg), ['short', 'full'], arg);
+    } else if (arg === '--allocator-profiles') {
+      explicitMatrixOptions.add(arg);
+      options.allocatorProfiles = parseAllocatorProfiles(readValue(argv, ++index, arg));
     } else if (arg === '--output') {
       options.output = parseChoice(readValue(argv, ++index, arg), ['json'], arg);
     } else {
@@ -91,7 +122,7 @@ function parseArgs(argv) {
   }
 
   if (options.smoke && explicitMatrixOptions.size > 0) {
-    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, or --fixture-scale');
+    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles');
   }
 
   return options;
@@ -134,6 +165,64 @@ function parseList(raw, allowed, optionName) {
   return values;
 }
 
+function parseAllocatorProfiles(raw) {
+  const values = raw.split(',').map((value) => value.trim()).filter(Boolean);
+  if (values.length === 0) {
+    throw new Error('--allocator-profiles requires at least one value');
+  }
+  for (const value of values) {
+    if (!ALLOCATOR_PROFILES.has(value)) {
+      throw new Error(`--allocator-profiles must be one of: ${Array.from(ALLOCATOR_PROFILES.keys()).join(', ')}`);
+    }
+  }
+  return values;
+}
+
+function allocatorProfileEnv(profileName) {
+  const env = ALLOCATOR_PROFILES.get(profileName);
+  if (!env) {
+    throw new Error(`unsupported allocator profile: ${profileName}`);
+  }
+  return { ...env };
+}
+
+function allocatorProfileReport(profileName, baseEnv = process.env) {
+  const env = allocatorProfileEnv(profileName);
+  return {
+    name: profileName,
+    env,
+    scrubbedAllocatorEnvKeys: scrubbedAllocatorEnvKeys(baseEnv, env),
+    overriddenAllocatorEnvKeys: overriddenAllocatorEnvKeys(baseEnv, env),
+  };
+}
+
+function buildMeasuredServerEnv(allocatorEnv, baseEnv = process.env) {
+  const serverEnv = {};
+  for (const key of MEASURED_SERVER_ENV_ALLOWLIST) {
+    if (Object.prototype.hasOwnProperty.call(baseEnv, key)) {
+      serverEnv[key] = baseEnv[key];
+    }
+  }
+  return {
+    ...serverEnv,
+    ...allocatorEnv,
+  };
+}
+
+function scrubbedAllocatorEnvKeys(baseEnv = process.env, allocatorEnv = {}) {
+  return ALLOCATOR_ENV_KEYS.filter((key) => (
+    Object.prototype.hasOwnProperty.call(baseEnv, key)
+    && !Object.prototype.hasOwnProperty.call(allocatorEnv, key)
+  ));
+}
+
+function overriddenAllocatorEnvKeys(baseEnv = process.env, allocatorEnv = {}) {
+  return ALLOCATOR_ENV_KEYS.filter((key) => (
+    Object.prototype.hasOwnProperty.call(baseEnv, key)
+    && Object.prototype.hasOwnProperty.call(allocatorEnv, key)
+  ));
+}
+
 function parseChoice(value, allowed, optionName) {
   if (!allowed.includes(value)) {
     throw new Error(`${optionName} must be one of: ${allowed.join(', ')}`);
@@ -148,12 +237,14 @@ Options:
   --help                         Show this help.
   --self-test-sanitization       Run local sanitization checks without starting the server.
   --smoke                        Run a short dev/prefix/cold measurement.
-                                 Cannot be combined with --modes, --fixtures, --runs, or --fixture-scale.
+                                 Cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
                                  Fixture kinds to measure. Default: prefix.
   --runs cold,warm               Run kinds to measure. Default: cold.
   --fixture-scale short,full     Fixture size. Default: short.
+  --allocator-profiles default,arena1,arena2
+                                 Allocator profiles for measured server process. Default: default.
   --port <number>                Local port. Default: ${DEFAULT_PORT}.
   --query <query>                Search query. Default: ${DEFAULT_QUERY}.
   --keep-temp                    Keep temp fixture directory for local debugging.
@@ -217,12 +308,99 @@ function runSanitizationSelfTest() {
   assert.throws(() => parseArgs(['--port', '0']), /positive integer/);
   assert.throws(() => parseArgs(['--port', '70000']), /between 1 and 65535/);
   assert.equal(parseArgs(['--port', '65535', '--self-test-sanitization']).port, 65535);
+  assert.deepEqual(parseArgs(['--allocator-profiles', 'default,arena1']).allocatorProfiles, ['default', 'arena1']);
+  assert.deepEqual(parseArgs(['--allocator-profiles', 'arena2']).allocatorProfiles, ['arena2']);
+  assert.deepEqual(allocatorProfileEnv('default'), {});
+  assert.deepEqual(allocatorProfileEnv('arena1'), { MALLOC_ARENA_MAX: '1' });
+  assert.deepEqual(allocatorProfileReport('arena2', {}), {
+    name: 'arena2',
+    env: { MALLOC_ARENA_MAX: '2' },
+    scrubbedAllocatorEnvKeys: [],
+    overriddenAllocatorEnvKeys: [],
+  });
+  const inheritedEnvFixture = Object.fromEntries(
+    MEASURED_SERVER_ENV_ALLOWLIST.map((key) => [key, `allowed-${key}`])
+  );
+  const allocatorEnvFixture = Object.fromEntries(
+    ALLOCATOR_ENV_KEYS.map((key) => [key, `allocator-${key}`])
+  );
+  assert.deepEqual(
+    buildMeasuredServerEnv({}, {
+      ...inheritedEnvFixture,
+      ...allocatorEnvFixture,
+      GITHUB_TOKEN: 'secret-token',
+      HTTP_PROXY: 'http://proxy.example',
+      HTTPS_PROXY: 'https://proxy.example',
+      CI: 'true',
+      SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+    }),
+    inheritedEnvFixture
+  );
+  assert.deepEqual(
+    buildMeasuredServerEnv({ MALLOC_ARENA_MAX: '1' }, {
+      PATH: '/usr/bin',
+      MALLOC_ARENA_MAX: '8',
+    }),
+    { PATH: '/usr/bin', MALLOC_ARENA_MAX: '1' }
+  );
+  assert.deepEqual(
+    allocatorProfileReport('default', {
+      PATH: '/usr/bin',
+      ...allocatorEnvFixture,
+      GITHUB_TOKEN: 'secret-token',
+    }),
+    {
+      name: 'default',
+      env: {},
+      scrubbedAllocatorEnvKeys: ALLOCATOR_ENV_KEYS,
+      overriddenAllocatorEnvKeys: [],
+    }
+  );
+  assert.deepEqual(
+    allocatorProfileReport('arena1', {
+      PATH: '/usr/bin',
+      ...allocatorEnvFixture,
+      GITHUB_TOKEN: 'secret-token',
+    }),
+    {
+      name: 'arena1',
+      env: { MALLOC_ARENA_MAX: '1' },
+      scrubbedAllocatorEnvKeys: ALLOCATOR_ENV_KEYS.filter((key) => key !== 'MALLOC_ARENA_MAX'),
+      overriddenAllocatorEnvKeys: ['MALLOC_ARENA_MAX'],
+    }
+  );
+  assert.deepEqual(buildMeasurementContext({
+    smoke: false,
+    fixtureScale: 'short',
+    modes: ['dev'],
+    fixtures: ['prefix'],
+    runs: ['cold'],
+    allocatorProfiles: ['default'],
+    port: 65535,
+  }).measuredServerEnvPolicy, {
+    inheritedEnvKeys: ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'RUST_BACKTRACE'],
+    allocatorEnvScrubTargetKeys: ALLOCATOR_ENV_KEYS,
+    reportPolicy: 'reports allocator env key names needed for interpretation, never parent env values',
+  });
+  assert.throws(
+    () => allocatorProfileEnv('unsupported'),
+    /unsupported allocator profile/
+  );
+  assert.throws(
+    () => parseArgs(['--allocator-profiles', 'jemalloc']),
+    /--allocator-profiles must be one of/
+  );
+  assert.throws(
+    () => parseArgs(['--allocator-profiles', '']),
+    /requires at least one value/
+  );
 
   const matrixOptionPairs = [
     ['--modes', 'release'],
     ['--fixtures', 'prefix'],
     ['--runs', 'cold'],
     ['--fixture-scale', 'short'],
+    ['--allocator-profiles', 'default'],
   ];
   for (const [optionName, optionValue] of matrixOptionPairs) {
     assert.throws(
@@ -240,6 +418,7 @@ function runSanitizationSelfTest() {
   assert.deepEqual(smokeOptions.fixtures, ['prefix']);
   assert.deepEqual(smokeOptions.runs, ['cold']);
   assert.equal(smokeOptions.fixtureScale, 'short');
+  assert.deepEqual(smokeOptions.allocatorProfiles, ['default']);
 
   const anonymous = parseMapsLine('7f0000000000-7f0000100000 rw-p 00000000 00:00 0');
   const fileBacked = parseMapsLine('7f0000200000-7f0000300000 r--p 00000000 08:01 123 /usr/lib/libc.so');
@@ -376,6 +555,8 @@ function runSanitizationSelfTest() {
   const context = buildMeasurementContext(parseArgs(['--query', 'needle']));
   assert.equal(Object.hasOwn(context.cliOptions, 'queryLength'), false);
   assert.equal(Object.hasOwn(context.cliOptions, 'querySha256'), false);
+  const allocatorContext = buildMeasurementContext(parseArgs(['--allocator-profiles', 'default,arena1']));
+  assert.deepEqual(allocatorContext.cliOptions.allocatorProfiles, ['default', 'arena1']);
 
   assert.deepEqual(readMapsSummaryFromText('invalid maps line'), {
     available: false,
@@ -674,8 +855,14 @@ function parseMapsLine(line) {
   };
 }
 
-async function runMeasuredScenario(options, fixture, mode, runKind) {
-  const server = await startServer({ mode, workspace: fixture.workspace, port: options.port });
+async function runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile) {
+  const allocator = allocatorProfileReport(allocatorProfile);
+  const server = await startServer({
+    mode,
+    workspace: fixture.workspace,
+    port: options.port,
+    allocatorEnv: allocator.env,
+  });
   let scenarioError = null;
   try {
     await waitForServer(server, options.port);
@@ -707,6 +894,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind) {
     return {
       mode,
       runKind,
+      allocatorProfile: allocator,
       pid: server.pid,
       elapsedMs: Number(endedAt - startedAt) / 1_000_000,
       peakRssKb: peakRssKb(snapshots),
@@ -746,11 +934,12 @@ function trackPromise(promise) {
   return promise;
 }
 
-async function startServer({ mode, workspace, port }) {
+async function startServer({ mode, workspace, port, allocatorEnv = {} }) {
   await assertPortAvailable(port);
   const binaryPath = ensureBuiltBinary(mode);
   const child = spawn(binaryPath, [workspace, '--port', String(port), '--no-open'], {
     cwd: process.cwd(),
+    env: buildMeasuredServerEnv(allocatorEnv),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdoutChunks = [];
@@ -1077,31 +1266,34 @@ async function runMeasurement(options) {
     for (const fixtureKind of options.fixtures) {
       const fixture = createFixture(root, fixtureKind, options.fixtureScale);
       for (const mode of options.modes) {
-        for (const runKind of options.runs) {
-          const baseReport = {
-            fixtureKind,
-            fixture: {
-              fileCount: fixture.fileCount,
-              bytes: fixture.bytes,
-              workspace: fixture.maskedWorkspace,
-            },
-            mode,
-            runKind,
-          };
-          try {
-            const scenario = await runMeasuredScenario(options, fixture, mode, runKind);
-            reports.push({
-              ...baseReport,
-              status: 'ok',
-              ...scenario,
-            });
-          } catch (error) {
-            failed = true;
-            reports.push({
-              ...baseReport,
-              status: 'failed',
-              ...errorReportFields(error),
-            });
+        for (const allocatorProfile of options.allocatorProfiles) {
+          for (const runKind of options.runs) {
+            const baseReport = {
+              fixtureKind,
+              fixture: {
+                fileCount: fixture.fileCount,
+                bytes: fixture.bytes,
+                workspace: fixture.maskedWorkspace,
+              },
+              mode,
+              runKind,
+              allocatorProfile: allocatorProfileReport(allocatorProfile),
+            };
+            try {
+              const scenario = await runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile);
+              reports.push({
+                ...baseReport,
+                status: 'ok',
+                ...scenario,
+              });
+            } catch (error) {
+              failed = true;
+              reports.push({
+                ...baseReport,
+                status: 'failed',
+                ...errorReportFields(error),
+              });
+            }
           }
         }
       }
@@ -1191,7 +1383,13 @@ function buildMeasurementContext(options) {
       modes: options.modes,
       fixtures: options.fixtures,
       runs: options.runs,
+      allocatorProfiles: options.allocatorProfiles,
       port: options.port,
+    },
+    measuredServerEnvPolicy: {
+      inheritedEnvKeys: [...MEASURED_SERVER_ENV_ALLOWLIST],
+      allocatorEnvScrubTargetKeys: [...ALLOCATOR_ENV_KEYS],
+      reportPolicy: 'reports allocator env key names needed for interpretation, never parent env values',
     },
   };
 }
