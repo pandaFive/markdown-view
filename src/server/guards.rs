@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_origin拒否実ログは分類levelと構造化fieldを出力する() {
+    fn test_ws_host_bypass兆候は構造化errorログ契約として固定する() {
         let mut missing_host = HeaderMap::new();
         missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
 
@@ -885,6 +885,74 @@ mod tests {
         untrusted_host.insert(HOST, "evil.example:3000".parse().unwrap());
         untrusted_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
 
+        let cases = [
+            (
+                missing_host,
+                "MissingHost",
+                "\"<absent>\"",
+                "\"http://localhost:3000\"",
+            ),
+            (
+                host_malformed,
+                "HostMalformed",
+                "\"<non-ascii>\"",
+                "\"http://localhost:3000\"",
+            ),
+            (
+                untrusted_host,
+                "UntrustedHost",
+                "\"evil.example:3000\"",
+                "\"http://localhost:3000\"",
+            ),
+        ];
+
+        for (headers, expected_rejection, expected_host, expected_origin) in cases {
+            let events = capture_ws_rejection_events(&headers);
+            assert_eq!(
+                events.len(),
+                1,
+                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+            );
+
+            let event = &events[0];
+            assert_eq!(
+                event.level,
+                Level::ERROR,
+                "{expected_rejection} は Host middleware bypass 兆候として ERROR で記録する"
+            );
+            assert!(
+                event
+                    .fields
+                    .get("rejection")
+                    .is_some_and(|actual| actual.contains(expected_rejection)),
+                "{expected_rejection} の rejection field が不正: {:?}",
+                event.fields
+            );
+            assert_eq!(
+                event.fields.get("ws_rejection_class").map(String::as_str),
+                Some("WS Host 検証異常"),
+                "{expected_rejection} の分類 field が不正"
+            );
+            assert_eq!(
+                event.fields.get("host_recheck_anomaly").map(String::as_str),
+                Some("true"),
+                "{expected_rejection} は host_recheck_anomaly=true で記録する"
+            );
+            assert_eq!(
+                event.fields.get("host").map(String::as_str),
+                Some(expected_host),
+                "{expected_rejection} の host field は log_value_for_header 契約に従う"
+            );
+            assert_eq!(
+                event.fields.get("origin").map(String::as_str),
+                Some(expected_origin),
+                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ws_origin拒否はhost_bypass兆候として扱わない() {
         let mut missing_origin = HeaderMap::new();
         missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
 
@@ -894,44 +962,22 @@ mod tests {
 
         let cases = [
             (
-                missing_host,
-                Level::ERROR,
-                "MissingHost",
-                "WS Host 検証異常",
-                "true",
-            ),
-            (
-                host_malformed,
-                Level::ERROR,
-                "HostMalformed",
-                "WS Host 検証異常",
-                "true",
-            ),
-            (
-                untrusted_host,
-                Level::ERROR,
-                "UntrustedHost",
-                "WS Host 検証異常",
-                "true",
-            ),
-            (
                 missing_origin,
                 Level::INFO,
                 "MissingOrigin",
-                "WS Origin 拒否",
-                "false",
+                "\"localhost:3000\"",
+                "\"<absent>\"",
             ),
             (
                 authority_mismatch,
                 Level::WARN,
                 "AuthorityMismatch",
-                "WS Origin 拒否",
-                "false",
+                "\"localhost:3000\"",
+                "\"http://127.0.0.1:3000\"",
             ),
         ];
 
-        for (headers, expected_level, expected_rejection, expected_class, expected_anomaly) in cases
-        {
+        for (headers, expected_level, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
             assert_eq!(
                 events.len(),
@@ -954,23 +1000,23 @@ mod tests {
             );
             assert_eq!(
                 event.fields.get("ws_rejection_class").map(String::as_str),
-                Some(expected_class),
+                Some("WS Origin 拒否"),
                 "{expected_rejection} の分類 field が不正"
             );
             assert_eq!(
                 event.fields.get("host_recheck_anomaly").map(String::as_str),
-                Some(expected_anomaly),
-                "{expected_rejection} の Host 再検証異常 field が不正"
+                Some("false"),
+                "{expected_rejection} は host_recheck_anomaly=false で記録する"
             );
-            assert!(
-                event.fields.contains_key("host"),
-                "{expected_rejection} の host field が欠落: {:?}",
-                event.fields
+            assert_eq!(
+                event.fields.get("host").map(String::as_str),
+                Some(expected_host),
+                "{expected_rejection} の host field は log_value_for_header 契約に従う"
             );
-            assert!(
-                event.fields.contains_key("origin"),
-                "{expected_rejection} の origin field が欠落: {:?}",
-                event.fields
+            assert_eq!(
+                event.fields.get("origin").map(String::as_str),
+                Some(expected_origin),
+                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
             );
         }
     }
