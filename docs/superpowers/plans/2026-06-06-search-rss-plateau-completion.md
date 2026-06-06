@@ -168,7 +168,7 @@ Expected: output includes the new P2 backlog item and its diagnosis scope.
 Run:
 
 ```bash
-rg -n "Medium Priority の follow-up として継続する" docs/todo/TODO.md
+rg -n "Medium Priority の follow-up として継続する|RSS plateau follow-up の受け入れ条件として残す|受け入れ条件として残す" docs/todo/TODO.md
 ```
 
 Expected: no output and exit code 1.
