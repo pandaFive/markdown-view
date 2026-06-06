@@ -98,7 +98,7 @@ production Rust code、測定スクリプト、UI、TypeScript、generated JS �
 ```bash
 rg -n "RSS plateau|glibc allocator arena|WSL2|Host/Origin|SearchResponse|CSP" docs/todo/TODO.md docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
 rg -n "^- \\[ \\]" docs/todo/TODO.md
-placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\\.md| Issues)|未[定]' docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
+placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O[:：]|未[定]' docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 git diff --check
 ```
