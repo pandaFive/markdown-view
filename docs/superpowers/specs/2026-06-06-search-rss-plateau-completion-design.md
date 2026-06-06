@@ -61,7 +61,9 @@ native Linux、別 allocator、prefix live allocation の追加検証は、今�
 変更対象:
 
 - `docs/todo/TODO.md`
+- `docs/todo/BACKLOG.md`
 - `docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md`
+- `docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md`
 
 参照対象:
 
@@ -73,7 +75,7 @@ production Rust code、測定スクリプト、UI、TypeScript、generated JS �
 
 ## ロールバック
 
-この設計書追加と `TODO.md` 更新の commit を revert すればよい。コード挙動、HTTP API、WebSocket、検索アルゴリズムは変更しないため、追加の巻き戻しは不要である。
+この4ファイルを含む docs-only commit を revert すればよい。コード挙動、HTTP API、WebSocket、検索アルゴリズムは変更しないため、追加の巻き戻しは不要である。
 
 ## 受け入れ基準
 

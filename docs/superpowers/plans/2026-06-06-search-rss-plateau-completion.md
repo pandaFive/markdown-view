@@ -216,8 +216,8 @@ Expected output contains:
 ```text
  M docs/todo/TODO.md
  M docs/todo/BACKLOG.md
- M docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
- M docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
+A  docs/superpowers/specs/2026-06-06-search-rss-plateau-completion-design.md
+A  docs/superpowers/plans/2026-06-06-search-rss-plateau-completion.md
 ```
 
 No production source files should be modified.
@@ -233,7 +233,7 @@ git add docs/todo/TODO.md docs/todo/BACKLOG.md docs/superpowers/specs/2026-06-06
 git commit -m "docs: 検索RSS plateau完了整理のレビュー指摘を反映"
 ```
 
-Expected: commit succeeds with four modified files.
+Expected: commit succeeds with two modified and two added documentation files.
 
 - [ ] **Step 4: Confirm clean worktree**
 
