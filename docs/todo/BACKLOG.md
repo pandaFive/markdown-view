@@ -35,9 +35,9 @@
 ## Done
 
 - [x] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
-  - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認する。
+  - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認した。
   - 判断: 個人向け localhost ツールとしては、既存の `error!` ログと structured field で異常兆候を確認できるため、metrics crate、counter state、HTTP endpoint、外部監視基盤は追加しない。継続集計が必要な本格運用要求が出た場合のみ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
-  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は既存の `log_value_for_header()` 経由に限定する。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
+  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
   - 由来: PR #123 レビュー follow-up (2026-05-04)、WS Host bypass structured log 契約設計 (2026-06-07)
 
 - [x] インラインブラウザJS の TS 化

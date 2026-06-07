@@ -16,6 +16,15 @@
 - Modify `docs/todo/BACKLOG.md`: Move the P3 WS Host middleware bypass metrics item to Done and record that structured logs are the chosen lightweight observability contract.
 - Reference `docs/superpowers/specs/2026-06-07-ws-host-bypass-structured-log-design.md`: Source design and acceptance criteria.
 
+## Preflight Gate
+
+Before implementation, confirm these items and stop if any check fails:
+
+- The user approved this implementation after goal, non-goals, acceptance criteria, impact scope, and rollback path were presented.
+- `git status --short --branch` shows a branch that is not `develop` or `main`.
+- If the current branch is `develop` or `main`, create a feature/fix branch in the current repository before editing.
+- The worktree has no unrelated uncommitted changes in files this plan will modify.
+
 ## Task 1: Contract-Test WS Host Bypass Structured Logs
 
 **Files:**
@@ -46,20 +55,20 @@ Replace the current `test_ws_origin拒否実ログは分類levelと構造化fiel
             (
                 missing_host,
                 "MissingHost",
-                "\"<absent>\"",
-                "\"http://localhost:3000\"",
+                "<absent>",
+                "http://localhost:3000",
             ),
             (
                 host_malformed,
                 "HostMalformed",
-                "\"<non-ascii>\"",
-                "\"http://localhost:3000\"",
+                "<non-ascii>",
+                "http://localhost:3000",
             ),
             (
                 untrusted_host,
                 "UntrustedHost",
-                "\"evil.example:3000\"",
-                "\"http://localhost:3000\"",
+                "evil.example:3000",
+                "http://localhost:3000",
             ),
         ];
 
@@ -98,12 +107,12 @@ Replace the current `test_ws_origin拒否実ログは分類levelと構造化fiel
             assert_eq!(
                 event.fields.get("host").map(String::as_str),
                 Some(expected_host),
-                "{expected_rejection} の host field は log_value_for_header 契約に従う"
+                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
             );
             assert_eq!(
                 event.fields.get("origin").map(String::as_str),
                 Some(expected_origin),
-                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
+                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
             );
         }
     }
@@ -128,15 +137,15 @@ Immediately after the Host contract test, add this separate Origin test. This ke
                 missing_origin,
                 Level::INFO,
                 "MissingOrigin",
-                "\"localhost:3000\"",
-                "\"<absent>\"",
+                "localhost:3000",
+                "<absent>",
             ),
             (
                 authority_mismatch,
                 Level::WARN,
                 "AuthorityMismatch",
-                "\"localhost:3000\"",
-                "\"http://127.0.0.1:3000\"",
+                "localhost:3000",
+                "http://127.0.0.1:3000",
             ),
         ];
 
@@ -174,12 +183,12 @@ Immediately after the Host contract test, add this separate Origin test. This ke
             assert_eq!(
                 event.fields.get("host").map(String::as_str),
                 Some(expected_host),
-                "{expected_rejection} の host field は log_value_for_header 契約に従う"
+                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
             );
             assert_eq!(
                 event.fields.get("origin").map(String::as_str),
                 Some(expected_origin),
-                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
+                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
             );
         }
     }
@@ -263,9 +272,9 @@ Remove the unchecked P3 item from `## P3: 長期改善・低緊急` and add this
 
 ```markdown
 - [x] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
-  - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認する。
+  - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認した。
   - 判断: 個人向け localhost ツールとしては、既存の `error!` ログと structured field で異常兆候を確認できるため、metrics crate、counter state、HTTP endpoint、外部監視基盤は追加しない。継続集計が必要な本格運用要求が出た場合のみ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
-  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は既存の `log_value_for_header()` 経由に限定する。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
+  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
   - 由来: PR #123 レビュー follow-up (2026-05-04)、WS Host bypass structured log 契約設計 (2026-06-07)
 ```
 

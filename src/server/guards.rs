@@ -50,6 +50,22 @@ fn log_value_for_header<'a>(headers: &'a HeaderMap, name: &axum::http::HeaderNam
     }
 }
 
+fn log_value_for_ws_origin(headers: &HeaderMap) -> String {
+    let Some(value) = headers.get(ORIGIN) else {
+        return "<absent>".to_string();
+    };
+    let Ok(origin) = value.to_str() else {
+        return "<non-ascii>".to_string();
+    };
+    let Ok(uri) = origin.parse::<Uri>() else {
+        return "<invalid-origin-uri>".to_string();
+    };
+    let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
+        return "<invalid-origin-uri>".to_string();
+    };
+    format!("{scheme}://{authority}")
+}
+
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 #[cfg(test)]
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -215,8 +231,8 @@ fn emit_ws_rejection_log(
             if host_recheck_anomaly {
                 tracing::$macro_name!(
                     rejection = ?rejection,
-                    host = ?host,
-                    origin = ?origin,
+                    host = host,
+                    origin = origin,
                     ws_rejection_class = message,
                     host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
@@ -228,8 +244,8 @@ fn emit_ws_rejection_log(
             } else {
                 tracing::$macro_name!(
                     rejection = ?rejection,
-                    host = ?host,
-                    origin = ?origin,
+                    host = host,
+                    origin = origin,
                     ws_rejection_class = message,
                     host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}",
@@ -267,13 +283,6 @@ fn emit_ws_rejection_log(
 /// （`*Malformed`）を別 variant で区別し、呼び出し元でログレベルを
 /// 段階化できるようにする。
 pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejection> {
-    let origin = match headers.get(ORIGIN) {
-        None => return Err(WsOriginRejection::MissingOrigin),
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return Err(WsOriginRejection::OriginMalformed),
-        },
-    };
     let host = match headers.get(HOST) {
         None => return Err(WsOriginRejection::MissingHost),
         Some(v) => match v.to_str() {
@@ -284,6 +293,13 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
     if !is_trusted_authority(host, "host") {
         return Err(WsOriginRejection::UntrustedHost);
     }
+    let origin = match headers.get(ORIGIN) {
+        None => return Err(WsOriginRejection::MissingOrigin),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::OriginMalformed),
+        },
+    };
     let Ok(origin_uri) = origin.parse::<Uri>() else {
         return Err(WsOriginRejection::OriginParseError);
     };
@@ -316,7 +332,7 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
         Ok(()) => true,
         Err(rejection) => {
             let host = log_value_for_header(headers, &HOST);
-            let origin = log_value_for_header(headers, &ORIGIN);
+            let origin = log_value_for_ws_origin(headers);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
             let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
@@ -326,7 +342,7 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
                 host_recheck_anomaly,
                 rejection,
                 host,
-                origin,
+                &origin,
             );
             false
         }
@@ -871,6 +887,8 @@ mod tests {
 
     #[test]
     fn test_ws_host_bypass兆候は構造化errorログ契約として固定する() {
+        let missing_host_and_origin = HeaderMap::new();
+
         let mut missing_host = HeaderMap::new();
         missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
 
@@ -887,22 +905,28 @@ mod tests {
 
         let cases = [
             (
+                missing_host_and_origin,
+                "MissingHost",
+                "<absent>",
+                "<absent>",
+            ),
+            (
                 missing_host,
                 "MissingHost",
-                "\"<absent>\"",
-                "\"http://localhost:3000\"",
+                "<absent>",
+                "http://localhost:3000",
             ),
             (
                 host_malformed,
                 "HostMalformed",
-                "\"<non-ascii>\"",
-                "\"http://localhost:3000\"",
+                "<non-ascii>",
+                "http://localhost:3000",
             ),
             (
                 untrusted_host,
                 "UntrustedHost",
-                "\"evil.example:3000\"",
-                "\"http://localhost:3000\"",
+                "evil.example:3000",
+                "http://localhost:3000",
             ),
         ];
 
@@ -941,12 +965,12 @@ mod tests {
             assert_eq!(
                 event.fields.get("host").map(String::as_str),
                 Some(expected_host),
-                "{expected_rejection} の host field は log_value_for_header 契約に従う"
+                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
             );
             assert_eq!(
                 event.fields.get("origin").map(String::as_str),
                 Some(expected_origin),
-                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
+                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
             );
         }
     }
@@ -956,24 +980,84 @@ mod tests {
         let mut missing_origin = HeaderMap::new();
         missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
 
+        let mut origin_malformed = HeaderMap::new();
+        origin_malformed.insert(HOST, "localhost:3000".parse().unwrap());
+        origin_malformed.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
+
+        let mut origin_parse_error = HeaderMap::new();
+        origin_parse_error.insert(HOST, "localhost:3000".parse().unwrap());
+        origin_parse_error.insert(ORIGIN, "not a uri".parse().unwrap());
+
+        let mut unsupported_scheme = HeaderMap::new();
+        unsupported_scheme.insert(HOST, "localhost:3000".parse().unwrap());
+        unsupported_scheme.insert(
+            ORIGIN,
+            "ftp://localhost:3000/private?token=secret".parse().unwrap(),
+        );
+
+        let mut untrusted_origin_authority = HeaderMap::new();
+        untrusted_origin_authority.insert(HOST, "localhost:3000".parse().unwrap());
+        untrusted_origin_authority.insert(
+            ORIGIN,
+            "http://evil.example:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
+
         let mut authority_mismatch = HeaderMap::new();
         authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
-        authority_mismatch.insert(ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+        authority_mismatch.insert(
+            ORIGIN,
+            "http://127.0.0.1:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
 
         let cases = [
             (
                 missing_origin,
                 Level::INFO,
                 "MissingOrigin",
-                "\"localhost:3000\"",
-                "\"<absent>\"",
+                "localhost:3000",
+                "<absent>",
+            ),
+            (
+                origin_malformed,
+                Level::WARN,
+                "OriginMalformed",
+                "localhost:3000",
+                "<non-ascii>",
+            ),
+            (
+                origin_parse_error,
+                Level::WARN,
+                "OriginParseError",
+                "localhost:3000",
+                "<invalid-origin-uri>",
+            ),
+            (
+                unsupported_scheme,
+                Level::WARN,
+                "UnsupportedScheme",
+                "localhost:3000",
+                "ftp://localhost:3000",
+            ),
+            (
+                untrusted_origin_authority,
+                Level::WARN,
+                "UntrustedOriginAuthority",
+                "localhost:3000",
+                "http://evil.example:3000",
             ),
             (
                 authority_mismatch,
                 Level::WARN,
                 "AuthorityMismatch",
-                "\"localhost:3000\"",
-                "\"http://127.0.0.1:3000\"",
+                "localhost:3000",
+                "http://127.0.0.1:3000",
             ),
         ];
 
@@ -1011,12 +1095,22 @@ mod tests {
             assert_eq!(
                 event.fields.get("host").map(String::as_str),
                 Some(expected_host),
-                "{expected_rejection} の host field は log_value_for_header 契約に従う"
+                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
             );
             assert_eq!(
                 event.fields.get("origin").map(String::as_str),
                 Some(expected_origin),
-                "{expected_rejection} の origin field は log_value_for_header 契約に従う"
+                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
+            );
+            let rendered_message = event
+                .fields
+                .get("message")
+                .expect("message field should be captured");
+            assert!(
+                !rendered_message.contains("private")
+                    && !rendered_message.contains("token")
+                    && !rendered_message.contains("secret"),
+                "{expected_rejection} の拒否ログ message に Origin の path/query が混入している: {rendered_message}"
             );
         }
     }
@@ -1166,12 +1260,11 @@ mod tests {
 
     #[test]
     fn test_check_ws_origin_variants_網羅() {
-        // MissingOrigin: Origin ヘッダー不在
-        let mut headers = HeaderMap::new();
-        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        // MissingHost: Host と Origin がどちらもない場合も Host bypass 兆候を優先する
+        let headers = HeaderMap::new();
         assert_eq!(
             check_ws_origin(&headers),
-            Err(WsOriginRejection::MissingOrigin)
+            Err(WsOriginRejection::MissingHost)
         );
 
         // MissingHost: HOST ヘッダー不在
@@ -1180,6 +1273,14 @@ mod tests {
         assert_eq!(
             check_ws_origin(&headers),
             Err(WsOriginRejection::MissingHost)
+        );
+
+        // MissingOrigin: Origin ヘッダー不在
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingOrigin)
         );
 
         // UntrustedHost: HOST が trusted でない
@@ -1259,10 +1360,23 @@ mod tests {
         );
 
         // HostMalformed: Host ヘッダーは存在するが to_str() 失敗（非 ASCII）
-        // OriginMalformed と同じ境界だが、評価順は Origin 側が先のため
-        // Origin を正常値にして Host を malformed にする
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::HostMalformed)
+        );
+
+        // HostMalformed は OriginMalformed より Host bypass 兆候として優先する
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
         headers.insert(
             HOST,
             axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
