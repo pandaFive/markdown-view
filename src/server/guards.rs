@@ -69,6 +69,25 @@ fn log_value_for_ws_origin(headers: &HeaderMap) -> String {
     format!("{scheme}://{authority}")
 }
 
+fn log_value_for_ws_host(headers: &HeaderMap) -> String {
+    let Some(value) = headers.get(HOST) else {
+        return "<absent>".to_string();
+    };
+    let Ok(host) = value.to_str() else {
+        return "<non-ascii>".to_string();
+    };
+    let Ok(authority) = host.parse::<Authority>() else {
+        return "<invalid-host-authority>".to_string();
+    };
+    if authority.as_str().contains('@') {
+        return "<host-authority-with-userinfo>".to_string();
+    }
+    if has_port_suffix(authority.as_str()) && authority.port_u16().is_none() {
+        return "<invalid-host-authority>".to_string();
+    }
+    authority.as_str().to_string()
+}
+
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 #[cfg(test)]
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -334,7 +353,7 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     match check_ws_origin(headers) {
         Ok(()) => true,
         Err(rejection) => {
-            let host = log_value_for_header(headers, &HOST);
+            let host = log_value_for_ws_host(headers);
             let origin = log_value_for_ws_origin(headers);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
@@ -344,7 +363,7 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
                 message,
                 host_recheck_anomaly,
                 rejection,
-                host,
+                &host,
                 &origin,
             );
             false
@@ -355,9 +374,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
 pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bool {
     let Ok(parsed) = authority.parse::<Authority>() else {
         tracing::warn!(
-            "[markdown-view] authority の parse に失敗し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority の parse に失敗し拒否 (context={})",
+            context
         );
         return false;
     };
@@ -379,9 +397,8 @@ pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bo
     // 元文字列を直接検査してport接尾辞の有無を判定する。
     if has_port_suffix(parsed.as_str()) && parsed.port_u16().is_none() {
         tracing::warn!(
-            "[markdown-view] authority に非数値 port を検出し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority に非数値 port を検出し拒否 (context={})",
+            context
         );
         return false;
     }
@@ -1190,6 +1207,66 @@ mod tests {
             Some("<origin-authority-with-userinfo>"),
             "userinfo 付き Origin は authority 実値を監査ログに残さない"
         );
+    }
+
+    #[test]
+    fn test_ws_host_untrusted入力は監査ログに実値を残さない() {
+        let cases = [
+            (
+                "alice:hunter2@localhost:3000",
+                "<host-authority-with-userinfo>",
+            ),
+            (
+                "localhost:3000/private?token=secret",
+                "<invalid-host-authority>",
+            ),
+            ("localhost:abc", "<invalid-host-authority>"),
+        ];
+
+        for (host, expected_host_field) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, host.parse().unwrap());
+            headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
+            assert_eq!(
+                check_ws_origin(&headers),
+                Err(WsOriginRejection::UntrustedHost),
+                "{host} は Host 検証異常として拒否する"
+            );
+
+            let events = capture_ws_rejection_events(&headers);
+            assert!(
+                events
+                    .iter()
+                    .all(
+                        |event| event.fields.values().all(|value| !value.contains("alice")
+                            && !value.contains("hunter2")
+                            && !value.contains("private")
+                            && !value.contains("token")
+                            && !value.contains("secret"))
+                    ),
+                "未信頼 Host の監査ログに機密値が混入している: {events:?}"
+            );
+
+            let ws_event = events
+                .iter()
+                .find(|event| event.fields.contains_key("ws_rejection_class"))
+                .expect("WS rejection event should be captured");
+            assert_eq!(ws_event.level, Level::ERROR);
+            assert!(
+                ws_event
+                    .fields
+                    .get("rejection")
+                    .is_some_and(|actual| actual.contains("UntrustedHost")),
+                "未信頼 Host の rejection field が不正: {:?}",
+                ws_event.fields
+            );
+            assert_eq!(
+                ws_event.fields.get("host").map(String::as_str),
+                Some(expected_host_field),
+                "未信頼 Host は authority 実値を監査ログに残さない"
+            );
+        }
     }
 
     #[test]
