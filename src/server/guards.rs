@@ -63,6 +63,9 @@ fn log_value_for_ws_origin(headers: &HeaderMap) -> String {
     let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
         return "<invalid-origin-uri>".to_string();
     };
+    if authority.as_str().contains('@') {
+        return "<origin-authority-with-userinfo>".to_string();
+    }
     format!("{scheme}://{authority}")
 }
 
@@ -365,9 +368,8 @@ pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bo
     //   host() が "[::1]" を返すため loopback 認定されてしまう）
     if parsed.as_str().contains('@') {
         tracing::warn!(
-            "[markdown-view] authority に userinfo を検出し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority に userinfo を検出し拒否 (context={})",
+            context
         );
         return false;
     }
@@ -890,10 +892,20 @@ mod tests {
         let missing_host_and_origin = HeaderMap::new();
 
         let mut missing_host = HeaderMap::new();
-        missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        missing_host.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
 
         let mut host_malformed = HeaderMap::new();
-        host_malformed.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        host_malformed.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
         host_malformed.insert(
             HOST,
             axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
@@ -901,7 +913,12 @@ mod tests {
 
         let mut untrusted_host = HeaderMap::new();
         untrusted_host.insert(HOST, "evil.example:3000".parse().unwrap());
-        untrusted_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        untrusted_host.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
 
         let cases = [
             (
@@ -971,6 +988,16 @@ mod tests {
                 event.fields.get("origin").map(String::as_str),
                 Some(expected_origin),
                 "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
+            );
+            let rendered_message = event
+                .fields
+                .get("message")
+                .expect("message field should be captured");
+            assert!(
+                !rendered_message.contains("private")
+                    && !rendered_message.contains("token")
+                    && !rendered_message.contains("secret"),
+                "{expected_rejection} の拒否ログ message に Origin の path/query が混入している: {rendered_message}"
             );
         }
     }
@@ -1109,10 +1136,60 @@ mod tests {
             assert!(
                 !rendered_message.contains("private")
                     && !rendered_message.contains("token")
-                    && !rendered_message.contains("secret"),
-                "{expected_rejection} の拒否ログ message に Origin の path/query が混入している: {rendered_message}"
+                    && !rendered_message.contains("secret")
+                    && !rendered_message.contains("user")
+                    && !rendered_message.contains("pass"),
+                "{expected_rejection} の拒否ログ message に Origin の機密値が混入している: {rendered_message}"
             );
         }
+    }
+
+    #[test]
+    fn test_ws_origin_userinfoは監査ログに実値を残さない() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(
+            ORIGIN,
+            "http://alice:hunter2@localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedOriginAuthority)
+        );
+
+        let events = capture_ws_rejection_events(&headers);
+        assert!(
+            events.iter().all(
+                |event| event.fields.values().all(|value| !value.contains("alice")
+                    && !value.contains("hunter2")
+                    && !value.contains("private")
+                    && !value.contains("token")
+                    && !value.contains("secret"))
+            ),
+            "userinfo 付き Origin の監査ログに機密値が混入している: {events:?}"
+        );
+
+        let ws_event = events
+            .iter()
+            .find(|event| event.fields.contains_key("ws_rejection_class"))
+            .expect("WS rejection event should be captured");
+        assert_eq!(ws_event.level, Level::WARN);
+        assert!(
+            ws_event
+                .fields
+                .get("rejection")
+                .is_some_and(|actual| actual.contains("UntrustedOriginAuthority")),
+            "userinfo 付き Origin の rejection field が不正: {:?}",
+            ws_event.fields
+        );
+        assert_eq!(
+            ws_event.fields.get("origin").map(String::as_str),
+            Some("<origin-authority-with-userinfo>"),
+            "userinfo 付き Origin は authority 実値を監査ログに残さない"
+        );
     }
 
     #[test]

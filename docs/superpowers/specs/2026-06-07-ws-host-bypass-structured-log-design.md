@@ -21,7 +21,7 @@
 
 現行コードは、Host middleware 後段で `MissingHost`、`HostMalformed`、`UntrustedHost` に到達した場合に `WS Host 検証異常` として `error!` を出し、`host_recheck_anomaly=true` を structured field に含めている。この分類は「Host middleware bypass、または Host 検証通過後の malformed / untrusted probe」を示す異常兆候であり、通常運用では到達しない。
 
-今回の実装では、この既存構造をメトリクス代替の観測契約として扱う。新しい runtime state は追加しない。必要な変更は、テスト名と assertion を契約志向へ寄せ、BACKLOG に「メトリクス化は見送り、構造化ログ契約で完了」と記録することに限定する。
+今回の実装では、この既存構造をメトリクス代替の観測契約として扱う。新しい runtime state は追加しない。外部の拒否可否、HTTP response、WebSocket payload は変えないが、複合拒否時の監査ログ分類は Host middleware 後段の異常兆候を優先するため Host 先行で固定する。
 
 ## 受け入れ基準
 
@@ -31,7 +31,7 @@ Host 系 `WsOriginRejection` について、次が unit test で固定される�
 - `ws_rejection_class` は `"WS Host 検証異常"` である。
 - `host_recheck_anomaly` は `true` である。
 - `rejection` field が該当 variant を保持する。
-- `host` と `origin` は監査ログ用の正規化値であり、欠落や非 ASCII を sentinel として扱う。Origin は parse 可能な場合も scheme + authority までに限定し、path / query / fragment を出さない。
+- `host` と `origin` は監査ログ用の正規化値であり、欠落や非 ASCII を sentinel として扱う。Origin は parse 可能な場合も scheme + authority までに限定し、path / query / fragment を出さない。userinfo 付き authority は実値を出さず sentinel 化する。
 
 Origin 系 `WsOriginRejection` について、次が維持される。
 
@@ -68,7 +68,7 @@ cargo test server::guards --all-targets --all-features
 
 Host と Origin は攻撃者制御の未信頼入力として扱う。今回の変更では DNS Rebinding 対策である Host middleware と WebSocket Origin authority 一致検証を緩めない。
 
-ログ値は監査ログ用の正規化 helper を通す。欠落値は `"<absent>"`、非 ASCII header は `"<non-ascii>"` として扱い、raw bytes をログへ出さない。Origin は parse 可能な場合も scheme + authority までを出し、path / query / fragment は落とす。Host / Origin の値は既存契約の範囲でのみ出し、新たに query string、Markdown 本文、ファイルパス、full process args、環境変数を出力しない。
+ログ値は監査ログ用の正規化 helper を通す。欠落値は `"<absent>"`、非 ASCII header は `"<non-ascii>"` として扱い、raw bytes をログへ出さない。Origin は parse 可能な場合も scheme + authority までを出し、path / query / fragment は落とす。Origin authority に userinfo が含まれる場合は `"<origin-authority-with-userinfo>"` とし、userinfo 実値を出さない。Host / Origin の値は既存契約の範囲でのみ出し、新たに query string、Markdown 本文、ファイルパス、full process args、環境変数を出力しない。
 
 メトリクス基盤を追加しないため、追加 endpoint、長寿命 counter state、外部 scrape surface、依存 crate による攻撃面は増えない。将来、本格運用や継続監視の要求が出た場合だけ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
 
@@ -85,7 +85,7 @@ Host と Origin は攻撃者制御の未信頼入力として扱う。今回の�
 - `tests/integration/security.rs`: Host / Origin 外部契約と security headers の既存統合テスト。
 - `docs/superpowers/specs/2026-05-16-host-middleware-observability-followup-design.md`: Host middleware 観測性 follow-up の過去設計。
 
-production behavior、HTTP response、WebSocket payload、CSP、security headers、Host / Origin 許可条件は変更しない。
+外部 API behavior、HTTP response、WebSocket payload、CSP、security headers、Host / Origin 許可条件は変更しない。監査ログの拒否理由と分類は、Host と Origin の両方に問題がある場合に Host 系異常を優先する。
 
 ## ロールバック
 

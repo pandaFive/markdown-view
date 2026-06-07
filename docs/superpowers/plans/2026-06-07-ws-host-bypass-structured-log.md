@@ -1,6 +1,6 @@
 # WS Host Bypass Structured Log Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** This plan has been executed. Completion is tracked by the checked steps below, `docs/todo/BACKLOG.md`, and the associated commits/tests.
 
 **Goal:** Treat WS Host middleware bypass metrics as complete by hardening the existing structured log contract and documenting why no metrics runtime is added.
 
@@ -12,7 +12,7 @@
 
 ## File Structure
 
-- Modify `src/server/guards.rs`: Rename and tighten existing WS rejection log tests so Host-side anomalies are an explicit structured-log contract. Do not change Host / Origin validation behavior unless a test reveals the contract is not currently met.
+- Modify `src/server/guards.rs`: Rename and tighten existing WS rejection log tests so Host-side anomalies are an explicit structured-log contract. External rejection behavior remains unchanged, but composite WS rejection classification is fixed as Host-first for audit logging.
 - Modify `docs/todo/BACKLOG.md`: Move the P3 WS Host middleware bypass metrics item to Done and record that structured logs are the chosen lightweight observability contract.
 - Reference `docs/superpowers/specs/2026-06-07-ws-host-bypass-structured-log-design.md`: Source design and acceptance criteria.
 
@@ -30,7 +30,7 @@ Before implementation, confirm these items and stop if any check fails:
 **Files:**
 - Modify: `src/server/guards.rs:788-976`
 
-- [ ] **Step 1: Write the contract-focused test update**
+- [x] **Step 1: Write the contract-focused test update**
 
 Replace the current `test_ws_origin拒否実ログは分類levelと構造化fieldを出力する` body with the following contract-focused version. Keep `capture_ws_rejection_events()` unchanged.
 
@@ -118,7 +118,7 @@ Replace the current `test_ws_origin拒否実ログは分類levelと構造化fiel
     }
 ```
 
-- [ ] **Step 2: Add the Origin-side negative contract test**
+- [x] **Step 2: Add the Origin-side negative contract test**
 
 Immediately after the Host contract test, add this separate Origin test. This keeps Host anomaly behavior and ordinary Origin rejection behavior distinct.
 
@@ -194,7 +194,7 @@ Immediately after the Host contract test, add this separate Origin test. This ke
     }
 ```
 
-- [ ] **Step 3: Run the targeted test and inspect the result**
+- [x] **Step 3: Run the targeted test and inspect the result**
 
 Run:
 
@@ -204,9 +204,9 @@ cargo test server::guards::tests::test_ws_host_bypass兆候は構造化errorロ�
 
 Expected: PASS if the current implementation already meets the contract. If it fails only because captured `host` / `origin` values are formatted differently, update the expected strings to match `CapturedFields::record_debug()` output without changing runtime logging behavior. If it fails because `host_recheck_anomaly`, level, or class is wrong, fix the runtime helper in the next step.
 
-- [ ] **Step 4: Apply minimal runtime fix only if the test exposed a contract mismatch**
+- [x] **Step 4: Apply minimal runtime fix only if the test exposed a contract mismatch**
 
-If Step 3 shows a runtime mismatch, ensure the existing helper functions match this logic. Do not change validation order or accepted hosts.
+If Step 3 shows a runtime mismatch, ensure the existing helper functions match this logic. Keep accepted hosts unchanged. Validation order may be Host-first for audit classification so Host middleware bypass indicators are not hidden by malformed/missing Origin values.
 
 ```rust
 fn is_host_middleware_bypass_indicator(rejection: WsOriginRejection) -> bool {
@@ -240,7 +240,7 @@ fn ws_rejection_log_message(rejection: WsOriginRejection) -> &'static str {
 }
 ```
 
-- [ ] **Step 5: Run all guards tests**
+- [x] **Step 5: Run all guards tests**
 
 Run:
 
@@ -250,7 +250,7 @@ cargo test server::guards --all-targets --all-features
 
 Expected: PASS. The output should show all `server::guards` unit tests passing.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 Run:
 
@@ -266,7 +266,7 @@ Expected: A focused commit containing only `src/server/guards.rs`.
 **Files:**
 - Modify: `docs/todo/BACKLOG.md:33-40`
 
-- [ ] **Step 1: Update BACKLOG text**
+- [x] **Step 1: Update BACKLOG text**
 
 Remove the unchecked P3 item from `## P3: 長期改善・低緊急` and add this Done entry near the top of the `## Done` section.
 
@@ -274,11 +274,11 @@ Remove the unchecked P3 item from `## P3: 長期改善・低緊急` and add this
 - [x] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
   - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認した。
   - 判断: 個人向け localhost ツールとしては、既存の `error!` ログと structured field で異常兆候を確認できるため、metrics crate、counter state、HTTP endpoint、外部監視基盤は追加しない。継続集計が必要な本格運用要求が出た場合のみ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
-  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
+  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。userinfo 付き Origin authority は実値を出さず sentinel 化する。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
   - 由来: PR #123 レビュー follow-up (2026-05-04)、WS Host bypass structured log 契約設計 (2026-06-07)
 ```
 
-- [ ] **Step 2: Validate BACKLOG no longer has the unchecked WS metrics item**
+- [x] **Step 2: Validate BACKLOG no longer has the unchecked WS metrics item**
 
 Run:
 
@@ -288,7 +288,7 @@ rg -n "WS Host middleware bypass|host_recheck_anomaly|metrics crate|query string
 
 Expected: The WS item appears only under `## Done`; no unchecked `- [ ] WS Host middleware bypass` line remains.
 
-- [ ] **Step 3: Commit Task 2**
+- [x] **Step 3: Commit Task 2**
 
 Run:
 
@@ -306,7 +306,7 @@ Expected: A focused commit containing only `docs/todo/BACKLOG.md`.
 - Verify: `docs/todo/BACKLOG.md`
 - Verify: `docs/superpowers/specs/2026-06-07-ws-host-bypass-structured-log-design.md`
 
-- [ ] **Step 1: Run targeted verification**
+- [x] **Step 1: Run targeted verification**
 
 Run:
 
@@ -316,7 +316,7 @@ cargo test server::guards --all-targets --all-features
 
 Expected: PASS.
 
-- [ ] **Step 2: Run required repository verification**
+- [x] **Step 2: Run required repository verification**
 
 Run:
 
@@ -326,7 +326,7 @@ Run:
 
 Expected: PASS. If this fails due to environment or dependency setup, capture the failing command and stderr summary in the completion report.
 
-- [ ] **Step 3: Run documentation sanity checks**
+- [x] **Step 3: Run documentation sanity checks**
 
 Run:
 
@@ -338,7 +338,7 @@ git status --short --branch
 
 Expected: The placeholder scan prints no matches and exits with status 1 because there are no matches. `git diff --check` prints nothing and exits 0. `git status --short --branch` shows the current branch and no unstaged/untracked implementation files.
 
-- [ ] **Step 4: Prepare completion report**
+- [x] **Step 4: Prepare completion report**
 
 Report the completion summary in Japanese with these concrete facts:
 
