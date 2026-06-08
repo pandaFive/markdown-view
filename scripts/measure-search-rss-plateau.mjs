@@ -545,6 +545,58 @@ function runSanitizationSelfTest() {
     }
   );
 
+  const eventStarted = namedSnapshot('request_started', 0, {
+    status: { available: true, VmRSS: 1000, RssAnon: 800, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 790 },
+    maps: { available: true },
+  }, 'event', null);
+  const samplePeak = namedSnapshot('sample_0000', 50, {
+    status: { available: true, VmRSS: 5000, RssAnon: 4500, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 4480 },
+    maps: { available: true },
+  }, 'sampling', 0);
+  const eventHeaders = namedSnapshot('headers_received', 75, {
+    status: { available: true, VmRSS: 3000, RssAnon: 2500, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 2480 },
+    maps: { available: true },
+  }, 'event', null);
+  const eventBody = namedSnapshot('body_received', 100, {
+    status: { available: true, VmRSS: 2000, RssAnon: 1500, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 1490 },
+    maps: { available: true },
+  }, 'event', null);
+  const eventSettled = namedSnapshot('settled_1s', 1100, {
+    status: { available: true, VmRSS: 1600, RssAnon: 1200, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 1190 },
+    maps: { available: true },
+  }, 'event', null);
+  const timeline = buildTimelineReport({
+    eventSnapshots: [eventStarted, eventHeaders, eventBody, eventSettled],
+    sampleSnapshots: [samplePeak],
+    settledDelaysMs: [1000],
+    bodyReadStartElapsedMs: 76,
+    bodyReadEndElapsedMs: 100,
+    responseBytes: 1234,
+  });
+  assert.equal(timeline.peaks.requestPeakRss.name, 'sample_0000');
+  assert.equal(timeline.peaks.requestPeakAnon.name, 'sample_0000');
+  assert.equal(timeline.peaks.bodyDrainPeakRss.name, 'sample_0000');
+  assert.equal(timeline.peaks.bodyDrainPeakAnon.name, 'sample_0000');
+  assert.equal(timeline.derived.request_started_to_headers_delta_kb, 1700);
+  assert.equal(timeline.derived.headers_to_body_delta_kb, -1000);
+  assert.equal(timeline.derived.headers_to_body_peak_delta_kb, 2000);
+  assert.equal(timeline.derived.body_peak_to_body_received_delta_kb, 3000);
+  assert.deepEqual(timeline.derived.settledComparisons, [{
+    settledDelayMs: 1000,
+    settledSnapshotName: 'settled_1s',
+    peak_to_settled_delta_kb: 3300,
+    peak_to_settled_ratio: 3.75,
+  }]);
+  assert.equal(timeline.samplingSummary.samplingIntervalMs, SAMPLE_INTERVAL_MS);
+  assert.equal(timeline.samplingSummary.clock, 'monotonic');
+  assert.equal(timeline.samplingSummary.sampleCount, 1);
+  assert.deepEqual(timeline.samplingSummary.droppedSampleReasons, ['raw_samples_omitted']);
+
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
     /search request failed/
@@ -831,6 +883,47 @@ function readProcSnapshot(pid) {
     smapsRollup: readSmapsRollup(pid),
     maps: readMapsSummary(pid),
   };
+}
+
+function namedSnapshot(name, elapsedMs, procSnapshot, capturedFrom = 'event', sampleIndex = null) {
+  return {
+    name,
+    elapsedMs,
+    capturedFrom,
+    sampleIndex,
+    status: procSnapshot.status,
+    smapsRollup: procSnapshot.smapsRollup,
+    maps: procSnapshot.maps,
+    procComplete: summarizeProcCompleteness([procSnapshot]).procComplete,
+  };
+}
+
+function clonePeakSnapshot(snapshot, phase, metric) {
+  if (!snapshot) {
+    return null;
+  }
+  return {
+    phase,
+    metric,
+    capturedFrom: snapshot.capturedFrom,
+    sampleIndex: snapshot.sampleIndex,
+    name: snapshot.name,
+    elapsedMs: snapshot.elapsedMs,
+    status: snapshot.status,
+    smapsRollup: snapshot.smapsRollup,
+    maps: snapshot.maps,
+    procComplete: snapshot.procComplete,
+  };
+}
+
+function pickPeakSnapshot(snapshots, fieldName) {
+  const candidates = snapshots.filter((snapshot) => Number.isFinite(snapshot?.status?.[fieldName]));
+  if (candidates.length === 0) {
+    return null;
+  }
+  return candidates.reduce((best, candidate) => (
+    candidate.status[fieldName] > best.status[fieldName] ? candidate : best
+  ));
 }
 
 function readProcStatus(pid) {
@@ -1338,6 +1431,81 @@ function summarizeProcCompleteness(snapshots) {
   return {
     procComplete: reasons.size === 0,
     partialMeasurementReasons: [...reasons],
+  };
+}
+
+function snapshotByName(snapshots, name) {
+  return snapshots.find((snapshot) => snapshot.name === name) ?? null;
+}
+
+function deltaKb(left, right) {
+  return Number.isFinite(left) && Number.isFinite(right) ? left - right : null;
+}
+
+function ratioOrNull(numerator, denominator) {
+  return Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0
+    ? numerator / denominator
+    : null;
+}
+
+function buildTimelineReport({
+  eventSnapshots,
+  sampleSnapshots,
+  settledDelaysMs,
+  bodyReadStartElapsedMs,
+  bodyReadEndElapsedMs,
+  responseBytes,
+}) {
+  const snapshots = [...eventSnapshots].sort((left, right) => left.elapsedMs - right.elapsedMs);
+  const requestStarted = snapshotByName(snapshots, 'request_started');
+  const headersReceived = snapshotByName(snapshots, 'headers_received');
+  const bodyReceived = snapshotByName(snapshots, 'body_received');
+  const requestWindow = [requestStarted, ...sampleSnapshots, headersReceived, bodyReceived].filter(Boolean);
+  const bodyDrainWindow = [headersReceived, ...sampleSnapshots, bodyReceived].filter(Boolean);
+  const requestPeakRss = pickPeakSnapshot(requestWindow, 'VmRSS');
+  const requestPeakAnon = pickPeakSnapshot(requestWindow, 'RssAnon');
+  const bodyDrainPeakRss = pickPeakSnapshot(bodyDrainWindow, 'VmRSS');
+  const bodyDrainPeakAnon = pickPeakSnapshot(bodyDrainWindow, 'RssAnon');
+  const settledComparisons = settledDelaysMs.map((delayMs) => {
+    const settledSnapshotName = `settled_${delayMs / 1000}s`;
+    const settled = snapshotByName(snapshots, settledSnapshotName);
+    const peakAnon = requestPeakAnon?.status?.RssAnon;
+    const settledAnon = settled?.status?.RssAnon;
+    const peak_to_settled_delta_kb = deltaKb(peakAnon, settledAnon);
+    const peak_to_settled_ratio = ratioOrNull(peakAnon, settledAnon);
+    const entry = { settledDelayMs: delayMs, settledSnapshotName, peak_to_settled_delta_kb, peak_to_settled_ratio };
+    if (peak_to_settled_delta_kb === null || peak_to_settled_ratio === null) {
+      entry.excludedReason = 'missing_or_invalid_peak_or_settled_anon';
+    }
+    return entry;
+  });
+  return {
+    settledDelaysMs,
+    snapshots,
+    peaks: {
+      requestPeakRss: clonePeakSnapshot(requestPeakRss, 'request', 'VmRSS'),
+      requestPeakAnon: clonePeakSnapshot(requestPeakAnon, 'request', 'RssAnon'),
+      bodyDrainPeakRss: clonePeakSnapshot(bodyDrainPeakRss, 'body_drain', 'VmRSS'),
+      bodyDrainPeakAnon: clonePeakSnapshot(bodyDrainPeakAnon, 'body_drain', 'RssAnon'),
+    },
+    samplingSummary: {
+      samplingIntervalMs: SAMPLE_INTERVAL_MS,
+      clock: 'monotonic',
+      sampleCount: sampleSnapshots.length,
+      maxSamples: MAX_SAMPLES,
+      missedSampleReasons: [],
+      droppedSampleReasons: sampleSnapshots.length > 0 ? ['raw_samples_omitted'] : [],
+    },
+    bodyReadStartElapsedMs,
+    bodyReadEndElapsedMs,
+    responseBytes,
+    derived: {
+      settledComparisons,
+      request_started_to_headers_delta_kb: deltaKb(headersReceived?.status?.RssAnon, requestStarted?.status?.RssAnon),
+      headers_to_body_delta_kb: deltaKb(bodyReceived?.status?.RssAnon, headersReceived?.status?.RssAnon),
+      headers_to_body_peak_delta_kb: deltaKb(bodyDrainPeakAnon?.status?.RssAnon, headersReceived?.status?.RssAnon),
+      body_peak_to_body_received_delta_kb: deltaKb(bodyDrainPeakAnon?.status?.RssAnon, bodyReceived?.status?.RssAnon),
+    },
   };
 }
 
