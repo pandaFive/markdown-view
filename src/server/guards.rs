@@ -1169,6 +1169,12 @@ mod tests {
 
         for (headers, expected_level, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
+            assert_captured_events_do_not_contain(
+                &events,
+                &["abc", "private", "token", "secret", "user", "pass"],
+                expected_rejection,
+            );
+
             let ws_events = events
                 .iter()
                 .filter(|event| event.fields.contains_key("ws_rejection_class"))
@@ -1199,11 +1205,6 @@ mod tests {
             assert_captured_field_eq(event, "host_recheck_anomaly", "false", expected_rejection);
             assert_captured_field_eq(event, "host", expected_host, expected_rejection);
             assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
-            assert_captured_events_do_not_contain(
-                std::slice::from_ref(event),
-                &["abc", "private", "token", "secret", "user", "pass"],
-                expected_rejection,
-            );
         }
     }
 
