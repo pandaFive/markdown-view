@@ -41,7 +41,7 @@ node scripts/measure-search-rss-plateau.mjs \
   --allocator-profiles default,arena1
 ```
 
-`--timeline` は重い診断モードとして扱い、`--smoke` とは併用不可にする。既存 `--smoke` は軽量な dev/prefix/cold/default の契約確認に限定し、timeline sampling を暗黙に走らせない。`--fixture-density` と `--settled-delays` は timeline 専用 option とし、`--timeline` なしでは拒否する。`--smoke` は `--timeline`、`--fixture-density`、`--settled-delays` と併用不可にする。`--fixture-density` は `dense` / `sparse` を受け取り、既定は `dense` とする。`--settled-delays` は `1s,5s` を既定にし、追加確認が必要な場合だけ `1s,5s,15s` を指定する。許可する値は `1s,5s` と `1s,5s,15s` の 2 通りだけで、逆順、重複、`15s` 単独、baseline 欠落は拒否する。
+`--timeline` は重い診断モードとして扱い、`--smoke` とは併用不可にする。既存 `--smoke` は軽量な dev/prefix/cold/default の契約確認に限定し、timeline sampling を暗黙に走らせない。`--fixture-density` と `--settled-delays` は timeline 専用 option とし、`--timeline` なしでは拒否する。`--smoke` は `--timeline`、`--fixture-density`、`--settled-delays` と併用不可にする。`--fixture-density` は `dense` / `sparse` / `dense,sparse` を受け取り、既定は `dense` とする。`dense,sparse` 指定時は同一 JSON report 内に `prefix-full-dense` と `prefix-full-sparse` を生成し、scenario comparison を作れるようにする。逆順、重複、空値は拒否する。`--settled-delays` は `1s,5s` を既定にし、追加確認が必要な場合だけ `1s,5s,15s` を指定する。許可する値は `1s,5s` と `1s,5s,15s` の 2 通りだけで、逆順、重複、`15s` 単独、baseline 欠落は拒否する。
 
 report には既存の `fixtureKind` を維持し、既存通り `fixtureScale` は `measurementContext.cliOptions.fixtureScale` に置く。`reports[]` 直下には `fixtureScale` を追加しない。timeline 用に次の field を追加する。
 
@@ -51,6 +51,9 @@ report には既存の `fixtureKind` を維持し、既存通り `fixtureScale` 
 - `timeline.snapshots[]`: 実測 `elapsedMs` 昇順の event snapshot 配列。
 - `timeline.peaks`: request 全体と body drain 区間の peak snapshot inline copy。
 - `timeline.samplingSummary`: request sampling の実行条件と採取状況。
+- `timeline.bodyReadStartElapsedMs`: body stream 読み取り開始時点の elapsed milliseconds。
+- `timeline.bodyReadEndElapsedMs`: body stream 読み取り完了時点の elapsed milliseconds。
+- `timeline.responseBytes`: response body の byte 数。raw body は保存しない。
 - `timeline.derived`: 判定補助用の差分、delay 別 settled 比較、比率。
 - `comparisons[]`: allocator profile 間の比較結果。
 - `scenarioComparisons[]`: fixture scenario 間の比較結果。
@@ -114,7 +117,7 @@ peak snapshot は実測時刻に依存するため、`timeline.snapshots[]` の�
 
 `scenarioError` は snapshot 配下ではなく、failed scenario の `reports[]` item 直下にだけ置く。snapshot は `/proc` probe の local reason だけを持ち、server 起動失敗、HTTP failure、fixture 生成失敗のように snapshot が作れない失敗を表現しない。
 
-timeline 用 request path は通常測定の `requestSearch()` と分ける。`fetch()` が response headers を返した直後に `headers_received` を採取し、その後に body stream を `readResponseTextWithLimit()` 相当の上限付き処理で読み切って `body_received` を採取する。sampling は `request_started` から `body_received` まで継続し、body drain 中の一時 peak も `timeline.peaks` に含める。response body 読み取りの開始/終了 elapsed と response bytes は report に含める。
+timeline 用 request path は通常測定の `requestSearch()` と分ける。`fetch()` が response headers を返した直後に `headers_received` を採取し、その後に body stream を `readResponseTextWithLimit()` 相当の上限付き処理で読み切って `body_received` を採取する。sampling は `request_started` から `body_received` まで継続し、body drain 中の一時 peak も `timeline.peaks` に含める。response body 読み取りの開始/終了 elapsed と response bytes は `timeline.bodyReadStartElapsedMs`、`timeline.bodyReadEndElapsedMs`、`timeline.responseBytes` として report に含める。raw response body は report に保存しない。
 
 HTTP response については、既存と同じ契約値を記録する。
 
@@ -175,16 +178,17 @@ top-level `comparisons[]` には allocator profile 間比較を入れる。
 - `fixtureDensity`。
 - `scenarioId`。
 - `settledDelayMs`。
+- `settledSnapshotName`: `settledDelayMs` に対応する `settled_1s`、`settled_5s`、`settled_15s`。
 - `baseProfile`: `default`。
 - `compareProfile`: `arena1`。
-- `default_vs_arena1_settled_delta_kb`: `default` の settled `RssAnon` から `arena1` の settled `RssAnon` を引いた値。
+- `default_vs_arena1_settled_delta_kb`: `default` の `settledSnapshotName` snapshot の `status.RssAnon` から、`arena1` の同じ `settledSnapshotName` snapshot の `status.RssAnon` を引いた値。
 - `comparisonStatus`: `ok`、`partial`、`skipped` のいずれか。
 - `excludedReason`: 比較から除外する理由。比較可能なら省略する。
 - `missingProfiles`: 指定されなかった profile 名の配列。欠損がなければ空配列。
 
-comparison の group key は `mode`、`runKind`、`fixtureKind`、`fixtureScale`、`fixtureDensity`、`settledDelayMs`、`baseProfile`、`compareProfile` の組み合わせで一意にする。`scenarioId` は表示用 ID であり、単独では comparison key にしない。
+comparison の group key は `mode`、`runKind`、`fixtureKind`、`fixtureScale`、`fixtureDensity`、`settledDelayMs`、`settledSnapshotName`、`baseProfile`、`compareProfile` の組み合わせで一意にする。`scenarioId` は表示用 ID であり、単独では comparison key にしない。
 
-`default` と `arena1` が両方 `ok` の場合だけ `comparisonStatus="ok"` とし、`default_vs_arena1_settled_delta_kb = default.settled.RssAnon - arena1.settled.RssAnon` を出す。正の値は `arena1` の settled anonymous memory が `default` より低いことを示し、負の値は `arena1` の方が高いことを示す。片方が `partial` の場合は `comparisonStatus="partial"` とし、delta 値は出さず、`excludedReason` と partial reason だけを出す。片方が `failed` または未指定の場合は `comparisonStatus="skipped"` とする。
+`default` と `arena1` が両方 `ok` の場合だけ `comparisonStatus="ok"` とし、`default_vs_arena1_settled_delta_kb = default.timeline.snapshots[name=settledSnapshotName].status.RssAnon - arena1.timeline.snapshots[name=settledSnapshotName].status.RssAnon` を出す。正の値は `arena1` の settled anonymous memory が `default` より低いことを示し、負の値は `arena1` の方が高いことを示す。片方が `partial` の場合は `comparisonStatus="partial"` とし、delta 値は出さず、`excludedReason` と partial reason だけを出す。片方が `failed` または未指定の場合は `comparisonStatus="skipped"` とする。
 
 top-level `scenarioComparisons[]` には fixture scenario 間比較を入れる。
 
@@ -195,12 +199,16 @@ top-level `scenarioComparisons[]` には fixture scenario 間比較を入れる�
 - `baseScenarioId`。
 - `compareScenarioId`。
 - `metric`: `peak_to_settled_delta_kb`、`headers_to_body_peak_delta_kb` など。
+- `settledDelayMs`: settled 系 metric では必須。body drain 系 metric では `null`。
+- `settledSnapshotName`: settled 系 metric では必須。body drain 系 metric では `null`。
 - `deltaKb`: `compare - base`。比較できない場合は `null`。
 - `ratio`: `compare / base`。比較できない場合は `null`。
 - `comparisonStatus`: `ok`、`partial`、`skipped` のいずれか。
 - `excludedReason`: 比較から除外する理由。比較可能なら省略する。
 
-`scenarioComparisons[]` は、比較対象となる対照 fixture scenario が実行された場合だけ entry を生成する。primary run だけで対照 fixture が未実行の場合は空配列にする。`prefix-full-dense` と `prefix-full-sparse`、`prefix-full-dense` と `multifile-full-dense` の scenario comparison を report に残す。片方が `partial` の場合は `comparisonStatus="partial"`、片方が `failed` または未実行の場合は `comparisonStatus="skipped"` とし、delta と ratio は `null` にする。
+`scenarioComparisons[]` は、比較対象となる対照 fixture scenario が同一 JSON report 内にある場合だけ entry を生成する。primary run だけで対照 fixture が未実行の場合は空配列にする。`--fixture-density dense,sparse` で `prefix-full-dense` と `prefix-full-sparse` を同時実行した場合、および `--fixtures prefix,multifile --fixture-density dense` で `prefix-full-dense` と `multifile-full-dense` を同時実行した場合に scenario comparison を report に残す。別 process の JSON report 同士は merge しない。片方が `partial` の場合は `comparisonStatus="partial"`、片方が `failed` または未実行の場合は `comparisonStatus="skipped"` とし、delta と ratio は `null` にする。
+
+settled 系 metric の `scenarioComparisons[]` は、`settled_1s`、`settled_5s`、任意の `settled_15s` を delay 別の entry として出す。body drain 系 metric では `settledDelayMs=null`、`settledSnapshotName=null` とする。
 
 `scenarioComparisons[].ratio = compare / base` は、base metric が finite かつ `> 0` の場合だけ計算する。base metric が欠損、`0`、負値、非数値の場合は `ratio=null`、`comparisonStatus="partial"` とし、`excludedReason` に理由を残す。片方が `failed` または未実行の場合は `comparisonStatus="skipped"`、delta と ratio は `null` にする。
 
@@ -270,8 +278,8 @@ git diff --check
 prefix 固有性を結論する場合は、追加で次を確認する。
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density sparse --settled-delays 1s,5s --allocator-profiles default,arena1
-node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures multifile --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density dense,sparse --settled-delays 1s,5s --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix,multifile --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
 ```
 
 `--timeline` が sandbox の loopback bind で失敗した場合は、承認付きで再実行する。承認されない場合は、未実行または失敗理由を completion report に残し、full acceptance 未達として扱う。
@@ -282,12 +290,14 @@ self-test では次を固定する。
 - `--timeline` と `--strict` の parse。
 - `--timeline`、`--fixture-density`、`--settled-delays` と `--smoke` の併用拒否。
 - `--fixture-density` と `--settled-delays` の timeline 専用 parse と不正値拒否。
+- `--fixture-density` は `dense`、`sparse`、`dense,sparse` だけを許可し、逆順、重複、空値を拒否すること。
 - `--settled-delays` は `1s,5s` と `1s,5s,15s` だけを許可し、逆順、重複、`15s` 単独、baseline 欠落を拒否すること。
 - timeline event snapshot 名、`elapsedMs` 昇順、settled delay の単調性。
 - fake sampler による `timeline.peaks.requestPeakRss`、`requestPeakAnon`、`bodyDrainPeakRss`、`bodyDrainPeakAnon` の個別算出。
 - fake HTTP response による `headers_received` と `body_received` の分離。
 - `settled_1s` / `settled_5s` / 任意の `settled_15s` の delay 設定。
 - body drain 中だけ一時的に増える fake sample が `headers_to_body_peak_delta_kb` と `body_peak_to_body_received_delta_kb` に反映されること。
+- `timeline.bodyReadStartElapsedMs`、`timeline.bodyReadEndElapsedMs`、`timeline.responseBytes` が出て、raw response body は出ないこと。
 - `settledComparisons[]` が `settledDelayMs` ごとに出て、`settled_1s`、`settled_5s`、任意の `settled_15s` の peak-to-settled delta と ratio が期待値になること。
 - sampling summary に `samplingIntervalMs=50`、monotonic clock、`sampleCount`、`maxSamples`、`missedSampleReasons[]`、`droppedSampleReasons[]` が出ること。
 - timeline report sanitization が実パス、ユーザー名、本文断片、raw maps 行を出さないこと。
@@ -299,10 +309,12 @@ self-test では次を固定する。
 - failed scenario 後も残り scenario が report され、process exit code が `1` になること。
 - 全 scenario が `ok` の場合は `acceptanceStatus="full"`、`fullAcceptanceMet=true`、`--strict` でも exit code `0` になること。
 - partial だけの場合は通常 process exit code が `0`、`acceptanceStatus="partial"`、`fullAcceptanceMet=false` になり、`--strict` では non-zero になること。
-- `comparisons[]` が `mode`、`runKind`、`fixtureKind`、`fixtureScale`、`fixtureDensity`、`settledDelayMs`、profile pair で一意になり、partial 比較では delta 値を出さないこと。
+- `comparisons[]` が `mode`、`runKind`、`fixtureKind`、`fixtureScale`、`fixtureDensity`、`settledDelayMs`、`settledSnapshotName`、profile pair で一意になり、partial 比較では delta 値を出さないこと。
+- `comparisons[]` が `settledSnapshotName` に対応する `settled_*` snapshot の `status.RssAnon` を使って delta を出すこと。
 - `comparisons[]` が top-level にあり、`reports[]` 配下に出ないこと。
 - default のみ指定、arena1 failed、片側欠損の fake report group が `comparisonStatus="skipped"`、`missingProfiles`、`excludedReason`、delta 非出力になること。
-- `scenarioComparisons[]` が top-level にあり、primary run だけなら空配列、対照 fixture 実行時は prefix dense/sparse と prefix dense/multifile の比較を `ok` / `partial` / `skipped` で固定すること。
+- `scenarioComparisons[]` が top-level にあり、primary run だけなら空配列、同一 JSON report 内の対照 fixture 実行時は prefix dense/sparse と prefix dense/multifile の比較を `ok` / `partial` / `skipped` で固定すること。
+- settled 系 `scenarioComparisons[]` が `settled_1s`、`settled_5s`、任意の `settled_15s` を delay 別 entry として出すこと。
 - `scenarioComparisons[].ratio` は base metric が finite かつ `> 0` の場合だけ計算し、それ以外では `ratio=null` と `excludedReason` を出すこと。
 
 ## セキュリティ
@@ -343,7 +355,7 @@ JSON report の `measurementContext` には再現性に必要な `node`、`rustc
 Full acceptance:
 
 - `scripts/measure-search-rss-plateau.mjs` が opt-in の timeline 測定を実行できる。
-- timeline report に `timeline.snapshots[]`、`timeline.peaks`、`timeline.samplingSummary`、`timeline.derived`、`settledComparisons[]`、`comparisons[]`、`scenarioComparisons[]`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs`、`acceptanceStatus`、`fullAcceptanceMet` が含まれる。
+- timeline report に `timeline.snapshots[]`、`timeline.peaks`、`timeline.samplingSummary`、`timeline.bodyReadStartElapsedMs`、`timeline.bodyReadEndElapsedMs`、`timeline.responseBytes`、`timeline.derived`、`settledComparisons[]`、`comparisons[]`、`scenarioComparisons[]`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs`、`acceptanceStatus`、`fullAcceptanceMet` が含まれる。
 - release / prefix / full / dense / cold で `default` と `arena1` の timeline 比較結果を得る。
 - prefix 固有性を結論する場合は、prefix-full-sparse/cold と multifile-full-dense/cold の対照測定も成功している。
 - `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、server response 構築候補、post-header body drain 候補、次に必要な作業が記録される。
@@ -384,11 +396,12 @@ content_before_validation="$(sed '/^## 文書検証$/,$d' docs/superpowers/specs
 for term in \
   'fixtureDensity' 'scenarioId' 'timeline\.snapshots\[\]' 'timeline\.peaks' \
   'timeline\.samplingSummary' 'timeline\.derived' 'comparisons\[\]' 'scenarioComparisons\[\]' \
-  '--fixture-density' '--settled-delays' '--strict' '--self-test' \
+  '--fixture-density' 'dense,sparse' '--settled-delays' '--strict' '--self-test' \
   'requestPeakRss' 'requestPeakAnon' 'bodyDrainPeakRss' \
   'bodyDrainPeakAnon' 'headers_to_body_peak_delta_kb' 'partialMeasurementReasons' \
   'decisionExcludedReason' 'acceptanceStatus' 'fullAcceptanceMet' 'fixture_failed' \
   'samplingIntervalMs' 'droppedSampleReasons' 'settledComparisons\[\]' \
+  'settledSnapshotName' 'bodyReadStartElapsedMs' 'bodyReadEndElapsedMs' 'responseBytes' \
   'scenarioError' 'errorCode' 'sanitizedMessage' 'excludedReason'
 do
   printf '%s\n' "$content_before_validation" | rg -q -- "${term}" \
@@ -396,7 +409,7 @@ do
 done
 placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\\.md| Issues)|未[定]' docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
-stale_matches="$(printf '%s\n' "$content_before_validation" | rg -n 'settled\.status\.RssAnon|errorKind|各 snapshot には.*scenarioError' || :)"
+stale_matches="$(printf '%s\n' "$content_before_validation" | rg -n 'settled\.status\.RssAnon|default\.settled\.RssAnon|arena1\.settled\.RssAnon|errorKind|各 snapshot には.*scenarioError' || :)"
 test -z "$stale_matches" || { printf '%s\n' "$stale_matches"; exit 1; }
 git diff --check
 ```
