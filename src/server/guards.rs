@@ -544,6 +544,46 @@ mod tests {
         captured
     }
 
+    fn assert_captured_field_eq(event: &CapturedEvent, field: &str, expected: &str, context: &str) {
+        assert!(
+            event
+                .fields
+                .get(field)
+                .is_some_and(|actual| actual == expected),
+            "{context} の {field} field が不正"
+        );
+    }
+
+    fn assert_captured_field_contains(
+        event: &CapturedEvent,
+        field: &str,
+        expected_fragment: &str,
+        context: &str,
+    ) {
+        assert!(
+            event
+                .fields
+                .get(field)
+                .is_some_and(|actual| actual.contains(expected_fragment)),
+            "{context} の {field} field が不正"
+        );
+    }
+
+    fn assert_captured_events_do_not_contain(
+        events: &[CapturedEvent],
+        forbidden_fragments: &[&str],
+        context: &str,
+    ) {
+        assert!(
+            events.iter().all(
+                |event| event.fields.values().all(|value| forbidden_fragments
+                    .iter()
+                    .all(|fragment| !value.contains(fragment)))
+            ),
+            "{context} の監査ログに非公開値が混入している"
+        );
+    }
+
     #[test]
     fn test_trusted_host_localhost() {
         assert!(is_trusted_host("localhost"));
@@ -966,11 +1006,7 @@ mod tests {
 
         for (headers, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
-            assert_eq!(
-                events.len(),
-                1,
-                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
-            );
+            assert_eq!(events.len(), 1, "{expected_rejection} の拒否ログ件数が不正");
 
             let event = &events[0];
             assert_eq!(
@@ -978,43 +1014,25 @@ mod tests {
                 Level::ERROR,
                 "{expected_rejection} は Host middleware bypass 兆候として ERROR で記録する"
             );
-            assert!(
-                event
-                    .fields
-                    .get("rejection")
-                    .is_some_and(|actual| actual.contains(expected_rejection)),
-                "{expected_rejection} の rejection field が不正: {:?}",
-                event.fields
+            assert_captured_field_contains(
+                event,
+                "rejection",
+                expected_rejection,
+                expected_rejection,
             );
-            assert_eq!(
-                event.fields.get("ws_rejection_class").map(String::as_str),
-                Some("WS Host 検証異常"),
-                "{expected_rejection} の分類 field が不正"
+            assert_captured_field_eq(
+                event,
+                "ws_rejection_class",
+                "WS Host 検証異常",
+                expected_rejection,
             );
-            assert_eq!(
-                event.fields.get("host_recheck_anomaly").map(String::as_str),
-                Some("true"),
-                "{expected_rejection} は host_recheck_anomaly=true で記録する"
-            );
-            assert_eq!(
-                event.fields.get("host").map(String::as_str),
-                Some(expected_host),
-                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
-            );
-            assert_eq!(
-                event.fields.get("origin").map(String::as_str),
-                Some(expected_origin),
-                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
-            );
-            let rendered_message = event
-                .fields
-                .get("message")
-                .expect("message field should be captured");
-            assert!(
-                !rendered_message.contains("private")
-                    && !rendered_message.contains("token")
-                    && !rendered_message.contains("secret"),
-                "{expected_rejection} の拒否ログ message に Origin の path/query が混入している: {rendered_message}"
+            assert_captured_field_eq(event, "host_recheck_anomaly", "true", expected_rejection);
+            assert_captured_field_eq(event, "host", expected_host, expected_rejection);
+            assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
+            assert_captured_events_do_not_contain(
+                std::slice::from_ref(event),
+                &["private", "token", "secret"],
+                expected_rejection,
             );
         }
     }
@@ -1107,56 +1125,32 @@ mod tests {
 
         for (headers, expected_level, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
-            assert_eq!(
-                events.len(),
-                1,
-                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
-            );
+            assert_eq!(events.len(), 1, "{expected_rejection} の拒否ログ件数が不正");
 
             let event = &events[0];
             assert_eq!(
                 event.level, expected_level,
                 "{expected_rejection} の実ログ level が不正"
             );
-            assert!(
-                event
-                    .fields
-                    .get("rejection")
-                    .is_some_and(|actual| actual.contains(expected_rejection)),
-                "{expected_rejection} の rejection field が不正: {:?}",
-                event.fields
+            assert_captured_field_contains(
+                event,
+                "rejection",
+                expected_rejection,
+                expected_rejection,
             );
-            assert_eq!(
-                event.fields.get("ws_rejection_class").map(String::as_str),
-                Some("WS Origin 拒否"),
-                "{expected_rejection} の分類 field が不正"
+            assert_captured_field_eq(
+                event,
+                "ws_rejection_class",
+                "WS Origin 拒否",
+                expected_rejection,
             );
-            assert_eq!(
-                event.fields.get("host_recheck_anomaly").map(String::as_str),
-                Some("false"),
-                "{expected_rejection} は host_recheck_anomaly=false で記録する"
-            );
-            assert_eq!(
-                event.fields.get("host").map(String::as_str),
-                Some(expected_host),
-                "{expected_rejection} の host field は監査ログ用の正規化契約に従う"
-            );
-            assert_eq!(
-                event.fields.get("origin").map(String::as_str),
-                Some(expected_origin),
-                "{expected_rejection} の origin field は監査ログ用の正規化契約に従う"
-            );
-            let rendered_message = event
-                .fields
-                .get("message")
-                .expect("message field should be captured");
-            assert!(
-                !rendered_message.contains("private")
-                    && !rendered_message.contains("token")
-                    && !rendered_message.contains("secret")
-                    && !rendered_message.contains("user")
-                    && !rendered_message.contains("pass"),
-                "{expected_rejection} の拒否ログ message に Origin の機密値が混入している: {rendered_message}"
+            assert_captured_field_eq(event, "host_recheck_anomaly", "false", expected_rejection);
+            assert_captured_field_eq(event, "host", expected_host, expected_rejection);
+            assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
+            assert_captured_events_do_not_contain(
+                std::slice::from_ref(event),
+                &["private", "token", "secret", "user", "pass"],
+                expected_rejection,
             );
         }
     }
@@ -1178,15 +1172,10 @@ mod tests {
         );
 
         let events = capture_ws_rejection_events(&headers);
-        assert!(
-            events.iter().all(
-                |event| event.fields.values().all(|value| !value.contains("alice")
-                    && !value.contains("hunter2")
-                    && !value.contains("private")
-                    && !value.contains("token")
-                    && !value.contains("secret"))
-            ),
-            "userinfo 付き Origin の監査ログに機密値が混入している: {events:?}"
+        assert_captured_events_do_not_contain(
+            &events,
+            &["alice", "hunter2", "private", "token", "secret"],
+            "userinfo 付き Origin",
         );
 
         let ws_event = events
@@ -1194,18 +1183,17 @@ mod tests {
             .find(|event| event.fields.contains_key("ws_rejection_class"))
             .expect("WS rejection event should be captured");
         assert_eq!(ws_event.level, Level::WARN);
-        assert!(
-            ws_event
-                .fields
-                .get("rejection")
-                .is_some_and(|actual| actual.contains("UntrustedOriginAuthority")),
-            "userinfo 付き Origin の rejection field が不正: {:?}",
-            ws_event.fields
+        assert_captured_field_contains(
+            ws_event,
+            "rejection",
+            "UntrustedOriginAuthority",
+            "userinfo 付き Origin",
         );
-        assert_eq!(
-            ws_event.fields.get("origin").map(String::as_str),
-            Some("<origin-authority-with-userinfo>"),
-            "userinfo 付き Origin は authority 実値を監査ログに残さない"
+        assert_captured_field_eq(
+            ws_event,
+            "origin",
+            "<origin-authority-with-userinfo>",
+            "userinfo 付き Origin",
         );
     }
 
@@ -1213,17 +1201,23 @@ mod tests {
     fn test_ws_host_untrusted入力は監査ログに実値を残さない() {
         let cases = [
             (
+                "host_userinfo",
                 "alice:hunter2@localhost:3000",
                 "<host-authority-with-userinfo>",
             ),
             (
+                "host_path_query",
                 "localhost:3000/private?token=secret",
                 "<invalid-host-authority>",
             ),
-            ("localhost:abc", "<invalid-host-authority>"),
+            (
+                "host_invalid_port",
+                "localhost:abc",
+                "<invalid-host-authority>",
+            ),
         ];
 
-        for (host, expected_host_field) in cases {
+        for (case_label, host, expected_host_field) in cases {
             let mut headers = HeaderMap::new();
             headers.insert(HOST, host.parse().unwrap());
             headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
@@ -1231,21 +1225,14 @@ mod tests {
             assert_eq!(
                 check_ws_origin(&headers),
                 Err(WsOriginRejection::UntrustedHost),
-                "{host} は Host 検証異常として拒否する"
+                "{case_label} は Host 検証異常として拒否する"
             );
 
             let events = capture_ws_rejection_events(&headers);
-            assert!(
-                events
-                    .iter()
-                    .all(
-                        |event| event.fields.values().all(|value| !value.contains("alice")
-                            && !value.contains("hunter2")
-                            && !value.contains("private")
-                            && !value.contains("token")
-                            && !value.contains("secret"))
-                    ),
-                "未信頼 Host の監査ログに機密値が混入している: {events:?}"
+            assert_captured_events_do_not_contain(
+                &events,
+                &["alice", "hunter2", "private", "token", "secret"],
+                case_label,
             );
 
             let ws_event = events
@@ -1253,19 +1240,8 @@ mod tests {
                 .find(|event| event.fields.contains_key("ws_rejection_class"))
                 .expect("WS rejection event should be captured");
             assert_eq!(ws_event.level, Level::ERROR);
-            assert!(
-                ws_event
-                    .fields
-                    .get("rejection")
-                    .is_some_and(|actual| actual.contains("UntrustedHost")),
-                "未信頼 Host の rejection field が不正: {:?}",
-                ws_event.fields
-            );
-            assert_eq!(
-                ws_event.fields.get("host").map(String::as_str),
-                Some(expected_host_field),
-                "未信頼 Host は authority 実値を監査ログに残さない"
-            );
+            assert_captured_field_contains(ws_event, "rejection", "UntrustedHost", case_label);
+            assert_captured_field_eq(ws_event, "host", expected_host_field, case_label);
         }
     }
 
