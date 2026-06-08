@@ -66,6 +66,9 @@ fn log_value_for_ws_origin(headers: &HeaderMap) -> String {
     if authority.as_str().contains('@') {
         return "<origin-authority-with-userinfo>".to_string();
     }
+    if has_port_suffix(authority.as_str()) && authority.port_u16().is_none() {
+        return "<invalid-origin-authority>".to_string();
+    }
     format!("{scheme}://{authority}")
 }
 
@@ -544,13 +547,29 @@ mod tests {
         captured
     }
 
+    fn captured_field_summary(value: Option<&String>) -> String {
+        value.map_or_else(
+            || "missing".to_string(),
+            |value| log_value_summary(value.as_str()),
+        )
+    }
+
+    fn log_value_summary(value: &str) -> String {
+        if value.starts_with('<') && value.ends_with('>') {
+            format!("sentinel({value})")
+        } else {
+            format!("present(len={})", value.len())
+        }
+    }
+
     fn assert_captured_field_eq(event: &CapturedEvent, field: &str, expected: &str, context: &str) {
+        let actual = event.fields.get(field);
         assert!(
-            event
-                .fields
-                .get(field)
-                .is_some_and(|actual| actual == expected),
-            "{context} の {field} field が不正"
+            actual.is_some_and(|actual| actual == expected),
+            "{context} の {field} field が不正: field_present={} expected={} actual={}",
+            actual.is_some(),
+            log_value_summary(expected),
+            captured_field_summary(actual)
         );
     }
 
@@ -560,12 +579,13 @@ mod tests {
         expected_fragment: &str,
         context: &str,
     ) {
+        let actual = event.fields.get(field);
         assert!(
-            event
-                .fields
-                .get(field)
-                .is_some_and(|actual| actual.contains(expected_fragment)),
-            "{context} の {field} field が不正"
+            actual.is_some_and(|actual| actual.contains(expected_fragment)),
+            "{context} の {field} field が不正: field_present={} expected_fragment={} actual={}",
+            actual.is_some(),
+            log_value_summary(expected_fragment),
+            captured_field_summary(actual)
         );
     }
 
@@ -574,14 +594,16 @@ mod tests {
         forbidden_fragments: &[&str],
         context: &str,
     ) {
-        assert!(
-            events.iter().all(
-                |event| event.fields.values().all(|value| forbidden_fragments
-                    .iter()
-                    .all(|fragment| !value.contains(fragment)))
-            ),
-            "{context} の監査ログに非公開値が混入している"
-        );
+        for (event_index, event) in events.iter().enumerate() {
+            for (field, value) in &event.fields {
+                for (fragment_index, fragment) in forbidden_fragments.iter().enumerate() {
+                    assert!(
+                        !value.contains(fragment),
+                        "{context} の監査ログに非公開値が混入している: event_index={event_index} field={field} fragment_index={fragment_index}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1006,9 +1028,17 @@ mod tests {
 
         for (headers, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
-            assert_eq!(events.len(), 1, "{expected_rejection} の拒否ログ件数が不正");
+            let ws_events = events
+                .iter()
+                .filter(|event| event.fields.contains_key("ws_rejection_class"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ws_events.len(),
+                1,
+                "{expected_rejection} のWS拒否ログ件数が不正"
+            );
 
-            let event = &events[0];
+            let event = ws_events[0];
             assert_eq!(
                 event.level,
                 Level::ERROR,
@@ -1069,6 +1099,13 @@ mod tests {
                 .unwrap(),
         );
 
+        let mut invalid_origin_authority = HeaderMap::new();
+        invalid_origin_authority.insert(HOST, "localhost:3000".parse().unwrap());
+        invalid_origin_authority.insert(
+            ORIGIN,
+            "http://localhost:abc/private?token=secret".parse().unwrap(),
+        );
+
         let mut authority_mismatch = HeaderMap::new();
         authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
         authority_mismatch.insert(
@@ -1115,6 +1152,13 @@ mod tests {
                 "http://evil.example:3000",
             ),
             (
+                invalid_origin_authority,
+                Level::WARN,
+                "UntrustedOriginAuthority",
+                "localhost:3000",
+                "<invalid-origin-authority>",
+            ),
+            (
                 authority_mismatch,
                 Level::WARN,
                 "AuthorityMismatch",
@@ -1125,9 +1169,17 @@ mod tests {
 
         for (headers, expected_level, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
-            assert_eq!(events.len(), 1, "{expected_rejection} の拒否ログ件数が不正");
+            let ws_events = events
+                .iter()
+                .filter(|event| event.fields.contains_key("ws_rejection_class"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ws_events.len(),
+                1,
+                "{expected_rejection} のWS拒否ログ件数が不正"
+            );
 
-            let event = &events[0];
+            let event = ws_events[0];
             assert_eq!(
                 event.level, expected_level,
                 "{expected_rejection} の実ログ level が不正"
@@ -1149,7 +1201,7 @@ mod tests {
             assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
             assert_captured_events_do_not_contain(
                 std::slice::from_ref(event),
-                &["private", "token", "secret", "user", "pass"],
+                &["abc", "private", "token", "secret", "user", "pass"],
                 expected_rejection,
             );
         }

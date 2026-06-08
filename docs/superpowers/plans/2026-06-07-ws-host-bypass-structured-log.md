@@ -1,6 +1,7 @@
 # WS Host Bypass Structured Log Implementation Plan
 
 > **For agentic workers:** This plan has been executed. Completion is tracked by the checked steps below, `docs/todo/BACKLOG.md`, and the associated commits/tests.
+> Later review fixes tightened the exact test helper snippets to avoid raw captured-field output and added Origin invalid-authority sentinel handling. Treat the current `src/server/guards.rs`, BACKLOG entry, and design spec as authoritative before reusing snippets from this historical plan.
 
 **Goal:** Treat WS Host middleware bypass metrics as complete by hardening the existing structured log contract and documenting why no metrics runtime is added.
 
@@ -77,7 +78,7 @@ Replace the current `test_ws_origin拒否実ログは分類levelと構造化fiel
             assert_eq!(
                 events.len(),
                 1,
-                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+                "{expected_rejection} の拒否ログ件数が不正"
             );
 
             let event = &events[0];
@@ -91,8 +92,7 @@ Replace the current `test_ws_origin拒否実ログは分類levelと構造化fiel
                     .fields
                     .get("rejection")
                     .is_some_and(|actual| actual.contains(expected_rejection)),
-                "{expected_rejection} の rejection field が不正: {:?}",
-                event.fields
+                "{expected_rejection} の rejection field が不正"
             );
             assert_eq!(
                 event.fields.get("ws_rejection_class").map(String::as_str),
@@ -154,7 +154,7 @@ Immediately after the Host contract test, add this separate Origin test. This ke
             assert_eq!(
                 events.len(),
                 1,
-                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+                "{expected_rejection} の拒否ログ件数が不正"
             );
 
             let event = &events[0];
@@ -167,8 +167,7 @@ Immediately after the Host contract test, add this separate Origin test. This ke
                     .fields
                     .get("rejection")
                     .is_some_and(|actual| actual.contains(expected_rejection)),
-                "{expected_rejection} の rejection field が不正: {:?}",
-                event.fields
+                "{expected_rejection} の rejection field が不正"
             );
             assert_eq!(
                 event.fields.get("ws_rejection_class").map(String::as_str),
@@ -274,7 +273,7 @@ Remove the unchecked P3 item from `## P3: 長期改善・低緊急` and add this
 - [x] WS Host middleware bypass 兆候のメトリクス化を必要性ベースで検討する
   - 完了根拠: `src/server/guards.rs` の Host 系 `WsOriginRejection` (`MissingHost`, `HostMalformed`, `UntrustedHost`) は、Host middleware 後段では通常到達しない bypass / malformed probe 兆候として `ERROR`、`ws_rejection_class="WS Host 検証異常"`、`host_recheck_anomaly=true` の構造化ログ契約で固定した。Origin 系拒否は `WS Origin 拒否`、`host_recheck_anomaly=false` として分離し、Host 系異常説明文を混ぜないことを unit test で確認した。
   - 判断: 個人向け localhost ツールとしては、既存の `error!` ログと structured field で異常兆候を確認できるため、metrics crate、counter state、HTTP endpoint、外部監視基盤は追加しない。継続集計が必要な本格運用要求が出た場合のみ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
-  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。userinfo 付き Origin authority は実値を出さず sentinel 化する。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
+  - セキュリティ: Host / Origin は攻撃者制御の未信頼入力として扱い、ログ値は監査ログ用の正規化 helper 経由に限定する。Origin は parse 可能な場合も scheme + authority までを記録し、path / query / fragment は出さない。userinfo 付き Origin authority と非数値 port authority は実値を出さず sentinel 化する。Host/Origin 検証、DNS Rebinding 対策、CSP、security headers、WebSocket payload は変更しない。query string、Markdown 本文、ファイルパス、full process args、環境変数は新規出力しない。
   - 由来: PR #123 レビュー follow-up (2026-05-04)、WS Host bypass structured log 契約設計 (2026-06-07)
 ```
 

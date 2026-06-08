@@ -31,7 +31,7 @@ Host 系 `WsOriginRejection` について、次が unit test で固定される�
 - `ws_rejection_class` は `"WS Host 検証異常"` である。
 - `host_recheck_anomaly` は `true` である。
 - `rejection` field が該当 variant を保持する。
-- `host` と `origin` は監査ログ用の正規化値であり、欠落や非 ASCII を sentinel として扱う。Origin は parse 可能な場合も scheme + authority までに限定し、path / query / fragment を出さない。userinfo 付き authority は実値を出さず sentinel 化する。
+- `host` と `origin` は監査ログ用の正規化値であり、欠落や非 ASCII を sentinel として扱う。Origin は parse 可能な場合も scheme + authority までに限定し、path / query / fragment を出さない。userinfo 付き authority と非数値 port authority は実値を出さず sentinel 化する。
 
 Origin 系 `WsOriginRejection` について、次が維持される。
 
@@ -68,7 +68,7 @@ cargo test server::guards --all-targets --all-features
 
 Host と Origin は攻撃者制御の未信頼入力として扱う。今回の変更では DNS Rebinding 対策である Host middleware と WebSocket Origin authority 一致検証を緩めない。
 
-ログ値は監査ログ用の正規化 helper を通す。欠落値は `"<absent>"`、非 ASCII header は `"<non-ascii>"` として扱い、raw bytes をログへ出さない。Origin は parse 可能な場合も scheme + authority までを出し、path / query / fragment は落とす。Origin authority に userinfo が含まれる場合は `"<origin-authority-with-userinfo>"` とし、userinfo 実値を出さない。Host / Origin の値は既存契約の範囲でのみ出し、新たに query string、Markdown 本文、ファイルパス、full process args、環境変数を出力しない。
+ログ値は監査ログ用の正規化 helper を通す。欠落値は `"<absent>"`、非 ASCII header は `"<non-ascii>"` として扱い、raw bytes をログへ出さない。Origin は parse 可能な場合も scheme + authority までを出し、path / query / fragment は落とす。Origin authority に userinfo が含まれる場合は `"<origin-authority-with-userinfo>"`、非数値 port が含まれる場合は `"<invalid-origin-authority>"` とし、攻撃者制御の実値を出さない。Host / Origin の値は既存契約の範囲でのみ出し、新たに query string、Markdown 本文、ファイルパス、full process args、環境変数を出力しない。
 
 メトリクス基盤を追加しないため、追加 endpoint、長寿命 counter state、外部 scrape surface、依存 crate による攻撃面は増えない。将来、本格運用や継続監視の要求が出た場合だけ、今回固定した `host_recheck_anomaly=true` ログを入力契約として counter 化を再検討する。
 
