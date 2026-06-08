@@ -50,6 +50,47 @@ fn log_value_for_header<'a>(headers: &'a HeaderMap, name: &axum::http::HeaderNam
     }
 }
 
+fn log_value_for_ws_origin(headers: &HeaderMap) -> String {
+    let Some(value) = headers.get(ORIGIN) else {
+        return "<absent>".to_string();
+    };
+    let Ok(origin) = value.to_str() else {
+        return "<non-ascii>".to_string();
+    };
+    let Ok(uri) = origin.parse::<Uri>() else {
+        return "<invalid-origin-uri>".to_string();
+    };
+    let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
+        return "<invalid-origin-uri>".to_string();
+    };
+    if authority.as_str().contains('@') {
+        return "<origin-authority-with-userinfo>".to_string();
+    }
+    if has_port_suffix(authority.as_str()) && authority.port_u16().is_none() {
+        return "<invalid-origin-authority>".to_string();
+    }
+    format!("{scheme}://{authority}")
+}
+
+fn log_value_for_ws_host(headers: &HeaderMap) -> String {
+    let Some(value) = headers.get(HOST) else {
+        return "<absent>".to_string();
+    };
+    let Ok(host) = value.to_str() else {
+        return "<non-ascii>".to_string();
+    };
+    let Ok(authority) = host.parse::<Authority>() else {
+        return "<invalid-host-authority>".to_string();
+    };
+    if authority.as_str().contains('@') {
+        return "<host-authority-with-userinfo>".to_string();
+    }
+    if has_port_suffix(authority.as_str()) && authority.port_u16().is_none() {
+        return "<invalid-host-authority>".to_string();
+    }
+    authority.as_str().to_string()
+}
+
 /// 許可されたHostヘッダーのみ受け付け、拒否時は監査向けwarnログを残す。
 #[cfg(test)]
 pub(super) fn ensure_allowed_request_host(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -215,8 +256,8 @@ fn emit_ws_rejection_log(
             if host_recheck_anomaly {
                 tracing::$macro_name!(
                     rejection = ?rejection,
-                    host = ?host,
-                    origin = ?origin,
+                    host = host,
+                    origin = origin,
                     ws_rejection_class = message,
                     host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}; Host 系拒否は middleware bypass、または Host 検証通過後の malformed/untrusted probe。通常運用では到達しない",
@@ -228,8 +269,8 @@ fn emit_ws_rejection_log(
             } else {
                 tracing::$macro_name!(
                     rejection = ?rejection,
-                    host = ?host,
-                    origin = ?origin,
+                    host = host,
+                    origin = origin,
                     ws_rejection_class = message,
                     host_recheck_anomaly = host_recheck_anomaly,
                     "[markdown-view] {} ({:?}): host={:?} origin={:?}",
@@ -267,13 +308,6 @@ fn emit_ws_rejection_log(
 /// （`*Malformed`）を別 variant で区別し、呼び出し元でログレベルを
 /// 段階化できるようにする。
 pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejection> {
-    let origin = match headers.get(ORIGIN) {
-        None => return Err(WsOriginRejection::MissingOrigin),
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return Err(WsOriginRejection::OriginMalformed),
-        },
-    };
     let host = match headers.get(HOST) {
         None => return Err(WsOriginRejection::MissingHost),
         Some(v) => match v.to_str() {
@@ -284,6 +318,13 @@ pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), WsOriginRejecti
     if !is_trusted_authority(host, "host") {
         return Err(WsOriginRejection::UntrustedHost);
     }
+    let origin = match headers.get(ORIGIN) {
+        None => return Err(WsOriginRejection::MissingOrigin),
+        Some(v) => match v.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(WsOriginRejection::OriginMalformed),
+        },
+    };
     let Ok(origin_uri) = origin.parse::<Uri>() else {
         return Err(WsOriginRejection::OriginParseError);
     };
@@ -315,8 +356,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
     match check_ws_origin(headers) {
         Ok(()) => true,
         Err(rejection) => {
-            let host = log_value_for_header(headers, &HOST);
-            let origin = log_value_for_header(headers, &ORIGIN);
+            let host = log_value_for_ws_host(headers);
+            let origin = log_value_for_ws_origin(headers);
             let level = ws_rejection_log_level(rejection);
             let message = ws_rejection_log_message(rejection);
             let host_recheck_anomaly = is_host_middleware_bypass_indicator(rejection);
@@ -325,8 +366,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
                 message,
                 host_recheck_anomaly,
                 rejection,
-                host,
-                origin,
+                &host,
+                &origin,
             );
             false
         }
@@ -336,9 +377,8 @@ pub(super) fn is_allowed_ws_origin(headers: &HeaderMap) -> bool {
 pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bool {
     let Ok(parsed) = authority.parse::<Authority>() else {
         tracing::warn!(
-            "[markdown-view] authority の parse に失敗し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority の parse に失敗し拒否 (context={})",
+            context
         );
         return false;
     };
@@ -349,9 +389,8 @@ pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bo
     //   host() が "[::1]" を返すため loopback 認定されてしまう）
     if parsed.as_str().contains('@') {
         tracing::warn!(
-            "[markdown-view] authority に userinfo を検出し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority に userinfo を検出し拒否 (context={})",
+            context
         );
         return false;
     }
@@ -361,9 +400,8 @@ pub(super) fn is_trusted_authority(authority: &str, context: &'static str) -> bo
     // 元文字列を直接検査してport接尾辞の有無を判定する。
     if has_port_suffix(parsed.as_str()) && parsed.port_u16().is_none() {
         tracing::warn!(
-            "[markdown-view] authority に非数値 port を検出し拒否 (context={}): {:?}",
-            context,
-            authority
+            "[markdown-view] authority に非数値 port を検出し拒否 (context={})",
+            context
         );
         return false;
     }
@@ -507,6 +545,65 @@ mod tests {
 
         let captured = events.lock().expect("event capture lock").clone();
         captured
+    }
+
+    fn captured_field_summary(value: Option<&String>) -> String {
+        value.map_or_else(
+            || "missing".to_string(),
+            |value| log_value_summary(value.as_str()),
+        )
+    }
+
+    fn log_value_summary(value: &str) -> String {
+        if value.starts_with('<') && value.ends_with('>') {
+            format!("sentinel({value})")
+        } else {
+            format!("present(len={})", value.len())
+        }
+    }
+
+    fn assert_captured_field_eq(event: &CapturedEvent, field: &str, expected: &str, context: &str) {
+        let actual = event.fields.get(field);
+        assert!(
+            actual.is_some_and(|actual| actual == expected),
+            "{context} の {field} field が不正: field_present={} expected={} actual={}",
+            actual.is_some(),
+            log_value_summary(expected),
+            captured_field_summary(actual)
+        );
+    }
+
+    fn assert_captured_field_contains(
+        event: &CapturedEvent,
+        field: &str,
+        expected_fragment: &str,
+        context: &str,
+    ) {
+        let actual = event.fields.get(field);
+        assert!(
+            actual.is_some_and(|actual| actual.contains(expected_fragment)),
+            "{context} の {field} field が不正: field_present={} expected_fragment={} actual={}",
+            actual.is_some(),
+            log_value_summary(expected_fragment),
+            captured_field_summary(actual)
+        );
+    }
+
+    fn assert_captured_events_do_not_contain(
+        events: &[CapturedEvent],
+        forbidden_fragments: &[&str],
+        context: &str,
+    ) {
+        for (event_index, event) in events.iter().enumerate() {
+            for (field, value) in &event.fields {
+                for (fragment_index, fragment) in forbidden_fragments.iter().enumerate() {
+                    assert!(
+                        !value.contains(fragment),
+                        "{context} の監査ログに非公開値が混入している: event_index={event_index} field={field} fragment_index={fragment_index}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -870,12 +967,24 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_origin拒否実ログは分類levelと構造化fieldを出力する() {
+    fn test_ws_host_bypass兆候は構造化errorログ契約として固定する() {
+        let missing_host_and_origin = HeaderMap::new();
+
         let mut missing_host = HeaderMap::new();
-        missing_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        missing_host.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
 
         let mut host_malformed = HeaderMap::new();
-        host_malformed.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        host_malformed.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
         host_malformed.insert(
             HOST,
             axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
@@ -883,95 +992,309 @@ mod tests {
 
         let mut untrusted_host = HeaderMap::new();
         untrusted_host.insert(HOST, "evil.example:3000".parse().unwrap());
-        untrusted_host.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
-
-        let mut missing_origin = HeaderMap::new();
-        missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
-
-        let mut authority_mismatch = HeaderMap::new();
-        authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
-        authority_mismatch.insert(ORIGIN, "http://127.0.0.1:3000".parse().unwrap());
+        untrusted_host.insert(
+            ORIGIN,
+            "http://localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
 
         let cases = [
             (
-                missing_host,
-                Level::ERROR,
+                missing_host_and_origin,
                 "MissingHost",
-                "WS Host 検証異常",
-                "true",
+                "<absent>",
+                "<absent>",
+            ),
+            (
+                missing_host,
+                "MissingHost",
+                "<absent>",
+                "http://localhost:3000",
             ),
             (
                 host_malformed,
-                Level::ERROR,
                 "HostMalformed",
-                "WS Host 検証異常",
-                "true",
+                "<non-ascii>",
+                "http://localhost:3000",
             ),
             (
                 untrusted_host,
-                Level::ERROR,
                 "UntrustedHost",
-                "WS Host 検証異常",
-                "true",
+                "evil.example:3000",
+                "http://localhost:3000",
             ),
+        ];
+
+        for (headers, expected_rejection, expected_host, expected_origin) in cases {
+            let events = capture_ws_rejection_events(&headers);
+            let ws_events = events
+                .iter()
+                .filter(|event| event.fields.contains_key("ws_rejection_class"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ws_events.len(),
+                1,
+                "{expected_rejection} のWS拒否ログ件数が不正"
+            );
+
+            let event = ws_events[0];
+            assert_eq!(
+                event.level,
+                Level::ERROR,
+                "{expected_rejection} は Host middleware bypass 兆候として ERROR で記録する"
+            );
+            assert_captured_field_contains(
+                event,
+                "rejection",
+                expected_rejection,
+                expected_rejection,
+            );
+            assert_captured_field_eq(
+                event,
+                "ws_rejection_class",
+                "WS Host 検証異常",
+                expected_rejection,
+            );
+            assert_captured_field_eq(event, "host_recheck_anomaly", "true", expected_rejection);
+            assert_captured_field_eq(event, "host", expected_host, expected_rejection);
+            assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
+            assert_captured_events_do_not_contain(
+                std::slice::from_ref(event),
+                &["private", "token", "secret"],
+                expected_rejection,
+            );
+        }
+    }
+
+    #[test]
+    fn test_ws_origin拒否はhost_bypass兆候として扱わない() {
+        let mut missing_origin = HeaderMap::new();
+        missing_origin.insert(HOST, "localhost:3000".parse().unwrap());
+
+        let mut origin_malformed = HeaderMap::new();
+        origin_malformed.insert(HOST, "localhost:3000".parse().unwrap());
+        origin_malformed.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
+
+        let mut origin_parse_error = HeaderMap::new();
+        origin_parse_error.insert(HOST, "localhost:3000".parse().unwrap());
+        origin_parse_error.insert(ORIGIN, "not a uri".parse().unwrap());
+
+        let mut unsupported_scheme = HeaderMap::new();
+        unsupported_scheme.insert(HOST, "localhost:3000".parse().unwrap());
+        unsupported_scheme.insert(
+            ORIGIN,
+            "ftp://localhost:3000/private?token=secret".parse().unwrap(),
+        );
+
+        let mut untrusted_origin_authority = HeaderMap::new();
+        untrusted_origin_authority.insert(HOST, "localhost:3000".parse().unwrap());
+        untrusted_origin_authority.insert(
+            ORIGIN,
+            "http://evil.example:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
+
+        let mut invalid_origin_authority = HeaderMap::new();
+        invalid_origin_authority.insert(HOST, "localhost:3000".parse().unwrap());
+        invalid_origin_authority.insert(
+            ORIGIN,
+            "http://localhost:abc/private?token=secret".parse().unwrap(),
+        );
+
+        let mut authority_mismatch = HeaderMap::new();
+        authority_mismatch.insert(HOST, "localhost:3000".parse().unwrap());
+        authority_mismatch.insert(
+            ORIGIN,
+            "http://127.0.0.1:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
+
+        let cases = [
             (
                 missing_origin,
                 Level::INFO,
                 "MissingOrigin",
-                "WS Origin 拒否",
-                "false",
+                "localhost:3000",
+                "<absent>",
+            ),
+            (
+                origin_malformed,
+                Level::WARN,
+                "OriginMalformed",
+                "localhost:3000",
+                "<non-ascii>",
+            ),
+            (
+                origin_parse_error,
+                Level::WARN,
+                "OriginParseError",
+                "localhost:3000",
+                "<invalid-origin-uri>",
+            ),
+            (
+                unsupported_scheme,
+                Level::WARN,
+                "UnsupportedScheme",
+                "localhost:3000",
+                "ftp://localhost:3000",
+            ),
+            (
+                untrusted_origin_authority,
+                Level::WARN,
+                "UntrustedOriginAuthority",
+                "localhost:3000",
+                "http://evil.example:3000",
+            ),
+            (
+                invalid_origin_authority,
+                Level::WARN,
+                "UntrustedOriginAuthority",
+                "localhost:3000",
+                "<invalid-origin-authority>",
             ),
             (
                 authority_mismatch,
                 Level::WARN,
                 "AuthorityMismatch",
-                "WS Origin 拒否",
-                "false",
+                "localhost:3000",
+                "http://127.0.0.1:3000",
             ),
         ];
 
-        for (headers, expected_level, expected_rejection, expected_class, expected_anomaly) in cases
-        {
+        for (headers, expected_level, expected_rejection, expected_host, expected_origin) in cases {
             let events = capture_ws_rejection_events(&headers);
-            assert_eq!(
-                events.len(),
-                1,
-                "{expected_rejection} の拒否ログ件数が不正: {events:?}"
+            assert_captured_events_do_not_contain(
+                &events,
+                &["abc", "private", "token", "secret", "user", "pass"],
+                expected_rejection,
             );
 
-            let event = &events[0];
+            let ws_events = events
+                .iter()
+                .filter(|event| event.fields.contains_key("ws_rejection_class"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ws_events.len(),
+                1,
+                "{expected_rejection} のWS拒否ログ件数が不正"
+            );
+
+            let event = ws_events[0];
             assert_eq!(
                 event.level, expected_level,
                 "{expected_rejection} の実ログ level が不正"
             );
-            assert!(
-                event
-                    .fields
-                    .get("rejection")
-                    .is_some_and(|actual| actual.contains(expected_rejection)),
-                "{expected_rejection} の rejection field が不正: {:?}",
-                event.fields
+            assert_captured_field_contains(
+                event,
+                "rejection",
+                expected_rejection,
+                expected_rejection,
             );
+            assert_captured_field_eq(
+                event,
+                "ws_rejection_class",
+                "WS Origin 拒否",
+                expected_rejection,
+            );
+            assert_captured_field_eq(event, "host_recheck_anomaly", "false", expected_rejection);
+            assert_captured_field_eq(event, "host", expected_host, expected_rejection);
+            assert_captured_field_eq(event, "origin", expected_origin, expected_rejection);
+        }
+    }
+
+    #[test]
+    fn test_ws_origin_userinfoは監査ログに実値を残さない() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        headers.insert(
+            ORIGIN,
+            "http://alice:hunter2@localhost:3000/private?token=secret"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::UntrustedOriginAuthority)
+        );
+
+        let events = capture_ws_rejection_events(&headers);
+        assert_captured_events_do_not_contain(
+            &events,
+            &["alice", "hunter2", "private", "token", "secret"],
+            "userinfo 付き Origin",
+        );
+
+        let ws_event = events
+            .iter()
+            .find(|event| event.fields.contains_key("ws_rejection_class"))
+            .expect("WS rejection event should be captured");
+        assert_eq!(ws_event.level, Level::WARN);
+        assert_captured_field_contains(
+            ws_event,
+            "rejection",
+            "UntrustedOriginAuthority",
+            "userinfo 付き Origin",
+        );
+        assert_captured_field_eq(
+            ws_event,
+            "origin",
+            "<origin-authority-with-userinfo>",
+            "userinfo 付き Origin",
+        );
+    }
+
+    #[test]
+    fn test_ws_host_untrusted入力は監査ログに実値を残さない() {
+        let cases = [
+            (
+                "host_userinfo",
+                "alice:hunter2@localhost:3000",
+                "<host-authority-with-userinfo>",
+            ),
+            (
+                "host_path_query",
+                "localhost:3000/private?token=secret",
+                "<invalid-host-authority>",
+            ),
+            (
+                "host_invalid_port",
+                "localhost:abc",
+                "<invalid-host-authority>",
+            ),
+        ];
+
+        for (case_label, host, expected_host_field) in cases {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, host.parse().unwrap());
+            headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+
             assert_eq!(
-                event.fields.get("ws_rejection_class").map(String::as_str),
-                Some(expected_class),
-                "{expected_rejection} の分類 field が不正"
+                check_ws_origin(&headers),
+                Err(WsOriginRejection::UntrustedHost),
+                "{case_label} は Host 検証異常として拒否する"
             );
-            assert_eq!(
-                event.fields.get("host_recheck_anomaly").map(String::as_str),
-                Some(expected_anomaly),
-                "{expected_rejection} の Host 再検証異常 field が不正"
+
+            let events = capture_ws_rejection_events(&headers);
+            assert_captured_events_do_not_contain(
+                &events,
+                &["alice", "hunter2", "private", "token", "secret"],
+                case_label,
             );
-            assert!(
-                event.fields.contains_key("host"),
-                "{expected_rejection} の host field が欠落: {:?}",
-                event.fields
-            );
-            assert!(
-                event.fields.contains_key("origin"),
-                "{expected_rejection} の origin field が欠落: {:?}",
-                event.fields
-            );
+
+            let ws_event = events
+                .iter()
+                .find(|event| event.fields.contains_key("ws_rejection_class"))
+                .expect("WS rejection event should be captured");
+            assert_eq!(ws_event.level, Level::ERROR);
+            assert_captured_field_contains(ws_event, "rejection", "UntrustedHost", case_label);
+            assert_captured_field_eq(ws_event, "host", expected_host_field, case_label);
         }
     }
 
@@ -1120,12 +1443,11 @@ mod tests {
 
     #[test]
     fn test_check_ws_origin_variants_網羅() {
-        // MissingOrigin: Origin ヘッダー不在
-        let mut headers = HeaderMap::new();
-        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        // MissingHost: Host と Origin がどちらもない場合も Host bypass 兆候を優先する
+        let headers = HeaderMap::new();
         assert_eq!(
             check_ws_origin(&headers),
-            Err(WsOriginRejection::MissingOrigin)
+            Err(WsOriginRejection::MissingHost)
         );
 
         // MissingHost: HOST ヘッダー不在
@@ -1134,6 +1456,14 @@ mod tests {
         assert_eq!(
             check_ws_origin(&headers),
             Err(WsOriginRejection::MissingHost)
+        );
+
+        // MissingOrigin: Origin ヘッダー不在
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "localhost:3000".parse().unwrap());
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::MissingOrigin)
         );
 
         // UntrustedHost: HOST が trusted でない
@@ -1213,10 +1543,23 @@ mod tests {
         );
 
         // HostMalformed: Host ヘッダーは存在するが to_str() 失敗（非 ASCII）
-        // OriginMalformed と同じ境界だが、評価順は Origin 側が先のため
-        // Origin を正常値にして Host を malformed にする
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "http://localhost:3000".parse().unwrap());
+        headers.insert(
+            HOST,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(WsOriginRejection::HostMalformed)
+        );
+
+        // HostMalformed は OriginMalformed より Host bypass 兆候として優先する
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"\xff non-ascii origin").unwrap(),
+        );
         headers.insert(
             HOST,
             axum::http::HeaderValue::from_bytes(b"\xff non-ascii host").unwrap(),
