@@ -550,7 +550,7 @@ function runSanitizationSelfTest() {
     smapsRollup: { available: true, Anonymous: 790 },
     maps: { available: true },
   }, 'event', null);
-  const samplePeak = namedSnapshot('sample_0000', 50, {
+  const samplePeak = namedSnapshot('sample_0000', 80, {
     status: { available: true, VmRSS: 5000, RssAnon: 4500, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 4480 },
     maps: { available: true },
@@ -596,6 +596,26 @@ function runSanitizationSelfTest() {
   assert.equal(timeline.samplingSummary.clock, 'monotonic');
   assert.equal(timeline.samplingSummary.sampleCount, 1);
   assert.deepEqual(timeline.samplingSummary.droppedSampleReasons, ['raw_samples_omitted']);
+
+  const sampleBeforeHeaders = namedSnapshot('sample_before_headers', 60, {
+    status: { available: true, VmRSS: 9000, RssAnon: 8800, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 8780 },
+    maps: { available: true },
+  }, 'sampling', 0);
+  const sampleAfterHeaders = namedSnapshot('sample_after_headers', 90, {
+    status: { available: true, VmRSS: 4200, RssAnon: 4100, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 4080 },
+    maps: { available: true },
+  }, 'sampling', 1);
+  const bodyDrainTimeline = buildTimelineReport({
+    eventSnapshots: [eventStarted, eventHeaders, eventBody, eventSettled],
+    sampleSnapshots: [sampleBeforeHeaders, sampleAfterHeaders],
+    settledDelaysMs: [1000],
+    bodyReadStartElapsedMs: 76,
+    bodyReadEndElapsedMs: 100,
+    responseBytes: 1234,
+  });
+  assert.equal(bodyDrainTimeline.peaks.bodyDrainPeakAnon.name, 'sample_after_headers');
 
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
@@ -1438,6 +1458,17 @@ function snapshotByName(snapshots, name) {
   return snapshots.find((snapshot) => snapshot.name === name) ?? null;
 }
 
+function samplesInWindow(sampleSnapshots, startSnapshot, endSnapshot) {
+  if (!startSnapshot || !endSnapshot) {
+    return [];
+  }
+  return sampleSnapshots.filter((snapshot) => (
+    Number.isFinite(snapshot.elapsedMs)
+    && snapshot.elapsedMs >= startSnapshot.elapsedMs
+    && snapshot.elapsedMs <= endSnapshot.elapsedMs
+  ));
+}
+
 function deltaKb(left, right) {
   return Number.isFinite(left) && Number.isFinite(right) ? left - right : null;
 }
@@ -1460,8 +1491,10 @@ function buildTimelineReport({
   const requestStarted = snapshotByName(snapshots, 'request_started');
   const headersReceived = snapshotByName(snapshots, 'headers_received');
   const bodyReceived = snapshotByName(snapshots, 'body_received');
-  const requestWindow = [requestStarted, ...sampleSnapshots, headersReceived, bodyReceived].filter(Boolean);
-  const bodyDrainWindow = [headersReceived, ...sampleSnapshots, bodyReceived].filter(Boolean);
+  const requestWindowSamples = samplesInWindow(sampleSnapshots, requestStarted, bodyReceived);
+  const bodyDrainWindowSamples = samplesInWindow(sampleSnapshots, headersReceived, bodyReceived);
+  const requestWindow = [requestStarted, ...requestWindowSamples, headersReceived, bodyReceived].filter(Boolean);
+  const bodyDrainWindow = [headersReceived, ...bodyDrainWindowSamples, bodyReceived].filter(Boolean);
   const requestPeakRss = pickPeakSnapshot(requestWindow, 'VmRSS');
   const requestPeakAnon = pickPeakSnapshot(requestWindow, 'RssAnon');
   const bodyDrainPeakRss = pickPeakSnapshot(bodyDrainWindow, 'VmRSS');
