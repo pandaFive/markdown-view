@@ -8,7 +8,8 @@
 
 - request 中だけ大きく増える一時 live allocation。
 - response 完了後も残る allocator retained memory。
-- JSON 直列化または response buffering の寄与。
+- server 側 JSON 直列化または response 構築の寄与。
+- post-header body drain または socket buffering の寄与。
 - prefix 経路固有の挙動。
 
 この作業は RSS plateau の解消ではなく、次に Rust 側 probe や allocation 削減実装へ進む価値があるかを判断するための診断である。
@@ -49,6 +50,7 @@ report には既存の `fixtureKind` と `fixtureScale` を維持し、timeline 
 - `timeline.settledDelaysMs`: 実際に採取した settled delay の millisecond 配列。
 - `timeline.snapshots[]`: snapshot の時系列配列。
 - `timeline.derived`: 判定補助用の差分と比率。
+- `comparisons[]`: allocator profile 間の比較結果。
 
 `prefix-full` という語は `--fixtures prefix --fixture-scale full --fixture-density dense` の短い説明名であり、CLI の fixture kind ではない。
 
@@ -56,7 +58,8 @@ timeline 測定では、scenario ごとに次の snapshot を記録する。
 
 - `server_ready`: server 起動後、request 前。
 - `request_started`: HTTP request 送信直後。
-- `request_peak`: request 中 sampling で観測した最大 RSS snapshot。
+- `request_peak_rss`: request 中 sampling で `VmRSS` が最大の snapshot。
+- `request_peak_anon`: request 中 sampling で `RssAnon` が最大の snapshot。
 - `headers_received`: HTTP response headers 受信時。
 - `body_received`: response body 受信完了直後。
 - `settled_1s`: body 受信完了から 1 秒後。
@@ -89,22 +92,46 @@ HTTP response については、既存と同じ契約値を記録する。
 
 - `prefix-full-dense`: `--fixtures prefix --fixture-scale full --fixture-density dense` の主対象。
 - `prefix-full-sparse`: `--fixtures prefix --fixture-scale full --fixture-density sparse` の対照。
-- `multifile` または short fallback: prefix 経路固有性を確認する対照。
+- `multifile/full/dense`: prefix 経路固有性を確認する必須対照。
 
-`prefix-full-sparse` は、同程度の読み込み量でも hit 密度と result-limit 到達位置が異なる場合に peak / settled の差が変わるかを見るための補助 scenario である。`sparse` でも `resultsLength=100` と `truncated_reasons=["result_limit"]` に到達する fixture とし、既存 `validateScenarioResult()` の検索契約を緩めない。測定 matrix が過剰にならないよう、既定 timeline run では `prefix-full-dense` を主対象にし、prefix 固有性を結論する場合だけ `prefix-full-sparse` と `multifile/full/dense` も実行する。
+`prefix-full-sparse` は、dense と byte size を ±5% 以内に揃えつつ、hit 密度と result-limit 到達位置を変えた場合に peak / settled の差が変わるかを見るための補助 scenario である。`sparse` は `fixtureKind=prefix` の場合だけ意味を持ち、`multifile` と `fallback` では no-op dimension として `scenarioId` と report にだけ残す。測定 matrix が過剰にならないよう、既定 timeline run では `prefix-full-dense` を主対象にし、prefix 固有性を結論する場合だけ `prefix-full-sparse` と `multifile/full/dense` も実行する。fallback は任意の補助測定であり、prefix 固有性の Full acceptance 条件には含めない。
+
+`prefix-full-sparse` の生成規則は次の通り固定する。
+
+- `createFixture(root, fixtureKind, scale, density)` へ拡張し、workspace 名または `scenarioId` に density を含める。
+- file count は dense と同じ 1 file。
+- fixture byte size は `prefix/full/dense` の ±5% 以内にする。
+- `needle` は 101 個以上配置し、ファイル全体へ概ね均等に分散する。
+- `resultsLength=100`、`truncated_reasons` に `result_limit`、`searched_files=1` を維持する。
+- `searched_bytes` は fixture bytes の ±5% 以内とし、self-test で dense/sparse の file count、byte range、result-limit 契約を固定する。
 
 allocator profile は `default` と `arena1` を基本にする。`arena2` は必要時の任意 profile とし、timeline の受け入れ基準には含めない。
 
 ## 判定方針
 
-timeline の判定は絶対 RSS ではなく、scenario 内と profile 間の相対差で行う。script は自動分類を行わず、次の derived fields を人間判断用の補助値として出力する。
+timeline の判定は絶対 RSS ではなく、scenario 内と profile 間の相対差で行う。script は自動分類を行わず、scenario-local な `timeline.derived` と top-level `comparisons[]` を人間判断用の補助値として出力する。
 
-- `peak_to_settled_delta_kb`: `request_peak` と最長 settled snapshot の `RssAnon` 差。
-- `peak_to_settled_ratio`: `request_peak.RssAnon / settled.RssAnon`。
+`reports[].timeline.derived` には次を入れる。
+
+- `peak_to_settled_delta_kb`: `request_peak_anon.RssAnon` と最長 settled snapshot の `RssAnon` 差。
+- `peak_to_settled_ratio`: `request_peak_anon.RssAnon / settled.RssAnon`。
+- `request_started_to_headers_delta_kb`: `request_started` と `headers_received` の `RssAnon` 差。
 - `headers_to_body_delta_kb`: `headers_received` と `body_received` の `RssAnon` 差。
-- `default_vs_arena1_settled_delta_kb`: 同一 scenario の `default` と `arena1` の settled `RssAnon` 差。
 
-`peak_to_settled_delta_kb` と `peak_to_settled_ratio` が大きい場合は一時 live allocation 候補、`headers_to_body_delta_kb` が目立つ場合は JSON 直列化または response buffering 候補、`default_vs_arena1_settled_delta_kb` が目立つ場合は glibc allocator retained memory 候補として記録する。数値 threshold は CI や自動判定に入れず、`docs/todo/BACKLOG.md` には実測値と解釈を併記する。
+top-level `comparisons[]` には allocator profile 間比較を入れる。
+
+- `scenarioId`。
+- `settledDelayMs`。
+- `baseProfile`: `default`。
+- `compareProfile`: `arena1`。
+- `default_vs_arena1_settled_delta_kb`。
+- `comparisonStatus`: `ok`、`partial`、`skipped` のいずれか。
+- `excludedReason`: 比較から除外する理由。比較可能なら省略する。
+- `missingProfiles`: 指定されなかった profile 名の配列。欠損がなければ空配列。
+
+`default` と `arena1` が両方 `ok` の場合だけ `comparisonStatus="ok"` とする。片方が `partial` の場合は `comparisonStatus="partial"` とし、片方が `failed` または未指定の場合は `comparisonStatus="skipped"` とする。
+
+`peak_to_settled_delta_kb` と `peak_to_settled_ratio` が大きい場合は一時 live allocation 候補、`request_started_to_headers_delta_kb` が目立つ場合は server 側 JSON 直列化または response 構築候補、`headers_to_body_delta_kb` が目立つ場合は post-header body drain または socket buffering 候補、`default_vs_arena1_settled_delta_kb` が目立つ場合は glibc allocator retained memory 候補として記録する。数値 threshold は CI や自動判定に入れず、`docs/todo/BACKLOG.md` には実測値と解釈を併記する。
 
 - `prefix-full-dense` だけが高く、`prefix-full-sparse` や multifile 対照が低い場合は、prefix many-match 経路固有の問題として扱う。
 - `/proc` 取得が不完全な scenario は判定から除外し、部分測定として記録する。
@@ -120,6 +147,8 @@ scenario ごとに `status` を記録し、他 scenario は可能な限り継続
 - `failed`: server 起動、HTTP、JSON 契約、fixture 生成、body parse、timeout のいずれかが失敗した。
 
 `partial` は `partialMeasurementReasons` と `decisionExcludedReason` を持ち、Done 判断や比較結論の根拠から除外する。既存の `procComplete=false` は `partial` status へ対応付ける。
+
+`runMeasuredScenario()` の成功結果を `runMeasurement()` が report 化するとき、`procComplete ? "ok" : "partial"` で `status` を決める。`partial` は JSON report 生成自体は成功とみなし、process exit code は `0` とする。ただし completion report と `docs/todo/BACKLOG.md` では Full acceptance 未達として扱う。`failed` が 1 件以上ある場合だけ process exit code を `1` にする。
 
 記録対象の失敗は次を含める。
 
@@ -173,12 +202,17 @@ self-test では次を固定する。
 - `--timeline` の parse。
 - `--timeline` と `--smoke` の併用拒否。
 - `--fixture-density` と `--settled-delays` の parse と不正値拒否。
+- `--settled-delays` は `1s`、`5s`、`15s` の組み合わせだけ許可すること。
 - timeline snapshot 名、順序、elapsed 単調性。
-- fake sampler による `request_peak` 算出。
+- fake sampler による `request_peak_rss` と `request_peak_anon` の個別算出。
 - fake HTTP response による `headers_received` と `body_received` の分離。
 - `settled_1s` / `settled_5s` / 任意の `settled_15s` の delay 設定。
 - timeline report sanitization が実パス、ユーザー名、本文断片、raw maps 行を出さないこと。
 - `fixtureDensity=sparse` が既存 fixture matrix と矛盾せず、`resultsLength=100` と `result_limit` 契約を維持すること。
+- fake `/proc` 欠落と `smaps_rollup` 権限不足が `status="partial"`、`partialMeasurementReasons`、`decisionExcludedReason` を出すこと。
+- server 起動失敗、HTTP failure、JSON failure、fixture 生成失敗、timeout が `status="failed"` になること。
+- failed scenario 後も残り scenario が report され、process exit code が `1` になること。
+- partial だけの場合は process exit code が `0` になり、Full acceptance 未達として報告できること。
 
 ## セキュリティ
 
@@ -216,10 +250,10 @@ server process に追加する環境変数は、allocator profile 定義で許�
 Full acceptance:
 
 - `scripts/measure-search-rss-plateau.mjs` が opt-in の timeline 測定を実行できる。
-- timeline report に `timeline.snapshots[]`、`timeline.derived`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs` が含まれる。
+- timeline report に `timeline.snapshots[]`、`timeline.derived`、`comparisons[]`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs` が含まれる。
 - release / prefix / full / dense / cold で `default` と `arena1` の timeline 比較結果を得る。
 - prefix 固有性を結論する場合は、prefix / full / sparse / cold と multifile / full / dense / cold の対照測定も成功している。
-- `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、response buffering 候補、次に必要な作業が記録される。
+- `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、server response 構築候補、post-header body drain 候補、次に必要な作業が記録される。
 - 検索 API 契約、Host/Origin/path validation、HTML sanitize、CSP、検索上限契約を弱めていないことが記録される。
 - self-test と文書 validation が成功する。
 - `./verify.sh` が pass する。未実行または失敗がある場合は、理由と残リスクを報告する。
@@ -245,7 +279,7 @@ loopback bind 承認、release build、full fixture timeline 測定、`--settled
 
 ```bash
 rg -n "目的|非ゴール|測定アーキテクチャ|比較 fixture|判定方針|エラー処理|データ更新|テストと検証|セキュリティ|影響範囲|ロールバック|受け入れ基準|Full acceptance|Sandbox-limited partial validation|見積もり" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
-rg -n "fixtureDensity|scenarioId|timeline\\.snapshots|timeline\\.derived|--fixture-density|--settled-delays|partialMeasurementReasons|decisionExcludedReason" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
+rg -n "fixtureDensity|scenarioId|timeline\\.snapshots|timeline\\.derived|comparisons\\[\\]|--fixture-density|--settled-delays|request_peak_rss|request_peak_anon|request_started_to_headers_delta_kb|partialMeasurementReasons|decisionExcludedReason|process exit code" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
 placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\\.md| Issues)|未[定]' docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 git diff --check
