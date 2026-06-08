@@ -661,23 +661,38 @@ function runSanitizationSelfTest() {
 
   const root = createFixtureRoot();
   try {
-    const prefix = createFixture(root, 'prefix', 'short');
-    assert.equal(prefix.fixtureKind, 'prefix');
-    assert.equal(prefix.fileCount, 1);
-    assert.ok(prefix.bytes > 0);
-    assert.equal(prefix.maskedWorkspace.startsWith(MASKED_TEMP), true);
+    const prefixDense = createFixture(root, 'prefix', 'short', 'dense');
+    assert.equal(prefixDense.fixtureKind, 'prefix');
+    assert.equal(prefixDense.fixtureDensity, 'dense');
+    assert.equal(prefixDense.scenarioId, 'prefix-short-dense');
+    assert.equal(prefixDense.fileCount, 1);
+    assert.ok(prefixDense.bytes > 0);
+    assert.equal(prefixDense.maskedWorkspace.startsWith(MASKED_TEMP), true);
 
-    const multifile = createFixture(root, 'multifile', 'short');
+    const prefixSparse = createFixture(root, 'prefix', 'short', 'sparse');
+    assert.equal(prefixSparse.fixtureKind, 'prefix');
+    assert.equal(prefixSparse.fixtureDensity, 'sparse');
+    assert.equal(prefixSparse.scenarioId, 'prefix-short-sparse');
+    assert.equal(prefixSparse.fileCount, 1);
+    assert.ok(prefixSparse.bytes > 0);
+    assert.ok(prefixSparse.bytes >= Math.floor(prefixDense.bytes * 0.95));
+    assert.ok(prefixSparse.bytes <= Math.ceil(prefixDense.bytes * 1.05));
+
+    const multifile = createFixture(root, 'multifile', 'short', 'dense');
     assert.equal(multifile.fixtureKind, 'multifile');
+    assert.equal(multifile.fixtureDensity, 'dense');
+    assert.equal(multifile.scenarioId, 'multifile-short-dense');
     assert.equal(multifile.fileCount, 8);
     assert.ok(multifile.bytes > 0);
 
-    const fallback = createFixture(root, 'fallback', 'short');
+    const fallback = createFixture(root, 'fallback', 'short', 'dense');
     assert.equal(fallback.fixtureKind, 'fallback');
+    assert.equal(fallback.fixtureDensity, 'dense');
+    assert.equal(fallback.scenarioId, 'fallback-short-dense');
     assert.equal(fallback.fileCount, 1);
     assert.ok(fallback.bytes > 0);
 
-    const fullFallback = createFixture(root, 'fallback', 'full');
+    const fullFallback = createFixture(root, 'fallback', 'full', 'dense');
     assert.equal(fullFallback.fixtureKind, 'fallback');
     assert.equal(fullFallback.fileCount, 1);
     assert.ok(fullFallback.bytes > fallback.bytes * 10);
@@ -706,34 +721,43 @@ function createFixtureRoot() {
   return root;
 }
 
-function createFixture(root, fixtureKind, scale) {
-  const workspace = path.join(root, `${fixtureKind}-workspace`);
+function createFixture(root, fixtureKind, scale, density = 'dense') {
+  const workspace = path.join(root, `${fixtureKind}-${scale}-${density}-workspace`);
   mkdirSync(workspace, { recursive: true });
 
   if (fixtureKind === 'prefix') {
-    return createPrefixFixture(workspace, scale);
+    return createPrefixFixture(workspace, scale, density);
   }
-  if (fixtureKind === 'multifile') {
-    return createMultifileFixture(workspace, scale);
+  if (fixtureKind === 'multifile' && density === 'dense') {
+    return createMultifileFixture(workspace, scale, density);
   }
-  if (fixtureKind === 'fallback') {
-    return createFallbackFixture(workspace, scale);
+  if (fixtureKind === 'fallback' && density === 'dense') {
+    return createFallbackFixture(workspace, scale, density);
   }
-  throw new Error(`unsupported fixture kind: ${fixtureKind}`);
+  throw new Error(`unsupported fixture combination: ${fixtureKind}/${scale}/${density}`);
 }
 
-function createPrefixFixture(workspace, scale) {
+function createPrefixFixture(workspace, scale, density = 'dense') {
   const repeatCount = scale === 'full' ? 180_000 : 1_200;
   const filePath = path.join(workspace, 'prefix.md');
   const paragraphs = [];
-  for (let index = 0; index < repeatCount; index += 1) {
-    paragraphs.push(`needle paragraph ${index}`);
+  if (density === 'dense') {
+    for (let index = 0; index < repeatCount; index += 1) {
+      paragraphs.push(`needle paragraph ${index}`);
+    }
+  } else if (density === 'sparse') {
+    for (let index = 0; index < repeatCount; index += 1) {
+      const marker = index % Math.max(1, Math.floor(repeatCount / 120)) === 0 ? 'needle' : 'filler';
+      paragraphs.push(`${marker} paragraph ${index}`);
+    }
+  } else {
+    throw new Error(`unsupported prefix density: ${density}`);
   }
   writeFileSync(filePath, `${paragraphs.join('\n\n')}\n`, 'utf8');
-  return summarizeFixture(workspace, 'prefix');
+  return summarizeFixture(workspace, 'prefix', scale, density);
 }
 
-function createMultifileFixture(workspace, scale) {
+function createMultifileFixture(workspace, scale, density = 'dense') {
   const fileCount = scale === 'full' ? 120 : 8;
   const repeatCount = scale === 'full' ? 240 : 16;
   for (let fileIndex = 0; fileIndex < fileCount; fileIndex += 1) {
@@ -744,22 +768,24 @@ function createMultifileFixture(workspace, scale) {
     }
     writeFileSync(filePath, `${lines.join('\n\n')}\n`, 'utf8');
   }
-  return summarizeFixture(workspace, 'multifile');
+  return summarizeFixture(workspace, 'multifile', scale, density);
 }
 
-function createFallbackFixture(workspace, scale) {
+function createFallbackFixture(workspace, scale, density = 'dense') {
   const repeatCount = scale === 'full' ? 300_000 : 4_000;
   const filePath = path.join(workspace, 'fallback.md');
   const chunk = 'needle_inside_single_large_block ';
   writeFileSync(filePath, `# fallback\n\n${chunk.repeat(repeatCount)}\n`, 'utf8');
-  return summarizeFixture(workspace, 'fallback');
+  return summarizeFixture(workspace, 'fallback', scale, density);
 }
 
-function summarizeFixture(workspace, fixtureKind) {
+function summarizeFixture(workspace, fixtureKind, scale, density = 'dense') {
   const files = collectMarkdownFiles(workspace);
   const bytes = files.reduce((sum, filePath) => sum + statSync(filePath).size, 0);
   return {
     fixtureKind,
+    fixtureDensity: density,
+    scenarioId: `${fixtureKind}-${scale}-${density}`,
     workspace,
     fileCount: files.length,
     bytes,
@@ -1360,35 +1386,39 @@ async function runMeasurement(options) {
     const reports = [];
     let failed = false;
     for (const fixtureKind of options.fixtures) {
-      const fixture = createFixture(root, fixtureKind, options.fixtureScale);
-      for (const mode of options.modes) {
-        for (const allocatorProfile of options.allocatorProfiles) {
-          for (const runKind of options.runs) {
-            const baseReport = {
-              fixtureKind,
-              fixture: {
-                fileCount: fixture.fileCount,
-                bytes: fixture.bytes,
-                workspace: fixture.maskedWorkspace,
-              },
-              mode,
-              runKind,
-              allocatorProfile: allocatorProfileReport(allocatorProfile),
-            };
-            try {
-              const scenario = await runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile);
-              reports.push({
-                ...baseReport,
-                status: 'ok',
-                ...scenario,
-              });
-            } catch (error) {
-              failed = true;
-              reports.push({
-                ...baseReport,
-                status: 'failed',
-                ...errorReportFields(error),
-              });
+      for (const fixtureDensity of options.fixtureDensities) {
+        const fixture = createFixture(root, fixtureKind, options.fixtureScale, fixtureDensity);
+        for (const mode of options.modes) {
+          for (const allocatorProfile of options.allocatorProfiles) {
+            for (const runKind of options.runs) {
+              const baseReport = {
+                fixtureKind,
+                fixtureDensity,
+                scenarioId: fixture.scenarioId,
+                fixture: {
+                  fileCount: fixture.fileCount,
+                  bytes: fixture.bytes,
+                  workspace: fixture.maskedWorkspace,
+                },
+                mode,
+                runKind,
+                allocatorProfile: allocatorProfileReport(allocatorProfile),
+              };
+              try {
+                const scenario = await runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile);
+                reports.push({
+                  ...baseReport,
+                  status: 'ok',
+                  ...scenario,
+                });
+              } catch (error) {
+                failed = true;
+                reports.push({
+                  ...baseReport,
+                  status: 'failed',
+                  ...errorReportFields(error),
+                });
+              }
             }
           }
         }
