@@ -612,12 +612,43 @@ function runSanitizationSelfTest() {
     responseBytes: 1234,
   });
   assert.equal(bodyDrainTimeline.peaks.bodyDrainPeakAnon.name, 'sample_after_headers');
+  const partialSample = namedSnapshot('sample_missing_maps', 80, {
+    status: { available: true, VmRSS: 5000, RssAnon: 4500, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 4480 },
+    maps: { available: false, reason: 'missing' },
+  }, 'sampling', 0);
+  const partialSampleTimeline = buildTimelineReport({
+    eventSnapshots: [eventStarted, eventHeaders, eventBody, eventSettled],
+    sampleSnapshots: [partialSample],
+    settledDelaysMs: [1000],
+    bodyReadStartElapsedMs: 76,
+    bodyReadEndElapsedMs: 100,
+    responseBytes: 1234,
+  });
+  assert.equal(partialSampleTimeline.peaks.requestPeakRss.name, 'sample_missing_maps');
+  assert.deepEqual(procCompletenessForSnapshots([eventStarted, eventHeaders, eventBody, eventSettled, partialSample]), {
+    procComplete: false,
+    partialMeasurementReasons: ['maps:missing'],
+  });
+  assert.deepEqual(statusForProcCompleteness(procCompletenessForSnapshots([
+    eventStarted,
+    eventHeaders,
+    eventBody,
+    eventSettled,
+    partialSample,
+  ])), {
+    status: 'partial',
+    partialMeasurementReasons: ['maps:missing'],
+    decisionExcludedReason: 'partial_proc_measurement',
+  });
   assert.deepEqual(statusForProcCompleteness({ procComplete: true, partialMeasurementReasons: [] }), { status: 'ok' });
   assert.deepEqual(statusForProcCompleteness({ procComplete: false, partialMeasurementReasons: ['maps:missing'] }), {
     status: 'partial',
     partialMeasurementReasons: ['maps:missing'],
     decisionExcludedReason: 'partial_proc_measurement',
   });
+  assert.equal(measurementExitCode({ failed: false, strict: false, reports: [{ status: 'partial' }] }), 0);
+  assert.equal(measurementExitCode({ failed: false, strict: true, reports: [{ status: 'partial' }] }), 1);
   const fixtureFailureReport = failedScenarioReport({
     fixtureKind: 'prefix',
     fixtureDensity: 'dense',
@@ -632,6 +663,20 @@ function runSanitizationSelfTest() {
   assert.equal(fixtureFailureReport.scenarioError.errorCode, 'fixture_failed');
   assert.equal(Object.hasOwn(fixtureFailureReport.scenarioError, 'rawStderr'), false);
   assert.equal(Object.hasOwn(fixtureFailureReport, 'errorKind'), false);
+  const cleanupFailureReport = failedScenarioReport({
+    fixtureKind: 'prefix',
+    fixtureDensity: 'dense',
+    scenarioId: 'prefix-short-dense',
+    mode: 'dev',
+    runKind: 'cold',
+    allocatorProfile: 'default',
+    error: attachCleanupFailure(new Error('fixture failed: synthetic'), 12345),
+    errorCode: 'fixture_failed',
+  });
+  assert.equal(cleanupFailureReport.scenarioError.cleanupFailed, true);
+  assert.equal(cleanupFailureReport.scenarioError.cleanupErrorKind, 'server_stop_failed');
+  assert.equal(cleanupFailureReport.scenarioError.cleanupMessage, 'server stop failed for pid 12345');
+  assert.equal(Object.hasOwn(cleanupFailureReport, 'cleanupFailed'), false);
 
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
@@ -1178,11 +1223,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
         responseBytes: response.responseBytes,
       });
       const responseReport = { ...response, bodyReadStartElapsedMs, bodyReadEndElapsedMs };
-      const procCompleteness = summarizeProcCompleteness(timeline.snapshots.map((snapshot) => ({
-        status: snapshot.status,
-        smapsRollup: snapshot.smapsRollup,
-        maps: snapshot.maps,
-      })));
+      const procCompleteness = procCompletenessForSnapshots([...eventSnapshots, ...sampleSnapshots]);
       return {
         mode,
         runKind,
@@ -1711,11 +1752,17 @@ function statusForProcCompleteness(procCompleteness) {
 }
 
 function scenarioErrorFields(error, errorCode = classifyError(error)) {
-  return {
+  const fields = {
     errorCode,
     sanitizedMessage: sanitizeProcessOutput(errorMessage(error)),
     redactedContext: {},
   };
+  if (error && error.cleanupFailed === true) {
+    fields.cleanupFailed = true;
+    fields.cleanupErrorKind = sanitizeProcessOutput(error.cleanupErrorKind ?? 'server_stop_failed');
+    fields.cleanupMessage = sanitizeProcessOutput(error.cleanupMessage ?? '');
+  }
+  return fields;
 }
 
 function failedScenarioReport({
@@ -1811,7 +1858,7 @@ async function runMeasurement(options) {
       tempRoot: root,
       reports,
     }), null, 2));
-    return failed ? 1 : 0;
+    return measurementExitCode({ failed, strict: options.strict, reports });
   } finally {
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
@@ -1860,6 +1907,24 @@ function errorReportFields(error) {
     report.cleanupMessage = sanitizeProcessOutput(error.cleanupMessage ?? '');
   }
   return report;
+}
+
+function procCompletenessForSnapshots(snapshots) {
+  return summarizeProcCompleteness(snapshots.map((snapshot) => ({
+    status: snapshot.status,
+    smapsRollup: snapshot.smapsRollup,
+    maps: snapshot.maps,
+  })));
+}
+
+function measurementExitCode({ failed, strict, reports }) {
+  if (failed) {
+    return 1;
+  }
+  if (strict && reports.some((report) => report.status !== 'ok')) {
+    return 1;
+  }
+  return 0;
 }
 
 function attachCleanupFailure(error, pid) {
