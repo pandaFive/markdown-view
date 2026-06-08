@@ -49,9 +49,11 @@ report には既存の `fixtureKind` を維持し、既存通り `fixtureScale` 
 - `scenarioId`: `prefix-full-dense` のように fixture kind、scale、density を連結した表示用 ID。
 - `timeline.settledDelaysMs`: 実際に採取した settled delay の millisecond 配列。
 - `timeline.snapshots[]`: 実測 `elapsedMs` 昇順の event snapshot 配列。
-- `timeline.peaks`: request 全体と body drain 区間の peak snapshot 参照。
+- `timeline.peaks`: request 全体と body drain 区間の peak snapshot inline copy。
+- `timeline.samplingSummary`: request sampling の実行条件と採取状況。
 - `timeline.derived`: 判定補助用の差分と比率。
 - `comparisons[]`: allocator profile 間の比較結果。
+- `scenarioComparisons[]`: fixture scenario 間の比較結果。
 
 `prefix-full` という語は `--fixtures prefix --fixture-scale full --fixture-density dense` の短い説明名であり、CLI の fixture kind ではない。
 
@@ -65,14 +67,42 @@ timeline 測定では、scenario ごとに次の event snapshot を `timeline.sn
 - `settled_5s`: body 受信完了から 5 秒後。
 - `settled_15s`: `--settled-delays` に `15s` が含まれる場合だけ body 受信完了から 15 秒後。
 
-`timeline.peaks` には、固定順 snapshot ではなく、`timeline.snapshots[]` または request sampling から選んだ peak snapshot 参照を入れる。
+`timeline.peaks` には、固定順 snapshot ではなく、event snapshot または request sampling から選んだ peak snapshot の inline copy を入れる。request sampling 全体は report に全件保存しない。
 
 - `requestPeakRss`: `request_started` から `body_received` までの sampling で `VmRSS` が最大の snapshot。
 - `requestPeakAnon`: `request_started` から `body_received` までの sampling で `RssAnon` が最大の snapshot。
 - `bodyDrainPeakRss`: `headers_received` から `body_received` までの sampling で `VmRSS` が最大の snapshot。
 - `bodyDrainPeakAnon`: `headers_received` から `body_received` までの sampling で `RssAnon` が最大の snapshot。
 
-peak snapshot は実測時刻に依存するため、`timeline.snapshots[]` の順序検証とは分ける。`timeline.snapshots[]` は `elapsedMs` 昇順だけを契約にし、`timeline.peaks` は対象区間、metric、参照 snapshot の `name` と `elapsedMs`、memory fields を持つ。
+peak snapshot は実測時刻に依存するため、`timeline.snapshots[]` の順序検証とは分ける。`timeline.snapshots[]` は `elapsedMs` 昇順だけを契約にし、`timeline.peaks.*` は `phase`、`metric`、`capturedFrom`、`sampleIndex`、`name`、`elapsedMs`、`status`、`smapsRollup`、`maps`、`procComplete` を持つ。`capturedFrom` は `event` または `sampling` とし、`sampleIndex` は request sampling 由来なら 0 始まりの整数、event snapshot 由来なら `null` とする。memory fields は既存 `readProcSnapshot()` と同じ `status.{VmRSS,RssAnon,RssFile,RssShmem}`、`smapsRollup`、`maps` の構造を維持し、timeline 専用の flat schema へ変換しない。
+
+`timeline.samplingSummary` には次を入れる。
+
+- `samplingIntervalMs`: `50`。
+- `clock`: monotonic clock。
+- `sampleCount`: 採取した request sampling 数。
+- `maxSamples`: sampling 上限。
+- `missedSampleReasons[]`: 採取できなかった理由。なければ空配列。
+- `droppedSampleReasons[]`: report から落とした sample がある理由。request sampling 全件を保存しない通常動作では `raw_samples_omitted` を入れる。
+
+`timeline.peaks` の JSON shape は次の形に固定する。
+
+```json
+{
+  "requestPeakAnon": {
+    "phase": "request",
+    "metric": "RssAnon",
+    "capturedFrom": "sampling",
+    "sampleIndex": 3,
+    "name": "sample_0003",
+    "elapsedMs": 123.4,
+    "status": { "available": true, "RssAnon": 1024, "VmRSS": 2048, "RssFile": 512, "RssShmem": 0 },
+    "smapsRollup": { "available": true, "Anonymous": 1024 },
+    "maps": { "available": true },
+    "procComplete": true
+  }
+}
+```
 
 各 snapshot には、取得できる範囲で次を含める。
 
@@ -81,7 +111,7 @@ peak snapshot は実測時刻に依存するため、`timeline.snapshots[]` の�
 - `smaps_rollup Anonymous`。
 - elapsed milliseconds。
 - `/proc` 取得 completeness。
-- scenario error。
+- `scenarioError`: 自由文字列ではなく、`errorCode`、`sanitizedMessage`、`redactedContext` の構造に限定する。
 
 timeline 用 request path は通常測定の `requestSearch()` と分ける。`fetch()` が response headers を返した直後に `headers_received` を採取し、その後に body stream を `readResponseTextWithLimit()` 相当の上限付き処理で読み切って `body_received` を採取する。sampling は `request_started` から `body_received` まで継続し、body drain 中の一時 peak も `timeline.peaks` に含める。response body 読み取りの開始/終了 elapsed と response bytes は report に含める。
 
@@ -119,14 +149,14 @@ allocator profile は `default` と `arena1` を基本にする。`arena2` は�
 
 timeline の判定は絶対 RSS ではなく、scenario 内と profile 間の相対差で行う。script は自動分類を行わず、scenario-local な `timeline.derived` と top-level `comparisons[]` を人間判断用の補助値として出力する。
 
-`reports[].timeline.derived` には次を入れる。
+`reports[].timeline.derived` には次を入れる。delta はすべて `left - right` で計算し、必要な snapshot または metric が欠損している場合は field を省略せず `null` を出す。ratio は denominator が欠損または `0` の場合に `null` を出し、理由を `partialMeasurementReasons` または `decisionExcludedReason` に残す。
 
-- `peak_to_settled_delta_kb`: `timeline.peaks.requestPeakAnon.RssAnon` と最長 settled snapshot の `RssAnon` 差。
-- `peak_to_settled_ratio`: `timeline.peaks.requestPeakAnon.RssAnon / settled.RssAnon`。
-- `request_started_to_headers_delta_kb`: `request_started` と `headers_received` の `RssAnon` 差。
-- `headers_to_body_delta_kb`: `headers_received` と `body_received` の `RssAnon` 差。
-- `headers_to_body_peak_delta_kb`: `headers_received` と `timeline.peaks.bodyDrainPeakAnon.RssAnon` の差。
-- `body_peak_to_body_received_delta_kb`: `timeline.peaks.bodyDrainPeakAnon.RssAnon` と `body_received` の差。
+- `peak_to_settled_delta_kb`: `timeline.peaks.requestPeakAnon.status.RssAnon - settled.status.RssAnon`。
+- `peak_to_settled_ratio`: `timeline.peaks.requestPeakAnon.status.RssAnon / settled.status.RssAnon`。
+- `request_started_to_headers_delta_kb`: `headers_received.status.RssAnon - request_started.status.RssAnon`。
+- `headers_to_body_delta_kb`: `body_received.status.RssAnon - headers_received.status.RssAnon`。
+- `headers_to_body_peak_delta_kb`: `timeline.peaks.bodyDrainPeakAnon.status.RssAnon - headers_received.status.RssAnon`。
+- `body_peak_to_body_received_delta_kb`: `body_received.status.RssAnon - timeline.peaks.bodyDrainPeakAnon.status.RssAnon`。
 
 top-level `comparisons[]` には allocator profile 間比較を入れる。
 
@@ -148,6 +178,22 @@ comparison の group key は `mode`、`runKind`、`fixtureKind`、`fixtureScale`
 
 `default` と `arena1` が両方 `ok` の場合だけ `comparisonStatus="ok"` とし、`default_vs_arena1_settled_delta_kb = default.settled.RssAnon - arena1.settled.RssAnon` を出す。正の値は `arena1` の settled anonymous memory が `default` より低いことを示し、負の値は `arena1` の方が高いことを示す。片方が `partial` の場合は `comparisonStatus="partial"` とし、delta 値は出さず、`excludedReason` と partial reason だけを出す。片方が `failed` または未指定の場合は `comparisonStatus="skipped"` とする。
 
+top-level `scenarioComparisons[]` には fixture scenario 間比較を入れる。
+
+- `comparisonType`: `scenario`。
+- `mode`。
+- `runKind`。
+- `allocatorProfile`。
+- `baseScenarioId`。
+- `compareScenarioId`。
+- `metric`: `peak_to_settled_delta_kb`、`headers_to_body_peak_delta_kb` など。
+- `deltaKb`: `compare - base`。比較できない場合は `null`。
+- `ratio`: `compare / base`。比較できない場合は `null`。
+- `comparisonStatus`: `ok`、`partial`、`skipped` のいずれか。
+- `excludedReason`: 比較から除外する理由。比較可能なら省略する。
+
+`prefix-full-dense` と `prefix-full-sparse`、`prefix-full-dense` と `multifile-full-dense` の scenario comparison を report に残す。片方が `partial` の場合は `comparisonStatus="partial"`、片方が `failed` または未実行の場合は `comparisonStatus="skipped"` とし、delta と ratio は `null` にする。
+
 `peak_to_settled_delta_kb` と `peak_to_settled_ratio` が大きい場合は一時 live allocation 候補、`request_started_to_headers_delta_kb` が目立つ場合は server 側 JSON 直列化または response 構築候補、`headers_to_body_delta_kb`、`headers_to_body_peak_delta_kb`、`body_peak_to_body_received_delta_kb` が目立つ場合は post-header body drain または socket buffering 候補、`default_vs_arena1_settled_delta_kb` が正方向に目立つ場合は glibc allocator retained memory 候補として記録する。数値 threshold は CI や自動判定に入れず、`docs/todo/BACKLOG.md` には実測値と解釈を併記する。
 
 - `prefix-full-dense` だけが高く、`prefix-full-sparse` や multifile 対照が低い場合は、prefix many-match 経路固有の問題として扱う。
@@ -166,6 +212,10 @@ scenario ごとに `status` を記録し、他 scenario は可能な限り継続
 `partial` は `partialMeasurementReasons` と `decisionExcludedReason` を持ち、Done 判断や比較結論の根拠から除外する。既存の `procComplete=false` は `partial` status へ対応付ける。
 
 `runMeasuredScenario()` の成功結果を `runMeasurement()` が report 化するとき、`procComplete ? "ok" : "partial"` で `status` を決める。top-level report には `acceptanceStatus: "full" | "partial" | "failed"` と `fullAcceptanceMet: boolean` を必ず出す。`partial` は JSON report 生成自体は成功とみなし、通常 process exit code は `0` とする。ただし `acceptanceStatus="partial"`、`fullAcceptanceMet=false` とし、completion report と `docs/todo/BACKLOG.md` では Full acceptance 未達として扱う。`failed` が 1 件以上ある場合は `acceptanceStatus="failed"`、`fullAcceptanceMet=false`、通常 process exit code `1` にする。
+
+fixture 生成も per-fixture / per-scenario の catch 対象にする。既存実装のように `createFixture(root, fixtureKind, scale)` が scenario loop の外で例外を投げる形にはしない。`createFixture(root, fixtureKind, scale, density)` が失敗した場合は、該当 `fixtureKind`、`fixtureScale`、`fixtureDensity`、`mode`、`runKind`、`allocatorProfile` の report を `status="failed"`、`errorKind="fixture_failed"`、sanitized error fields 付きで出し、残り matrix は可能な限り継続する。
+
+error fields は `errorCode`、`sanitizedMessage`、`redactedContext` に限定する。raw stderr、raw process args、実パス、fixture 本文断片、HTTP response body、raw `/proc` 行、親 process env 値を error fields に入れない。
 
 自動実行や CI 用に `--strict` を追加する。`--strict` では `acceptanceStatus` が `full` でない場合、つまり `partial` または `failed` が 1 件以上ある場合に process exit code を non-zero にする。
 
@@ -186,7 +236,7 @@ sandbox の loopback bind 制限で server 起動が失敗する場合は、承�
 
 実装時の主な変更対象は次の 2 ファイルである。
 
-- `scripts/measure-search-rss-plateau.mjs`: `--timeline`、`--strict`、`--fixture-density`、`--settled-delays`、snapshot 名、sampling 間隔、timeline peaks、timeline report、derived fields、self-test。
+- `scripts/measure-search-rss-plateau.mjs`: `--timeline`、`--strict`、`--self-test`、`--fixture-density`、`--settled-delays`、snapshot 名、sampling 間隔、timeline peaks、timeline report、derived fields、self-test。
 - `docs/todo/BACKLOG.md`: 測定結果、判断、残件、セキュリティ境界維持。
 
 設計書としてこのファイルを追加する。
@@ -200,7 +250,7 @@ docs/config/script 変更なので、ceremonial TDD ではなく validation を�
 実装後に確認する項目は次の通り。
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
+node scripts/measure-search-rss-plateau.mjs --self-test
 node scripts/measure-search-rss-plateau.mjs --help
 node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
 git diff --check
@@ -210,14 +260,15 @@ git diff --check
 prefix 固有性を結論する場合は、追加で次を確認する。
 
 ```bash
-node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density sparse --settled-delays 1s,5s --allocator-profiles default,arena1
-node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures multifile --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density sparse --settled-delays 1s,5s --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures multifile --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
 ```
 
 `--timeline` が sandbox の loopback bind で失敗した場合は、承認付きで再実行する。承認されない場合は、未実行または失敗理由を completion report に残し、full acceptance 未達として扱う。
 
 self-test では次を固定する。
 
+- `--self-test` の parse。既存 `--self-test-sanitization` は後方互換 alias として残す。
 - `--timeline` と `--strict` の parse。
 - `--timeline`、`--fixture-density`、`--settled-delays` と `--smoke` の併用拒否。
 - `--fixture-density` と `--settled-delays` の timeline 専用 parse と不正値拒否。
@@ -227,13 +278,20 @@ self-test では次を固定する。
 - fake HTTP response による `headers_received` と `body_received` の分離。
 - `settled_1s` / `settled_5s` / 任意の `settled_15s` の delay 設定。
 - body drain 中だけ一時的に増える fake sample が `headers_to_body_peak_delta_kb` と `body_peak_to_body_received_delta_kb` に反映されること。
+- sampling summary に `samplingIntervalMs=50`、monotonic clock、`sampleCount`、`maxSamples`、`missedSampleReasons[]`、`droppedSampleReasons[]` が出ること。
 - timeline report sanitization が実パス、ユーザー名、本文断片、raw maps 行を出さないこと。
+- error fields が `errorCode`、`sanitizedMessage`、`redactedContext` に限定され、raw stderr、raw process args、実パス、本文断片、raw `/proc`、親 process env 値を出さないこと。
 - `fixtureDensity=sparse` が既存 fixture matrix と矛盾せず、`resultsLength=100` と `result_limit` 契約を維持すること。
 - fake `/proc` 欠落と `smaps_rollup` 権限不足が `status="partial"`、`partialMeasurementReasons`、`decisionExcludedReason` を出すこと。
 - server 起動失敗、HTTP failure、JSON failure、fixture 生成失敗、timeout が `status="failed"` になること。
+- fixture 生成失敗が `errorKind="fixture_failed"` として report 化され、残り matrix が継続されること。
 - failed scenario 後も残り scenario が report され、process exit code が `1` になること。
+- 全 scenario が `ok` の場合は `acceptanceStatus="full"`、`fullAcceptanceMet=true`、`--strict` でも exit code `0` になること。
 - partial だけの場合は通常 process exit code が `0`、`acceptanceStatus="partial"`、`fullAcceptanceMet=false` になり、`--strict` では non-zero になること。
 - `comparisons[]` が `mode`、`runKind`、`fixtureKind`、`fixtureScale`、`fixtureDensity`、`settledDelayMs`、profile pair で一意になり、partial 比較では delta 値を出さないこと。
+- `comparisons[]` が top-level にあり、`reports[]` 配下に出ないこと。
+- default のみ指定、arena1 failed、片側欠損の fake report group が `comparisonStatus="skipped"`、`missingProfiles`、`excludedReason`、delta 非出力になること。
+- `scenarioComparisons[]` が top-level にあり、prefix dense/sparse と prefix dense/multifile の比較を `ok` / `partial` / `skipped` で固定すること。
 
 ## セキュリティ
 
@@ -273,7 +331,7 @@ JSON report の `measurementContext` には再現性に必要な `node`、`rustc
 Full acceptance:
 
 - `scripts/measure-search-rss-plateau.mjs` が opt-in の timeline 測定を実行できる。
-- timeline report に `timeline.snapshots[]`、`timeline.peaks`、`timeline.derived`、`comparisons[]`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs`、`acceptanceStatus`、`fullAcceptanceMet` が含まれる。
+- timeline report に `timeline.snapshots[]`、`timeline.peaks`、`timeline.samplingSummary`、`timeline.derived`、`comparisons[]`、`scenarioComparisons[]`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs`、`acceptanceStatus`、`fullAcceptanceMet` が含まれる。
 - release / prefix / full / dense / cold で `default` と `arena1` の timeline 比較結果を得る。
 - prefix 固有性を結論する場合は、prefix-full-sparse/cold と multifile-full-dense/cold の対照測定も成功している。
 - `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、server response 構築候補、post-header body drain 候補、次に必要な作業が記録される。
@@ -301,22 +359,27 @@ loopback bind 承認、release build、full fixture timeline 測定、`--settled
 設計書自体は docs-only なので、次で検証する。
 
 ```bash
+set -euo pipefail
 for heading in \
   "目的" "非ゴール" "測定アーキテクチャ" "比較 fixture" "判定方針" "エラー処理" \
   "データ更新" "テストと検証" "セキュリティ" "影響範囲" "ロールバック" \
   "受け入れ基準" "見積もり" "文書検証"
 do
-  rg -q "^## ${heading}$" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
+  rg -q "^## ${heading}$" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md \
+    || { printf 'missing heading: %s\n' "$heading"; exit 1; }
 done
 content_before_validation="$(sed '/^## 文書検証$/,$d' docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md)"
 for term in \
   'fixtureDensity' 'scenarioId' 'timeline\.snapshots\[\]' 'timeline\.peaks' \
-  'timeline\.derived' 'comparisons\[\]' '--fixture-density' '--settled-delays' \
-  '--strict' 'requestPeakRss' 'requestPeakAnon' 'bodyDrainPeakRss' \
+  'timeline\.samplingSummary' 'timeline\.derived' 'comparisons\[\]' 'scenarioComparisons\[\]' \
+  '--fixture-density' '--settled-delays' '--strict' '--self-test' \
+  'requestPeakRss' 'requestPeakAnon' 'bodyDrainPeakRss' \
   'bodyDrainPeakAnon' 'headers_to_body_peak_delta_kb' 'partialMeasurementReasons' \
-  'decisionExcludedReason' 'acceptanceStatus' 'fullAcceptanceMet'
+  'decisionExcludedReason' 'acceptanceStatus' 'fullAcceptanceMet' 'fixture_failed' \
+  'samplingIntervalMs' 'droppedSampleReasons' 'sanitizedMessage'
 do
-  printf '%s\n' "$content_before_validation" | rg -q -- "${term}"
+  printf '%s\n' "$content_before_validation" | rg -q -- "${term}" \
+    || { printf 'missing term: %s\n' "$term"; exit 1; }
 done
 placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\\.md| Issues)|未[定]' docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
