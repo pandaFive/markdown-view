@@ -35,10 +35,22 @@ node scripts/measure-search-rss-plateau.mjs \
   --fixtures prefix \
   --runs cold \
   --fixture-scale full \
+  --fixture-density dense \
+  --settled-delays 1s,5s \
   --allocator-profiles default,arena1
 ```
 
-`--timeline` は重い診断モードとして扱い、`--smoke` とは併用不可にする。既存 `--smoke` は軽量な dev/prefix/cold/default の契約確認に限定し、timeline sampling を暗黙に走らせない。
+`--timeline` は重い診断モードとして扱い、`--smoke` とは併用不可にする。既存 `--smoke` は軽量な dev/prefix/cold/default の契約確認に限定し、timeline sampling を暗黙に走らせない。`--fixture-density` は `dense` / `sparse` を受け取り、既定は `dense` とする。`--settled-delays` は `1s,5s` を既定にし、追加確認が必要な場合だけ `1s,5s,15s` を指定する。
+
+report には既存の `fixtureKind` と `fixtureScale` を維持し、timeline 用に次の field を追加する。
+
+- `fixtureDensity`: `dense` または `sparse`。
+- `scenarioId`: `prefix-full-dense` のように fixture kind、scale、density を連結した表示用 ID。
+- `timeline.settledDelaysMs`: 実際に採取した settled delay の millisecond 配列。
+- `timeline.snapshots[]`: snapshot の時系列配列。
+- `timeline.derived`: 判定補助用の差分と比率。
+
+`prefix-full` という語は `--fixtures prefix --fixture-scale full --fixture-density dense` の短い説明名であり、CLI の fixture kind ではない。
 
 timeline 測定では、scenario ごとに次の snapshot を記録する。
 
@@ -49,15 +61,18 @@ timeline 測定では、scenario ごとに次の snapshot を記録する。
 - `body_received`: response body 受信完了直後。
 - `settled_1s`: body 受信完了から 1 秒後。
 - `settled_5s`: body 受信完了から 5 秒後。
-- `settled_15s`: 指定時のみ body 受信完了から 15 秒後。
+- `settled_15s`: `--settled-delays` に `15s` が含まれる場合だけ body 受信完了から 15 秒後。
 
 各 snapshot には、取得できる範囲で次を含める。
 
+- `name`。
 - `VmRSS`、`RssAnon`、`RssFile`、`RssShmem`。
 - `smaps_rollup Anonymous`。
 - elapsed milliseconds。
 - `/proc` 取得 completeness。
 - scenario error。
+
+timeline 用 request path は通常測定の `requestSearch()` と分ける。`fetch()` が response headers を返した直後に `headers_received` を採取し、その後に body stream を `readResponseTextWithLimit()` 相当の上限付き処理で読み切って `body_received` を採取する。response body 読み取りの開始/終了 elapsed と response bytes は report に含める。
 
 HTTP response については、既存と同じ契約値を記録する。
 
@@ -72,47 +87,58 @@ HTTP response については、既存と同じ契約値を記録する。
 
 比較対象は最小限に抑える。
 
-- `prefix-full`: 既存の full prefix many-match fixture。
-- `prefix-sparse`: full prefix と近い byte サイズで hit 密度を下げた fixture。
+- `prefix-full-dense`: `--fixtures prefix --fixture-scale full --fixture-density dense` の主対象。
+- `prefix-full-sparse`: `--fixtures prefix --fixture-scale full --fixture-density sparse` の対照。
 - `multifile` または short fallback: prefix 経路固有性を確認する対照。
 
-`prefix-sparse` は、同程度の読み込み量でも hit 密度と result-limit 到達位置が異なる場合に peak / settled の差が変わるかを見るための補助 fixture である。測定 matrix が過剰にならないよう、既定 timeline run では `prefix-full` を主対象にし、`prefix-sparse` と対照 fixture は明示指定時だけ実行する。
+`prefix-full-sparse` は、同程度の読み込み量でも hit 密度と result-limit 到達位置が異なる場合に peak / settled の差が変わるかを見るための補助 scenario である。`sparse` でも `resultsLength=100` と `truncated_reasons=["result_limit"]` に到達する fixture とし、既存 `validateScenarioResult()` の検索契約を緩めない。測定 matrix が過剰にならないよう、既定 timeline run では `prefix-full-dense` を主対象にし、prefix 固有性を結論する場合だけ `prefix-full-sparse` と `multifile/full/dense` も実行する。
 
 allocator profile は `default` と `arena1` を基本にする。`arena2` は必要時の任意 profile とし、timeline の受け入れ基準には含めない。
 
 ## 判定方針
 
-timeline の判定は絶対 RSS ではなく、scenario 内と profile 間の相対差で行う。
+timeline の判定は絶対 RSS ではなく、scenario 内と profile 間の相対差で行う。script は自動分類を行わず、次の derived fields を人間判断用の補助値として出力する。
 
-- `request_peak` が高く、`body_received` または `settled_1s` 以降で大きく下がる場合は、一時 live allocation の寄与が強い候補とする。
-- `request_peak` と `settled_5s` が近い場合は、allocator retained memory または保持された構造の寄与が強い候補とする。
-- `headers_received` から `body_received` までの差が大きい場合は、JSON 直列化または response buffering の寄与候補とする。
-- `default` と `arena1` の `settled_5s` 差が大きい場合は、glibc allocator retained memory の寄与候補とする。
-- `prefix-full` だけが高く、`prefix-sparse` や multifile 対照が低い場合は、prefix many-match 経路固有の問題として扱う。
+- `peak_to_settled_delta_kb`: `request_peak` と最長 settled snapshot の `RssAnon` 差。
+- `peak_to_settled_ratio`: `request_peak.RssAnon / settled.RssAnon`。
+- `headers_to_body_delta_kb`: `headers_received` と `body_received` の `RssAnon` 差。
+- `default_vs_arena1_settled_delta_kb`: 同一 scenario の `default` と `arena1` の settled `RssAnon` 差。
+
+`peak_to_settled_delta_kb` と `peak_to_settled_ratio` が大きい場合は一時 live allocation 候補、`headers_to_body_delta_kb` が目立つ場合は JSON 直列化または response buffering 候補、`default_vs_arena1_settled_delta_kb` が目立つ場合は glibc allocator retained memory 候補として記録する。数値 threshold は CI や自動判定に入れず、`docs/todo/BACKLOG.md` には実測値と解釈を併記する。
+
+- `prefix-full-dense` だけが高く、`prefix-full-sparse` や multifile 対照が低い場合は、prefix many-match 経路固有の問題として扱う。
 - `/proc` 取得が不完全な scenario は判定から除外し、部分測定として記録する。
 
 RSS は OS、allocator、CPU、ディスクキャッシュ、同時実行 process の影響を受けるため、CI test に絶対しきい値は入れない。
 
 ## エラー処理
 
-scenario ごとに失敗を記録し、他 scenario は可能な限り継続する。記録対象の失敗は次を含める。
+scenario ごとに `status` を記録し、他 scenario は可能な限り継続する。
+
+- `ok`: HTTP 契約、JSON 契約、`/proc` snapshot がすべて揃った。
+- `partial`: HTTP 契約と JSON 契約は成功したが、`/proc` または `smaps_rollup` の一部が不完全だった。
+- `failed`: server 起動、HTTP、JSON 契約、fixture 生成、body parse、timeout のいずれかが失敗した。
+
+`partial` は `partialMeasurementReasons` と `decisionExcludedReason` を持ち、Done 判断や比較結論の根拠から除外する。既存の `procComplete=false` は `partial` status へ対応付ける。
+
+記録対象の失敗は次を含める。
 
 - port 衝突。
 - server 起動失敗。
 - HTTP timeout。
 - response body parse failure。
 - JSON 契約不一致。
-- `/proc` 欠落。
-- `smaps_rollup` 権限不足。
 - fixture 生成失敗。
 
-sandbox の loopback bind 制限で server 起動が失敗する場合は、承認付き実行が必要になる。承認されない場合は、self-test と文書検証までを完了範囲とし、timeline 実測は残リスクとして報告する。
+HTTP 契約が成功している場合の `/proc` 欠落と `smaps_rollup` 権限不足は `failed` ではなく `partial` とする。
+
+sandbox の loopback bind 制限で server 起動が失敗する場合は、承認付き実行が必要になる。承認されない場合は、self-test と文書検証までを `Sandbox-limited partial validation` とし、full acceptance 未達として completion report に残す。
 
 ## データ更新
 
 実装時の主な変更対象は次の 2 ファイルである。
 
-- `scripts/measure-search-rss-plateau.mjs`: `--timeline`、snapshot 名、sampling 間隔、timeline report、self-test。
+- `scripts/measure-search-rss-plateau.mjs`: `--timeline`、`--fixture-density`、`--settled-delays`、snapshot 名、sampling 間隔、timeline report、derived fields、self-test。
 - `docs/todo/BACKLOG.md`: 測定結果、判断、残件、セキュリティ境界維持。
 
 設計書としてこのファイルを追加する。
@@ -128,20 +154,31 @@ docs/config/script 変更なので、ceremonial TDD ではなく validation を�
 ```bash
 node scripts/measure-search-rss-plateau.mjs --self-test-sanitization
 node scripts/measure-search-rss-plateau.mjs --help
-node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures prefix --runs cold --fixture-scale full --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
 git diff --check
 ./verify.sh
 ```
 
-`--timeline` が sandbox の loopback bind で失敗した場合は、承認付きで再実行する。承認されない場合は、未実行または失敗理由を completion report に残す。
+prefix 固有性を結論する場合は、追加で次を確認する。
+
+```bash
+node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density sparse --settled-delays 1s,5s --allocator-profiles default,arena1
+node scripts/measure-search-rss-plateau.mjs --timeline --modes release --fixtures multifile --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1
+```
+
+`--timeline` が sandbox の loopback bind で失敗した場合は、承認付きで再実行する。承認されない場合は、未実行または失敗理由を completion report に残し、full acceptance 未達として扱う。
 
 self-test では次を固定する。
 
 - `--timeline` の parse。
 - `--timeline` と `--smoke` の併用拒否。
-- timeline snapshot 名の安定性。
+- `--fixture-density` と `--settled-delays` の parse と不正値拒否。
+- timeline snapshot 名、順序、elapsed 単調性。
+- fake sampler による `request_peak` 算出。
+- fake HTTP response による `headers_received` と `body_received` の分離。
+- `settled_1s` / `settled_5s` / 任意の `settled_15s` の delay 設定。
 - timeline report sanitization が実パス、ユーザー名、本文断片、raw maps 行を出さないこと。
-- `prefix-sparse` fixture 指定が既存 fixture matrix と矛盾しないこと。
+- `fixtureDensity=sparse` が既存 fixture matrix と矛盾せず、`resultsLength=100` と `result_limit` 契約を維持すること。
 
 ## セキュリティ
 
@@ -176,27 +213,39 @@ server process に追加する環境変数は、allocator profile 定義で許�
 
 ## 受け入れ基準
 
+Full acceptance:
+
 - `scripts/measure-search-rss-plateau.mjs` が opt-in の timeline 測定を実行できる。
-- timeline report に request 前、request 中 peak、headers 受信時、body 受信完了後、settled snapshot が含まれる。
-- release/prefix/full/cold で `default` と `arena1` の timeline 比較結果を得る。
+- timeline report に `timeline.snapshots[]`、`timeline.derived`、`scenarioId`、`fixtureDensity`、`timeline.settledDelaysMs` が含まれる。
+- release / prefix / full / dense / cold で `default` と `arena1` の timeline 比較結果を得る。
+- prefix 固有性を結論する場合は、prefix / full / sparse / cold と multifile / full / dense / cold の対照測定も成功している。
 - `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、response buffering 候補、次に必要な作業が記録される。
 - 検索 API 契約、Host/Origin/path validation、HTML sanitize、CSP、検索上限契約を弱めていないことが記録される。
 - self-test と文書 validation が成功する。
 - `./verify.sh` が pass する。未実行または失敗がある場合は、理由と残リスクを報告する。
+
+Sandbox-limited partial validation:
+
+- self-test、help、文書 validation、`git diff --check` は成功している。
+- loopback bind 制限や承認不可により timeline 実測が未実行の場合、full acceptance 未達として completion report に明記している。
+- `docs/todo/BACKLOG.md` を Done 扱いにせず、実測未完了の残リスクと次作業候補を残している。
+
+completion report には、変更ファイルと理由、rough line impact、影響する依存ファイル、実行した検証、未実行検証、残リスク、次作業候補、セキュリティ境界維持を含める。
 
 ## 見積もり
 
 - 人間作業: 1.5-3 時間。
 - Codex / AI 支援: 45-90 分。
 
-loopback bind 承認、release build、full fixture timeline 測定、15 秒 settled snapshot の有無で変動する。
+loopback bind 承認、release build、full fixture timeline 測定、`--settled-delays` に `15s` を含めるかどうかで変動する。
 
 ## 文書検証
 
 設計書自体は docs-only なので、次で検証する。
 
 ```bash
-rg -n "目的|非ゴール|測定アーキテクチャ|比較 fixture|判定方針|エラー処理|データ更新|テストと検証|セキュリティ|影響範囲|ロールバック|受け入れ基準|見積もり" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
+rg -n "目的|非ゴール|測定アーキテクチャ|比較 fixture|判定方針|エラー処理|データ更新|テストと検証|セキュリティ|影響範囲|ロールバック|受け入れ基準|Full acceptance|Sandbox-limited partial validation|見積もり" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
+rg -n "fixtureDensity|scenarioId|timeline\\.snapshots|timeline\\.derived|--fixture-density|--settled-delays|partialMeasurementReasons|decisionExcludedReason" docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md
 placeholder_matches="$(rg -n -P 'T[B]D|TO[D]O(?!\\.md| Issues)|未[定]' docs/superpowers/specs/2026-06-08-search-rss-live-allocation-timeline-design.md | rg -v 'T\\[B\\]D|TO\\[D\\]O|未\\[定\\]' || :)"
 test -z "$placeholder_matches" || { printf '%s\n' "$placeholder_matches"; exit 1; }
 git diff --check
