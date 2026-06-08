@@ -302,15 +302,15 @@ Options:
   --self-test-sanitization       Alias for --self-test.
   --smoke                        Run a short dev/prefix/cold measurement.
                                  Cannot be combined with --timeline, --modes, --fixtures, --runs, --fixture-scale, --fixture-density, --settled-delays, or --allocator-profiles.
-  --timeline                     Run opt-in timeline diagnostics with request/body/settled snapshots.
-  --strict                       Exit non-zero unless timeline acceptance status is full.
+  --timeline                     Parse timeline options only; measurement is not implemented yet.
+  --strict                       Timeline reports only: exit non-zero unless acceptance status is full.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
                                  Fixture kinds to measure. Default: prefix.
   --runs cold,warm               Run kinds to measure. Default: cold.
   --fixture-scale short,full     Fixture size. Default: short.
-  --fixture-density dense,sparse Timeline-only prefix density. Default: dense.
-  --settled-delays 1s,5s         Timeline-only settled snapshots. Also supports 1s,5s,15s.
+  --fixture-density dense,sparse Timeline-only prefix density. Must exactly match dense, sparse, or dense,sparse. Default: dense.
+  --settled-delays 1s,5s         Timeline-only settled snapshots. Must exactly match 1s,5s or 1s,5s,15s.
   --allocator-profiles default,arena1,arena2
                                  Allocator profiles for measured server process. Default: default.
   --port <number>                Local port. Default: ${DEFAULT_PORT}.
@@ -467,6 +467,10 @@ function runSanitizationSelfTest() {
   assert.equal(parseArgs(['--self-test-sanitization']).selfTest, true);
   assert.equal(parseArgs(['--timeline']).timeline, true);
   assert.equal(parseArgs(['--strict']).strict, true);
+  assert.throws(
+    () => assertTimelineMeasurementImplemented(parseArgs(['--timeline'])),
+    /--timeline measurement is not implemented yet/
+  );
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense']).fixtureDensities, ['dense']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'sparse']).fixtureDensities, ['sparse']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense,sparse']).fixtureDensities, ['dense', 'sparse']);
@@ -1349,6 +1353,8 @@ function isChildExited(child) {
 }
 
 async function runMeasurement(options) {
+  assertTimelineMeasurementImplemented(options);
+
   const root = createFixtureRoot();
   try {
     const reports = [];
@@ -1398,6 +1404,12 @@ async function runMeasurement(options) {
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
     }
+  }
+}
+
+function assertTimelineMeasurementImplemented(options) {
+  if (options.timeline) {
+    throw new Error('--timeline measurement is not implemented yet; continue with timeline implementation tasks');
   }
 }
 
