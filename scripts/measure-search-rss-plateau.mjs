@@ -302,7 +302,7 @@ Options:
   --self-test-sanitization       Alias for --self-test.
   --smoke                        Run a short dev/prefix/cold measurement.
                                  Cannot be combined with --timeline, --modes, --fixtures, --runs, --fixture-scale, --fixture-density, --settled-delays, or --allocator-profiles.
-  --timeline                     Parse timeline options only; measurement is not implemented yet.
+  --timeline                     Run opt-in timeline diagnostics with request/body/settled snapshots.
   --strict                       Timeline reports only: exit non-zero unless acceptance status is full.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
@@ -467,10 +467,6 @@ function runSanitizationSelfTest() {
   assert.equal(parseArgs(['--self-test-sanitization']).selfTest, true);
   assert.equal(parseArgs(['--timeline']).timeline, true);
   assert.equal(parseArgs(['--strict']).strict, true);
-  assert.throws(
-    () => assertTimelineMeasurementImplemented(parseArgs(['--timeline'])),
-    /--timeline measurement is not implemented yet/
-  );
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense']).fixtureDensities, ['dense']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'sparse']).fixtureDensities, ['sparse']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense,sparse']).fixtureDensities, ['dense', 'sparse']);
@@ -616,6 +612,26 @@ function runSanitizationSelfTest() {
     responseBytes: 1234,
   });
   assert.equal(bodyDrainTimeline.peaks.bodyDrainPeakAnon.name, 'sample_after_headers');
+  assert.deepEqual(statusForProcCompleteness({ procComplete: true, partialMeasurementReasons: [] }), { status: 'ok' });
+  assert.deepEqual(statusForProcCompleteness({ procComplete: false, partialMeasurementReasons: ['maps:missing'] }), {
+    status: 'partial',
+    partialMeasurementReasons: ['maps:missing'],
+    decisionExcludedReason: 'partial_proc_measurement',
+  });
+  const fixtureFailureReport = failedScenarioReport({
+    fixtureKind: 'prefix',
+    fixtureDensity: 'dense',
+    scenarioId: 'prefix-short-dense',
+    mode: 'dev',
+    runKind: 'cold',
+    allocatorProfile: 'default',
+    error: new Error('fixture failed: synthetic'),
+    errorCode: 'fixture_failed',
+  });
+  assert.equal(fixtureFailureReport.status, 'failed');
+  assert.equal(fixtureFailureReport.scenarioError.errorCode, 'fixture_failed');
+  assert.equal(Object.hasOwn(fixtureFailureReport.scenarioError, 'rawStderr'), false);
+  assert.equal(Object.hasOwn(fixtureFailureReport, 'errorKind'), false);
 
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
@@ -1108,6 +1124,80 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       warmupResponse = await requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS);
       validateScenarioResult(fixture.fixtureKind, warmupResponse);
     }
+    if (options.timeline) {
+      const startedAt = process.hrtime.bigint();
+      const eventSnapshots = [];
+      const sampleSnapshots = [];
+      const elapsed = () => Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      eventSnapshots.push(namedSnapshot('server_ready', elapsed(), readProcSnapshot(server.pid)));
+      const requestStartedElapsedMs = elapsed();
+      eventSnapshots.push(namedSnapshot('request_started', requestStartedElapsedMs, readProcSnapshot(server.pid)));
+      let headersCaptured = false;
+      const requestPromise = trackPromise(requestSearchTimeline(options.port, options.query, REQUEST_TIMEOUT_MS, () => {
+        headersCaptured = true;
+        eventSnapshots.push(namedSnapshot('headers_received', elapsed(), readProcSnapshot(server.pid)));
+      }));
+      let sampleIndex = 0;
+      while (!isPromiseSettled(requestPromise) && sampleSnapshots.length < MAX_SAMPLES) {
+        sampleSnapshots.push(namedSnapshot(
+          `sample_${String(sampleIndex).padStart(4, '0')}`,
+          elapsed(),
+          readProcSnapshot(server.pid),
+          'sampling',
+          sampleIndex
+        ));
+        sampleIndex += 1;
+        await delay(SAMPLE_INTERVAL_MS);
+      }
+      if (!isPromiseSettled(requestPromise)) {
+        requestPromise.abort?.();
+        throw new Error('request sampling limit exceeded');
+      }
+      const response = await requestPromise;
+      validateScenarioResult(fixture.fixtureKind, response);
+      const bodyReadStartElapsedMs = requestStartedElapsedMs + response.bodyReadStartElapsedMs;
+      const bodyReadEndElapsedMs = requestStartedElapsedMs + response.bodyReadEndElapsedMs;
+      if (!headersCaptured) {
+        eventSnapshots.push(namedSnapshot('headers_received', bodyReadStartElapsedMs, readProcSnapshot(server.pid)));
+      }
+      const bodyReceivedElapsedMs = bodyReadEndElapsedMs;
+      eventSnapshots.push(namedSnapshot('body_received', bodyReceivedElapsedMs, readProcSnapshot(server.pid)));
+      for (const delayMs of options.settledDelaysMs) {
+        const elapsedSinceBodyReceived = elapsed() - bodyReceivedElapsedMs;
+        if (elapsedSinceBodyReceived < delayMs) {
+          await delay(delayMs - elapsedSinceBodyReceived);
+        }
+        eventSnapshots.push(namedSnapshot(`settled_${delayMs / 1000}s`, elapsed(), readProcSnapshot(server.pid)));
+      }
+      const timeline = buildTimelineReport({
+        eventSnapshots,
+        sampleSnapshots,
+        settledDelaysMs: options.settledDelaysMs,
+        bodyReadStartElapsedMs,
+        bodyReadEndElapsedMs,
+        responseBytes: response.responseBytes,
+      });
+      const responseReport = { ...response, bodyReadStartElapsedMs, bodyReadEndElapsedMs };
+      const procCompleteness = summarizeProcCompleteness(timeline.snapshots.map((snapshot) => ({
+        status: snapshot.status,
+        smapsRollup: snapshot.smapsRollup,
+        maps: snapshot.maps,
+      })));
+      return {
+        mode,
+        runKind,
+        allocatorProfile: allocator,
+        pid: server.pid,
+        elapsedMs: bodyReadEndElapsedMs,
+        peakRssKb: timeline.peaks.requestPeakRss?.status?.VmRSS ?? null,
+        procComplete: procCompleteness.procComplete,
+        partialMeasurementReasons: procCompleteness.partialMeasurementReasons,
+        ...statusForProcCompleteness(procCompleteness),
+        timeline,
+        ...(warmupResponse ? { warmupResponse } : {}),
+        response: responseReport,
+      };
+    }
     const before = readProcSnapshot(server.pid);
     const startedAt = process.hrtime.bigint();
     const requestPromise = trackPromise(requestSearch(options.port, options.query, REQUEST_TIMEOUT_MS));
@@ -1319,6 +1409,32 @@ function requestSearch(port, query, timeoutMs) {
       });
       const body = await readResponseTextWithLimit(response, MAX_RESPONSE_BYTES);
       return summarizeSearchResponse(response, body, query);
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+  promise.abort = () => controller.abort();
+  return promise;
+}
+
+function requestSearchTimeline(port, query, timeoutMs, onHeaders) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  const startedAt = process.hrtime.bigint();
+  const promise = (async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/search?q=${encodeURIComponent(query)}`, {
+        headers: { Host: `127.0.0.1:${port}` },
+        signal: controller.signal,
+      });
+      onHeaders?.(response);
+      const bodyReadStartElapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      const body = await readResponseTextWithLimit(response, MAX_RESPONSE_BYTES);
+      const bodyReadEndElapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      const summary = summarizeSearchResponse(response, body, query);
+      return { ...summary, bodyReadStartElapsedMs, bodyReadEndElapsedMs };
     } finally {
       clearTimeout(timeout);
     }
@@ -1583,16 +1699,77 @@ function isChildExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
-async function runMeasurement(options) {
-  assertTimelineMeasurementImplemented(options);
+function statusForProcCompleteness(procCompleteness) {
+  if (procCompleteness.procComplete) {
+    return { status: 'ok' };
+  }
+  return {
+    status: 'partial',
+    partialMeasurementReasons: procCompleteness.partialMeasurementReasons,
+    decisionExcludedReason: 'partial_proc_measurement',
+  };
+}
 
+function scenarioErrorFields(error, errorCode = classifyError(error)) {
+  return {
+    errorCode,
+    sanitizedMessage: sanitizeProcessOutput(errorMessage(error)),
+    redactedContext: {},
+  };
+}
+
+function failedScenarioReport({
+  fixtureKind,
+  fixtureDensity,
+  scenarioId,
+  mode,
+  runKind,
+  allocatorProfile,
+  error,
+  errorCode,
+}) {
+  return {
+    fixtureKind,
+    fixtureDensity,
+    scenarioId,
+    mode,
+    runKind,
+    allocatorProfile: allocatorProfileReport(allocatorProfile),
+    status: 'failed',
+    scenarioError: scenarioErrorFields(error, errorCode),
+  };
+}
+
+async function runMeasurement(options) {
   const root = createFixtureRoot();
   try {
     const reports = [];
     let failed = false;
     for (const fixtureKind of options.fixtures) {
       for (const fixtureDensity of options.fixtureDensities) {
-        const fixture = createFixture(root, fixtureKind, options.fixtureScale, fixtureDensity);
+        let fixture;
+        try {
+          fixture = createFixture(root, fixtureKind, options.fixtureScale, fixtureDensity);
+        } catch (error) {
+          failed = true;
+          for (const mode of options.modes) {
+            for (const allocatorProfile of options.allocatorProfiles) {
+              for (const runKind of options.runs) {
+                reports.push(failedScenarioReport({
+                  fixtureKind,
+                  fixtureDensity,
+                  scenarioId: `${fixtureKind}-${options.fixtureScale}-${fixtureDensity}`,
+                  mode,
+                  runKind,
+                  allocatorProfile,
+                  error,
+                  errorCode: 'fixture_failed',
+                }));
+              }
+            }
+          }
+          continue;
+        }
         for (const mode of options.modes) {
           for (const allocatorProfile of options.allocatorProfiles) {
             for (const runKind of options.runs) {
@@ -1613,7 +1790,7 @@ async function runMeasurement(options) {
                 const scenario = await runMeasuredScenario(options, fixture, mode, runKind, allocatorProfile);
                 reports.push({
                   ...baseReport,
-                  status: 'ok',
+                  status: scenario.status ?? 'ok',
                   ...scenario,
                 });
               } catch (error) {
@@ -1621,7 +1798,7 @@ async function runMeasurement(options) {
                 reports.push({
                   ...baseReport,
                   status: 'failed',
-                  ...errorReportFields(error),
+                  scenarioError: scenarioErrorFields(error),
                 });
               }
             }
@@ -1639,12 +1816,6 @@ async function runMeasurement(options) {
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
     }
-  }
-}
-
-function assertTimelineMeasurementImplemented(options) {
-  if (options.timeline) {
-    throw new Error('--timeline measurement is not implemented yet; continue with timeline implementation tasks');
   }
 }
 
