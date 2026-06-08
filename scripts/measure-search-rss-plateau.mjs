@@ -745,6 +745,14 @@ function runSanitizationSelfTest() {
   const partialComparisonSummary = buildReportSummary(partialComparisonReports);
   assert.equal(partialComparisonSummary.acceptanceStatus, 'partial');
   assert.equal(partialComparisonSummary.fullAcceptanceMet, false);
+  const arena2OnlySummary = buildReportSummary([
+    {
+      ...summaryReports[0],
+      allocatorProfile: { name: 'arena2' },
+    },
+  ]);
+  assert.equal(arena2OnlySummary.acceptanceStatus, 'partial');
+  assert.equal(arena2OnlySummary.fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'partial' }]).acceptanceStatus, 'partial');
   assert.equal(buildReportSummary([{ status: 'partial' }]).fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'failed' }]).acceptanceStatus, 'failed');
@@ -1890,14 +1898,17 @@ function failedScenarioReport({
 function buildReportSummary(reports, options = {}) {
   const hasFailed = reports.some((report) => report.status === 'failed');
   const hasPartial = reports.some((report) => report.status === 'partial');
+  const hasTimelineReport = reports.some((report) => report.timeline);
   const comparisons = buildAllocatorComparisons(reports, options);
   const hasIncompleteRequiredAllocatorComparison = comparisons.some((comparison) => (
     isRequiredAllocatorComparison(comparison)
     && comparison.comparisonStatus !== 'ok'
   ));
+  const missingRequiredAllocatorComparison = hasTimelineReport
+    && !hasRequiredAllocatorComparisons(comparisons);
   const acceptanceStatus = hasFailed
     ? 'failed'
-    : hasPartial || hasIncompleteRequiredAllocatorComparison
+    : hasPartial || hasIncompleteRequiredAllocatorComparison || missingRequiredAllocatorComparison
       ? 'partial'
       : 'full';
   return {
@@ -1913,6 +1924,17 @@ function isRequiredAllocatorComparison(comparison) {
     && comparison.compareProfile === 'arena1'
     && typeof comparison.settledSnapshotName === 'string'
     && comparison.settledSnapshotName.startsWith('settled_');
+}
+
+function hasRequiredAllocatorComparisons(comparisons) {
+  return ['settled_1s', 'settled_5s'].every((settledSnapshotName) => (
+    comparisons.some((comparison) => (
+      comparison.baseProfile === 'default'
+      && comparison.compareProfile === 'arena1'
+      && comparison.settledSnapshotName === settledSnapshotName
+      && comparison.comparisonStatus === 'ok'
+    ))
+  ));
 }
 
 function buildAllocatorComparisons(reports, options = {}) {
