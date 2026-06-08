@@ -685,6 +685,62 @@ function runSanitizationSelfTest() {
   assert.equal(cleanupFailureReport.scenarioError.cleanupErrorKind, 'server_stop_failed');
   assert.equal(cleanupFailureReport.scenarioError.cleanupMessage, 'server stop failed for pid 12345');
   assert.equal(Object.hasOwn(cleanupFailureReport, 'cleanupFailed'), false);
+  const summaryReports = [
+    {
+      status: 'ok',
+      fixtureKind: 'prefix',
+      fixtureDensity: 'dense',
+      scenarioId: 'prefix-full-dense',
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: { name: 'default' },
+      timeline: {
+        snapshots: [
+          { name: 'settled_1s', status: { available: true, RssAnon: 5000 } },
+          { name: 'settled_5s', status: { available: true, RssAnon: 4500 } },
+        ],
+        derived: {
+          settledComparisons: [
+            { settledDelayMs: 1000, settledSnapshotName: 'settled_1s', peak_to_settled_delta_kb: 1000, peak_to_settled_ratio: 1.2 },
+            { settledDelayMs: 5000, settledSnapshotName: 'settled_5s', peak_to_settled_delta_kb: 1500, peak_to_settled_ratio: 1.33 },
+          ],
+          headers_to_body_peak_delta_kb: 700,
+        },
+      },
+    },
+    {
+      status: 'ok',
+      fixtureKind: 'prefix',
+      fixtureDensity: 'dense',
+      scenarioId: 'prefix-full-dense',
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: { name: 'arena1' },
+      timeline: {
+        snapshots: [
+          { name: 'settled_1s', status: { available: true, RssAnon: 3000 } },
+          { name: 'settled_5s', status: { available: true, RssAnon: 2500 } },
+        ],
+        derived: {
+          settledComparisons: [
+            { settledDelayMs: 1000, settledSnapshotName: 'settled_1s', peak_to_settled_delta_kb: 800, peak_to_settled_ratio: 1.26 },
+            { settledDelayMs: 5000, settledSnapshotName: 'settled_5s', peak_to_settled_delta_kb: 1100, peak_to_settled_ratio: 1.44 },
+          ],
+          headers_to_body_peak_delta_kb: 500,
+        },
+      },
+    },
+  ];
+  const reportSummary = buildReportSummary(summaryReports);
+  assert.equal(reportSummary.acceptanceStatus, 'full');
+  assert.equal(reportSummary.fullAcceptanceMet, true);
+  assert.equal(reportSummary.comparisons[0].default_vs_arena1_settled_delta_kb, 2000);
+  assert.equal(reportSummary.comparisons[0].comparisonStatus, 'ok');
+  assert.deepEqual(reportSummary.scenarioComparisons, []);
+  assert.equal(buildReportSummary([{ status: 'partial' }]).acceptanceStatus, 'partial');
+  assert.equal(buildReportSummary([{ status: 'partial' }]).fullAcceptanceMet, false);
+  assert.equal(buildReportSummary([{ status: 'failed' }]).acceptanceStatus, 'failed');
+  assert.equal(buildReportSummary([{ status: 'failed' }]).fullAcceptanceMet, false);
 
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
@@ -1823,6 +1879,218 @@ function failedScenarioReport({
   };
 }
 
+function buildReportSummary(reports, options = {}) {
+  const hasFailed = reports.some((report) => report.status === 'failed');
+  const hasPartial = reports.some((report) => report.status === 'partial');
+  return {
+    comparisons: buildAllocatorComparisons(reports, options),
+    scenarioComparisons: buildScenarioComparisons(reports),
+    acceptanceStatus: hasFailed ? 'failed' : hasPartial ? 'partial' : 'full',
+    fullAcceptanceMet: !hasFailed && !hasPartial,
+  };
+}
+
+function buildAllocatorComparisons(reports, options = {}) {
+  const grouped = new Map();
+  for (const report of reports) {
+    const profile = report.allocatorProfile?.name;
+    if (!report.timeline || !profile) {
+      continue;
+    }
+    const key = [
+      report.mode,
+      report.runKind,
+      report.fixtureKind,
+      report.fixtureDensity,
+      report.scenarioId,
+    ].join('|');
+    const group = grouped.get(key) ?? [];
+    group.push(report);
+    grouped.set(key, group);
+  }
+
+  const comparisons = [];
+  for (const group of grouped.values()) {
+    const base = group.find((report) => report.allocatorProfile.name === 'default') ?? null;
+    const compare = group.find((report) => report.allocatorProfile.name === 'arena1') ?? null;
+    const representative = base ?? compare;
+    const delayEntries = allocatorComparisonDelayEntries(base, compare);
+    for (const { settledDelayMs, settledSnapshotName } of delayEntries) {
+      const entry = {
+        mode: representative.mode,
+        runKind: representative.runKind,
+        fixtureKind: representative.fixtureKind,
+        fixtureScale: options.fixtureScale ?? null,
+        fixtureDensity: representative.fixtureDensity,
+        scenarioId: representative.scenarioId,
+        settledDelayMs,
+        settledSnapshotName,
+        baseProfile: 'default',
+        compareProfile: 'arena1',
+        missingProfiles: [],
+      };
+      if (!base) {
+        entry.comparisonStatus = 'skipped';
+        entry.missingProfiles.push('default');
+        entry.excludedReason = 'missing_default_profile';
+      } else if (!compare) {
+        entry.comparisonStatus = 'skipped';
+        entry.missingProfiles.push('arena1');
+        entry.excludedReason = 'missing_arena1_profile';
+      } else if (base.status === 'failed' || compare.status === 'failed') {
+        entry.comparisonStatus = 'skipped';
+        entry.excludedReason = 'profile_report_failed';
+      } else if (base.status !== 'ok' || compare.status !== 'ok') {
+        entry.comparisonStatus = 'partial';
+        entry.excludedReason = 'profile_report_not_ok';
+      } else {
+        const baseSnapshot = snapshotByName(base.timeline.snapshots ?? [], settledSnapshotName);
+        const compareSnapshot = snapshotByName(compare.timeline.snapshots ?? [], settledSnapshotName);
+        const delta = deltaKb(baseSnapshot?.status?.RssAnon, compareSnapshot?.status?.RssAnon);
+        if (delta === null) {
+          entry.comparisonStatus = 'partial';
+          entry.excludedReason = 'missing_settled_anon';
+        } else {
+          entry.comparisonStatus = 'ok';
+          entry.default_vs_arena1_settled_delta_kb = delta;
+        }
+      }
+      comparisons.push(entry);
+    }
+  }
+  return comparisons;
+}
+
+function allocatorComparisonDelayEntries(base, compare) {
+  const entries = new Map();
+  for (const report of [base, compare]) {
+    for (const settled of report?.timeline?.derived?.settledComparisons ?? []) {
+      entries.set(`${settled.settledDelayMs}|${settled.settledSnapshotName}`, {
+        settledDelayMs: settled.settledDelayMs,
+        settledSnapshotName: settled.settledSnapshotName,
+      });
+    }
+    for (const snapshot of report?.timeline?.snapshots ?? []) {
+      const match = /^settled_(\d+)s$/.exec(snapshot.name);
+      if (match) {
+        const settledDelayMs = Number(match[1]) * 1000;
+        entries.set(`${settledDelayMs}|${snapshot.name}`, { settledDelayMs, settledSnapshotName: snapshot.name });
+      }
+    }
+  }
+  return [...entries.values()].sort((left, right) => left.settledDelayMs - right.settledDelayMs);
+}
+
+function buildScenarioComparisons(reports) {
+  const pairs = [
+    ['prefix-full-dense', 'prefix-full-sparse'],
+    ['prefix-full-dense', 'multifile-full-dense'],
+  ];
+  const comparisons = [];
+  for (const [baseScenarioId, compareScenarioId] of pairs) {
+    for (const base of reports.filter((report) => report.scenarioId === baseScenarioId && report.timeline)) {
+      const compare = reports.find((report) => (
+        report.scenarioId === compareScenarioId
+        && report.mode === base.mode
+        && report.runKind === base.runKind
+        && report.allocatorProfile?.name === base.allocatorProfile?.name
+        && report.timeline
+      ));
+      if (!compare) {
+        continue;
+      }
+      for (const settled of base.timeline.derived?.settledComparisons ?? []) {
+        const compareSettled = compare.timeline.derived?.settledComparisons?.find((entry) => (
+          entry.settledDelayMs === settled.settledDelayMs
+          && entry.settledSnapshotName === settled.settledSnapshotName
+        ));
+        comparisons.push(buildScenarioComparisonEntry({
+          base,
+          compare,
+          baseScenarioId,
+          compareScenarioId,
+          metric: 'peak_to_settled_delta_kb',
+          settledDelayMs: settled.settledDelayMs,
+          settledSnapshotName: settled.settledSnapshotName,
+          baseMetric: settled.peak_to_settled_delta_kb,
+          compareMetric: compareSettled?.peak_to_settled_delta_kb,
+        }));
+      }
+      comparisons.push(buildScenarioComparisonEntry({
+        base,
+        compare,
+        baseScenarioId,
+        compareScenarioId,
+        metric: 'headers_to_body_peak_delta_kb',
+        settledDelayMs: null,
+        settledSnapshotName: null,
+        baseMetric: base.timeline.derived?.headers_to_body_peak_delta_kb,
+        compareMetric: compare.timeline.derived?.headers_to_body_peak_delta_kb,
+      }));
+    }
+  }
+  return comparisons;
+}
+
+function buildScenarioComparisonEntry({
+  base,
+  compare,
+  baseScenarioId,
+  compareScenarioId,
+  metric,
+  settledDelayMs,
+  settledSnapshotName,
+  baseMetric,
+  compareMetric,
+}) {
+  const entry = {
+    comparisonType: 'scenario',
+    mode: base.mode,
+    runKind: base.runKind,
+    allocatorProfile: base.allocatorProfile.name,
+    baseScenarioId,
+    compareScenarioId,
+    metric,
+    settledDelayMs,
+    settledSnapshotName,
+  };
+  if (base.status === 'failed' || compare.status === 'failed') {
+    return {
+      ...entry,
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'skipped',
+      excludedReason: 'scenario_report_failed',
+    };
+  }
+  if (base.status !== 'ok' || compare.status !== 'ok') {
+    return {
+      ...entry,
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'partial',
+      excludedReason: 'scenario_report_not_ok',
+    };
+  }
+  const delta = deltaKb(compareMetric, baseMetric);
+  const ratio = ratioOrNull(compareMetric, baseMetric);
+  if (delta === null || ratio === null) {
+    return {
+      ...entry,
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'partial',
+      excludedReason: 'missing_or_invalid_base_metric',
+    };
+  }
+  return {
+    ...entry,
+    deltaKb: delta,
+    ratio,
+    comparisonStatus: 'ok',
+  };
+}
+
 async function runMeasurement(options) {
   const root = createFixtureRoot();
   try {
@@ -1889,12 +2157,17 @@ async function runMeasurement(options) {
         }
       }
     }
+    const reportSummary = buildReportSummary(reports, options);
     console.log(JSON.stringify(sanitizeReport({
       measurementContext: buildMeasurementContext(options),
       tempRoot: root,
+      comparisons: reportSummary.comparisons,
+      scenarioComparisons: reportSummary.scenarioComparisons,
+      acceptanceStatus: reportSummary.acceptanceStatus,
+      fullAcceptanceMet: reportSummary.fullAcceptanceMet,
       reports,
     }), null, 2));
-    return measurementExitCode({ failed, strict: options.strict, reports });
+    return measurementExitCode({ failed, strict: options.strict, reportSummary });
   } finally {
     if (!options.keepTemp) {
       rmSync(root, { recursive: true, force: true });
@@ -1953,11 +2226,12 @@ function procCompletenessForSnapshots(snapshots) {
   })));
 }
 
-function measurementExitCode({ failed, strict, reports }) {
-  if (failed) {
+function measurementExitCode({ failed, strict, reports, reportSummary }) {
+  const summary = reportSummary ?? buildReportSummary(reports ?? []);
+  if (failed || summary.acceptanceStatus === 'failed') {
     return 1;
   }
-  if (strict && reports.some((report) => report.status !== 'ok')) {
+  if (strict && summary.acceptanceStatus !== 'full') {
     return 1;
   }
   return 0;
