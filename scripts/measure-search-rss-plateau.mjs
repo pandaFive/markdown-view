@@ -737,6 +737,14 @@ function runSanitizationSelfTest() {
   assert.equal(reportSummary.comparisons[0].default_vs_arena1_settled_delta_kb, 2000);
   assert.equal(reportSummary.comparisons[0].comparisonStatus, 'ok');
   assert.deepEqual(reportSummary.scenarioComparisons, []);
+  const missingArenaSummary = buildReportSummary([summaryReports[0]]);
+  assert.equal(missingArenaSummary.acceptanceStatus, 'partial');
+  assert.equal(missingArenaSummary.fullAcceptanceMet, false);
+  const partialComparisonReports = structuredClone(summaryReports);
+  delete partialComparisonReports[1].timeline.snapshots[0].status.RssAnon;
+  const partialComparisonSummary = buildReportSummary(partialComparisonReports);
+  assert.equal(partialComparisonSummary.acceptanceStatus, 'partial');
+  assert.equal(partialComparisonSummary.fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'partial' }]).acceptanceStatus, 'partial');
   assert.equal(buildReportSummary([{ status: 'partial' }]).fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'failed' }]).acceptanceStatus, 'failed');
@@ -1882,12 +1890,29 @@ function failedScenarioReport({
 function buildReportSummary(reports, options = {}) {
   const hasFailed = reports.some((report) => report.status === 'failed');
   const hasPartial = reports.some((report) => report.status === 'partial');
+  const comparisons = buildAllocatorComparisons(reports, options);
+  const hasIncompleteRequiredAllocatorComparison = comparisons.some((comparison) => (
+    isRequiredAllocatorComparison(comparison)
+    && comparison.comparisonStatus !== 'ok'
+  ));
+  const acceptanceStatus = hasFailed
+    ? 'failed'
+    : hasPartial || hasIncompleteRequiredAllocatorComparison
+      ? 'partial'
+      : 'full';
   return {
-    comparisons: buildAllocatorComparisons(reports, options),
+    comparisons,
     scenarioComparisons: buildScenarioComparisons(reports),
-    acceptanceStatus: hasFailed ? 'failed' : hasPartial ? 'partial' : 'full',
-    fullAcceptanceMet: !hasFailed && !hasPartial,
+    acceptanceStatus,
+    fullAcceptanceMet: acceptanceStatus === 'full',
   };
+}
+
+function isRequiredAllocatorComparison(comparison) {
+  return comparison.baseProfile === 'default'
+    && comparison.compareProfile === 'arena1'
+    && typeof comparison.settledSnapshotName === 'string'
+    && comparison.settledSnapshotName.startsWith('settled_');
 }
 
 function buildAllocatorComparisons(reports, options = {}) {
