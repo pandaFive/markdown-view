@@ -677,6 +677,10 @@ function runSanitizationSelfTest() {
     assert.ok(prefixSparse.bytes > 0);
     assert.ok(prefixSparse.bytes >= Math.floor(prefixDense.bytes * 0.95));
     assert.ok(prefixSparse.bytes <= Math.ceil(prefixDense.bytes * 1.05));
+    const sparseFiles = collectMarkdownFiles(prefixSparse.workspace);
+    assert.equal(sparseFiles.length, 1);
+    const sparseNeedleCount = (readFileSync(sparseFiles[0], 'utf8').match(/needle/g) ?? []).length;
+    assert.ok(sparseNeedleCount >= 101);
 
     const multifile = createFixture(root, 'multifile', 'short', 'dense');
     assert.equal(multifile.fixtureKind, 'multifile');
