@@ -561,6 +561,14 @@ function runSanitizationSelfTest() {
     smapsRollup: { available: true, Anonymous: 1490 },
     maps: { available: true },
   }, 'event', null);
+  const bodyReceivedFromCallback = bodyReceivedSnapshotFromCallback(123.456, {
+    status: { available: true, VmRSS: 2100, RssAnon: 1600, RssFile: 100, RssShmem: 0 },
+    smapsRollup: { available: true, Anonymous: 1590 },
+    maps: { available: true },
+  });
+  assert.equal(bodyReceivedFromCallback.name, 'body_received');
+  assert.equal(bodyReceivedFromCallback.elapsedMs, 123.456);
+  assert.equal(bodyReceivedFromCallback.capturedFrom, 'event');
   const eventSettled = namedSnapshot('settled_1s', 1100, {
     status: { available: true, VmRSS: 1600, RssAnon: 1200, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 1190 },
@@ -979,6 +987,10 @@ function namedSnapshot(name, elapsedMs, procSnapshot, capturedFrom = 'event', sa
   };
 }
 
+function bodyReceivedSnapshotFromCallback(bodyReadEndElapsedMs, procSnapshot) {
+  return namedSnapshot('body_received', bodyReadEndElapsedMs, procSnapshot, 'event', null);
+}
+
 function clonePeakSnapshot(snapshot, phase, metric) {
   if (!snapshot) {
     return null;
@@ -1178,10 +1190,23 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       const requestStartedElapsedMs = elapsed();
       eventSnapshots.push(namedSnapshot('request_started', requestStartedElapsedMs, readProcSnapshot(server.pid)));
       let headersCaptured = false;
-      const requestPromise = trackPromise(requestSearchTimeline(options.port, options.query, REQUEST_TIMEOUT_MS, () => {
-        headersCaptured = true;
-        eventSnapshots.push(namedSnapshot('headers_received', elapsed(), readProcSnapshot(server.pid)));
-      }));
+      let bodyReceivedCaptured = false;
+      const requestPromise = trackPromise(requestSearchTimeline(
+        options.port,
+        options.query,
+        REQUEST_TIMEOUT_MS,
+        () => {
+          headersCaptured = true;
+          eventSnapshots.push(namedSnapshot('headers_received', elapsed(), readProcSnapshot(server.pid)));
+        },
+        ({ bodyReadEndElapsedMs }) => {
+          bodyReceivedCaptured = true;
+          eventSnapshots.push(bodyReceivedSnapshotFromCallback(
+            requestStartedElapsedMs + bodyReadEndElapsedMs,
+            readProcSnapshot(server.pid)
+          ));
+        }
+      ));
       let sampleIndex = 0;
       while (!isPromiseSettled(requestPromise) && sampleSnapshots.length < MAX_SAMPLES) {
         sampleSnapshots.push(namedSnapshot(
@@ -1192,7 +1217,16 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
           sampleIndex
         ));
         sampleIndex += 1;
-        await delay(SAMPLE_INTERVAL_MS);
+        const samplingWaitResult = await Promise.race([
+          requestPromise.then(
+            () => 'request_settled',
+            () => 'request_settled'
+          ),
+          delay(SAMPLE_INTERVAL_MS).then(() => 'sample_interval_elapsed'),
+        ]);
+        if (samplingWaitResult === 'request_settled') {
+          break;
+        }
       }
       if (!isPromiseSettled(requestPromise)) {
         requestPromise.abort?.();
@@ -1205,10 +1239,11 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       if (!headersCaptured) {
         eventSnapshots.push(namedSnapshot('headers_received', bodyReadStartElapsedMs, readProcSnapshot(server.pid)));
       }
-      const bodyReceivedElapsedMs = bodyReadEndElapsedMs;
-      eventSnapshots.push(namedSnapshot('body_received', bodyReceivedElapsedMs, readProcSnapshot(server.pid)));
+      if (!bodyReceivedCaptured) {
+        eventSnapshots.push(bodyReceivedSnapshotFromCallback(bodyReadEndElapsedMs, readProcSnapshot(server.pid)));
+      }
       for (const delayMs of options.settledDelaysMs) {
-        const elapsedSinceBodyReceived = elapsed() - bodyReceivedElapsedMs;
+        const elapsedSinceBodyReceived = elapsed() - bodyReadEndElapsedMs;
         if (elapsedSinceBodyReceived < delayMs) {
           await delay(delayMs - elapsedSinceBodyReceived);
         }
@@ -1458,7 +1493,7 @@ function requestSearch(port, query, timeoutMs) {
   return promise;
 }
 
-function requestSearchTimeline(port, query, timeoutMs, onHeaders) {
+function requestSearchTimeline(port, query, timeoutMs, onHeaders, onBodyReceived) {
   const controller = new AbortController();
   const timeout = setTimeout(() => {
     controller.abort();
@@ -1474,6 +1509,7 @@ function requestSearchTimeline(port, query, timeoutMs, onHeaders) {
       const bodyReadStartElapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       const body = await readResponseTextWithLimit(response, MAX_RESPONSE_BYTES);
       const bodyReadEndElapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      onBodyReceived?.({ bodyReadEndElapsedMs });
       const summary = summarizeSearchResponse(response, body, query);
       return { ...summary, bodyReadStartElapsedMs, bodyReadEndElapsedMs };
     } finally {
