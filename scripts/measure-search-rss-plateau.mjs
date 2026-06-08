@@ -55,9 +55,9 @@ function main(argv = process.argv.slice(2)) {
     printHelp();
     return Promise.resolve(0);
   }
-  if (options.selfTestSanitization) {
+  if (options.selfTest) {
     runSanitizationSelfTest();
-    console.log('sanitization self-test: ok');
+    console.log('self-test: ok');
     return Promise.resolve(0);
   }
   return runMeasurement(options);
@@ -66,7 +66,9 @@ function main(argv = process.argv.slice(2)) {
 function parseArgs(argv) {
   const options = {
     help: false,
-    selfTestSanitization: false,
+    selfTest: false,
+    timeline: false,
+    strict: false,
     smoke: false,
     keepTemp: false,
     port: DEFAULT_PORT,
@@ -75,6 +77,8 @@ function parseArgs(argv) {
     fixtures: ['prefix'],
     runs: ['cold'],
     fixtureScale: 'short',
+    fixtureDensities: ['dense'],
+    settledDelaysMs: [1000, 5000],
     allocatorProfiles: [...DEFAULT_ALLOCATOR_PROFILES],
     output: 'json',
   };
@@ -84,8 +88,13 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === '--help' || arg === '-h') {
       options.help = true;
-    } else if (arg === '--self-test-sanitization') {
-      options.selfTestSanitization = true;
+    } else if (arg === '--self-test' || arg === '--self-test-sanitization') {
+      options.selfTest = true;
+    } else if (arg === '--timeline') {
+      explicitMatrixOptions.add(arg);
+      options.timeline = true;
+    } else if (arg === '--strict') {
+      options.strict = true;
     } else if (arg === '--smoke') {
       options.smoke = true;
       options.fixtureScale = 'short';
@@ -93,6 +102,8 @@ function parseArgs(argv) {
       options.fixtures = ['prefix'];
       options.runs = ['cold'];
       options.allocatorProfiles = [...DEFAULT_ALLOCATOR_PROFILES];
+      options.fixtureDensities = ['dense'];
+      options.settledDelaysMs = [1000, 5000];
     } else if (arg === '--keep-temp') {
       options.keepTemp = true;
     } else if (arg === '--port') {
@@ -111,6 +122,12 @@ function parseArgs(argv) {
     } else if (arg === '--fixture-scale') {
       explicitMatrixOptions.add(arg);
       options.fixtureScale = parseChoice(readValue(argv, ++index, arg), ['short', 'full'], arg);
+    } else if (arg === '--fixture-density') {
+      explicitMatrixOptions.add(arg);
+      options.fixtureDensities = parseFixtureDensities(readValue(argv, ++index, arg));
+    } else if (arg === '--settled-delays') {
+      explicitMatrixOptions.add(arg);
+      options.settledDelaysMs = parseSettledDelays(readValue(argv, ++index, arg));
     } else if (arg === '--allocator-profiles') {
       explicitMatrixOptions.add(arg);
       options.allocatorProfiles = parseAllocatorProfiles(readValue(argv, ++index, arg));
@@ -122,7 +139,24 @@ function parseArgs(argv) {
   }
 
   if (options.smoke && explicitMatrixOptions.size > 0) {
-    throw new Error('--smoke cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles');
+    throw new Error('--smoke cannot be combined with --timeline, --modes, --fixtures, --runs, --fixture-scale, --fixture-density, --settled-delays, or --allocator-profiles');
+  }
+  if (!options.timeline && explicitMatrixOptions.has('--fixture-density')) {
+    throw new Error('--fixture-density requires --timeline');
+  }
+  if (!options.timeline && explicitMatrixOptions.has('--settled-delays')) {
+    throw new Error('--settled-delays requires --timeline');
+  }
+  if (!options.timeline && options.fixtureDensities.join(',') !== 'dense') {
+    throw new Error('--fixture-density requires --timeline');
+  }
+  if (!options.timeline && options.settledDelaysMs.join(',') !== '1000,5000') {
+    throw new Error('--settled-delays requires --timeline');
+  }
+  const hasSparseDensity = options.fixtureDensities.includes('sparse');
+  const hasNonPrefixFixture = options.fixtures.some((fixtureKind) => fixtureKind !== 'prefix');
+  if (hasSparseDensity && hasNonPrefixFixture) {
+    throw new Error('sparse density is only supported with --fixtures prefix');
   }
 
   return options;
@@ -163,6 +197,35 @@ function parseList(raw, allowed, optionName) {
     parseChoice(value, allowed, optionName);
   }
   return values;
+}
+
+function parseFixtureDensities(raw) {
+  if (raw === '') {
+    throw new Error('--fixture-density requires a value');
+  }
+  if (raw === 'dense') {
+    return ['dense'];
+  }
+  if (raw === 'sparse') {
+    return ['sparse'];
+  }
+  if (raw === 'dense,sparse') {
+    return ['dense', 'sparse'];
+  }
+  throw new Error('--fixture-density must be dense, sparse, or dense,sparse');
+}
+
+function parseSettledDelays(raw) {
+  if (raw === '') {
+    throw new Error('--settled-delays requires a value');
+  }
+  if (raw === '1s,5s') {
+    return [1000, 5000];
+  }
+  if (raw === '1s,5s,15s') {
+    return [1000, 5000, 15000];
+  }
+  throw new Error('--settled-delays must be 1s,5s or 1s,5s,15s');
 }
 
 function parseAllocatorProfiles(raw) {
@@ -235,14 +298,19 @@ function printHelp() {
 
 Options:
   --help                         Show this help.
-  --self-test-sanitization       Run local sanitization checks without starting the server.
+  --self-test                    Run local contract checks without starting the server.
+  --self-test-sanitization       Alias for --self-test.
   --smoke                        Run a short dev/prefix/cold measurement.
-                                 Cannot be combined with --modes, --fixtures, --runs, --fixture-scale, or --allocator-profiles.
+                                 Cannot be combined with --timeline, --modes, --fixtures, --runs, --fixture-scale, --fixture-density, --settled-delays, or --allocator-profiles.
+  --timeline                     Run opt-in timeline diagnostics with request/body/settled snapshots.
+  --strict                       Exit non-zero unless timeline acceptance status is full.
   --modes dev,release            Build modes to measure. Default: dev.
   --fixtures prefix,multifile,fallback
                                  Fixture kinds to measure. Default: prefix.
   --runs cold,warm               Run kinds to measure. Default: cold.
   --fixture-scale short,full     Fixture size. Default: short.
+  --fixture-density dense,sparse Timeline-only prefix density. Default: dense.
+  --settled-delays 1s,5s         Timeline-only settled snapshots. Also supports 1s,5s,15s.
   --allocator-profiles default,arena1,arena2
                                  Allocator profiles for measured server process. Default: default.
   --port <number>                Local port. Default: ${DEFAULT_PORT}.
@@ -394,6 +462,28 @@ function runSanitizationSelfTest() {
     () => parseArgs(['--allocator-profiles', '']),
     /requires at least one value/
   );
+
+  assert.equal(parseArgs(['--self-test']).selfTest, true);
+  assert.equal(parseArgs(['--self-test-sanitization']).selfTest, true);
+  assert.equal(parseArgs(['--timeline']).timeline, true);
+  assert.equal(parseArgs(['--strict']).strict, true);
+  assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense']).fixtureDensities, ['dense']);
+  assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'sparse']).fixtureDensities, ['sparse']);
+  assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense,sparse']).fixtureDensities, ['dense', 'sparse']);
+  assert.deepEqual(parseArgs(['--timeline', '--settled-delays', '1s,5s']).settledDelaysMs, [1000, 5000]);
+  assert.deepEqual(parseArgs(['--timeline', '--settled-delays', '1s,5s,15s']).settledDelaysMs, [1000, 5000, 15000]);
+  assert.throws(() => parseArgs(['--smoke', '--timeline']), /--smoke cannot be combined/);
+  assert.throws(() => parseArgs(['--smoke', '--fixture-density', 'dense']), /--smoke cannot be combined/);
+  assert.throws(() => parseArgs(['--smoke', '--settled-delays', '1s,5s']), /--smoke cannot be combined/);
+  assert.throws(() => parseArgs(['--fixture-density', 'dense']), /--fixture-density requires --timeline/);
+  assert.throws(() => parseArgs(['--settled-delays', '1s,5s']), /--settled-delays requires --timeline/);
+  assert.throws(() => parseArgs(['--timeline', '--fixture-density', 'sparse,dense']), /--fixture-density must be dense, sparse, or dense,sparse/);
+  assert.throws(() => parseArgs(['--timeline', '--fixture-density', 'dense,dense']), /--fixture-density must be dense, sparse, or dense,sparse/);
+  assert.throws(() => parseArgs(['--timeline', '--fixture-density', '']), /requires a value/);
+  assert.throws(() => parseArgs(['--timeline', '--fixtures', 'multifile', '--fixture-density', 'sparse']), /sparse density is only supported with --fixtures prefix/);
+  assert.throws(() => parseArgs(['--timeline', '--fixtures', 'fallback', '--fixture-density', 'dense,sparse']), /sparse density is only supported with --fixtures prefix/);
+  assert.throws(() => parseArgs(['--timeline', '--settled-delays', '5s,1s']), /--settled-delays must be 1s,5s or 1s,5s,15s/);
+  assert.throws(() => parseArgs(['--timeline', '--settled-delays', '15s']), /--settled-delays must be 1s,5s or 1s,5s,15s/);
 
   const matrixOptionPairs = [
     ['--modes', 'release'],
