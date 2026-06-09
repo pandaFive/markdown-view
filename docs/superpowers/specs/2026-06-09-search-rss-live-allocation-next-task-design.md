@@ -114,14 +114,14 @@ Full acceptance:
 - release / prefix / full / dense / cold で `default` と `arena1` の timeline 比較結果を得る。
 - `docs/todo/BACKLOG.md` に、live allocation 候補、allocator retained memory 候補、server response 構築候補、post-header body drain 候補、次に必要な作業が記録される。
 - 検索 API 契約、Host/Origin/path validation、HTML sanitize、CSP、検索上限契約を弱めていないことが記録される。
-- self-test と文書 validation が成功する。
+- `--self-test`、`--help`、`git diff --check` が成功する。
 - `./verify.sh` が pass する。未実行または失敗がある場合は、理由と残リスクを報告する。
 
 prefix 固有性を結論する場合は、prefix-full-sparse/cold と multifile-full-dense/cold の対照測定も成功していることを追加条件にする。
 
 Sandbox-limited partial validation:
 
-- self-test、help、文書 validation、`git diff --check` は成功している。
+- `--self-test`、`--help`、`git diff --check` は成功している。
 - loopback bind 制限や承認不可により timeline 実測が未実行の場合、full acceptance 未達として completion report に明記している。
 - `docs/todo/BACKLOG.md` を Done 扱いにせず、実測未完了の残リスクと次作業候補を残している。
 
