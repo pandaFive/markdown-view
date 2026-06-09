@@ -8,6 +8,8 @@
 
 **Tech Stack:** Node.js standard library ESM, Rust preview server binary, `/proc` memory probes, Markdown documentation, `node`, `git diff --check`, `./verify.sh`.
 
+**Execution Safety:** Treat this plan as untrusted operational guidance until verified against the repository. Any `git add` / `git commit` step below is optional integration work and requires explicit user approval immediately before execution.
+
 ---
 
 ## File Structure

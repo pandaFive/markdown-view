@@ -147,6 +147,9 @@ function parseArgs(argv) {
   if (!options.timeline && explicitMatrixOptions.has('--settled-delays')) {
     throw new Error('--settled-delays requires --timeline');
   }
+  if (!options.timeline && options.strict) {
+    throw new Error('--strict requires --timeline');
+  }
   if (!options.timeline && options.fixtureDensities.join(',') !== 'dense') {
     throw new Error('--fixture-density requires --timeline');
   }
@@ -466,7 +469,7 @@ function runSanitizationSelfTest() {
   assert.equal(parseArgs(['--self-test']).selfTest, true);
   assert.equal(parseArgs(['--self-test-sanitization']).selfTest, true);
   assert.equal(parseArgs(['--timeline']).timeline, true);
-  assert.equal(parseArgs(['--strict']).strict, true);
+  assert.equal(parseArgs(['--timeline', '--strict']).strict, true);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense']).fixtureDensities, ['dense']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'sparse']).fixtureDensities, ['sparse']);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense,sparse']).fixtureDensities, ['dense', 'sparse']);
@@ -475,6 +478,7 @@ function runSanitizationSelfTest() {
   assert.throws(() => parseArgs(['--smoke', '--timeline']), /--smoke cannot be combined/);
   assert.throws(() => parseArgs(['--smoke', '--fixture-density', 'dense']), /--smoke cannot be combined/);
   assert.throws(() => parseArgs(['--smoke', '--settled-delays', '1s,5s']), /--smoke cannot be combined/);
+  assert.throws(() => parseArgs(['--strict']), /--strict requires --timeline/);
   assert.throws(() => parseArgs(['--fixture-density', 'dense']), /--fixture-density requires --timeline/);
   assert.throws(() => parseArgs(['--settled-delays', '1s,5s']), /--settled-delays requires --timeline/);
   assert.throws(() => parseArgs(['--timeline', '--fixture-density', 'sparse,dense']), /--fixture-density must be dense, sparse, or dense,sparse/);
@@ -540,31 +544,46 @@ function runSanitizationSelfTest() {
       ],
     }
   );
+  assert.deepEqual(
+    summarizeProcCompleteness([{
+      status: { available: true, VmRSS: 1000, RssFile: 100, RssShmem: 0 },
+      smapsRollup: { available: true },
+      maps: { available: true, anonymousKb: 0, fileBackedKb: 0, heapKb: 0, stackKb: 0, otherSpecialKb: 0 },
+    }]),
+    {
+      procComplete: false,
+      partialMeasurementReasons: [
+        'status:missing_field:RssAnon',
+        'smapsRollup:missing_field:Anonymous',
+        'maps:missing_field:mappingCount',
+      ],
+    }
+  );
 
   const eventStarted = namedSnapshot('request_started', 0, {
     status: { available: true, VmRSS: 1000, RssAnon: 800, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 790 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'event', null);
   const samplePeak = namedSnapshot('sample_0000', 80, {
     status: { available: true, VmRSS: 5000, RssAnon: 4500, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 4480 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'sampling', 0);
   const eventHeaders = namedSnapshot('headers_received', 75, {
     status: { available: true, VmRSS: 3000, RssAnon: 2500, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 2480 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'event', null);
   const eventBody = namedSnapshot('body_received', 100, {
     status: { available: true, VmRSS: 2000, RssAnon: 1500, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 1490 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'event', null);
   const bodyReceivedFromCallback = bodyReceivedSnapshotFromCallback(123.456, {
     status: { available: true, VmRSS: 2100, RssAnon: 1600, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 1590 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   });
   assert.equal(bodyReceivedFromCallback.name, 'body_received');
   assert.equal(bodyReceivedFromCallback.elapsedMs, 123.456);
@@ -572,7 +591,7 @@ function runSanitizationSelfTest() {
   const eventSettled = namedSnapshot('settled_1s', 1100, {
     status: { available: true, VmRSS: 1600, RssAnon: 1200, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 1190 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'event', null);
   const timeline = buildTimelineReport({
     eventSnapshots: [eventStarted, eventHeaders, eventBody, eventSettled],
@@ -604,12 +623,12 @@ function runSanitizationSelfTest() {
   const sampleBeforeHeaders = namedSnapshot('sample_before_headers', 60, {
     status: { available: true, VmRSS: 9000, RssAnon: 8800, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 8780 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'sampling', 0);
   const sampleAfterHeaders = namedSnapshot('sample_after_headers', 90, {
     status: { available: true, VmRSS: 4200, RssAnon: 4100, RssFile: 100, RssShmem: 0 },
     smapsRollup: { available: true, Anonymous: 4080 },
-    maps: { available: true },
+    maps: { available: true, mappingCount: 1 },
   }, 'sampling', 1);
   const bodyDrainTimeline = buildTimelineReport({
     eventSnapshots: [eventStarted, eventHeaders, eventBody, eventSettled],
@@ -731,18 +750,25 @@ function runSanitizationSelfTest() {
       },
     },
   ];
-  const reportSummary = buildReportSummary(summaryReports);
+  const reportSummary = buildReportSummary(summaryReports, { fixtureScale: 'full' });
   assert.equal(reportSummary.acceptanceStatus, 'full');
   assert.equal(reportSummary.fullAcceptanceMet, true);
   assert.equal(reportSummary.comparisons[0].default_vs_arena1_settled_delta_kb, 2000);
   assert.equal(reportSummary.comparisons[0].comparisonStatus, 'ok');
   assert.deepEqual(reportSummary.scenarioComparisons, []);
-  const missingArenaSummary = buildReportSummary([summaryReports[0]]);
+  const shortDevSummary = buildReportSummary(summaryReports.map((report) => ({
+    ...structuredClone(report),
+    mode: 'dev',
+    scenarioId: 'prefix-short-dense',
+  })), { fixtureScale: 'short' });
+  assert.equal(shortDevSummary.acceptanceStatus, 'partial');
+  assert.equal(shortDevSummary.fullAcceptanceMet, false);
+  const missingArenaSummary = buildReportSummary([summaryReports[0]], { fixtureScale: 'full' });
   assert.equal(missingArenaSummary.acceptanceStatus, 'partial');
   assert.equal(missingArenaSummary.fullAcceptanceMet, false);
   const partialComparisonReports = structuredClone(summaryReports);
   delete partialComparisonReports[1].timeline.snapshots[0].status.RssAnon;
-  const partialComparisonSummary = buildReportSummary(partialComparisonReports);
+  const partialComparisonSummary = buildReportSummary(partialComparisonReports, { fixtureScale: 'full' });
   assert.equal(partialComparisonSummary.acceptanceStatus, 'partial');
   assert.equal(partialComparisonSummary.fullAcceptanceMet, false);
   const arena2OnlySummary = buildReportSummary([
@@ -757,6 +783,56 @@ function runSanitizationSelfTest() {
   assert.equal(buildReportSummary([{ status: 'partial' }]).fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'failed' }]).acceptanceStatus, 'failed');
   assert.equal(buildReportSummary([{ status: 'failed' }]).fullAcceptanceMet, false);
+  const scenarioComparisonReports = [
+    summaryReports[0],
+    {
+      ...structuredClone(summaryReports[0]),
+      scenarioId: 'prefix-full-sparse',
+      fixtureDensity: 'sparse',
+      timeline: {
+        ...structuredClone(summaryReports[0].timeline),
+        derived: {
+          settledComparisons: [
+            { settledDelayMs: 1000, settledSnapshotName: 'settled_1s', peak_to_settled_delta_kb: 3000, peak_to_settled_ratio: 1.8 },
+            { settledDelayMs: 5000, settledSnapshotName: 'settled_5s', peak_to_settled_delta_kb: 2500, peak_to_settled_ratio: 1.7 },
+          ],
+          headers_to_body_peak_delta_kb: 1200,
+        },
+      },
+    },
+  ];
+  const scenarioSummary = buildReportSummary(scenarioComparisonReports, { fixtureScale: 'full' });
+  assert.equal(scenarioSummary.scenarioComparisons.length, 3);
+  assert.equal(scenarioSummary.scenarioComparisons[0].comparisonStatus, 'ok');
+  assert.equal(scenarioSummary.scenarioComparisons[2].metric, 'headers_to_body_peak_delta_kb');
+  assert.equal(
+    buildScenarioComparisonEntry({
+      base: summaryReports[0],
+      compare: summaryReports[0],
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      baseMetric: null,
+      compareMetric: 1,
+    }).excludedReason,
+    'missing_or_invalid_base_metric'
+  );
+  assert.equal(
+    buildScenarioComparisonEntry({
+      base: summaryReports[0],
+      compare: summaryReports[0],
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      baseMetric: 1,
+      compareMetric: null,
+    }).excludedReason,
+    'missing_or_invalid_compare_metric'
+  );
 
   assert.throws(
     () => summarizeSearchResponse({ ok: false, status: 500 }, '{}'),
@@ -862,6 +938,10 @@ function runSanitizationSelfTest() {
   const context = buildMeasurementContext(parseArgs(['--query', 'needle']));
   assert.equal(Object.hasOwn(context.cliOptions, 'queryLength'), false);
   assert.equal(Object.hasOwn(context.cliOptions, 'querySha256'), false);
+  assert.equal(context.cliOptions.timeline, false);
+  assert.equal(context.cliOptions.strict, false);
+  assert.deepEqual(context.cliOptions.fixtureDensities, ['dense']);
+  assert.deepEqual(context.cliOptions.settledDelaysMs, [1000, 5000]);
   const allocatorContext = buildMeasurementContext(parseArgs(['--allocator-profiles', 'default,arena1']));
   assert.deepEqual(allocatorContext.cliOptions.allocatorProfiles, ['default', 'arena1']);
 
@@ -1375,6 +1455,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       peakRssKb: peakRssKb(snapshots),
       procComplete: procCompleteness.procComplete,
       partialMeasurementReasons: procCompleteness.partialMeasurementReasons,
+      ...statusForProcCompleteness(procCompleteness),
       before,
       after,
       settled,
@@ -1390,7 +1471,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       if (scenarioError) {
         attachCleanupFailure(scenarioError, server.pid);
       } else {
-        throw new Error(`server stop failed for pid ${server.pid}`);
+        throw attachCleanupFailure(new Error('server stop failed'), server.pid);
       }
     }
   }
@@ -1703,13 +1784,29 @@ function peakRssKb(snapshots) {
 function summarizeProcCompleteness(snapshots) {
   const reasons = new Set();
   for (const snapshot of snapshots) {
-    for (const [probeName, probe] of Object.entries({
-      status: snapshot?.status,
-      smapsRollup: snapshot?.smapsRollup,
-      maps: snapshot?.maps,
-    })) {
+    const probes = {
+      status: {
+        probe: snapshot?.status,
+        requiredFields: ['VmRSS', 'RssAnon', 'RssFile', 'RssShmem'],
+      },
+      smapsRollup: {
+        probe: snapshot?.smapsRollup,
+        requiredFields: ['Anonymous'],
+      },
+      maps: {
+        probe: snapshot?.maps,
+        requiredFields: ['mappingCount'],
+      },
+    };
+    for (const [probeName, { probe, requiredFields }] of Object.entries(probes)) {
       if (probe && probe.available === false) {
         reasons.add(probe.code ? `${probeName}:${probe.reason}:${probe.code}` : `${probeName}:${probe.reason}`);
+        continue;
+      }
+      for (const fieldName of requiredFields) {
+        if (!Number.isFinite(probe?.[fieldName])) {
+          reasons.add(`${probeName}:missing_field:${fieldName}`);
+        }
       }
     }
   }
@@ -1922,6 +2019,12 @@ function buildReportSummary(reports, options = {}) {
 function isRequiredAllocatorComparison(comparison) {
   return comparison.baseProfile === 'default'
     && comparison.compareProfile === 'arena1'
+    && comparison.mode === 'release'
+    && comparison.runKind === 'cold'
+    && comparison.fixtureKind === 'prefix'
+    && comparison.fixtureScale === 'full'
+    && comparison.fixtureDensity === 'dense'
+    && comparison.scenarioId === 'prefix-full-dense'
     && typeof comparison.settledSnapshotName === 'string'
     && comparison.settledSnapshotName.startsWith('settled_');
 }
@@ -1929,8 +2032,7 @@ function isRequiredAllocatorComparison(comparison) {
 function hasRequiredAllocatorComparisons(comparisons) {
   return ['settled_1s', 'settled_5s'].every((settledSnapshotName) => (
     comparisons.some((comparison) => (
-      comparison.baseProfile === 'default'
-      && comparison.compareProfile === 'arena1'
+      isRequiredAllocatorComparison(comparison)
       && comparison.settledSnapshotName === settledSnapshotName
       && comparison.comparisonStatus === 'ok'
     ))
@@ -2122,12 +2224,15 @@ function buildScenarioComparisonEntry({
   const delta = deltaKb(compareMetric, baseMetric);
   const ratio = ratioOrNull(compareMetric, baseMetric);
   if (delta === null || ratio === null) {
+    const excludedReason = !Number.isFinite(baseMetric)
+      ? 'missing_or_invalid_base_metric'
+      : 'missing_or_invalid_compare_metric';
     return {
       ...entry,
       deltaKb: null,
       ratio: null,
       comparisonStatus: 'partial',
-      excludedReason: 'missing_or_invalid_base_metric',
+      excludedReason,
     };
   }
   return {
@@ -2309,7 +2414,11 @@ function buildMeasurementContext(options) {
     head: currentGitHead(),
     cliOptions: {
       smoke: options.smoke,
+      timeline: options.timeline,
+      strict: options.strict,
       fixtureScale: options.fixtureScale,
+      fixtureDensities: options.fixtureDensities,
+      settledDelaysMs: options.settledDelaysMs,
       modes: options.modes,
       fixtures: options.fixtures,
       runs: options.runs,
