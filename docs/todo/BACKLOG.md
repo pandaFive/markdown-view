@@ -3,7 +3,7 @@
 低優先度で蓄積している項目。High/Medium は [`TODO.md`](./TODO.md) に置き、ここには低優先・長期改善の未完了候補を置く。
 未完了項目は重要度と将来影響度を基準に P1/P2/P3 へ分類する。各項目末尾の「由来」は TODO.md 再編時（2026-04-21）以降の発見コンテキスト。
 
-最終整理: 2026-06-06。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
+最終整理: 2026-06-09。セキュリティ境界、データ安全性、silent failure、監視不能に直接響く項目は `TODO.md` へ昇格した。ここには昇格しないが文脈を残すべき候補を置く。
 過去の完了済み履歴は [`DONE-2026-05.md`](../done/DONE-2026-05.md) に移動した。
 レビュー由来の `現状` は作業候補として扱い、実装前に対象ファイル・行番号・現象を現行コードで再確認する。
 
@@ -14,8 +14,12 @@
 - [ ] ディレクトリ検索 prefix many-match RSS plateau の環境差・live allocation 追加診断を必要時に行う
   - ファイル: `src/server/files/search.rs`, `scripts/measure-search-rss-plateau.mjs`
   - 現状: 2026-06-04 と 2026-06-05 の測定で、単一ファイル prefix many-match 経路の response 完了後に anonymous memory が高く残ること、`MALLOC_ARENA_MAX=1` で settled anonymous RSS が下がること、multifile result-limit や short fallback は同規模の plateau を示さないことを確認した。これにより Medium Priority の「切り分ける」目的は完了扱いにした。
+  - 追加診断: 2026-06-09 に `scripts/measure-search-rss-plateau.mjs --timeline --strict --modes release --fixtures prefix --runs cold --fixture-scale full --fixture-density dense --settled-delays 1s,5s --allocator-profiles default,arena1` を実行した。primary measurement は sandbox EPERM 後、承認付き再実行で pass。acceptanceStatus=`full`, fullAcceptanceMet=`true`。raw response body、実パス、full process args、raw `/proc/maps` 行、親環境変数値は記録していない。
+  - 診断結果: default settled anonymous memory は settled_1s=204700 KiB, settled_5s=598624 KiB。arena1 は settled_1s=150428 KiB, settled_5s=551256 KiB。default_vs_arena1_settled_delta_kb は settled_1s=54272, settled_5s=47368。default requestPeakAnon=`request_started`, bodyDrainPeakAnon=`headers_received`, body_peak_to_body_received_delta_kb=0。arena1 requestPeakAnon=`request_started`, bodyDrainPeakAnon=`headers_received`, body_peak_to_body_received_delta_kb=0。`requestPeakAnon=request_started` は request 中の live allocation peak ではなく request 開始時 baseline が最大だったことを示すため、peak-to-settled は live allocation decay と断定しない。`body_peak_to_body_received_delta_kb=0` は外部 HTTP response body drain 窓の観測であり、server 内部の JSON 構築完了時点や allocation 解放時点と同一視しない。
+  - 検証: `node scripts/measure-search-rss-plateau.mjs --self-test`: pass。`node scripts/measure-search-rss-plateau.mjs --help`: pass。`git diff --check`: pass。`./verify.sh`: pass。
+  - 次判断: timeline summary は取得でき、allocator profile 間の settled anonymous memory 差は正方向に出た。一方で primary run は prefix dense の default/arena1 比較に限定しており、prefix dense/sparse や multifile 対照を同一 JSON report で追加していないため、Rust 側 allocation 削減や追加 probe へ進むかは、必要性が再浮上した時点で path specificity 追加測定を行って判断する。現時点では Done に移さず、低優先の将来候補として残す。
   - 対応: RSS の絶対値改善や環境差検証が必要になった場合に限り、同一 prefix fixture を native Linux、別 allocator build、または prefix 経路の live allocation 観測で再確認する。現時点では個人向け localhost ツールの High / Medium 実行候補には戻さず、低優先の将来候補として扱う。
-  - セキュリティ: 追加診断を行う場合も、測定出力には実パス、full process args、本文断片、raw maps 行、親環境の値を含めない。検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は弱めない。
+  - セキュリティ: 測定は未信頼入力として扱う。追加診断を行う場合も、測定出力には実パス、full process args、本文断片、raw maps 行、親環境の値を含めない。検索ロジック、`SearchResponse` JSON、Host/Origin 検証、path validation、HTML sanitize、CSP、検索キャンセル境界、検索上限契約は変更していない。
   - 由来: ディレクトリ検索 many-match RSS plateau 完了判定のレビュー修正 (2026-06-06)
 
 - [ ] ディレクトリ検索 64MiB byte-limit 反復時の RSS plateau を測定方法改善込みで再確認する
