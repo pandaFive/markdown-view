@@ -698,6 +698,8 @@ function runSanitizationSelfTest() {
   });
   assert.equal(measurementExitCode({ failed: false, strict: false, reports: [{ status: 'partial' }] }), 0);
   assert.equal(measurementExitCode({ failed: false, strict: true, reports: [{ status: 'partial' }] }), 1);
+  assert.equal(measurementExitCode({ failed: true, strict: false, reports: [{ status: 'ok' }] }), 1);
+  assert.equal(measurementExitCode({ failed: false, strict: false, reports: [{ status: 'failed' }] }), 1);
   const fixtureFailureReport = failedScenarioReport({
     fixtureKind: 'prefix',
     fixtureDensity: 'dense',
@@ -923,7 +925,7 @@ function runSanitizationSelfTest() {
       excludedReason: 'compare_peak_is_request_baseline',
     }
   );
-  assert.equal(
+  assert.deepEqual(
     buildScenarioComparisonEntry({
       base: summaryReports[0],
       compare: summaryReports[0],
@@ -936,10 +938,24 @@ function runSanitizationSelfTest() {
       compareMetric: 800,
       baseExcludedReason: 'peak_is_request_baseline',
       compareExcludedReason: 'peak_is_request_baseline',
-    }).excludedReason,
-    'base_and_compare_peak_is_request_baseline'
+    }),
+    {
+      comparisonType: 'scenario',
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: 'default',
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'skipped',
+      excludedReason: 'base_and_compare_peak_is_request_baseline',
+    }
   );
-  assert.equal(
+  assert.deepEqual(
     buildScenarioComparisonEntry({
       base: summaryReports[0],
       compare: summaryReports[0],
@@ -952,8 +968,22 @@ function runSanitizationSelfTest() {
       compareMetric: 800,
       baseExcludedReason: 'peak_is_request_baseline',
       compareExcludedReason: 'missing_or_invalid_peak_or_settled_anon',
-    }).excludedReason,
-    'base_peak_is_request_baseline_compare_missing_or_invalid_peak_or_settled_anon'
+    }),
+    {
+      comparisonType: 'scenario',
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: 'default',
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'skipped',
+      excludedReason: 'base_peak_is_request_baseline_compare_missing_or_invalid_peak_or_settled_anon',
+    }
   );
   const cleanupPartialSummary = buildReportSummary([{ status: 'partial', decisionExcludedReason: 'server_cleanup_failed' }]);
   assert.deepEqual(cleanupPartialSummary.acceptanceReasons, ['report_partial', 'server_cleanup_failed']);
