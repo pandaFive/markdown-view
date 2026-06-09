@@ -57,7 +57,7 @@ function main(argv = process.argv.slice(2)) {
   }
   if (options.selfTest) {
     runSanitizationSelfTest();
-    console.log('self-test: ok');
+    console.log(options.selfTestSanitizationAlias ? 'sanitization self-test: ok' : 'self-test: ok');
     return Promise.resolve(0);
   }
   return runMeasurement(options);
@@ -67,6 +67,7 @@ function parseArgs(argv) {
   const options = {
     help: false,
     selfTest: false,
+    selfTestSanitizationAlias: false,
     timeline: false,
     strict: false,
     smoke: false,
@@ -90,6 +91,7 @@ function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--self-test' || arg === '--self-test-sanitization') {
       options.selfTest = true;
+      options.selfTestSanitizationAlias = arg === '--self-test-sanitization';
     } else if (arg === '--timeline') {
       explicitMatrixOptions.add(arg);
       options.timeline = true;
@@ -312,7 +314,7 @@ Options:
                                  Fixture kinds to measure. Default: prefix.
   --runs cold,warm               Run kinds to measure. Default: cold.
   --fixture-scale short,full     Fixture size. Default: short.
-  --fixture-density dense,sparse Timeline-only prefix density. Must exactly match dense, sparse, or dense,sparse. Default: dense.
+  --fixture-density dense,sparse Timeline-only fixture density. sparse is prefix-only; dense works for all fixture kinds. Default: dense.
   --settled-delays 1s,5s         Timeline-only settled snapshots. Must exactly match 1s,5s or 1s,5s,15s.
   --allocator-profiles default,arena1,arena2
                                  Allocator profiles for measured server process. Default: default.
@@ -468,6 +470,7 @@ function runSanitizationSelfTest() {
 
   assert.equal(parseArgs(['--self-test']).selfTest, true);
   assert.equal(parseArgs(['--self-test-sanitization']).selfTest, true);
+  assert.equal(parseArgs(['--self-test-sanitization']).selfTestSanitizationAlias, true);
   assert.equal(parseArgs(['--timeline']).timeline, true);
   assert.equal(parseArgs(['--timeline', '--strict']).strict, true);
   assert.deepEqual(parseArgs(['--timeline', '--fixture-density', 'dense']).fixtureDensities, ['dense']);
@@ -615,6 +618,25 @@ function runSanitizationSelfTest() {
     peak_to_settled_delta_kb: 3300,
     peak_to_settled_ratio: 3.75,
   }]);
+  const baselinePeakTimeline = buildTimelineReport({
+    eventSnapshots: [
+      namedSnapshot('request_started', 0, {
+        status: { available: true, VmRSS: 5000, RssAnon: 4500, RssFile: 100, RssShmem: 0 },
+        smapsRollup: { available: true, Anonymous: 4480 },
+        maps: { available: true, mappingCount: 1 },
+      }, 'event', null),
+      eventHeaders,
+      eventBody,
+      eventSettled,
+    ],
+    sampleSnapshots: [],
+    settledDelaysMs: [1000],
+    bodyReadStartElapsedMs: 76,
+    bodyReadEndElapsedMs: 100,
+    responseBytes: 1234,
+  });
+  assert.equal(baselinePeakTimeline.peaks.requestPeakAnon.name, 'request_started');
+  assert.equal(baselinePeakTimeline.derived.settledComparisons[0].excludedReason, 'peak_is_request_baseline');
   assert.equal(timeline.samplingSummary.samplingIntervalMs, SAMPLE_INTERVAL_MS);
   assert.equal(timeline.samplingSummary.clock, 'monotonic');
   assert.equal(timeline.samplingSummary.sampleCount, 1);
@@ -704,6 +726,40 @@ function runSanitizationSelfTest() {
   assert.equal(cleanupFailureReport.scenarioError.cleanupErrorKind, 'server_stop_failed');
   assert.equal(cleanupFailureReport.scenarioError.cleanupMessage, 'server stop failed for pid 12345');
   assert.equal(Object.hasOwn(cleanupFailureReport, 'cleanupFailed'), false);
+  const legacyFailureReport = failedScenarioReport({
+    fixtureKind: 'prefix',
+    fixtureDensity: 'dense',
+    scenarioId: 'prefix-short-dense',
+    mode: 'dev',
+    runKind: 'cold',
+    allocatorProfile: 'default',
+    error: new Error('legacy failure'),
+    errorCode: 'measurement_failed',
+    includeLegacyErrorFields: true,
+  });
+  assert.equal(legacyFailureReport.errorKind, 'measurement_failed');
+  assert.equal(legacyFailureReport.sanitizedMessage, 'legacy failure');
+  assert.equal(legacyFailureReport.scenarioError.errorCode, 'measurement_failed');
+  assert.deepEqual(
+    scenarioWithCleanupFailure({
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: allocatorProfileReport('default'),
+      status: 'ok',
+      timeline,
+    }, 12345),
+    {
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: allocatorProfileReport('default'),
+      status: 'partial',
+      timeline,
+      cleanupFailed: true,
+      cleanupErrorKind: 'server_stop_failed',
+      cleanupMessage: 'server stop failed for pid 12345',
+      decisionExcludedReason: 'server_cleanup_failed',
+    }
+  );
   const summaryReports = [
     {
       status: 'ok',
@@ -779,12 +835,16 @@ function runSanitizationSelfTest() {
   ]);
   assert.equal(arena2OnlySummary.acceptanceStatus, 'partial');
   assert.equal(arena2OnlySummary.fullAcceptanceMet, false);
+  assert.deepEqual(arena2OnlySummary.acceptanceReasons, ['missing_required_allocator_comparison']);
+  assert.equal(buildReportSummary([{ status: 'ok' }]).acceptanceStatus, 'not_applicable');
+  assert.equal(buildReportSummary([{ status: 'ok' }]).fullAcceptanceMet, false);
+  assert.equal(buildReportSummary([{ status: 'ok' }]).decisionExcludedReason, 'timeline_not_requested');
   assert.equal(buildReportSummary([{ status: 'partial' }]).acceptanceStatus, 'partial');
   assert.equal(buildReportSummary([{ status: 'partial' }]).fullAcceptanceMet, false);
   assert.equal(buildReportSummary([{ status: 'failed' }]).acceptanceStatus, 'failed');
   assert.equal(buildReportSummary([{ status: 'failed' }]).fullAcceptanceMet, false);
   const scenarioComparisonReports = [
-    summaryReports[0],
+    ...summaryReports,
     {
       ...structuredClone(summaryReports[0]),
       scenarioId: 'prefix-full-sparse',
@@ -800,11 +860,32 @@ function runSanitizationSelfTest() {
         },
       },
     },
+    {
+      ...structuredClone(summaryReports[1]),
+      scenarioId: 'prefix-full-sparse',
+      fixtureDensity: 'sparse',
+      timeline: {
+        ...structuredClone(summaryReports[1].timeline),
+        derived: {
+          settledComparisons: [
+            { settledDelayMs: 1000, settledSnapshotName: 'settled_1s', peak_to_settled_delta_kb: 1700, peak_to_settled_ratio: 1.5 },
+            { settledDelayMs: 5000, settledSnapshotName: 'settled_5s', peak_to_settled_delta_kb: 1600, peak_to_settled_ratio: 1.4 },
+          ],
+          headers_to_body_peak_delta_kb: 700,
+        },
+      },
+    },
   ];
   const scenarioSummary = buildReportSummary(scenarioComparisonReports, { fixtureScale: 'full' });
-  assert.equal(scenarioSummary.scenarioComparisons.length, 3);
+  assert.equal(scenarioSummary.scenarioComparisons.length, 6);
   assert.equal(scenarioSummary.scenarioComparisons[0].comparisonStatus, 'ok');
   assert.equal(scenarioSummary.scenarioComparisons[2].metric, 'headers_to_body_peak_delta_kb');
+  const partialScenarioReports = structuredClone(scenarioComparisonReports);
+  delete partialScenarioReports[2].timeline.derived.headers_to_body_peak_delta_kb;
+  const partialScenarioSummary = buildReportSummary(partialScenarioReports, { fixtureScale: 'full' });
+  assert.equal(partialScenarioSummary.acceptanceStatus, 'partial');
+  assert.equal(partialScenarioSummary.fullAcceptanceMet, false);
+  assert.deepEqual(partialScenarioSummary.acceptanceReasons, ['scenario_comparison_not_ok']);
   assert.equal(
     buildScenarioComparisonEntry({
       base: summaryReports[0],
@@ -1326,6 +1407,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
     allocatorEnv: allocator.env,
   });
   let scenarioError = null;
+  let scenarioResult = null;
   try {
     await waitForServer(server, options.port);
     let warmupResponse = null;
@@ -1411,7 +1493,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       });
       const responseReport = { ...response, bodyReadStartElapsedMs, bodyReadEndElapsedMs };
       const procCompleteness = procCompletenessForSnapshots([...eventSnapshots, ...sampleSnapshots]);
-      return {
+      scenarioResult = {
         mode,
         runKind,
         allocatorProfile: allocator,
@@ -1425,6 +1507,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
         ...(warmupResponse ? { warmupResponse } : {}),
         response: responseReport,
       };
+      return scenarioResult;
     }
     const before = readProcSnapshot(server.pid);
     const startedAt = process.hrtime.bigint();
@@ -1446,7 +1529,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
     const settled = readProcSnapshot(server.pid);
     const snapshots = [before, ...samples, after, settled];
     const procCompleteness = summarizeProcCompleteness(snapshots);
-    return {
+    scenarioResult = {
       mode,
       runKind,
       allocatorProfile: allocator,
@@ -1462,6 +1545,7 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
       ...(warmupResponse ? { warmupResponse } : {}),
       response,
     };
+    return scenarioResult;
   } catch (error) {
     scenarioError = normalizeError(error);
     throw scenarioError;
@@ -1470,11 +1554,23 @@ async function runMeasuredScenario(options, fixture, mode, runKind, allocatorPro
     if (!stopped) {
       if (scenarioError) {
         attachCleanupFailure(scenarioError, server.pid);
+      } else if (scenarioResult) {
+        scenarioWithCleanupFailure(scenarioResult, server.pid);
       } else {
         throw attachCleanupFailure(new Error('server stop failed'), server.pid);
       }
     }
   }
+}
+
+function scenarioWithCleanupFailure(scenario, pid) {
+  return Object.assign(scenario, {
+    status: 'partial',
+    cleanupFailed: true,
+    cleanupErrorKind: 'server_stop_failed',
+    cleanupMessage: `server stop failed for pid ${pid}`,
+    decisionExcludedReason: 'server_cleanup_failed',
+  });
 }
 
 function isPromiseSettled(promise) {
@@ -1869,7 +1965,9 @@ function buildTimelineReport({
     const peak_to_settled_delta_kb = deltaKb(peakAnon, settledAnon);
     const peak_to_settled_ratio = ratioOrNull(peakAnon, settledAnon);
     const entry = { settledDelayMs: delayMs, settledSnapshotName, peak_to_settled_delta_kb, peak_to_settled_ratio };
-    if (peak_to_settled_delta_kb === null || peak_to_settled_ratio === null) {
+    if (requestPeakAnon?.name === 'request_started') {
+      entry.excludedReason = 'peak_is_request_baseline';
+    } else if (peak_to_settled_delta_kb === null || peak_to_settled_ratio === null) {
       entry.excludedReason = 'missing_or_invalid_peak_or_settled_anon';
     }
     return entry;
@@ -1979,7 +2077,9 @@ function failedScenarioReport({
   allocatorProfile,
   error,
   errorCode,
+  includeLegacyErrorFields = false,
 }) {
+  const scenarioError = scenarioErrorFields(error, errorCode);
   return {
     fixtureKind,
     fixtureDensity,
@@ -1988,7 +2088,8 @@ function failedScenarioReport({
     runKind,
     allocatorProfile: allocatorProfileReport(allocatorProfile),
     status: 'failed',
-    scenarioError: scenarioErrorFields(error, errorCode),
+    ...(includeLegacyErrorFields ? errorReportFields(error) : {}),
+    scenarioError,
   };
 }
 
@@ -1997,23 +2098,52 @@ function buildReportSummary(reports, options = {}) {
   const hasPartial = reports.some((report) => report.status === 'partial');
   const hasTimelineReport = reports.some((report) => report.timeline);
   const comparisons = buildAllocatorComparisons(reports, options);
+  const scenarioComparisons = buildScenarioComparisons(reports);
   const hasIncompleteRequiredAllocatorComparison = comparisons.some((comparison) => (
     isRequiredAllocatorComparison(comparison)
     && comparison.comparisonStatus !== 'ok'
   ));
   const missingRequiredAllocatorComparison = hasTimelineReport
     && !hasRequiredAllocatorComparisons(comparisons);
+  const hasIncompleteScenarioComparison = scenarioComparisons.some((comparison) => (
+    comparison.comparisonStatus !== 'ok'
+  ));
+  const acceptanceReasons = [];
+  if (!hasTimelineReport && !hasFailed && !hasPartial) {
+    acceptanceReasons.push('timeline_not_requested');
+  }
+  if (hasPartial) {
+    acceptanceReasons.push('report_partial');
+  }
+  if (hasIncompleteRequiredAllocatorComparison) {
+    acceptanceReasons.push('required_allocator_comparison_not_ok');
+  }
+  if (missingRequiredAllocatorComparison) {
+    acceptanceReasons.push('missing_required_allocator_comparison');
+  }
+  if (hasIncompleteScenarioComparison) {
+    acceptanceReasons.push('scenario_comparison_not_ok');
+  }
   const acceptanceStatus = hasFailed
     ? 'failed'
-    : hasPartial || hasIncompleteRequiredAllocatorComparison || missingRequiredAllocatorComparison
+    : hasPartial || hasIncompleteRequiredAllocatorComparison || missingRequiredAllocatorComparison || hasIncompleteScenarioComparison
       ? 'partial'
+      : !hasTimelineReport
+      ? 'not_applicable'
       : 'full';
-  return {
+  const summary = {
     comparisons,
-    scenarioComparisons: buildScenarioComparisons(reports),
+    scenarioComparisons,
     acceptanceStatus,
     fullAcceptanceMet: acceptanceStatus === 'full',
   };
+  if (acceptanceReasons.length > 0) {
+    summary.acceptanceReasons = acceptanceReasons;
+  }
+  if (acceptanceStatus === 'not_applicable') {
+    summary.decisionExcludedReason = 'timeline_not_requested';
+  }
+  return summary;
 }
 
 function isRequiredAllocatorComparison(comparison) {
@@ -2267,6 +2397,7 @@ async function runMeasurement(options) {
                   allocatorProfile,
                   error,
                   errorCode: 'fixture_failed',
+                  includeLegacyErrorFields: !options.timeline,
                 }));
               }
             }
@@ -2301,6 +2432,7 @@ async function runMeasurement(options) {
                 reports.push({
                   ...baseReport,
                   status: 'failed',
+                  ...(!options.timeline ? errorReportFields(error) : {}),
                   scenarioError: scenarioErrorFields(error),
                 });
               }
@@ -2317,6 +2449,8 @@ async function runMeasurement(options) {
       scenarioComparisons: reportSummary.scenarioComparisons,
       acceptanceStatus: reportSummary.acceptanceStatus,
       fullAcceptanceMet: reportSummary.fullAcceptanceMet,
+      ...(reportSummary.acceptanceReasons ? { acceptanceReasons: reportSummary.acceptanceReasons } : {}),
+      ...(reportSummary.decisionExcludedReason ? { decisionExcludedReason: reportSummary.decisionExcludedReason } : {}),
       reports,
     }), null, 2));
     return measurementExitCode({ failed, strict: options.strict, reportSummary });
