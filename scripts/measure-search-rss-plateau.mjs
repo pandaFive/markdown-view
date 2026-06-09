@@ -894,6 +894,67 @@ function runSanitizationSelfTest() {
   assert.equal(baselineExcludedScenarioSummary.scenarioComparisons[0].comparisonStatus, 'skipped');
   assert.equal(baselineExcludedScenarioSummary.scenarioComparisons[0].excludedReason, 'base_peak_is_request_baseline');
   assert.deepEqual(baselineExcludedScenarioSummary.acceptanceReasons, ['scenario_comparison_not_ok']);
+  assert.deepEqual(
+    buildScenarioComparisonEntry({
+      base: summaryReports[0],
+      compare: summaryReports[0],
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      baseMetric: 1000,
+      compareMetric: 800,
+      compareExcludedReason: 'peak_is_request_baseline',
+    }),
+    {
+      comparisonType: 'scenario',
+      mode: 'release',
+      runKind: 'cold',
+      allocatorProfile: 'default',
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'skipped',
+      excludedReason: 'compare_peak_is_request_baseline',
+    }
+  );
+  assert.equal(
+    buildScenarioComparisonEntry({
+      base: summaryReports[0],
+      compare: summaryReports[0],
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      baseMetric: 1000,
+      compareMetric: 800,
+      baseExcludedReason: 'peak_is_request_baseline',
+      compareExcludedReason: 'peak_is_request_baseline',
+    }).excludedReason,
+    'base_and_compare_peak_is_request_baseline'
+  );
+  assert.equal(
+    buildScenarioComparisonEntry({
+      base: summaryReports[0],
+      compare: summaryReports[0],
+      baseScenarioId: 'prefix-full-dense',
+      compareScenarioId: 'prefix-full-sparse',
+      metric: 'peak_to_settled_delta_kb',
+      settledDelayMs: 1000,
+      settledSnapshotName: 'settled_1s',
+      baseMetric: 1000,
+      compareMetric: 800,
+      baseExcludedReason: 'peak_is_request_baseline',
+      compareExcludedReason: 'missing_or_invalid_peak_or_settled_anon',
+    }).excludedReason,
+    'base_peak_is_request_baseline_compare_missing_or_invalid_peak_or_settled_anon'
+  );
   const cleanupPartialSummary = buildReportSummary([{ status: 'partial', decisionExcludedReason: 'server_cleanup_failed' }]);
   assert.deepEqual(cleanupPartialSummary.acceptanceReasons, ['report_partial', 'server_cleanup_failed']);
   const procPartialSummary = buildReportSummary([{
