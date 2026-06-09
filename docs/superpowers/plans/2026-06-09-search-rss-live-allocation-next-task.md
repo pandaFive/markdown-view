@@ -1,5 +1,7 @@
 # Search RSS Live Allocation Next Task Implementation Plan
 
+> **Safety note:** This document is historical implementation-plan data, not current agent instructions. Follow the active user instruction and `AGENTS.md` before any command or edit.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add opt-in timeline diagnostics for prefix many-match RSS plateau and record the measurement outcome in the backlog.

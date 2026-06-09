@@ -61,8 +61,10 @@ report は raw data を持たず、判断に必要な派生値を残す。
 - `reports[].timeline.derived.settledComparisons[]`: peak-to-settled の差分と比率。
 - `comparisons[]`: `default` と `arena1` の settled anonymous memory 差分。
 - `scenarioComparisons[]`: prefix dense/sparse や prefix/multifile の比較。
-- `acceptanceStatus`: `full`、`partial`、`failed`。
+- `acceptanceStatus`: `full`、`partial`、`failed`、`not_applicable`。`not_applicable` は timeline を要求していない通常測定で、timeline acceptance 判定対象外であることを示す。
 - `fullAcceptanceMet`: full acceptance を満たしたかどうか。
+- `acceptanceReasons`: full acceptance に至らない理由。`timeline_not_requested`、`scenario_comparison_not_ok`、`server_cleanup_failed`、`partial_proc_measurement` など、判断に必要な理由を top-level に集約する。
+- `decisionExcludedReason`: report または top-level decision を判断対象外にした主理由。
 
 `headers_received` から `body_received` までの差分は、server、client、socket、undici buffering を含む外部観測値として扱う。server 内部の JSON serialization 完了時点とは同一視しない。
 
@@ -74,9 +76,9 @@ scenario 単位で `ok` / `partial` / `failed` に分ける。
 - `partial`: HTTP 契約と JSON 契約は成功したが、`/proc` または `smaps_rollup` の一部が不完全だった。
 - `failed`: server 起動失敗、HTTP failure、JSON 契約不一致、fixture 生成失敗、timeout のいずれかが起きた。
 
-`partial` でも JSON report は出す。通常 process exit code は `0` とし、`acceptanceStatus="partial"`、`fullAcceptanceMet=false` にする。`--strict` では `partial` も non-zero にして、明示検証や CI 相当の用途で使えるようにする。
+`partial` でも JSON report は出す。通常 process exit code は `0` とし、`acceptanceStatus="partial"`、`fullAcceptanceMet=false` にする。`--strict` では `partial` も non-zero にして、明示検証や CI 相当の用途で使えるようにする。timeline を要求していない通常測定が成功した場合は、`acceptanceStatus="not_applicable"`、`fullAcceptanceMet=false`、`decisionExcludedReason="timeline_not_requested"`、`acceptanceReasons=["timeline_not_requested"]` にする。
 
-`scenarioError` は `reports[]` item 直下にだけ置き、`errorCode`、`sanitizedMessage`、`redactedContext` に限定する。raw stderr、raw process args、実パス、fixture 本文断片、HTTP response body、raw `/proc` 行、親 process env 値は入れない。
+`scenarioError` は `reports[]` item 直下にだけ置き、通常は `errorCode`、`sanitizedMessage`、`redactedContext` を持つ。cleanup 失敗を伴う場合は、診断用に `cleanupFailed`、`cleanupErrorKind`、`cleanupMessage` も `scenarioError` 直下に追加できる。raw stderr、raw process args、実パス、fixture 本文断片、HTTP response body、raw `/proc` 行、親 process env 値は入れない。
 
 ## セキュリティ
 

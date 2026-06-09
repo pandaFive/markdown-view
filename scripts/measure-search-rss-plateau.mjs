@@ -886,6 +886,22 @@ function runSanitizationSelfTest() {
   assert.equal(partialScenarioSummary.acceptanceStatus, 'partial');
   assert.equal(partialScenarioSummary.fullAcceptanceMet, false);
   assert.deepEqual(partialScenarioSummary.acceptanceReasons, ['scenario_comparison_not_ok']);
+  const baselineExcludedScenarioReports = structuredClone(scenarioComparisonReports);
+  baselineExcludedScenarioReports[0].timeline.derived.settledComparisons[0].excludedReason = 'peak_is_request_baseline';
+  const baselineExcludedScenarioSummary = buildReportSummary(baselineExcludedScenarioReports, { fixtureScale: 'full' });
+  assert.equal(baselineExcludedScenarioSummary.acceptanceStatus, 'partial');
+  assert.equal(baselineExcludedScenarioSummary.fullAcceptanceMet, false);
+  assert.equal(baselineExcludedScenarioSummary.scenarioComparisons[0].comparisonStatus, 'skipped');
+  assert.equal(baselineExcludedScenarioSummary.scenarioComparisons[0].excludedReason, 'base_peak_is_request_baseline');
+  assert.deepEqual(baselineExcludedScenarioSummary.acceptanceReasons, ['scenario_comparison_not_ok']);
+  const cleanupPartialSummary = buildReportSummary([{ status: 'partial', decisionExcludedReason: 'server_cleanup_failed' }]);
+  assert.deepEqual(cleanupPartialSummary.acceptanceReasons, ['report_partial', 'server_cleanup_failed']);
+  const procPartialSummary = buildReportSummary([{
+    status: 'partial',
+    decisionExcludedReason: 'partial_proc_measurement',
+    partialMeasurementReasons: ['maps:missing'],
+  }]);
+  assert.deepEqual(procPartialSummary.acceptanceReasons, ['report_partial', 'partial_proc_measurement', 'maps:missing']);
   assert.equal(
     buildScenarioComparisonEntry({
       base: summaryReports[0],
@@ -2114,6 +2130,17 @@ function buildReportSummary(reports, options = {}) {
   }
   if (hasPartial) {
     acceptanceReasons.push('report_partial');
+    for (const report of reports) {
+      if (report.status !== 'partial') {
+        continue;
+      }
+      if (typeof report.decisionExcludedReason === 'string') {
+        acceptanceReasons.push(report.decisionExcludedReason);
+      }
+      for (const reason of report.partialMeasurementReasons ?? []) {
+        acceptanceReasons.push(reason);
+      }
+    }
   }
   if (hasIncompleteRequiredAllocatorComparison) {
     acceptanceReasons.push('required_allocator_comparison_not_ok');
@@ -2293,6 +2320,8 @@ function buildScenarioComparisons(reports) {
           settledSnapshotName: settled.settledSnapshotName,
           baseMetric: settled.peak_to_settled_delta_kb,
           compareMetric: compareSettled?.peak_to_settled_delta_kb,
+          baseExcludedReason: settled.excludedReason,
+          compareExcludedReason: compareSettled?.excludedReason,
         }));
       }
       comparisons.push(buildScenarioComparisonEntry({
@@ -2321,6 +2350,8 @@ function buildScenarioComparisonEntry({
   settledSnapshotName,
   baseMetric,
   compareMetric,
+  baseExcludedReason = null,
+  compareExcludedReason = null,
 }) {
   const entry = {
     comparisonType: 'scenario',
@@ -2351,6 +2382,16 @@ function buildScenarioComparisonEntry({
       excludedReason: 'scenario_report_not_ok',
     };
   }
+  const metricExcludedReason = scenarioMetricExcludedReason(baseExcludedReason, compareExcludedReason);
+  if (metricExcludedReason) {
+    return {
+      ...entry,
+      deltaKb: null,
+      ratio: null,
+      comparisonStatus: 'skipped',
+      excludedReason: metricExcludedReason,
+    };
+  }
   const delta = deltaKb(compareMetric, baseMetric);
   const ratio = ratioOrNull(compareMetric, baseMetric);
   if (delta === null || ratio === null) {
@@ -2371,6 +2412,27 @@ function buildScenarioComparisonEntry({
     ratio,
     comparisonStatus: 'ok',
   };
+}
+
+function scenarioMetricExcludedReason(baseExcludedReason, compareExcludedReason) {
+  const baseReason = normalizeExcludedReason(baseExcludedReason);
+  const compareReason = normalizeExcludedReason(compareExcludedReason);
+  if (baseReason && compareReason) {
+    return baseReason === compareReason
+      ? `base_and_compare_${baseReason}`
+      : `base_${baseReason}_compare_${compareReason}`;
+  }
+  if (baseReason) {
+    return `base_${baseReason}`;
+  }
+  if (compareReason) {
+    return `compare_${compareReason}`;
+  }
+  return null;
+}
+
+function normalizeExcludedReason(reason) {
+  return typeof reason === 'string' && reason.length > 0 ? reason : null;
 }
 
 async function runMeasurement(options) {
