@@ -161,11 +161,14 @@ fn test_ascii直後の太字記法は補正対象外() {
 fn test_cjk句読点で終わる太字記法を補正する() {
     let full_stop = normalize_source_markup(render_markdown("**太字。**は").as_str());
     let quote = normalize_source_markup(render_markdown("**太字」**は").as_str());
+    let ideographic_zero = normalize_source_markup(render_markdown("**注）**〇").as_str());
 
     assert!(full_stop.contains("<strong>太字。</strong>は"));
     assert!(!full_stop.contains("**"));
     assert!(quote.contains("<strong>太字」</strong>は"));
     assert!(!quote.contains("**"));
+    assert!(ideographic_zero.contains("<strong>注）</strong>〇"));
+    assert!(!ideographic_zero.contains("**"));
 }
 
 #[test]

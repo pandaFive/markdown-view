@@ -111,7 +111,8 @@ fn text_starts_with_cjk(event: &Event<'_>) -> bool {
 fn is_cjk_char(c: char) -> bool {
     matches!(
         c,
-        '\u{3040}'..='\u{30ff}'
+        '\u{3000}'..='\u{303f}'
+            | '\u{3040}'..='\u{30ff}'
             | '\u{1100}'..='\u{11ff}'
             | '\u{3400}'..='\u{4dbf}'
             | '\u{4e00}'..='\u{9fff}'
@@ -633,6 +634,7 @@ mod tests {
 
     #[test]
     fn test_is_cjk_charはhangulとcjk拡張漢字を含む() {
+        assert!(is_cjk_char('〇'));
         assert!(is_cjk_char('は'));
         assert!(is_cjk_char('漢'));
         assert!(is_cjk_char('ᄀ'));
