@@ -112,10 +112,14 @@ fn is_cjk_char(c: char) -> bool {
     matches!(
         c,
         '\u{3040}'..='\u{30ff}'
+            | '\u{1100}'..='\u{11ff}'
             | '\u{3400}'..='\u{4dbf}'
             | '\u{4e00}'..='\u{9fff}'
+            | '\u{a960}'..='\u{a97f}'
             | '\u{ac00}'..='\u{d7af}'
+            | '\u{d7b0}'..='\u{d7ff}'
             | '\u{f900}'..='\u{faff}'
+            | '\u{3130}'..='\u{318f}'
             | '\u{ff00}'..='\u{ffef}'
             | '\u{20000}'..='\u{323af}'
     )
@@ -631,7 +635,11 @@ mod tests {
     fn test_is_cjk_charはhangulとcjk拡張漢字を含む() {
         assert!(is_cjk_char('は'));
         assert!(is_cjk_char('漢'));
+        assert!(is_cjk_char('ᄀ'));
+        assert!(is_cjk_char('ㄱ'));
+        assert!(is_cjk_char('ꥠ'));
         assert!(is_cjk_char('각'));
+        assert!(is_cjk_char('ힰ'));
         assert!(is_cjk_char('𠀋'));
     }
 

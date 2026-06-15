@@ -185,6 +185,14 @@ fn test_hangul直後の太字記法を補正する() {
 }
 
 #[test]
+fn test_hangul_jamo直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**가**ᄂ").as_str());
+
+    assert!(html.contains("<strong>가</strong>ᄂ"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
 fn test_cjk拡張漢字直後の太字記法を補正する() {
     let html = normalize_source_markup(render_markdown("**古字**𠀋").as_str());
 
