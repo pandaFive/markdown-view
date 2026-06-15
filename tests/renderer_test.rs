@@ -84,6 +84,126 @@ fn test_太字と斜体() {
 }
 
 #[test]
+fn test_和文の直後に続く太字記法() {
+    let html = normalize_source_markup(render_markdown("**雲梯山（うんていざん）**は").as_str());
+
+    assert!(html.contains("<strong>雲梯山（うんていざん）</strong>は"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_和文段落内の連続する太字記法() {
+    let md = "**雲梯山（うんていざん）**は、長野県北信地方の架空市・**雲梯市（うんていし）**郊外にある霊峰。天狗が棲み、大天狗・**暁岳坊（ぎょうがくぼう）**が山の主を務める。";
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains("<strong>雲梯山（うんていざん）</strong>は"));
+    assert!(html.contains("<strong>雲梯市（うんていし）</strong>郊外"));
+    assert!(html.contains("<strong>暁岳坊（ぎょうがくぼう）</strong>が"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_エンティティ由来のアスタリスクは太字記法にしない() {
+    let named = normalize_source_markup(
+        render_markdown("&ast;&ast;雲梯山（うんていざん）&ast;&ast;は").as_str(),
+    );
+    let numeric = normalize_source_markup(
+        render_markdown("&#42;&#42;雲梯山（うんていざん）&#42;&#42;は").as_str(),
+    );
+
+    assert!(named.contains("**雲梯山（うんていざん）**は"));
+    assert!(!named.contains("<strong>"));
+    assert!(numeric.contains("**雲梯山（うんていざん）**は"));
+    assert!(!numeric.contains("<strong>"));
+}
+
+#[test]
+fn test_空白に隣接する太字記法は補正しない() {
+    let leading_space =
+        normalize_source_markup(render_markdown("** 雲梯山（うんていざん）**は").as_str());
+    let trailing_space =
+        normalize_source_markup(render_markdown("**雲梯山（うんていざん） **は").as_str());
+    let both_sides =
+        normalize_source_markup(render_markdown("** 雲梯山（うんていざん） **は").as_str());
+
+    assert!(leading_space.contains("** 雲梯山（うんていざん）**は"));
+    assert!(!leading_space.contains("<strong>"));
+    assert!(trailing_space.contains("**雲梯山（うんていざん） **は"));
+    assert!(!trailing_space.contains("<strong>"));
+    assert!(both_sides.contains("** 雲梯山（うんていざん） **は"));
+    assert!(!both_sides.contains("<strong>"));
+}
+
+#[test]
+fn test_見出し内の和文直後太字補正はidとtocを壊さない() {
+    let document = render_document("# **雲梯山（うんていざん）**は見出し");
+    let content = normalize_source_markup(document.content.as_str());
+    let heading_id = &document.headings[0].id;
+
+    assert!(content.contains("<strong>雲梯山（うんていざん）</strong>は見出し"));
+    assert!(content.contains(&format!(r##"<h1 id="{heading_id}">"##)));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(&format!(r##"href="#{heading_id}""##)));
+    assert_eq!(document.headings[0].text, "雲梯山（うんていざん）は見出し");
+}
+
+#[test]
+fn test_ascii直後の太字記法は補正対象外() {
+    let html = normalize_source_markup(render_markdown("**太字（よみ）**abc").as_str());
+
+    assert!(html.contains("**太字（よみ）**abc"));
+    assert!(!html.contains("<strong>"));
+}
+
+#[test]
+fn test_cjk句読点で終わる太字記法を補正する() {
+    let full_stop = normalize_source_markup(render_markdown("**太字。**は").as_str());
+    let quote = normalize_source_markup(render_markdown("**太字」**は").as_str());
+    let ideographic_zero = normalize_source_markup(render_markdown("**注）**〇").as_str());
+
+    assert!(full_stop.contains("<strong>太字。</strong>は"));
+    assert!(!full_stop.contains("**"));
+    assert!(quote.contains("<strong>太字」</strong>は"));
+    assert!(!quote.contains("**"));
+    assert!(ideographic_zero.contains("<strong>注）</strong>〇"));
+    assert!(!ideographic_zero.contains("**"));
+}
+
+#[test]
+fn test_エスケープされたアスタリスクは太字記法にしない() {
+    let html = normalize_source_markup(render_markdown(r"\*\*太字\*\*は").as_str());
+
+    assert!(html.contains("**太字**は"));
+    assert!(!html.contains("<strong>"));
+}
+
+#[test]
+fn test_hangul直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**강조**는").as_str());
+
+    assert!(html.contains("<strong>강조</strong>는"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_hangul_jamo直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**가**ᄂ").as_str());
+
+    assert!(html.contains("<strong>가</strong>ᄂ"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_cjk拡張漢字直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**古字**𠀋").as_str());
+
+    assert!(html.contains("<strong>古字</strong>𠀋"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
 fn test_gfmテーブル() {
     let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
     let html = normalize_source_markup(render_markdown(md).as_str());
