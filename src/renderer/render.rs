@@ -16,14 +16,17 @@ pub(super) struct RenderOutput {
     pub(super) headings: Vec<HeadingInfo>,
 }
 
+type MarkdownEvent<'a> = (Event<'a>, Range<usize>);
+
 pub(super) fn render(input: &str) -> RenderOutput {
     let line_lookup = LineLookup::new(input);
     let syntax_set = syntax_set();
     let mut context = RenderContext::new();
 
-    let parser =
-        Parser::new_ext(input, markdown_options(MarkdownProfile::Render)).into_offset_iter();
-    for (event, range) in parser {
+    let parser = Parser::new_ext(input, markdown_options(MarkdownProfile::Render))
+        .into_offset_iter()
+        .collect();
+    for (event, range) in normalize_cjk_adjacent_strong(input, parser) {
         dispatch_event(event, range, &line_lookup, syntax_set, &mut context);
     }
 
@@ -42,6 +45,66 @@ pub(super) fn render(input: &str) -> RenderOutput {
         content: SanitizedHtml::from_sanitized_html(state.into_html_with_recovery_warning()),
         headings,
     }
+}
+
+fn normalize_cjk_adjacent_strong<'a>(
+    input: &str,
+    events: Vec<MarkdownEvent<'a>>,
+) -> Vec<MarkdownEvent<'a>> {
+    let mut normalized = Vec::with_capacity(events.len());
+    let mut index = 0;
+
+    while index < events.len() {
+        if is_cjk_adjacent_strong_sequence(input, &events, index) {
+            normalized.push((Event::Start(Tag::Strong), events[index].1.clone()));
+            normalized.push(events[index + 2].clone());
+            normalized.push((Event::End(TagEnd::Strong), events[index + 3].1.clone()));
+            index += 5;
+            continue;
+        }
+
+        normalized.push(events[index].clone());
+        index += 1;
+    }
+
+    normalized
+}
+
+fn is_cjk_adjacent_strong_sequence(
+    input: &str,
+    events: &[MarkdownEvent<'_>],
+    index: usize,
+) -> bool {
+    index + 5 < events.len()
+        && is_source_text_marker(input, &events[index], "*")
+        && is_source_text_marker(input, &events[index + 1], "*")
+        && matches!(events[index + 2].0, Event::Text(_))
+        && is_source_text_marker(input, &events[index + 3], "*")
+        && is_source_text_marker(input, &events[index + 4], "*")
+        && text_starts_with_cjk(&events[index + 5].0)
+}
+
+fn is_source_text_marker(input: &str, event: &MarkdownEvent<'_>, marker: &str) -> bool {
+    matches!(&event.0, Event::Text(text) if text.as_ref() == marker)
+        && input.get(event.1.clone()) == Some(marker)
+}
+
+fn text_starts_with_cjk(event: &Event<'_>) -> bool {
+    match event {
+        Event::Text(text) => text.chars().next().is_some_and(is_cjk_char),
+        _ => false,
+    }
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3040}'..='\u{30ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ff00}'..='\u{ffef}'
+    )
 }
 
 struct RenderContext {

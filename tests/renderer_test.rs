@@ -84,6 +84,40 @@ fn test_太字と斜体() {
 }
 
 #[test]
+fn test_和文の直後に続く太字記法() {
+    let html = normalize_source_markup(render_markdown("**雲梯山（うんていざん）**は").as_str());
+
+    assert!(html.contains("<strong>雲梯山（うんていざん）</strong>は"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_和文段落内の連続する太字記法() {
+    let md = "**雲梯山（うんていざん）**は、長野県北信地方の架空市・**雲梯市（うんていし）**郊外にある霊峰。天狗が棲み、大天狗・**暁岳坊（ぎょうがくぼう）**が山の主を務める。";
+    let html = normalize_source_markup(render_markdown(md).as_str());
+
+    assert!(html.contains("<strong>雲梯山（うんていざん）</strong>は"));
+    assert!(html.contains("<strong>雲梯市（うんていし）</strong>郊外"));
+    assert!(html.contains("<strong>暁岳坊（ぎょうがくぼう）</strong>が"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_エンティティ由来のアスタリスクは太字記法にしない() {
+    let named = normalize_source_markup(
+        render_markdown("&ast;&ast;雲梯山（うんていざん）&ast;&ast;は").as_str(),
+    );
+    let numeric = normalize_source_markup(
+        render_markdown("&#42;&#42;雲梯山（うんていざん）&#42;&#42;は").as_str(),
+    );
+
+    assert!(named.contains("**雲梯山（うんていざん）**は"));
+    assert!(!named.contains("<strong>"));
+    assert!(numeric.contains("**雲梯山（うんていざん）**は"));
+    assert!(!numeric.contains("<strong>"));
+}
+
+#[test]
 fn test_gfmテーブル() {
     let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
     let html = normalize_source_markup(render_markdown(md).as_str());
