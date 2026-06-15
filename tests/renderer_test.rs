@@ -135,6 +135,64 @@ fn test_空白に隣接する太字記法は補正しない() {
 }
 
 #[test]
+fn test_見出し内の和文直後太字補正はidとtocを壊さない() {
+    let document = render_document("# **雲梯山（うんていざん）**は見出し");
+    let content = normalize_source_markup(document.content.as_str());
+    let heading_id = &document.headings[0].id;
+
+    assert!(content.contains("<strong>雲梯山（うんていざん）</strong>は見出し"));
+    assert!(content.contains(&format!(r##"<h1 id="{heading_id}">"##)));
+    assert!(document
+        .toc
+        .as_str()
+        .contains(&format!(r##"href="#{heading_id}""##)));
+    assert_eq!(document.headings[0].text, "雲梯山（うんていざん）は見出し");
+}
+
+#[test]
+fn test_ascii直後の太字記法は補正対象外() {
+    let html = normalize_source_markup(render_markdown("**太字（よみ）**abc").as_str());
+
+    assert!(html.contains("**太字（よみ）**abc"));
+    assert!(!html.contains("<strong>"));
+}
+
+#[test]
+fn test_cjk句読点で終わる太字記法を補正する() {
+    let full_stop = normalize_source_markup(render_markdown("**太字。**は").as_str());
+    let quote = normalize_source_markup(render_markdown("**太字」**は").as_str());
+
+    assert!(full_stop.contains("<strong>太字。</strong>は"));
+    assert!(!full_stop.contains("**"));
+    assert!(quote.contains("<strong>太字」</strong>は"));
+    assert!(!quote.contains("**"));
+}
+
+#[test]
+fn test_エスケープされたアスタリスクは太字記法にしない() {
+    let html = normalize_source_markup(render_markdown(r"\*\*太字\*\*は").as_str());
+
+    assert!(html.contains("**太字**は"));
+    assert!(!html.contains("<strong>"));
+}
+
+#[test]
+fn test_hangul直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**강조**는").as_str());
+
+    assert!(html.contains("<strong>강조</strong>는"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
+fn test_cjk拡張漢字直後の太字記法を補正する() {
+    let html = normalize_source_markup(render_markdown("**古字**𠀋").as_str());
+
+    assert!(html.contains("<strong>古字</strong>𠀋"));
+    assert!(!html.contains("**"));
+}
+
+#[test]
 fn test_gfmテーブル() {
     let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
     let html = normalize_source_markup(render_markdown(md).as_str());

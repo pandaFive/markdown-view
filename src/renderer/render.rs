@@ -75,13 +75,15 @@ fn is_cjk_adjacent_strong_sequence(
     events: &[MarkdownEvent<'_>],
     index: usize,
 ) -> bool {
-    index + 5 < events.len()
-        && is_source_text_marker(input, &events[index], "*")
-        && is_source_text_marker(input, &events[index + 1], "*")
-        && text_has_non_whitespace_edges(&events[index + 2].0)
-        && is_source_text_marker(input, &events[index + 3], "*")
-        && is_source_text_marker(input, &events[index + 4], "*")
-        && text_starts_with_cjk(&events[index + 5].0)
+    let Some(window) = events.get(index..index + 6) else {
+        return false;
+    };
+    is_source_text_marker(input, &window[0], "*")
+        && is_source_text_marker(input, &window[1], "*")
+        && text_has_non_whitespace_edges(&window[2].0)
+        && is_source_text_marker(input, &window[3], "*")
+        && is_source_text_marker(input, &window[4], "*")
+        && text_starts_with_cjk(&window[5].0)
 }
 
 fn is_source_text_marker(input: &str, event: &MarkdownEvent<'_>, marker: &str) -> bool {
@@ -92,8 +94,7 @@ fn is_source_text_marker(input: &str, event: &MarkdownEvent<'_>, marker: &str) -
 fn text_has_non_whitespace_edges(event: &Event<'_>) -> bool {
     match event {
         Event::Text(text) => {
-            let mut chars = text.chars();
-            chars.next().is_some_and(|c| !c.is_whitespace())
+            text.chars().next().is_some_and(|c| !c.is_whitespace())
                 && text.chars().next_back().is_some_and(|c| !c.is_whitespace())
         }
         _ => false,
@@ -113,8 +114,10 @@ fn is_cjk_char(c: char) -> bool {
         '\u{3040}'..='\u{30ff}'
             | '\u{3400}'..='\u{4dbf}'
             | '\u{4e00}'..='\u{9fff}'
+            | '\u{ac00}'..='\u{d7af}'
             | '\u{f900}'..='\u{faff}'
             | '\u{ff00}'..='\u{ffef}'
+            | '\u{20000}'..='\u{323af}'
     )
 }
 
@@ -623,6 +626,14 @@ fn code_block_line_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_cjk_charはhangulとcjk拡張漢字を含む() {
+        assert!(is_cjk_char('は'));
+        assert!(is_cjk_char('漢'));
+        assert!(is_cjk_char('각'));
+        assert!(is_cjk_char('𠀋'));
+    }
 
     #[test]
     #[cfg(debug_assertions)]
