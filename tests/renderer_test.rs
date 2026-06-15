@@ -118,6 +118,23 @@ fn test_エンティティ由来のアスタリスクは太字記法にしない
 }
 
 #[test]
+fn test_空白に隣接する太字記法は補正しない() {
+    let leading_space =
+        normalize_source_markup(render_markdown("** 雲梯山（うんていざん）**は").as_str());
+    let trailing_space =
+        normalize_source_markup(render_markdown("**雲梯山（うんていざん） **は").as_str());
+    let both_sides =
+        normalize_source_markup(render_markdown("** 雲梯山（うんていざん） **は").as_str());
+
+    assert!(leading_space.contains("** 雲梯山（うんていざん）**は"));
+    assert!(!leading_space.contains("<strong>"));
+    assert!(trailing_space.contains("**雲梯山（うんていざん） **は"));
+    assert!(!trailing_space.contains("<strong>"));
+    assert!(both_sides.contains("** 雲梯山（うんていざん） **は"));
+    assert!(!both_sides.contains("<strong>"));
+}
+
+#[test]
 fn test_gfmテーブル() {
     let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
     let html = normalize_source_markup(render_markdown(md).as_str());

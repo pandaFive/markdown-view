@@ -78,7 +78,7 @@ fn is_cjk_adjacent_strong_sequence(
     index + 5 < events.len()
         && is_source_text_marker(input, &events[index], "*")
         && is_source_text_marker(input, &events[index + 1], "*")
-        && matches!(events[index + 2].0, Event::Text(_))
+        && text_has_non_whitespace_edges(&events[index + 2].0)
         && is_source_text_marker(input, &events[index + 3], "*")
         && is_source_text_marker(input, &events[index + 4], "*")
         && text_starts_with_cjk(&events[index + 5].0)
@@ -87,6 +87,17 @@ fn is_cjk_adjacent_strong_sequence(
 fn is_source_text_marker(input: &str, event: &MarkdownEvent<'_>, marker: &str) -> bool {
     matches!(&event.0, Event::Text(text) if text.as_ref() == marker)
         && input.get(event.1.clone()) == Some(marker)
+}
+
+fn text_has_non_whitespace_edges(event: &Event<'_>) -> bool {
+    match event {
+        Event::Text(text) => {
+            let mut chars = text.chars();
+            chars.next().is_some_and(|c| !c.is_whitespace())
+                && text.chars().next_back().is_some_and(|c| !c.is_whitespace())
+        }
+        _ => false,
+    }
 }
 
 fn text_starts_with_cjk(event: &Event<'_>) -> bool {
