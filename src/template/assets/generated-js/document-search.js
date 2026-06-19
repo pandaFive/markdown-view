@@ -428,6 +428,7 @@ function createDocumentSearchController(ctx, deps) {
                 ctx.search.currentDirectoryLoading = false;
                 ctx.search.currentDirectoryError = '';
                 ctx.search.currentDirectoryResultsScrollTop = 0;
+                clearDocumentSearchHighlights();
                 deps.renderDirectorySearchUi({ preserveScroll: false });
                 return;
             }

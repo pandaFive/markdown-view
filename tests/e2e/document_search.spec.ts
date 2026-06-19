@@ -649,6 +649,40 @@ test('ディレクトリモードでは検索中状態を本文ハイライト�
   await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
 });
 
+test('ディレクトリモードでは入力編集で検索語を空にすると本文ハイライトも消える', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: searchFixtureContent(),
+    toc: searchFixtureToc()
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => visibleMatchCount(page)).toBe(3);
+
+  await setDocumentSearchQuery(page, '');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+  await expect.poll(() => visibleMatchCount(page)).toBe(0);
+});
+
 test('ディレクトリ検索APIへタブ内クライアントIDを送る', async ({ page }) => {
   const clientIds: string[] = [];
   await page.route('**/api/search**', async (route) => {
