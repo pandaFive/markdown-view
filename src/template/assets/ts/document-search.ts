@@ -455,6 +455,17 @@ function createDocumentSearchController(
     setCurrentDocumentSearchMatch(ctx.search.currentDocumentIndex + step);
   }
 
+  function scheduleDeferredDirectoryDocumentHighlights(query: string, generation: number): void {
+    window.requestAnimationFrame(function(): void {
+      window.setTimeout(function(): void {
+        if (!ctx.config.isDirMode) return;
+        if (generation !== ctx.search.documentFetchGeneration) return;
+        if (query !== ctx.search.currentDocumentQuery) return;
+        applyDocumentSearchHighlights(query);
+      }, 0);
+    });
+  }
+
   function applyDocumentSearchQuery(query: string): void {
     var previousDocumentQuery = ctx.search.currentDocumentQuery;
     ctx.search.currentDocumentQuery = (query || '').trim();
@@ -465,7 +476,6 @@ function createDocumentSearchController(
       }
     }
     if (ctx.config.isDirMode) {
-      applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
       ctx.search.pendingDirectoryNavigation = null;
       if (!ctx.search.currentDocumentQuery) {
         if (ctx.search.documentDebounceTimer) {
@@ -485,6 +495,7 @@ function createDocumentSearchController(
         ctx.search.currentDirectoryLoading = false;
         ctx.search.currentDirectoryError = '';
         ctx.search.currentDirectoryResultsScrollTop = 0;
+        clearDocumentSearchHighlights();
         deps.renderDirectorySearchUi({ preserveScroll: false });
         return;
       }
@@ -499,6 +510,10 @@ function createDocumentSearchController(
       deps.renderDirectorySearchUi({
         preserveScroll: ctx.search.currentDocumentQuery === previousDocumentQuery
       });
+      scheduleDeferredDirectoryDocumentHighlights(
+        ctx.search.currentDocumentQuery,
+        ctx.search.documentFetchGeneration
+      );
       return;
     }
     applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);

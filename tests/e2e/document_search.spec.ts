@@ -588,6 +588,101 @@ test('ディレクトリモードでは検索API結果を一覧表示する', as
     .toContainText('notes.md');
 });
 
+test('ディレクトリモードでは検索中状態を本文ハイライトより先に反映する', async ({ page }) => {
+  let releaseSearch: () => void = function() {};
+  const searchPending = new Promise<void>((resolve) => {
+    releaseSearch = resolve;
+  });
+
+  await page.route('**/api/search**', async (route) => {
+    await searchPending;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: 'alpha note',
+        results: [
+          {
+            file: 'README.md',
+            file_match_index: 0,
+            before: '',
+            current: 'Alpha note appears here.',
+            after: ''
+          }
+        ],
+        searched_files: 1,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: searchFixtureContent(),
+    toc: searchFixtureToc()
+  });
+
+  try {
+    await setDocumentSearchQuery(page, 'alpha note');
+
+    const immediateState = await page.evaluate(() => {
+      return {
+        summary: document.getElementById('document-search-summary')!.textContent,
+        busy: document.getElementById('document-search-results')!.getAttribute('aria-busy'),
+        matchCount: document.querySelectorAll('#content mark.document-search-match').length
+      };
+    });
+    expect(immediateState).toEqual({
+      summary: '検索中...',
+      busy: 'true',
+      matchCount: 0
+    });
+
+    await expect.poll(() => visibleMatchCount(page)).toBe(3);
+  } finally {
+    releaseSearch();
+  }
+
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(1);
+});
+
+test('ディレクトリモードでは入力編集で検索語を空にすると本文ハイライトも消える', async ({ page }) => {
+  await page.route('**/api/search**', async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(directorySearchResponse({
+        query: url.searchParams.get('q') || '',
+        results: [],
+        searched_files: 0,
+        skipped_files: 0
+      }))
+    });
+  });
+
+  await page.evaluate(() => {
+    window.markdownViewTestHooks.setDirModeForTest(true);
+    window.markdownViewTestHooks.setCurrentFileForTest('README.md');
+  });
+  await updateContentAndActivateToc(page, {
+    content: searchFixtureContent(),
+    toc: searchFixtureToc()
+  });
+
+  await setDocumentSearchQuery(page, 'alpha');
+  await expect.poll(() => visibleMatchCount(page)).toBe(3);
+
+  await setDocumentSearchQuery(page, '');
+
+  await expect(page.locator('#document-search-summary')).toHaveText('0 件');
+  await expect(page.locator('#document-search-results .document-search-result')).toHaveCount(0);
+  await expect.poll(() => visibleMatchCount(page)).toBe(0);
+});
+
 test('ディレクトリ検索APIへタブ内クライアントIDを送る', async ({ page }) => {
   const clientIds: string[] = [];
   await page.route('**/api/search**', async (route) => {

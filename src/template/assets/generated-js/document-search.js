@@ -385,6 +385,19 @@ function createDocumentSearchController(ctx, deps) {
             return;
         setCurrentDocumentSearchMatch(ctx.search.currentDocumentIndex + step);
     }
+    function scheduleDeferredDirectoryDocumentHighlights(query, generation) {
+        window.requestAnimationFrame(function () {
+            window.setTimeout(function () {
+                if (!ctx.config.isDirMode)
+                    return;
+                if (generation !== ctx.search.documentFetchGeneration)
+                    return;
+                if (query !== ctx.search.currentDocumentQuery)
+                    return;
+                applyDocumentSearchHighlights(query);
+            }, 0);
+        });
+    }
     function applyDocumentSearchQuery(query) {
         var previousDocumentQuery = ctx.search.currentDocumentQuery;
         ctx.search.currentDocumentQuery = (query || '').trim();
@@ -395,7 +408,6 @@ function createDocumentSearchController(ctx, deps) {
             }
         }
         if (ctx.config.isDirMode) {
-            applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
             ctx.search.pendingDirectoryNavigation = null;
             if (!ctx.search.currentDocumentQuery) {
                 if (ctx.search.documentDebounceTimer) {
@@ -416,6 +428,7 @@ function createDocumentSearchController(ctx, deps) {
                 ctx.search.currentDirectoryLoading = false;
                 ctx.search.currentDirectoryError = '';
                 ctx.search.currentDirectoryResultsScrollTop = 0;
+                clearDocumentSearchHighlights();
                 deps.renderDirectorySearchUi({ preserveScroll: false });
                 return;
             }
@@ -430,6 +443,7 @@ function createDocumentSearchController(ctx, deps) {
             deps.renderDirectorySearchUi({
                 preserveScroll: ctx.search.currentDocumentQuery === previousDocumentQuery
             });
+            scheduleDeferredDirectoryDocumentHighlights(ctx.search.currentDocumentQuery, ctx.search.documentFetchGeneration);
             return;
         }
         applyDocumentSearchHighlights(ctx.search.currentDocumentQuery);
